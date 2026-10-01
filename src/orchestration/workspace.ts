@@ -64,7 +64,10 @@ export class WorkspaceAudit {
   /** Tree id of the current working tree contents (the private index persists between snapshots). */
   async snapshot(): Promise<string> {
     const env = { GIT_INDEX_FILE: this.index };
-    await git(this.cwd, ["add", "--all", "--", ".", EXCLUDED], env, this.signal);
+    // An excluded pathspec still makes git add reject .orche when it is ignored. Stage
+    // normally, then remove spill artifacts from this private index (never the worktree).
+    await git(this.cwd, ["add", "--all", "--", "."], env, this.signal);
+    await git(this.cwd, ["rm", "--cached", "-r", "-q", "--ignore-unmatch", "--", ".orche"], env, this.signal);
     return (await git(this.cwd, ["write-tree"], env, this.signal)).trim();
   }
 

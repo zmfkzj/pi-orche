@@ -103,6 +103,54 @@ describe("workspace audit", () => {
     expect(describeWorkspaceChanges(commit, changes)).toContain("rm -- 'new file.txt'");
     await audit.close();
   });
+  it.each([
+    { ignored: true, scope: "." },
+    { ignored: false, scope: "." },
+    { ignored: true, scope: "pkg" },
+    { ignored: false, scope: "pkg" },
+  ])("excludes .orche contents (ignored: $ignored, cwd: $scope)", async ({ ignored, scope }) => {
+    const dir = await repo({
+      [join(scope, "core.txt")]: "before\n",
+      [join(scope, "keep.txt")]: "keep\n",
+      ".gitignore": `${ignored ? ".orche/\n" : ""}ignored/\n`,
+    });
+    const cwd = join(dir, scope);
+    await mkdir(join(cwd, ".orche/artifacts"), { recursive: true });
+    await writeFile(join(cwd, ".orche/artifacts/existing.txt"), "before\n");
+    await writeFile(join(cwd, "staged.txt"), "staged\n");
+    git(cwd, "add", "--", "staged.txt");
+    const head = git(dir, "rev-parse", "HEAD");
+    const index = await readFile(join(dir, ".git/index"));
+    const audit = (await WorkspaceAudit.open(cwd))!;
+    try {
+      const before = await audit.snapshot();
+      await writeFile(join(cwd, "core.txt"), "after\n");
+      await rm(join(cwd, "keep.txt"));
+      await writeFile(join(cwd, "new.txt"), "new\n");
+      await writeFile(join(cwd, ".orche/artifacts/existing.txt"), "after\n");
+      await writeFile(join(cwd, ".orche/artifacts/new.txt"), "spill\n");
+      await mkdir(join(cwd, "ignored"));
+      await writeFile(join(cwd, "ignored/build.txt"), "ignored\n");
+      await mkdir(join(cwd, ".orche-other"));
+      await writeFile(join(cwd, ".orche-other/keep.txt"), "not excluded\n");
+      const after = await audit.snapshot();
+      expect(await audit.diff(before, after)).toEqual([
+        { path: ".orche-other/keep.txt", status: "added" },
+        { path: "core.txt", status: "modified" },
+        { path: "keep.txt", status: "deleted" },
+        { path: "new.txt", status: "added" },
+      ]);
+      for (const tree of [before, after]) {
+        expect(git(cwd, "ls-tree", "-r", "--name-only", tree, "--", ".orche")).toBe("");
+      }
+      expect(git(dir, "rev-parse", "HEAD")).toBe(head);
+      expect(await readFile(join(dir, ".git/index"))).toEqual(index);
+      expect(await readFile(join(cwd, ".orche/artifacts/existing.txt"), "utf8")).toBe("after\n");
+      expect(await readFile(join(cwd, ".orche/artifacts/new.txt"), "utf8")).toBe("spill\n");
+    } finally {
+      await audit.close();
+    }
+  });
   it("reports paths relative to a subdirectory cwd", async () => {
     const dir = await repo({ "pkg/a.js": "a\n", "other/b.js": "b\n" });
     const audit = (await WorkspaceAudit.open(join(dir, "pkg")))!;
