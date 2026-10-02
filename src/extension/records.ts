@@ -19,7 +19,8 @@ import { DEFAULT_RECORDS_RETENTION_DAYS, type RecordsSettings } from "./config.j
  *   <parent-session-id | no-session>/
  *     <ISO-timestamp>_<run|task>-<shortid>/      one directory per orche_run / orche_task assignment ("a record")
  *       run.json                                 manifest: written at start (status "running"), rewritten atomically at the end
- *       events.jsonl                             the RunEvent stream of an orche_run, one bounded JSON per line
+ *       events.jsonl                             the RunEvent stream of an orche_run, one bounded JSON per line (`liveness` samples: one
+ *                                                compact line when a session's state changes, never per heartbeat; see agent/liveness.ts)
  *       sessions/<agentId>.jsonl                 pi session JSONL of each sub-session
  *     workers/<workerId>-<spawn-timestamp>.jsonl a persistent orche_task worker's session: one stable file across its assignments
  * ```

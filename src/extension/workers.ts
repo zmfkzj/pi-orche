@@ -21,6 +21,7 @@ import { WorkspaceAudit, type GitlinkChange, type WorkspaceChange } from "../orc
 import { WorkspaceActivity } from "../orchestration/run/activity.js";
 import { CHANGED_WHILE_QUIET } from "../orchestration/run/audit.js";
 import { WORKER_TOOL_NAMES } from "../tools/index.js";
+import { DEFAULT_LIVENESS_WINDOW_MS, KNOWN_TOOL_TIMEOUTS_MS, mergeLiveness, type Liveness, type SessionLiveness } from "../agent/liveness.js";
 import { createGenerateImageTool } from "../tools/generate-image.js";
 import { loadProviderExtensions, type ProviderExtensionHost } from "../pi/provider-extensions.js";
 import { ensureBundledImageProvider } from "../pi/register-bundled-image-provider.js";
@@ -469,6 +470,18 @@ export class WorkerPool {
     return [...this.workers.values()].map(worker => ({ ...this.manager!.get(worker.id), role: worker.role }));
   }
   session(id: string) { return this.manager!.session(id); }
+  /**
+   * Liveness of the pool's task workers (see src/agent/liveness.ts): `sessions` has one entry per live worker, `active` when any worker
+   * running an assignment had model output, a tool event, tool output or a progressing bash heartbeat within `windowMs`, or has a
+   * request / non-bash tool in flight within its bound. Idle workers are listed but never active. Read-only.
+   */
+  liveness(now: number = Date.now(), windowMs: number = DEFAULT_LIVENESS_WINDOW_MS): Liveness {
+    return this.manager ? this.manager.liveness(now, windowMs, [...this.workers.keys()]) : mergeLiveness();
+  }
+  /** {@link liveness} of one task worker; undefined for an unknown (or already retired) worker. */
+  workerLiveness(id: string, now: number = Date.now(), windowMs: number = DEFAULT_LIVENESS_WINDOW_MS): SessionLiveness | undefined {
+    return this.manager && this.workers.has(id) ? this.manager.workerLiveness(id, now, windowMs) : undefined;
+  }
   roster(): string {
     return this.list().map(worker => `${worker.id} ${worker.status} (${worker.role}: ${this.workers.get(worker.id)!.summary.slice(0, 80) || "no result yet"})`).join(", ") || "no workers";
   }
@@ -646,7 +659,9 @@ export class WorkerPool {
         : resolveRoute(config.routes, routeRole);
       meta.model = route.model;
       const customTools = images ? [createGenerateImageTool({ cwd: args.cwd, runtime, images })] : [];
+      // generate_image has its own timeout (images.timeoutMs, 180 s by default): liveness bounds a silent call by it, not by the generic tool bound.
       await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name)], customTools, peerMessaging: false, ...(sessionFile ? { sessionFile } : {}),
+        ...(images ? { toolTimeoutsMs: { generate_image: images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } } : {}),
         instructions: `${taskWorkerInstructions}\nYou work alone: there are no peer workers. Reply in the language of the request.`,
         onContextWindow: info => { meta.contextWindow = info.contextWindow; },
         toolGuard: async (name, input) => {
@@ -701,6 +716,7 @@ export class WorkerPool {
     };
     const unsubscribe = this.manager.subscribe(event => {
       if (!("agentId" in event) || event.agentId !== meta.id) return;
+      if (event.type === "liveness") return; // a state sample for the records, not progress
       if (event.type === "usage") { requests++; meta.latestInput = event.input + event.cacheRead; }
       progress();
     });

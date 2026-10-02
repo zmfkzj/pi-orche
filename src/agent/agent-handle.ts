@@ -1,6 +1,7 @@
 import type { TSchema } from "@sinclair/typebox";
 import type { SessionOptions } from "../pi/session-factory.js";
 import type { SessionRecords } from "./records.js";
+import type { LivenessEvent } from "./liveness.js";
 import type {
   NoteMessage,
   DeliveryReceipt,
@@ -74,6 +75,11 @@ export interface SpawnOptions extends SessionOptions {
    * never awaited.
    */
   onToolExecution?(event: ToolExecutionEvent): void | Promise<void>;
+  /**
+   * Known timeouts (ms, by tool name) of tools in this worker that have their own, e.g. `generate_image` with a configured
+   * `images.timeoutMs`. Liveness bounds such a tool by it (plus a grace) instead of the generic in-flight bound; see liveness.ts.
+   */
+  toolTimeoutsMs?: Readonly<Record<string, number>>;
 }
 /** Contract for the `data` of a RESULT; `optional` also accepts an absent `data`. */
 export interface ResultDataSchema {
@@ -113,6 +119,8 @@ export type ManagerEvent = { timestamp: number } & (
     }
   /** Tool start metadata only; arguments and output are deliberately excluded. */
   | { type: "tool_started"; agentId: string; assignmentId: string; toolName: string }
+  /** A session's liveness state changed (not sent per heartbeat); see liveness.ts. */
+  | LivenessEvent
   | {
       type: "usage";
       agentId: string;

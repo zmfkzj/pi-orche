@@ -13,6 +13,7 @@ import type { TeamSettings } from "../team.js";
 import type { AuditSettings } from "../artifacts.js";
 import type { WorkspaceActivity } from "./activity.js";
 
+import type { Liveness, LivenessTracker } from "../../agent/liveness.js";
 import type { SessionRecords } from "../../agent/records.js";
 import type { RunLimits } from "../limits.js";
 export { defaultRunLimits, type RunLimits } from "../limits.js";
@@ -116,6 +117,15 @@ export interface RunContext {
   state: PhaseState;
   manager: AgentManager;
   coordinator?: AgentSession;
+  /** Liveness of the coordinator session (created with it, fed from its events); absent until the coordinator exists. */
+  coordinatorLiveness?: LivenessTracker;
+  /**
+   * Is the run still actively working? Aggregates the coordinator and every worker (see {@link Liveness} and src/agent/liveness.ts):
+   * `active` when any of them had model output, a tool event, tool output or a progressing bash heartbeat within `windowMs`
+   * (default 2 minutes), or has a request / non-bash tool in flight within its bound. Read-only; it changes no
+   * timeout. Installed together with the first session of the run (see `ensureLiveness` in context.ts); {@link runLiveness} works on any context.
+   */
+  liveness?: (now?: number, windowMs?: number) => Liveness;
   /** Records bookkeeping of the coordinator session (created with it); see {@link RunOptions.records}. */
   coordinatorRecord?: { startedAt: number; requests: number; models: Record<string, number>; sessionFile?: string; model: string; thinking?: string; reported?: boolean };
   decisionValue: unknown;

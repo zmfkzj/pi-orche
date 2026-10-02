@@ -1,6 +1,7 @@
-import { abortable, timeoutError } from "./deadline.js";
+import { abortable, runLiveness, timeoutError } from "./deadline.js";
 import type { AgentManager } from "../../agent/agent-manager.js";
 import type { ManagerEvent, Outcome } from "../../agent/agent-handle.js";
+import type { LivenessEvent } from "../../agent/liveness.js";
 import type { NoteMessage } from "../../messaging/message.js";
 import { transition, type CoordinatorDecision, type CoordinatorEffect, type Explorer } from "../phases.js";
 import type { CoordinatorEvent } from "../events.js";
@@ -8,7 +9,7 @@ import { checkWriteRealPath, coveringTasks } from "../ownership.js";
 import type { RunContext } from "./types.js";
 
 /** Shared run plumbing: events, time budgets, worker spawning, phase transitions and outcome waits. */
-export function emit(ctx: RunContext, event: CoordinatorEvent): void {
+export function emit(ctx: RunContext, event: CoordinatorEvent | LivenessEvent): void {
   if (ctx.reported) return;
   ctx.options.sink?.(event);
 }
@@ -18,6 +19,7 @@ export function remaining(ctx: RunContext, cap: number): number {
 /** Spawn guard: a cancelled run must not create new sessions after teardown began. */
 export async function spawnWorker(ctx: RunContext, options: Parameters<AgentManager["spawn"]>[0]): Promise<void> {
   if (ctx.cancelled) throw new Error("cancelled");
+  ensureLiveness(ctx);
   ctx.stage = `startup/worker/${options.id}`;
   await ctx.manager.spawn({
     ...options,
@@ -29,6 +31,11 @@ export async function spawnWorker(ctx: RunContext, options: Parameters<AgentMana
   });
   // AgentManager disposes any late creation itself; never await unbounded teardown here.
   if (ctx.cancelled) throw new Error("cancelled");
+}
+export { runLiveness };
+/** Give the context its public `ctx.liveness()`; called when the first session of the run is created. */
+export function ensureLiveness(ctx: RunContext): void {
+  ctx.liveness ??= (now, windowMs) => runLiveness(ctx, now, windowMs);
 }
 export async function bounded<T>(ctx: RunContext, operation: Promise<T>, cap: number, label: string): Promise<T> {
   ctx.stage = label;

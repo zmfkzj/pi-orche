@@ -788,3 +788,105 @@ it("close releases outstanding manager wait timers", async () => {
   m.close("deadline");
   expect(await waiting).toEqual({ type: "timeout" });
 });
+
+describe("liveness (see src/agent/liveness.ts)", () => {
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  const beat = (extra: Record<string, unknown> = {}) => ({ type: "bash_heartbeat", seq: 1, at: Date.now(), elapsedMs: 15_000, outputBytes: 0, newOutput: false, procAvailable: true, progressing: false, ...extra });
+  /** A tool that runs until released and may leave heartbeats (as partial results) while it does. */
+  type Update = (partial: any) => void; // eslint-disable-line @typescript-eslint/no-explicit-any
+  function holdTool(entered: { resolve(): void }, release: { promise: Promise<void> }, report: { onUpdate?: Update } = {}) {
+    return {
+      name: "work", label: "work", description: "work", parameters: Type.Object({}),
+      execute: async (_id: string, _args: unknown, _signal: AbortSignal | undefined, onUpdate?: Update) => {
+        report.onUpdate = onUpdate;
+        entered.resolve(); await release.promise;
+        return { content: [{ type: "text" as const, text: "ok" }], details: {} };
+      },
+    };
+  }
+  it("an unassigned worker is idle and never active", async () => {
+    const { m } = await setup([]);
+    expect(m.liveness()).toEqual({ active: false, reasons: [], sessions: [{ id: "a", role: "test", state: "idle", active: false, detail: "idle" }] });
+    expect(m.workerLiveness("a")).toMatchObject({ id: "a", state: "idle", active: false });
+    expect(() => m.workerLiveness("nope")).toThrow("Unknown agent");
+  });
+  it("tracks a worker through its assignment: tool in flight is active, the finished assignment is idle", async () => {
+    const entered = deferred(); const release = deferred();
+    const { m } = await setup([reply([call("work", {})], { stopReason: "toolUse" }), result()], [holdTool(entered, release)]);
+    const events: ManagerEvent[] = [];
+    m.subscribe(event => events.push(event));
+    m.assign("a", "explore", "start");
+    await entered.promise;
+    const during = m.liveness();
+    expect(during.active).toBe(true);
+    expect(during.sessions).toEqual([expect.objectContaining({ id: "a", role: "test", state: "tool", active: true })]);
+    expect(during.reasons).toEqual([expect.stringMatching(/^a work running \d+s, no updates$/)]);
+    expect(m.workerLiveness("a")).toMatchObject({ state: "tool", active: true });
+    // Another id filter excludes it.
+    expect(m.liveness(Date.now(), 60_000, ["other"])).toEqual({ active: false, reasons: [], sessions: [] });
+    release.resolve();
+    expect(await m.wait("a", 2000)).toMatchObject({ type: "outcome", outcome: { status: "completed" } });
+    expect(m.liveness()).toMatchObject({ active: false, reasons: [], sessions: [{ id: "a", state: "idle", active: false }] });
+    // The records/events stream gets the state changes, once each, with the tool named.
+    const samples = events.filter(event => event.type === "liveness");
+    expect(samples.map(sample => sample.state)).toEqual(expect.arrayContaining(["request-wait", "streaming", "tool", "idle"]));
+    expect(samples.find(sample => sample.state === "tool")).toMatchObject({ type: "liveness", agentId: "a", role: "test", detail: "work", timestamp: expect.any(Number) });
+    expect(samples.at(-1)).toMatchObject({ state: "idle" });
+    for (let i = 1; i < samples.length; i++) expect(samples[i]!.state, "only changes are reported").not.toBe(samples[i - 1]!.state);
+  });
+  it("a bash-style heartbeat that is alive but idle is not activity; a progressing one is", async () => {
+    const entered = deferred(); const release = deferred();
+    const report: { onUpdate?: Update } = {};
+    const { m } = await setup([reply([call("work", {})], { stopReason: "toolUse" }), result()], [holdTool(entered, release, report)]);
+    const events: ManagerEvent[] = [];
+    m.subscribe(event => events.push(event));
+    m.assign("a", "explore", "start");
+    await entered.promise;
+    await sleep(15);
+    const quiet = m.get("a").lastActivityAt!;
+    report.onUpdate!({ content: [], details: { heartbeat: beat() } });
+    await sleep(15);
+    expect(m.get("a").lastActivityAt, "an idle heartbeat does not refresh lastActivityAt").toBe(quiet);
+    // Long after the start, with only idle heartbeats: alive, not progressing, not active.
+    const late = m.workerLiveness("a", Date.now() + 10 * 60_000, 60_000);
+    expect(late).toMatchObject({ state: "tool", active: false });
+    expect(late.detail).toContain("alive but not progressing");
+    report.onUpdate!({ content: [], details: { heartbeat: beat({ seq: 2, progressing: true, cpuMs: 500, processes: 2 }) } });
+    await sleep(15);
+    expect(m.get("a").lastActivityAt!).toBeGreaterThan(quiet);
+    const progressing = m.workerLiveness("a", Date.now(), 60_000);
+    expect(progressing.active).toBe(true);
+    expect(progressing.detail).toMatch(/^work running \d+s, cpu\/io activity \d+s ago \(cpu 500ms, 2 procs\)$/);
+    expect(events.filter(event => event.type === "liveness").map(event => event.state).filter(state => state === "tool")).toHaveLength(1);
+    release.resolve();
+    await m.wait("a", 2000);
+  });
+  it("a worker's known tool timeout bounds its silent tool", async () => {
+    const entered = deferred(); const release = deferred();
+    const f = await fauxRuntime([reply([call("work", {})], { stopReason: "toolUse" }), result()]);
+    const m = new AgentManager(f.runtime); managers.push(m);
+    await m.spawn({ id: "a", role: "test", route: f.route, modelRuntime: f.runtime, cwd: process.cwd(), instructions: "test", tools: ["work"], customTools: [holdTool(entered, release)], toolTimeoutsMs: { work: 20 * 60_000 } });
+    m.assign("a", "explore", "start");
+    await entered.promise;
+    expect(m.workerLiveness("a", Date.now() + 15 * 60_000, 60_000).active).toBe(true); // its own timeout, not the generic 10 minutes
+    expect(m.workerLiveness("a", Date.now() + 25 * 60_000, 60_000).active).toBe(false);
+    release.resolve();
+    await m.wait("a", 2000);
+  });
+  it("a closed manager emits no more liveness samples and a disposed worker is left out", async () => {
+    const entered = deferred(); const release = deferred();
+    const { m } = await setup([reply([call("work", {})], { stopReason: "toolUse" }), result()], [holdTool(entered, release)]);
+    const events: ManagerEvent[] = [];
+    m.subscribe(event => events.push(event));
+    m.assign("a", "explore", "start");
+    await entered.promise;
+    m.close("deadline");
+    const seen = events.filter(event => event.type === "liveness").length;
+    release.resolve();
+    await sleep(30);
+    expect(events.filter(event => event.type === "liveness")).toHaveLength(seen);
+    await m.dispose();
+    expect(m.liveness()).toEqual({ active: false, reasons: [], sessions: [] });
+    expect(m.workerLiveness("a")).toMatchObject({ state: "idle", active: false });
+  });
+});

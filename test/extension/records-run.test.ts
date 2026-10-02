@@ -139,6 +139,26 @@ describe("an orche_run that finishes", () => {
     for (const type of ["phase_changed", "request_classified", "coordinator_usage", "usage", "workspace_baseline"]) expect(types, type).toContain(type);
   });
 
+  it("records a compact liveness sample per session state change (never per delta), coordinator and worker, before run_finished", async () => {
+    const { dir } = await finishedRun();
+    const events = readJsonl(join(dir, "events.jsonl"));
+    const samples = events.filter(event => event.type === "liveness");
+    expect(new Set(samples.map(sample => sample.agentId))).toEqual(new Set(["coordinator", "A1"]));
+    for (const sample of samples) {
+      expect(Object.keys(sample).sort()).toEqual(expect.arrayContaining(["agentId", "role", "state", "timestamp", "type"]));
+      expect(Object.keys(sample).length).toBeLessThanOrEqual(6); // type, timestamp, agentId, role, state and at most a short detail
+      expect(["streaming", "tool", "request-wait", "idle"]).toContain(sample.state);
+      expect(JSON.stringify(sample).length).toBeLessThan(300);
+      expect(events.indexOf(sample)).toBeLessThan(events.length - 1); // run_finished is still the last line
+    }
+    for (const id of ["coordinator", "A1"]) {
+      const states = samples.filter(sample => sample.agentId === id).map(sample => sample.state);
+      expect(states[0]).toBe("request-wait");
+      expect(states.at(-1)).toBe("idle");
+      for (let i = 1; i < states.length; i++) expect(states[i]).not.toBe(states[i - 1]);
+    }
+  });
+
   it("persists the coordinator's and the worker's session as pi session JSONL with their assistant messages", async () => {
     const { dir, h } = await finishedRun();
     expect((await readdir(join(dir, "sessions"))).sort()).toEqual(["A1.jsonl", "coordinator.jsonl"]);

@@ -3,12 +3,13 @@ import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { createSession } from "../../pi/session-factory.js";
 import { reportAgent, targetOf } from "../../agent/records.js";
+import { LivenessTracker } from "../../agent/liveness.js";
 import { READ_ONLY_TOOL_NAMES } from "../../tools/index.js";
 import { parseCoordinatorDecision, decisionSchemaForPhase, transition, type CoordinatorDecision, type Phase } from "../phases.js";
 import { validateBacklog } from "../backlog.js";
 import { resolveRoute } from "../routing.js";
 import { MAX_WORKERS_LIMIT } from "../team.js";
-import { apply, bounded, emit, remaining, roster } from "./context.js";
+import { apply, bounded, emit, ensureLiveness, remaining, roster } from "./context.js";
 import type { RunContext } from "./types.js";
 
 /** The coordinator session and its structured, validated and bounded-repair decisions. */
@@ -130,7 +131,13 @@ export async function createCoordinator(ctx: RunContext, runtime: ModelRuntime):
     throw new Error("cancelled");
   }
   let requests = 0;
+  // The coordinator had no activity tracking beyond a completed request: between a prompt and the end of its reply nothing was visible.
+  // This tracker sees its streaming, tool calls and provider retries; state changes go into the events stream (never per delta).
+  const liveness = new LivenessTracker({ id: "coordinator", role: "coordinator", onChange: event => emit(ctx, event) });
+  ctx.coordinatorLiveness = liveness;
+  ensureLiveness(ctx);
   ctx.unsubscribers.push(ctx.coordinator.subscribe(event => {
+    liveness.observe(event);
     if (event.type !== "message_end" || event.message.role !== "assistant") return;
     const usage = event.message.usage;
     const answered = `${event.message.provider}/${event.message.model}`;

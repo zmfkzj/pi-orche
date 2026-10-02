@@ -46,6 +46,11 @@ export interface SessionOptions {
    * error result.
    */
   toolGuard?: ToolGuard;
+  /**
+   * Every session gets Pi's `bash` with a heartbeat (see `src/tools/bash.ts`): while a command runs, a sample is sent as
+   * a tool partial update every `intervalMs` (default 15 s). Sessions without `bash` in `tools` are unaffected.
+   */
+  bashHeartbeat?: { intervalMs?: number };
 }
 export type ToolGuard = (toolName: string, input: Record<string, unknown>) => string | undefined | Promise<string | undefined>;
 /** Session extension applying a {@link ToolGuard} through Pi's public, blocking `tool_call` hook. */
@@ -106,7 +111,7 @@ export async function createSession(
     model,
     thinkingLevel: options.route.thinking ?? "off",
     tools: options.tools,
-    customTools: [...createOrcheTools({ cwd: options.cwd }), ...(options.customTools ?? [])],
+    customTools: [...createOrcheTools({ cwd: options.cwd, bashHeartbeat: { ...options.bashHeartbeat } }), ...(options.customTools ?? [])],
     resourceLoader: loader,
     sessionManager,
     settingsManager: SettingsManager.inMemory({

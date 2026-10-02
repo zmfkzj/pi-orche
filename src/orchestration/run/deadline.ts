@@ -1,4 +1,17 @@
+import { DEFAULT_LIVENESS_WINDOW_MS, mergeLiveness, type Liveness, type LivenessState, type SessionLiveness } from "../../agent/liveness.js";
 import type { RunContext } from "./types.js";
+
+/**
+ * Liveness of the whole run at `now`: the coordinator session plus every worker of the manager (advisors are not part of it). Works on
+ * any context; a coordinator that does not exist yet, or a manager without liveness (a test double), simply contributes nothing.
+ * Lives here, not in context.ts, because the diagnostics below need it and context.ts imports this module.
+ */
+export function runLiveness(ctx: RunContext, now: number = Date.now(), windowMs: number = DEFAULT_LIVENESS_WINDOW_MS): Liveness {
+  return mergeLiveness(ctx.coordinatorLiveness?.liveness(now, windowMs), ctx.manager?.liveness?.(now, windowMs));
+}
+/** What a diagnostic says about one session's liveness (see {@link SessionLiveness}). */
+export interface LivenessSummary { state: LivenessState; active: boolean; detail: string; lastSignalAt?: number }
+const summary = ({ state, active, detail, lastSignalAt }: SessionLiveness): LivenessSummary => ({ state, active, detail, ...(lastSignalAt !== undefined ? { lastSignalAt } : {}) });
 
 export interface TimeoutDiagnostic {
   scope: "overall" | "phase";
@@ -7,7 +20,14 @@ export interface TimeoutDiagnostic {
   elapsedMs: number;
   configuredCapMs: number;
   effectiveCapMs: number;
-  workers: Array<{ id: string; status?: string; assignmentId?: string; kind?: string; taskId?: string; requestCount?: number; lastActivityAt?: number; lastToolName?: string; lastToolAt?: number }>;
+  workers: Array<{ id: string; status?: string; assignmentId?: string; kind?: string; taskId?: string; requestCount?: number; lastActivityAt?: number; lastToolName?: string; lastToolAt?: number; liveness?: LivenessSummary }>;
+  /** The coordinator session's liveness at the time of the snapshot; absent when it did not exist yet. */
+  coordinator?: LivenessSummary;
+  /**
+   * What the run was doing when the snapshot was taken: `active` when any session counted as working within `windowMs`, and why
+   * (`reasons`, e.g. `W2 bash running 14m, output 20s ago`). Absent when liveness could not be read. Informational only.
+   */
+  liveness?: { windowMs: number; active: boolean; reasons: string[] };
 }
 /** Manual cancellation snapshot, captured before teardown; timeouts retain their existing scope. */
 export interface CancellationDiagnostic extends Omit<TimeoutDiagnostic, "scope"> {
@@ -15,6 +35,11 @@ export interface CancellationDiagnostic extends Omit<TimeoutDiagnostic, "scope">
   timestamp: number;
 }
 function diagnosticSnapshot(ctx: RunContext, stage: string, cap: number, effective: number, includeIdle = false): Omit<TimeoutDiagnostic, "scope"> {
+  // A diagnostic never fails because of liveness: a context or manager without it (or one that throws) just has no liveness fields.
+  let live: Liveness | undefined;
+  try { live = runLiveness(ctx, Date.now(), DEFAULT_LIVENESS_WINDOW_MS); } catch { live = undefined; }
+  const session = (id: string) => live?.sessions.find(item => item.id === id);
+  const coordinator = session("coordinator");
   return {
     stage, phase: ctx.state.phase, elapsedMs: Date.now() - ctx.startedAt,
     configuredCapMs: cap, effectiveCapMs: effective,
@@ -22,7 +47,10 @@ function diagnosticSnapshot(ctx: RunContext, stage: string, cap: number, effecti
       id: w.id, status: w.status, assignmentId: w.currentAssignment?.id, kind: w.currentAssignment?.kind,
       taskId: ctx.activeTasks.get(w.id)?.id, requestCount: w.requestCount,
       lastActivityAt: w.lastActivityAt, lastToolName: w.lastToolName, lastToolAt: w.lastToolAt,
+      ...(session(w.id) ? { liveness: summary(session(w.id)!) } : {}),
     })),
+    ...(coordinator ? { coordinator: summary(coordinator) } : {}),
+    ...(live?.sessions.length ? { liveness: { windowMs: DEFAULT_LIVENESS_WINDOW_MS, active: live.active, reasons: live.reasons } } : {}),
   };
 }
 export function cancellationDiagnostic(ctx: RunContext): CancellationDiagnostic {

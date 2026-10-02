@@ -6,6 +6,8 @@ import { loadProviderExtensions } from "../../src/pi/provider-extensions.js";
 import { WorkspaceAudit } from "../../src/orchestration/workspace.js";
 import type { RunContext, RunOptions } from "../../src/orchestration/run/types.js";
 import { guardWrite, waitOutcomes } from "../../src/orchestration/run/context.js";
+import { cancellationDiagnostic, timeoutError } from "../../src/orchestration/run/deadline.js";
+import { aggregateLiveness, DEFAULT_LIVENESS_WINDOW_MS, LivenessTracker, type BashHeartbeatSample } from "../../src/agent/liveness.js";
 import type { RunEvent } from "../../src/orchestration/events.js";
 vi.mock("../../src/pi/session-factory.js", () => ({ createSession: vi.fn() }));
 vi.mock("../../src/pi/provider-extensions.js", () => ({ loadProviderExtensions: vi.fn() }));
@@ -110,5 +112,84 @@ it("inbox messages cannot reset a phase deadline; cancelled guarded writes are r
   expect(ctx.cancel).toHaveBeenCalledTimes(1);
   ctx.cancelled = true;
   expect(guardWrite(ctx, "A1", "write", { path: "owned.txt", content: "late" })).toContain("cancelled");
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+// ---- (i) timeout diagnostics say what each session was doing ----
+const MINUTE = 60_000;
+const heartbeat = (extra: Partial<BashHeartbeatSample> = {}) => ({ type: "tool_execution_update", toolCallId: "b1", toolName: "bash", args: {}, partialResult: { content: [], details: { heartbeat: { type: "bash_heartbeat", seq: 1, at: 0, elapsedMs: 0, outputBytes: 0, newOutput: false, procAvailable: true, progressing: false, ...extra } } } });
+const delta = { type: "message_update", message: { role: "assistant" }, assistantMessageEvent: { type: "text_delta", delta: "x" } };
+/** A context shaped like a run in progress: one coordinator tracker and a manager that lists one worker and reports its liveness. */
+function runningContext(worker: LivenessTracker, coordinator?: LivenessTracker) {
+  const sink: RunEvent[] = [];
+  const ctx = {
+    startedAt: Date.now() - 20 * MINUTE, options: options({ sink: event => sink.push(event) }), limits: { overallMs: 50, assignmentMs: 10 }, state: { phase: "EXECUTE" },
+    activeTasks: new Map([["W2", { id: "change" }]]), cancelled: false, cancel: vi.fn(), ...(coordinator ? { coordinatorLiveness: coordinator } : {}),
+    manager: {
+      list: () => [{ id: "W2", status: "running", currentAssignment: { id: "assignment-1", kind: "implement" }, requestCount: 3, lastToolName: "bash", lastActivityAt: 1 }],
+      liveness: (now: number, windowMs: number) => aggregateLiveness([worker], now, windowMs),
+    },
+  } as unknown as RunContext;
+  return { ctx, sink };
+}
+it("(i) a timeout diagnostic carries each worker's liveness state and detail, the coordinator's, and the reasons the run still counted as working", () => {
+  const now = Date.now();
+  const worker = new LivenessTracker({ id: "W2", role: "implementer" });
+  worker.observe({ type: "tool_execution_start", toolCallId: "b1", toolName: "bash", args: {} }, now - 14 * MINUTE);
+  worker.observe({ type: "tool_execution_update", toolCallId: "b1", toolName: "bash", args: {}, partialResult: { content: [], details: {} } }, now - 20_000);
+  const coordinator = new LivenessTracker({ id: "coordinator", role: "coordinator" });
+  coordinator.observe({ type: "agent_start" }, now - 10_000);
+  coordinator.observe(delta, now - 5000);
+  const { ctx, sink } = runningContext(worker, coordinator);
+
+  const error = timeoutError(ctx, "implement outcomes", 10, 10, "phase");
+  expect(error.diagnostic.workers).toEqual([expect.objectContaining({
+    id: "W2", taskId: "change", requestCount: 3, lastToolName: "bash",
+    liveness: { state: "tool", active: true, detail: "bash running 14m, output 20s ago", lastSignalAt: now - 20_000 },
+  })]);
+  expect(error.diagnostic.coordinator).toEqual({ state: "streaming", active: true, detail: "streaming 5s ago", lastSignalAt: now - 5000 });
+  expect(error.diagnostic.liveness).toEqual({ windowMs: DEFAULT_LIVENESS_WINDOW_MS, active: true, reasons: ["coordinator streaming 5s ago", "W2 bash running 14m, output 20s ago"] });
+  // The same diagnostic goes to the event stream and the run's timeouts list.
+  expect(sink.find(event => event.type === "run_timeout")).toMatchObject({ diagnostic: { liveness: { reasons: expect.arrayContaining(["W2 bash running 14m, output 20s ago"]) } } });
+  expect(ctx.timeouts).toHaveLength(1);
+});
+it("(i) a stuck worker is shown as alive but not progressing, and the run as not active", () => {
+  const now = Date.now();
+  const worker = new LivenessTracker({ id: "W2", role: "implementer" });
+  worker.observe({ type: "tool_execution_start", toolCallId: "b1", toolName: "bash", args: {} }, now - 14 * MINUTE);
+  for (let at = 15_000; at < 14 * MINUTE; at += 15_000) worker.observe(heartbeat({ cpuMs: 40, processes: 1 }), now - 14 * MINUTE + at);
+  const { ctx } = runningContext(worker);
+  const diagnostic = cancellationDiagnostic(ctx);
+  expect(diagnostic.workers[0]!.liveness).toMatchObject({ state: "tool", active: false, detail: "bash running 14m, no output yet, alive but not progressing (cpu 40ms, 1 proc)" });
+  expect(diagnostic.liveness).toEqual({ windowMs: DEFAULT_LIVENESS_WINDOW_MS, active: false, reasons: [] });
+  expect(diagnostic).not.toHaveProperty("coordinator");
+});
+it("(i) a diagnostic never fails because liveness is missing or broken", () => {
+  const worker = new LivenessTracker({ id: "W2", role: "implementer" });
+  const { ctx } = runningContext(worker);
+  (ctx.manager as unknown as { liveness: () => never }).liveness = () => { throw new Error("broken"); };
+  const broken = timeoutError(ctx, "stage", 10, 10, "phase").diagnostic;
+  expect(broken.workers).toHaveLength(1);
+  expect(broken.workers[0]).not.toHaveProperty("liveness");
+  expect(broken).not.toHaveProperty("liveness");
+  delete (ctx.manager as unknown as { liveness?: unknown }).liveness; // a manager double without liveness
+  expect(timeoutError(ctx, "stage", 10, 10, "phase").diagnostic.workers[0]).not.toHaveProperty("liveness");
+});
+it("(i) an overall timeout while the coordinator is streaming names it in the run's timeout diagnostic", async () => {
+  const listeners: Array<(event: unknown) => void> = [];
+  const prompt = vi.fn(() => {
+    for (const event of [{ type: "agent_start" }, { type: "turn_start" }, delta]) for (const listener of listeners) listener(event);
+    return never();
+  });
+  vi.mocked(createSession).mockResolvedValue(session({ prompt, subscribe: vi.fn((listener: (event: unknown) => void) => { listeners.push(listener); return () => {}; }) as never }));
+  const events: RunEvent[] = [];
+  const report = await finish(runOrchestrated(options({ sink: event => events.push(event) })));
+  expect(report.timeouts?.[0]).toMatchObject({
+    scope: "overall", stage: "Coordinator decision",
+    coordinator: { state: "streaming", active: true },
+    liveness: { active: true, reasons: [expect.stringMatching(/^coordinator streaming \d+s ago$/)] },
+  });
+  expect(events.find(event => event.type === "run_timeout")).toMatchObject({ diagnostic: { coordinator: { state: "streaming" } } });
+  expect(events.filter(event => event.type === "liveness").map(event => event.state)).toEqual(["request-wait", "streaming"]);
   expect(vi.getTimerCount()).toBe(0);
 });

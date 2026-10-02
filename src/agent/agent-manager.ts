@@ -29,6 +29,7 @@ import type {
   WaitResult,
 } from "./agent-handle.js";
 import { reportAgent, targetOf, type AgentRecordEntry, type SessionRecords } from "./records.js";
+import { DEFAULT_LIVENESS_WINDOW_MS, LivenessTracker, isIdleHeartbeat, mergeLiveness, type Liveness, type SessionLiveness } from "./liveness.js";
 /** Requests a forced final report may take after a budget stop before the assignment fails. */
 export const BUDGET_GRACE_REQUESTS = 5;
 interface Worker {
@@ -51,6 +52,8 @@ interface Worker {
   unsubscribe: () => void;
   /** Records bookkeeping (see {@link AgentManager.agentRecord}); never read by the lifecycle itself. */
   stats: WorkerStats;
+  /** Liveness of this worker's session (see liveness.ts), fed from the session subscription; never read by the lifecycle itself. */
+  liveness: LivenessTracker;
 }
 interface WorkerStats {
   startedAt: number;
@@ -261,6 +264,11 @@ export class AgentManager {
       budget: "none",
       unsubscribe: () => {},
       stats: { startedAt: Date.now(), requests: 0, models: {}, busyMs: 0, sessionFile: session.sessionFile, reported: false },
+      // The state changes go into the manager's event stream, but not once the manager is closed or the worker disposed.
+      liveness: new LivenessTracker({
+        id: options.id, role: options.role, ...(options.toolTimeoutsMs ? { toolTimeoutsMs: options.toolTimeoutsMs } : {}),
+        onChange: event => { if (!this.closed.signal.aborted && worker.snapshot.status !== "disposed") this.emit(event); },
+      }),
     };
     // The end of a tool is observed through the Agent's own listener, not the session listener below: the Agent awaits its listeners,
     // in order, before it goes on (tool-result message, next model request), so an observer that returns a promise (the workspace
@@ -288,8 +296,12 @@ export class AgentManager {
         const model = `${event.message.provider}/${event.message.model}`;
         worker.stats.models[model] = (worker.stats.models[model] ?? 0) + 1;
       }
+      // Liveness is fed before the closed/disposed guard too, so the tracker never believes in a tool that already ended. Its state
+      // changes are published through `onChange` above (silenced once the manager is closed). A heartbeat of a process that is alive
+      // but idle is not activity: it must not refresh `lastActivityAt` below.
+      worker.liveness.observe(event);
       if (this.closed.signal.aborted || worker.snapshot.status === "disposed") return;
-      worker.snapshot.lastActivityAt = Date.now();
+      if (!isIdleHeartbeat(event)) worker.snapshot.lastActivityAt = Date.now();
       if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
         worker.snapshot.lastToolName = event.toolName;
         worker.snapshot.lastToolAt = Date.now();
@@ -688,6 +700,27 @@ export class AgentManager {
       ...(stats.sessionFile ? { sessionFile: stats.sessionFile } : {}),
       ...(stats.last?.error ? { error: stats.last.error } : {}),
     };
+  }
+  /**
+   * Liveness of one worker (see liveness.ts): is it still actively working? A worker with no assignment, or a disposed one, is `idle`
+   * and never active, whatever its last events said. Throws for an unknown id, like {@link get}.
+   */
+  workerLiveness(id: string, now: number = Date.now(), windowMs: number = DEFAULT_LIVENESS_WINDOW_MS): SessionLiveness {
+    const w = this.require(id);
+    return w.liveness.session(now, windowMs, { idle: !w.snapshot.currentAssignment || w.snapshot.status === "disposed" });
+  }
+  /**
+   * Aggregate liveness of the workers (all of them, or only `ids`; unknown ids are ignored; disposed workers are left out): `active`
+   * when any worker with an assignment had model output, a tool event, tool output or a progressing bash heartbeat within `windowMs`
+   * or is within the bounds of a request or tool in flight. Read-only: it changes no timeout or state.
+   */
+  liveness(now: number = Date.now(), windowMs: number = DEFAULT_LIVENESS_WINDOW_MS, ids?: readonly string[]): Liveness {
+    const parts: Liveness[] = [];
+    for (const w of this.workers.values()) {
+      if (w.snapshot.status === "disposed" || (ids && !ids.includes(w.snapshot.id))) continue;
+      parts.push(w.liveness.liveness(now, windowMs, { idle: !w.snapshot.currentAssignment }));
+    }
+    return mergeLiveness(...parts);
   }
   /** {@link agentRecord} of every worker ever spawned here (disposed ones included), in spawn order. */
   agentRecords(): AgentRecordEntry[] {
