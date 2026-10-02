@@ -25,6 +25,7 @@ import type {
   ResultDataSchema,
   ResultPayload,
   SpawnOptions,
+  ToolExecutionEvent,
   WaitResult,
 } from "./agent-handle.js";
 /** Requests a forced final report may take after a budget stop before the assignment fails. */
@@ -241,6 +242,14 @@ export class AgentManager {
       unsubscribe: () => {},
     };
     worker.unsubscribe = adapter.subscribe((event) => {
+      // Tool tracking comes first: an end or settle must still be seen while the manager closes,
+      // otherwise the observer would think a tool is running forever. Arguments go to this callback
+      // only, never into the public event stream.
+      if (options.onToolExecution) {
+        if (event.type === "tool_execution_start") notifyTool(options, { phase: "start", toolCallId: event.toolCallId, toolName: event.toolName, args: event.args });
+        else if (event.type === "tool_execution_end") notifyTool(options, { phase: "end", toolCallId: event.toolCallId, toolName: event.toolName, isError: event.isError });
+        else if (event.type === "agent_settled") notifyTool(options, { phase: "settled" });
+      }
       if (this.closed.signal.aborted || worker.snapshot.status === "disposed") return;
       worker.snapshot.lastActivityAt = Date.now();
       if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
@@ -650,6 +659,15 @@ export class AgentManager {
       w.adapter.dispose();
       w.snapshot.status = "disposed";
     }
+  }
+}
+/** Deliver a tool execution to the spawn-time observer; it can neither throw into nor await the session. */
+function notifyTool(options: SpawnOptions, event: ToolExecutionEvent): void {
+  try {
+    const pending = options.onToolExecution?.(event);
+    if (pending) void Promise.resolve(pending).catch(() => undefined);
+  } catch {
+    /* Observers cannot alter worker lifecycle. */
   }
 }
 /** Validation errors of a RESULT's `data`, or undefined when it satisfies the contract. */

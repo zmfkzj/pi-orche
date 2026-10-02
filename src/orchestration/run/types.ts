@@ -11,6 +11,7 @@ import type { RunEventSink } from "../events.js";
 import type { WorkspaceAudit, WorkspaceChange } from "../workspace.js";
 import type { TeamSettings } from "../team.js";
 import type { AuditSettings } from "../artifacts.js";
+import type { WorkspaceActivity } from "./activity.js";
 
 import type { RunLimits } from "../limits.js";
 export { defaultRunLimits, type RunLimits } from "../limits.js";
@@ -48,9 +49,20 @@ export interface RunReport {
    * Workspace changes since the run started, from git snapshots (absent outside a git work tree).
    * `baseline` is a commit holding the pre-run contents, also kept at refs/pi-orche/baseline.
    */
-  workspace?: { baseline: string; changes: readonly WorkspaceChange[] };
+  workspace?: {
+    baseline: string;
+    /** Run-attributed changes only. */
+    changes: readonly WorkspaceChange[];
+    /**
+     * Changes made outside this run (another session, the user, a commit elsewhere), with the reason.
+     * Present only when non-empty. They are never violations and must not be restored.
+     */
+    external?: Array<WorkspaceChange & { reason: string }>;
+  };
   taskClass: TaskClass | "unclassified";
   answer: string;
+  /** The `answer` was produced by a run that ended `failed` (violation, timeout, error): it may be incomplete. */
+  answerFromFailedRun?: boolean;
   timeouts?: readonly TimeoutDiagnostic[];
   /** Signal cancellation diagnostics captured before sessions are stopped; summary stays "cancelled". */
   cancellation?: CancellationDiagnostic;
@@ -80,7 +92,19 @@ export interface RunContext {
   audit?: WorkspaceAudit;
   /** Snapshot tree the next workspace audit diffs against. */
   auditTree?: string;
-  baseline?: { tree: string; commit: string };
+  /**
+   * `head`: HEAD commit when the run started (absent on an unborn branch), to detect commits made
+   * elsewhere during the run. `headRead` is false when HEAD could not be read at the start.
+   */
+  baseline?: { tree: string; commit: string; head?: string; headRead?: boolean };
+  /**
+   * Worker tool-activity tracker: in-flight write-capable tool executions, files written by
+   * edit/write, and which changed files appeared in quiet vs active windows. Created together with
+   * the workspace audit; absent when the audit is off.
+   */
+  activity?: WorkspaceActivity;
+  /** Changes attributed to somebody else, by file; never violations. Reported as `workspace.external`. */
+  externalChanges?: Map<string, WorkspaceChange & { reason: string }>;
   /** Decision schema last sent to the coordinator, to avoid resending an identical one. */
   lastSchema?: string;
   unsubscribers: (() => void)[];

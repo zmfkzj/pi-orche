@@ -230,24 +230,31 @@ describe("workspace audit in a run", () => {
     expect(describeWorkspaceChanges(report.workspace!.baseline, report.workspace!.changes)).toContain(`rm -- ${file}`);
     expect(f.faux.getPendingResponseCount()).toBe(0);
   });
-  it.each([false, true])("audits read-only analyst creation (artifact escape hatch: %s)", async exempt => {
+  // Behaviour intentionally changed (workspace change attribution): analysts hold read-only tools
+  // only, so a file that appears during their assignment was not written by any worker tool call.
+  // It is a change made outside the run (another session, the user, a script) and is reported as
+  // `external`: it is no longer an ownership violation that fails the run and discards the answer,
+  // and the new-file artifact policy (audit.artifacts) does not apply to it either way.
+  it.each([false, true])("reports a change made while read-only analysts run as external, not as a violation (artifact escape hatch: %s)", async exempt => {
     const dir = await repo();
     const events: RunEvent[] = [];
     const f = await fauxRuntime([
       decision({ type: "classify", taskClass: "answer", workerCount: 1, language: "en", reason: "read-only" }),
       () => {
-        // Analysts expose no bash/write tool. Simulate an out-of-band check/script side effect
-        // during their assignment so the snapshot backstop, not the tool guard, is exercised.
+        // Analysts expose no bash/write tool. Simulate an out-of-band check/script (or another pi
+        // session) writing during their assignment: no worker tool is running when it lands.
         execFileSync("sh", ["-c", "echo notes > notes.md"], { cwd: dir });
         return tool("report_result", { kind: "answer", summary: "explained", data: { evidence: ["core.mjs"] } });
       },
       decision({ type: "answer_from_worker", sourceAgentId: "A1", summary: "explained" }),
     ]);
     const report = await runOrchestrated({ problem: "Explain the code.", cwd: dir, routes: { routes: {}, default: { model: f.route.model }, ...(exempt ? { audit: { artifacts: ["notes.md"] } } : {}) }, modelRuntime: f.runtime, sink: event => events.push(event) });
-    expect(report.status).toBe(exempt ? "done" : "failed");
-    expect(report.ownershipViolations).toEqual(exempt ? [] : [{ agentId: "A1", file: "notes.md", via: "workspace", created: true }]);
-    expect(events.filter(event => event.type === "workspace_unowned_file")).toMatchObject(exempt ? [{ agentId: "A1", file: "notes.md" }] : []);
-    expect(report.workspace?.changes).toEqual([{ path: "notes.md", status: "added" }]);
+    expect(report.status).toBe("done");
+    expect(report.ownershipViolations).toEqual([]);
+    expect(events.filter(event => event.type === "ownership_violation" || event.type === "workspace_unowned_file")).toEqual([]);
+    expect(events.filter(event => event.type === "workspace_external_change")).toMatchObject([{ file: "notes.md", reason: expect.stringContaining("no worker tool") }]);
+    expect(report.workspace?.changes).toEqual([]);
+    expect(report.workspace?.external).toEqual([{ path: "notes.md", status: "added", reason: expect.stringContaining("no worker tool") }]);
     expect(f.faux.getPendingResponseCount()).toBe(0);
   });
 

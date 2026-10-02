@@ -40,12 +40,34 @@ export interface AgentSnapshot {
   lastToolName?: string;
   lastToolAt?: number;
 }
+/**
+ * A worker tool execution as seen by the session's `tool_execution_start/end` and `agent_settled`
+ * events. `start` carries the raw call arguments and `settled` means the session has no tool in
+ * flight. This is delivered through {@link SpawnOptions.onToolExecution}, never through the public
+ * {@link ManagerEvent} stream, which deliberately excludes tool arguments.
+ */
+export interface ToolExecutionEvent {
+  phase: "start" | "end" | "settled";
+  toolCallId?: string;
+  toolName?: string;
+  /** `start` only: the call's arguments, for owners that need a written path (never forwarded as an event). */
+  args?: unknown;
+  /** `end` only. */
+  isError?: boolean;
+}
 export interface SpawnOptions extends SessionOptions {
   id: string;
   role: string;
   peerMessaging?: boolean;
   /** Cancels creation promptly; late SDK sessions are disposed without registration. */
   signal?: AbortSignal;
+  /**
+   * Observes this worker's tool executions (start, end, and the settle that proves nothing is
+   * running any more). Invoked synchronously from the session event, before the manager's
+   * closed/disposed guard, so ends are still seen while a run tears down. Errors and rejections
+   * are swallowed: observers cannot alter the worker lifecycle.
+   */
+  onToolExecution?(event: ToolExecutionEvent): void | Promise<void>;
 }
 /** Contract for the `data` of a RESULT; `optional` also accepts an absent `data`. */
 export interface ResultDataSchema {

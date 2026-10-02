@@ -21,6 +21,12 @@ export interface WorkspaceChange {
   readonly status: "added" | "modified" | "deleted";
 }
 
+/**
+ * A change that this run's workers did not make (another process or session, or a commit made
+ * elsewhere). `reason` says why it is not attributed to the run. Reported, never restored.
+ */
+export type ExternalWorkspaceChange = WorkspaceChange & { reason: string };
+
 async function git(cwd: string, args: readonly string[], env: Record<string, string> = {}, signal?: AbortSignal): Promise<string> {
   signal?.throwIfAborted();
   const { stdout } = await execFileAsync("git", args, { cwd, signal, timeout: 30_000, killSignal: "SIGKILL", env: { ...process.env, ...env }, maxBuffer: 64 * 1024 * 1024 });
@@ -91,6 +97,34 @@ export class WorkspaceAudit {
   }
 
   /**
+   * The commit HEAD points at right now (undefined on an unborn branch or if git fails). Reads
+   * refs only: the user's index, worktree and HEAD are untouched. A HEAD that differs from the
+   * one recorded at the start means someone committed, switched branch or reset during the run.
+   */
+  async head(): Promise<string | undefined> {
+    try {
+      return (await git(this.cwd, ["rev-parse", "--verify", "-q", "HEAD"], {}, this.signal)).trim() || undefined;
+    } catch {
+      this.signal?.throwIfAborted(); // cancellation must not look like "no HEAD"
+      return undefined;
+    }
+  }
+
+  /**
+   * Tree id of a commit, comparable with {@link snapshot} trees through {@link diff}: with the
+   * baseline tree, the tree of the new HEAD and the current snapshot, a file whose snapshot
+   * content equals the new HEAD but differs from the baseline was committed by someone else.
+   */
+  async treeOf(commit: string): Promise<string> {
+    return (await git(this.cwd, ["rev-parse", "--verify", "-q", `${commit}^{tree}`], {}, this.signal)).trim();
+  }
+
+  /** Alias of {@link treeOf}, named for the common use on the result of {@link head}. */
+  headTree(commit: string): Promise<string> {
+    return this.treeOf(commit);
+  }
+
+  /**
    * Record `tree` as a commit (parented on HEAD when there is one) and point {@link BASELINE_REF}
    * at it, so the pre-run contents stay restorable with `git restore --source=<commit>`.
    * A failed ref update (e.g. a concurrent run holding the lock) keeps the unreferenced commit.
@@ -103,29 +137,97 @@ export class WorkspaceAudit {
   }
 }
 
+/** Run-attributed changes listed one per line in a report; the rest is summarised. */
 const MAX_LISTED = 20;
+/** External files listed in a report (informational only: no command is ever built from them). */
+const MAX_EXTERNAL_LISTED = 50;
+/** Above this many run-attributed files the report stops spelling out one command per chunk. */
+const MAX_COMMAND_PATHS = 200;
+/** One shell command carries at most this many paths / characters of paths. */
+const CHUNK_PATHS = 25;
+const CHUNK_CHARS = 4_000;
 const quote = (path: string) => /^[\w./@+-]+$/.test(path) ? path : `'${path.replaceAll("'", "'\\''")}'`;
 
-/** Shell commands that put the listed files back to their pre-run contents. */
-export function recoveryCommands(commit: string, changes: readonly WorkspaceChange[]): string[] {
-  const restore = changes.filter(change => change.status !== "added").map(change => quote(change.path));
-  const remove = changes.filter(change => change.status === "added").map(change => quote(change.path));
-  const commands: string[] = [];
-  if (restore.length) commands.push(`git restore --source=${commit} --worktree -- ${restore.join(" ")}`);
-  if (remove.length) commands.push(`rm -- ${remove.join(" ")}`);
-  return commands;
+/** Split quoted paths into groups that keep every generated command line short. */
+function chunked(paths: readonly string[]): string[][] {
+  const groups: string[][] = [];
+  let current: string[] = [];
+  let size = 0;
+  for (const path of paths) {
+    if (current.length && (current.length >= CHUNK_PATHS || size + path.length + 1 > CHUNK_CHARS)) {
+      groups.push(current);
+      current = [];
+      size = 0;
+    }
+    current.push(path);
+    size += path.length + 1;
+  }
+  if (current.length) groups.push(current);
+  return groups;
 }
 
-/** Human summary of workspace changes with recovery commands, for failure reports. */
-export function describeWorkspaceChanges(commit: string, changes: readonly WorkspaceChange[]): string {
-  if (!changes.length) return "";
-  const listed = changes.slice(0, MAX_LISTED).map(change => `- ${change.status}: ${change.path}`);
-  if (changes.length > MAX_LISTED) listed.push(`- … ${changes.length - MAX_LISTED} more (git diff --name-status ${commit})`);
+/**
+ * Shell commands that put the run-attributed files back to their pre-run contents.
+ *
+ * Every command is built from an explicit path list (chunked when long); there is deliberately
+ * no blanket `-- .` form, because the worktree may also hold work of other processes (other
+ * sessions, the user, their commits). `external` files are never restored: they are dropped from
+ * the lists even if a caller passes them in `changes` too.
+ */
+export function recoveryCommands(commit: string, changes: readonly WorkspaceChange[], external: readonly WorkspaceChange[] = []): string[] {
+  const foreign = new Set(external.map(change => change.path));
+  const own = changes.filter(change => !foreign.has(change.path));
+  const restore = own.filter(change => change.status !== "added").map(change => quote(change.path));
+  const remove = own.filter(change => change.status === "added").map(change => quote(change.path));
   return [
-    `Workspace changes since the run started (baseline ${commit.slice(0, 12)}, ref ${BASELINE_REF}):`,
-    ...listed,
-    "To restore the pre-run contents:",
-    ...recoveryCommands(commit, changes.length > MAX_LISTED ? [] : changes).map(command => `  ${command}`),
-    ...(changes.length > MAX_LISTED ? [`  git restore --source=${commit} --worktree -- .   # then remove added files`] : []),
-  ].join("\n");
+    ...chunked(restore).map(paths => `git restore --source=${commit} --worktree -- ${paths.join(" ")}`),
+    ...chunked(remove).map(paths => `rm -- ${paths.join(" ")}`),
+  ];
+}
+
+/**
+ * Human summary of workspace changes with recovery commands, for failure reports.
+ *
+ * `changes` are the run-attributed files: only they get restore commands. `external` files
+ * (committed or edited by someone else while the run was going) are listed separately and
+ * explicitly marked not to be restored. Returns "" when there is nothing to report.
+ */
+export function describeWorkspaceChanges(
+  commit: string,
+  changes: readonly WorkspaceChange[],
+  external: readonly (WorkspaceChange & { reason?: string })[] = [],
+): string {
+  const foreign = new Set(external.map(change => change.path));
+  const own = changes.filter(change => !foreign.has(change.path));
+  if (!own.length && !external.length) return "";
+  const lines: string[] = [];
+  if (own.length) {
+    const tooMany = own.length > MAX_COMMAND_PATHS;
+    lines.push(`Workspace changes made by this run (baseline ${commit.slice(0, 12)}, ref ${BASELINE_REF}):`);
+    lines.push(...own.slice(0, MAX_LISTED).map(change => `- ${change.status}: ${change.path}`));
+    if (own.length > MAX_LISTED) {
+      lines.push(`- … ${own.length - MAX_LISTED} more run files (${tooMany ? "not listed here" : "all are covered by the commands below"})`);
+    }
+    if (tooMany) {
+      // Too many paths for reviewable commands: inspection only. Never a blanket restore.
+      lines.push(
+        `Too many run files (${own.length}) to spell out restore commands. Inspect with: git diff --name-status ${commit}`,
+        "(that also lists files changed outside this run, if any); restore only files that belong to this run.",
+      );
+    } else {
+      lines.push("To restore the pre-run contents of these run files only:");
+      lines.push(...recoveryCommands(commit, own).map(command => `  ${command}`));
+    }
+  } else {
+    lines.push("No workspace change is attributed to this run.");
+  }
+  if (external.length) {
+    lines.push(
+      "",
+      "Files changed outside this run; not restored — do not restore (another process, session or commit made these changes):",
+      ...external.slice(0, MAX_EXTERNAL_LISTED).map(change => `- ${change.status}: ${change.path}${change.reason ? ` — ${change.reason}` : ""}`),
+    );
+    if (external.length > MAX_EXTERNAL_LISTED) lines.push(`- … ${external.length - MAX_EXTERNAL_LISTED} more changed outside this run`);
+  }
+  return lines.join("\n");
 }

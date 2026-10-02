@@ -1,6 +1,6 @@
 import { getAgentDir, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { runOrchestrated, type RunReport } from "../orchestration/coordinator.js";
+import { externalChangesWarning, runOrchestrated, type RunReport } from "../orchestration/coordinator.js";
 import type { RunEvent } from "../orchestration/events.js";
 import { describeSource, discoverOrcheConfig, NoRouteError, type ConfigSource } from "./config.js";
 import { describeProgress } from "./progress.js";
@@ -51,7 +51,10 @@ export interface OrcheRunDetails {
 }
 export interface OrcheOutcome {
   report: RunReport;
-  /** Final user-facing text: the answer on success, the failure summary otherwise. */
+  /**
+   * Final user-facing text: the answer on success, the failure summary otherwise. A failed run's
+   * preserved answer (`report.answer` with `answerFromFailedRun`) is shown by {@link formatOutcome}.
+   */
   text: string;
   details: OrcheRunDetails;
   /** The cancellation came from `/orche cancel`. */
@@ -249,10 +252,19 @@ export function formatOutcome(outcome: OrcheOutcome): string {
       ? `orche finished (${details.taskClass}, ${seconds}s, ${details.requests} model requests; ${details.config})`
       : `orche FAILED (${details.taskClass}, ${seconds}s; ${details.config})`;
   const changes = report.workspace?.changes ?? [];
-  const workspace = !changes.length ? ""
-    : report.status === "done"
-      ? `\n\nChanged files: ${changes.map(change => change.path).join(", ")}`
-      : `\n\n${describeWorkspaceChanges(report.workspace!.baseline, changes)}`;
+  const external = report.workspace?.external ?? [];
+  // Run-attributed files get restore advice; files changed by somebody else are listed apart, as
+  // not-to-restore. A finished run only names them (its text is the answer, not the summary).
+  const finished = report.status === "done";
+  const workspace = [
+    finished && changes.length ? `Changed files: ${changes.map(change => change.path).join(", ")}` : "",
+    finished && external.length ? externalChangesWarning(external) : "",
+    finished ? "" : describeWorkspaceChanges(report.workspace?.baseline ?? "", changes, external),
+  ].filter(Boolean).map(part => `\n\n${part}`).join("");
+  // A failed run keeps what it produced; show it under its own marker, never as a verified result.
+  const preserved = !finished && report.answerFromFailedRun && report.answer.trim()
+    ? `\n\nResult from failed run (may be incomplete):\n${report.answer}`
+    : "";
   const cleanup = report.cleanup?.incomplete ? `\n\nCleanup incomplete; pending: ${report.cleanup.pending.join(", ")}. Uncooperative in-process SDK/tool work cannot be forcibly stopped.` : "";
   const diagnostic = report.cancellation;
   const cancellation = !diagnostic ? "" : `\n\nCancelled at ${diagnostic.phase} after ${Math.round(diagnostic.elapsedMs / 1000)}s; active: ${diagnostic.workers.map(worker => {
@@ -260,5 +272,5 @@ export function formatOutcome(outcome: OrcheOutcome): string {
     const tool = worker.lastToolName ? `, last tool ${worker.lastToolName}${worker.lastToolAt !== undefined ? ` ${Math.max(0, Math.round((diagnostic.timestamp - worker.lastToolAt) / 1000))}s ago` : ""}` : "";
     return `${worker.id} ${worker.kind} (${worker.requestCount ?? 0} requests${tool})`;
   }).join(", ") || "none"}`;
-  return `${head}\n\n${outcome.text}${cancellation}${workspace}${cleanup}`;
+  return `${head}\n\n${outcome.text}${preserved}${cancellation}${workspace}${cleanup}`;
 }

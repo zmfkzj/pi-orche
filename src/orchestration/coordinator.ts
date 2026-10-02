@@ -14,6 +14,7 @@ import { runAnswer } from "./run/answer.js";
 import { exploreUntilAccepted, collectProposals, planAndSpawnExplorers } from "./run/diagnose.js";
 import { mergeExecuteAndVerify, spawnChangeWorkers } from "./run/change.js";
 import { type RunContext, type RunOptions, type RunReport } from "./run/types.js";
+import type { WorkspaceChange } from "./workspace.js";
 import { resolveRunLimits } from "./limits.js";
 import { CREATED_FILE_ADVICE } from "./artifacts.js";
 
@@ -46,6 +47,16 @@ export async function runOrchestrated(options: RunOptions): Promise<RunReport> {
     cancelled: false,
   };
   ctx.unsubscribers.push(ctx.manager.subscribe(event => forwardManagerEvent(ctx, event)));
+  // Completed worker results by agent and kind (latest wins). The run flows only hand them to the
+  // coordinator after every worker of a phase finished; a failure before that must not lose them.
+  const workerResults = new Map<string, WorkerResult>();
+  ctx.unsubscribers.push(ctx.manager.subscribe(event => {
+    if (event.type !== "assignment_outcome" || event.outcome.status !== "completed" || !event.outcome.result?.summary.trim()) return;
+    const { agentId, kind, result } = event.outcome;
+    const key = `${agentId}:${kind}`;
+    workerResults.delete(key);
+    workerResults.set(key, { agentId, kind, summary: result.summary });
+  }));
   emit(ctx, { type: "run_started", timestamp: startedAt, mode: "orchestrated", problem: options.problem });
   emit(ctx, { type: "phase_changed", timestamp: startedAt, from: "INIT", to: "EXPLORE" });
   const controller = new AbortController();
@@ -154,9 +165,16 @@ export async function runOrchestrated(options: RunOptions): Promise<RunReport> {
   const status = !failure && ctx.state.phase === "DONE" && !ctx.violations.length ? "done" : "failed";
   const violated = [...new Set(ctx.violations.map(violation => violation.file))];
   const created = [...new Set(ctx.violations.filter(violation => violation.created).map(violation => violation.file))];
-  const summary = ctx.cancellation ? "cancelled" : ctx.violations.length
+  const baseSummary = ctx.cancellation ? "cancelled" : ctx.violations.length
     ? `Decomposition failure: ${ctx.violations.length} ownership violation${ctx.violations.length === 1 ? "" : "s"} (${violated.slice(0, 5).join(", ")}${violated.length > 5 ? ", …" : ""})${created.length ? `; ${created.slice(0, 5).map(file => `created unowned source file ${file}`).join("; ")}${created.length > 5 ? "; …" : ""}. ${CREATED_FILE_ADVICE}` : ""}`
     : failure ?? ctx.state.summary ?? ctx.state.failure ?? "Run failed";
+  // Changes made by other processes are reported, never restored, and never decide the status. A
+  // cancelled run keeps the exact summary "cancelled" (the controller recognises it by that text).
+  const external = workspace?.external ?? [];
+  const summary = external.length && !ctx.cancellation ? `${baseSummary}\n\n${externalChangesWarning(external)}` : baseSummary;
+  // A failed run (violation, timeout, error) may still have produced its analysis: keep it next to
+  // the failure summary instead of replacing it, so minutes of work are not thrown away.
+  const preserved = status === "failed" ? producedResult(ctx, [...workerResults.values()]) : undefined;
   const finishedAt = Date.now();
   emit(ctx, { type: "run_finished", timestamp: finishedAt, status, summary });
   ctx.reported = true;
@@ -167,6 +185,32 @@ export async function runOrchestrated(options: RunOptions): Promise<RunReport> {
     ...(ctx.timeouts?.length ? { timeouts: ctx.timeouts } : {}),
     ...(ctx.cancellation ? { cancellation: ctx.cancellation } : {}),
     cleanup: { incomplete: pending.length > 0, pending },
-    taskClass: ctx.state.taskClass ?? "unclassified", answer: status === "done" ? ctx.state.answer ?? summary : summary,
+    taskClass: ctx.state.taskClass ?? "unclassified",
+    answer: status === "done" ? ctx.state.answer ?? summary : preserved ?? summary,
+    ...(preserved ? { answerFromFailedRun: true } : {}),
   };
+}
+
+/** One-line warning for files changed by somebody else during the run. Never a failure. */
+export function externalChangesWarning(external: readonly WorkspaceChange[]): string {
+  const files = external.map(change => change.path);
+  return `Warning: ${files.length} file${files.length === 1 ? "" : "s"} changed outside this run; not restored: ${files.slice(0, 5).join(", ")}${files.length > 5 ? `, … (+${files.length - 5} more)` : ""}`;
+}
+
+interface WorkerResult { agentId: string; kind: string; summary: string }
+
+/**
+ * What a run produced before it failed: the coordinator's approved answer when there is one, else
+ * the completed worker results (for the answer class the analysts' answers themselves). Undefined
+ * when nothing usable exists, in which case the report carries the failure summary alone.
+ */
+function producedResult(ctx: RunContext, results: readonly WorkerResult[]): string | undefined {
+  if (ctx.state.answer?.trim()) return ctx.state.answer;
+  if (!results.length) return undefined;
+  if (ctx.state.taskClass === "answer") {
+    const answers = results.filter(result => result.kind === "answer");
+    if (answers.length === 1) return answers[0]!.summary;
+    if (answers.length > 1) return answers.map(result => `## ${result.agentId}\n${result.summary}`).join("\n\n");
+  }
+  return results.map(result => `## ${result.agentId} (${result.kind})\n${result.summary}`).join("\n\n");
 }

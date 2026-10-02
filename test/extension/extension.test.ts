@@ -240,6 +240,27 @@ describe("pi-orche as a Pi extension (real AgentSession, faux providers)", () =>
     expect(JSON.stringify(toolResult)).toContain("cannot be done");
   });
 
+  it("a failed orchestration still hands the main model what the run produced, marked as incomplete", async () => {
+    let toolResult: unknown;
+    const h = await harness({
+      mainSteps: [
+        tool("orche_run", { request: "explain greeting.txt" }),
+        context => { toolResult = context.messages.findLast(message => message.role === "toolResult"); return reply("noted"); },
+      ],
+      orcheSteps: [
+        decision({ type: "classify", taskClass: "answer", workerCount: 1, language: "en", reason: "explanation" }),
+        tool("report_result", { kind: "answer", summary: "PRESERVED_ANALYSIS: greeting.txt says hello world.", data: { evidence: ["greeting.txt"] } }),
+        decision({ type: "fail", reason: "coordinator gave up" }),
+      ],
+    });
+    await h.session.prompt("go");
+    expect(toolResult).toMatchObject({ isError: true });
+    const text = JSON.stringify(toolResult);
+    expect(text).toContain("coordinator gave up");
+    expect(text).toContain("Result from failed run (may be incomplete)");
+    expect(text).toContain("PRESERVED_ANALYSIS: greeting.txt says hello world.");
+  });
+
   it("aborting the main turn cancels a running orche_run and disposes the orchestration sessions", async () => {
     const entered = deferred();
     let observedAbort = false;

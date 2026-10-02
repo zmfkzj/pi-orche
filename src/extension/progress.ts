@@ -41,6 +41,8 @@ export function describeProgress(event: RunEvent): string | undefined {
       return event.action === "notice" ? undefined : `${event.agentId} request budget ${event.action === "stop" ? "exhausted; forcing a report" : "exceeded; assignment failed"}`;
     case "workspace_unowned_file":
       return `new unowned file ${event.file} (listed in the report)`;
+    case "workspace_external_change":
+      return `warning: external change (not this run): ${event.file} — ${event.reason}`;
     case "workspace_audit_unavailable":
       return `workspace audit off: ${event.reason}`;
     case "advisor_result":

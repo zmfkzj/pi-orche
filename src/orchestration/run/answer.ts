@@ -22,7 +22,9 @@ export async function runAnswer(ctx: RunContext, runtime: ModelRuntime): Promise
     ctx.manager.assign(id, "answer", answerPrompt(ctx.options.problem, cycled(ctx.team.answerAngles, index), ctx.workerIds.filter(peer => peer !== id), ctx.state.language!));
   }
   const outcomes = await waitOutcomes(ctx, "answer", new Set(ctx.workerIds));
-  await auditWorkspace(ctx, ctx.workerIds, () => false);
+  // Analysts hold read-only tools only: a change not traceable to a worker tool call is external
+  // (another session, the user, a commit elsewhere), never a violation that would discard the answer.
+  await auditWorkspace(ctx, ctx.workerIds, () => false, { readOnly: true });
   for (const outcome of outcomes) {
     if (outcome.result?.summary.trim()) ctx.workerAnswers.set(outcome.agentId, outcome.result.summary);
   }

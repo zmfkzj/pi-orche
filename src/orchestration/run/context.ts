@@ -24,6 +24,8 @@ export async function spawnWorker(ctx: RunContext, options: Parameters<AgentMana
     signal: ctx.signal,
     onContextWindow: info => emit(ctx, { type: "context_window", timestamp: Date.now(), actor: options.id, ...info }),
     toolGuard: (toolName, input) => guardWrite(ctx, options.id, toolName, input),
+    // Resolved against ctx.activity at event time: it exists whenever the workspace audit is on.
+    onToolExecution: event => ctx.activity?.record(options.id, event),
   });
   // AgentManager disposes any late creation itself; never await unbounded teardown here.
   if (ctx.cancelled) throw new Error("cancelled");
@@ -132,6 +134,8 @@ export function forwardManagerEvent(ctx: RunContext, event: ManagerEvent): void 
  * Pre-execution ownership guard for a worker's write tools (edit, write, ast_rewrite): a write
  * outside the worker's owned files, or during a read-only assignment, never runs. The model gets
  * the reason as the tool error; no file changed, so this is reported but is not a violation.
+ * A call that passes is a write-capable tool about to run: the activity tracker may need a
+ * snapshot first (quiet→active edge), and this guard is awaited before the tool executes.
  */
 export function guardWrite(ctx: RunContext, agentId: string, toolName: string, input: Record<string, unknown>): string | undefined | Promise<string | undefined> {
   if (ctx.cancelled || ctx.signal?.aborted) return "Run cancelled: no further tool writes are accepted";
@@ -139,7 +143,10 @@ export function guardWrite(ctx: RunContext, agentId: string, toolName: string, i
   return checkWriteRealPath({ toolName, input, cwd: ctx.options.cwd, agentId, assignmentKind, tasks: ctx.state.tasks }).then(blocked => {
     // Cancellation may have arrived while filesystem resolution was pending.
     if (ctx.cancelled || ctx.signal?.aborted) return "Run cancelled: no further tool writes are accepted";
-    if (!blocked) return undefined;
+    if (!blocked) {
+      return (ctx.activity?.enter(agentId, toolName) ?? Promise.resolve()).then(() =>
+        ctx.cancelled || ctx.signal?.aborted ? "Run cancelled: no further tool writes are accepted" : undefined);
+    }
     emit(ctx, {
       type: "ownership_blocked", timestamp: Date.now(), agentId, tool: toolName, file: blocked.file,
       ownerTaskIds: coveringTasks(ctx.state.tasks, blocked.file).map(task => task.id),

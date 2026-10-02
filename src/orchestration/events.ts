@@ -32,6 +32,12 @@ export type CoordinatorEvent =
   | { type: "ownership_blocked"; timestamp: number; agentId: string; tool: string; file: string; ownerTaskIds: readonly string[] }
   /** New generated output outside ownership; warned and listed, not a violation. */
   | { type: "workspace_unowned_file"; timestamp: number; agentId: string; file: string }
+  /**
+   * A workspace change made outside this run (another process or session, or a commit made elsewhere).
+   * Never an ownership violation: the file is reported and left alone. `agentId` is set when a worker
+   * was active in the window the change was seen in.
+   */
+  | { type: "workspace_external_change"; timestamp: number; agentId?: string; file: string; reason: string }
   | { type: "workspace_baseline"; timestamp: number; commit: string }
   | { type: "workspace_audit_unavailable"; timestamp: number; reason: string }
   | { type: "verification"; timestamp: number; passed: boolean; round: number; summary: string }
