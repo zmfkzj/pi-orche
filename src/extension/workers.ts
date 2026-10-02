@@ -1,9 +1,11 @@
 /** Session API: construct WorkerPool({controller, agentDir?, idleTtlMs?}), register
  * orcheTaskParameters with execute(args), and call dispose() on session_shutdown.
- * execute accepts OrcheRunArgs plus task parameters; onProgress feeds tool updates/UI.
+ * execute accepts OrcheRunArgs plus task parameters; onProgress feeds tool updates/UI. A task whose worker ran but failed, timed
+ * out or was cancelled rejects with TaskFailedError (the message a plain Error would have had, plus structured details);
+ * executeTool() is execute() as a tool result, with such a failure returned as an isError result that keeps the details.
  * formatWorkers(), stop(id|"all") and roster() implement the pool slash commands. */
 import { Type, type Static } from "@sinclair/typebox";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -15,7 +17,9 @@ import { resolveRunLimits } from "../orchestration/limits.js";
 import { taskWorkerInstructions } from "../orchestration/prompts.js";
 import { orchestrationResultSchemas } from "../orchestration/result-schemas.js";
 import { resolveRoute, resolveSpecialistRoute } from "../orchestration/routing.js";
-import { WorkspaceAudit, type WorkspaceChange } from "../orchestration/workspace.js";
+import { WorkspaceAudit, type GitlinkChange, type WorkspaceChange } from "../orchestration/workspace.js";
+import { WorkspaceActivity } from "../orchestration/run/activity.js";
+import { CHANGED_WHILE_QUIET } from "../orchestration/run/audit.js";
 import { WORKER_TOOL_NAMES } from "../tools/index.js";
 import { createGenerateImageTool } from "../tools/generate-image.js";
 import { loadProviderExtensions, type ProviderExtensionHost } from "../pi/provider-extensions.js";
@@ -23,6 +27,7 @@ import { ensureBundledImageProvider } from "../pi/register-bundled-image-provide
 import { describeSource, discoverOrcheConfig, NoRouteError } from "./config.js";
 import { OrcheController, withConcurrentWarning, type OrcheRunArgs } from "./controller.js";
 import type { ConcurrentActivitySummary } from "./concurrent-sessions.js";
+import { errorToolResult, failureReason, type ErrorToolResult, type ToolFailure, type ToolFailureKind } from "./tool-result.js";
 
 export const orcheTaskParameters = Type.Object({
   role: Type.Union([Type.Literal("explore"), Type.Literal("answer"), Type.Literal("implement"), Type.Literal("verify"), Type.Literal("game-asset"), Type.Literal("video")]),
@@ -42,13 +47,35 @@ export const orcheTaskParameters = Type.Object({
 });
 export type TaskParameters = Static<typeof orcheTaskParameters>;
 export type TaskRole = TaskParameters["role"];
+/** A change the worker is not credited with, and why. */
+export type OtherChange = WorkspaceChange & { reason: string };
+/** HEAD of the task cwd's repository moved during the task (`from` absent: unborn branch; `branch` absent: detached). */
+export interface HeadMove {
+  from?: string;
+  to?: string;
+  /** Commits reachable from `to` but not from `from`; `commits` lists at most 20 (`git log --oneline`, newest first). */
+  commitCount: number;
+  commits: string[];
+  branch?: string;
+}
+/** A submodule whose HEAD moved (or that appeared or went away: `from`/`to` absent) during the task; `path` is relative to the task cwd. */
+export interface SubmoduleMove extends HeadMove { path: string }
 export interface TaskDetails {
   worker: string;
   role: TaskRole;
   status: string;
+  /** Model route of the worker (`provider/model`), when known. */
+  model?: string;
   durationMs: number;
   requests: number;
+  /** Changed by this worker: paths written by its edit/write tools plus changes made while one of its write-capable tool calls ran. Submodule files are `sub/file`. Always empty for read-only roles. */
   changes: WorkspaceChange[];
+  /** Workspace changes observed during the task that are not attributed to this worker (they may come from other sessions or processes). */
+  otherChanges: OtherChange[];
+  /** Present when a submodule HEAD (gitlink) changed during the task. */
+  submodules?: SubmoduleMove[];
+  /** Present when HEAD of the task cwd's repository moved during the task, with or without a git grant. */
+  headMoved?: HeadMove;
   roster: string;
   retired?: string[];
   /** Other pi sessions that were active on the repository when the task started. */
@@ -56,11 +83,44 @@ export interface TaskDetails {
   /** Present when the assignment carried a git grant: the commits it created and whether a push was detected. */
   git?: GitReport;
 }
+/** The workspace/git part of a task's details. */
+type ChangeReport = Pick<TaskDetails, "changes" | "otherChanges" | "submodules" | "headMoved">;
+
+/**
+ * A task whose worker ran but did not complete its assignment: the worker failed or ended without a result, the
+ * assignment timed out, or the task was cancelled. Arguments, unknown workers, a busy controller or startup errors
+ * before any worker ran stay plain errors.
+ *
+ * It is an Error whose message is exactly the text a plain throw had, so callers that only catch errors see no
+ * difference. A thrown error loses its structured data in the SDK (the agent loop records `details: {}`), so the
+ * tool layer turns it into a returned error result with {@link TaskFailedError.toolResult} (see tool-result.ts):
+ * `details` is the TaskDetails of the assignment that ran (model, requests, duration, changes, other changes, HEAD
+ * movement, git report, ...) and `failure` the compact reason.
+ */
+export class TaskFailedError extends Error {
+  override readonly name = "TaskFailedError";
+  constructor(message: string, readonly details: TaskDetails, readonly failure: ToolFailure) { super(message); }
+  /** `isError: true`, `content` = the message, `details` = the TaskDetails plus `failure`. */
+  toolResult(): ErrorToolResult<TaskDetails, ToolFailure> { return errorToolResult(this.message, this.details, this.failure); }
+}
+
+/** Raised inside executeAssignment once the worker was given its assignment and that assignment did not complete; it becomes a {@link TaskFailedError} there. */
+class WorkerFailure extends Error {
+  constructor(message: string, readonly kind: ToolFailureKind, readonly status: string) { super(message); }
+}
+/** The text the controller throws for a cancelled task. */
+const CANCELLED_TEXT = /^cancelled( by user)?$/;
 interface Worker {
   id: string;
   role: TaskRole;
   cwd: string;
   files?: readonly string[];
+  /** `provider/model` of the worker's route. */
+  model?: string;
+  /** Tool-activity tracker of the assignment in flight (write roles only; the spawn callbacks resolve it at event time). */
+  activity?: WorkspaceActivity;
+  /** HEAD at the end of the previous assignment (`sha` absent: unborn), for the stale-context prefix. */
+  head?: { sha?: string };
   summary: string;
   lastUsed: number;
   tree?: string;
@@ -180,12 +240,12 @@ async function trackedRefs(cwd: string, grant: GitGrant, signal?: AbortSignal): 
   return [...names];
 }
 
-/** HEAD and the tracked remote refs before the worker starts (`available: false` when git cannot say). */
-async function captureGitBaseline(cwd: string, grant: GitGrant, signal?: AbortSignal): Promise<GitBaseline> {
+/** HEAD (and, with a grant, the tracked remote refs) before the worker starts (`available: false` when git cannot say). */
+async function captureGitBaseline(cwd: string, grant: GitGrant | undefined, signal?: AbortSignal): Promise<GitBaseline> {
   if (await git(cwd, ["rev-parse", "--is-inside-work-tree"], signal) !== "true") return { available: false, refs: new Map() };
   const head = await rev(cwd, "HEAD", signal);
   const refs = new Map<string, string | undefined>();
-  for (const name of await trackedRefs(cwd, grant, signal)) refs.set(name, await rev(cwd, name, signal));
+  if (grant) for (const name of await trackedRefs(cwd, grant, signal)) refs.set(name, await rev(cwd, name, signal));
   return { available: true, ...(head ? { head } : {}), refs };
 }
 
@@ -203,6 +263,15 @@ async function changedGitlinks(cwd: string, from: string, to: string): Promise<s
   return links;
 }
 
+/** Commits reachable from `to` but not from `from` (all of `to` when `from` is unborn): the true count and at most 20 `git log --oneline` lines, newest first. Fail-soft. */
+async function commitsBetween(cwd: string, from: string | undefined, to: string): Promise<{ commitCount: number; commits: string[] }> {
+  const range = from ? `${from}..${to}` : to;
+  const log = await git(cwd, ["log", "--no-color", "--no-decorate", "--no-show-signature", "--oneline", `--max-count=${MAX_COMMITS}`, range]);
+  const commits = log ? log.split("\n") : [];
+  const count = Number.parseInt(await git(cwd, ["rev-list", "--count", range]) ?? "", 10);
+  return { commitCount: Number.isFinite(count) ? Math.max(count, commits.length) : commits.length, commits };
+}
+
 /** Commits, gitlinks and push evidence since `baseline`. Never throws: unreadable parts are left out or "unknown". */
 async function reportGit(cwd: string, grant: GitGrant, baseline: GitBaseline): Promise<GitReport> {
   const empty: GitReport = { grant, available: false, commitCount: 0, commits: [], gitlinks: [], push: "unknown", refs: [] };
@@ -214,11 +283,7 @@ async function reportGit(cwd: string, grant: GitGrant, baseline: GitBaseline): P
     let commits: string[] = [];
     let gitlinks: string[] = [];
     if (headAfter && headAfter !== baseline.head) {
-      const range = baseline.head ? `${baseline.head}..${headAfter}` : headAfter;
-      const log = await git(cwd, ["log", "--no-color", "--no-decorate", "--no-show-signature", "--oneline", `--max-count=${MAX_COMMITS}`, range]);
-      commits = log ? log.split("\n") : [];
-      const count = Number.parseInt(await git(cwd, ["rev-list", "--count", range]) ?? "", 10);
-      commitCount = Number.isFinite(count) ? Math.max(count, commits.length) : commits.length;
+      ({ commitCount, commits } = await commitsBetween(cwd, baseline.head, headAfter));
       if (baseline.head) gitlinks = (await changedGitlinks(cwd, baseline.head, headAfter)).slice(0, MAX_GITLINKS);
     }
     const names = new Set(baseline.refs.keys());
@@ -266,6 +331,110 @@ export function formatGitReport(report: GitReport): string[] {
   }
   return lines;
 }
+
+// ---- what a task changed: attribution, HEAD movement and the lines of the result ----
+/** Why a change of a read-only role is not the worker's: no edit/write call can succeed for it, and its shell calls are not tracked. */
+const READ_ONLY_ROLE = "read-only role: not attributed to the worker";
+const NO_GRANT_NOTE = "; commits were not authorized for this assignment, so they may come from another session or process";
+const OTHER_CHANGES_NOTE = "not attributed to this worker; they may come from other sessions or processes";
+const CONCURRENT_NOTE = " (may include changes made by the other pi session(s); check before attributing them to this task)";
+/** Files spelled out per list in the result text (`details` keeps all of them). */
+const MAX_LISTED_FILES = 50;
+
+/**
+ * Split the net changes of one assignment into the worker's and the rest. Changes of the worker: paths
+ * written by a successful edit/write call, and changes that appeared while a write-capable tool call (bash,
+ * ast_rewrite, ...) of the worker was in flight, since such a call can write any file (ambiguous ones stay
+ * the worker's, exactly as in the orche_run audit). Changes seen only while none of its tools ran cannot be
+ * its own. A read-only role cannot edit, so nothing is attributed to it. Between two assignments of a reused
+ * worker no tool of it runs, so the stale-context changes are never its own either.
+ */
+function attributeChanges(changes: readonly WorkspaceChange[], activity: WorkspaceActivity | undefined, readOnly: boolean): { own: WorkspaceChange[]; other: OtherChange[] } {
+  const own: WorkspaceChange[] = [];
+  const other: OtherChange[] = [];
+  for (const change of changes) {
+    const reason = readOnly ? READ_ONLY_ROLE : activity?.touchedOnlyQuiet(change.path) ? CHANGED_WHILE_QUIET : undefined;
+    if (reason) other.push({ ...change, reason });
+    else own.push(change);
+  }
+  return { own, other };
+}
+
+/** HEAD of the task cwd's repository now versus the baseline; undefined when it did not move or git cannot say. Never throws. */
+async function headMovement(cwd: string, baseline: GitBaseline | undefined): Promise<HeadMove | undefined> {
+  if (!baseline?.available) return undefined;
+  try {
+    const to = await rev(cwd, "HEAD");
+    if (!to || to === baseline.head) return undefined;
+    const branch = await git(cwd, ["symbolic-ref", "-q", "--short", "HEAD"]);
+    return { ...(baseline.head ? { from: baseline.head } : {}), to, ...await commitsBetween(cwd, baseline.head, to), ...(branch ? { branch } : {}) };
+  } catch {
+    return undefined;
+  }
+}
+
+/** The commits behind each changed gitlink (bounded to 10; git runs inside the submodule). Never throws. */
+async function submoduleMoves(cwd: string, links: readonly GitlinkChange[]): Promise<SubmoduleMove[]> {
+  const moves: SubmoduleMove[] = [];
+  for (const link of links.slice(0, MAX_GITLINKS)) {
+    const counted = link.from && link.to ? await commitsBetween(resolve(cwd, link.path), link.from, link.to).catch(() => undefined) : undefined;
+    moves.push({ path: link.path, ...(link.from ? { from: link.from } : {}), ...(link.to ? { to: link.to } : {}), commitCount: counted?.commitCount ?? 0, commits: counted?.commits ?? [] });
+  }
+  return moves;
+}
+
+const commitNoun = (count: number) => `${count} commit${count === 1 ? "" : "s"}`;
+/** `HEAD moved a..b (N commits)` and the commit lines (at most 20). `label` is "HEAD" or `Submodule <path>: HEAD`. */
+function moveLines(label: string, move: HeadMove, suffix = ""): string[] {
+  const range = `${short(move.from)}..${short(move.to)}`;
+  return [
+    `${label} moved ${range} (${move.commitCount > 0 ? commitNoun(move.commitCount) : "no new commits; reset or checkout?"})${suffix}`,
+    ...move.commits.map(commit => `  ${commit}`),
+    ...(move.commitCount > move.commits.length ? [`  … ${move.commitCount - move.commits.length} more`] : []),
+  ];
+}
+function submoduleLines(moves: readonly SubmoduleMove[]): string[] {
+  return moves.flatMap(move => !move.to ? [`Submodule ${move.path}: removed (was ${short(move.from)})`]
+    : !move.from ? [`Submodule ${move.path}: added (HEAD ${short(move.to)})`]
+    : moveLines(`Submodule ${move.path}: HEAD`, move));
+}
+const listPaths = (changes: readonly WorkspaceChange[]) =>
+  `${changes.slice(0, MAX_LISTED_FILES).map(change => change.path).join(", ")}${changes.length > MAX_LISTED_FILES ? `, … ${changes.length - MAX_LISTED_FILES} more` : ""}`;
+
+/**
+ * The change section of a task result. "No files changed" appears only when there is nothing to report at all: no
+ * file change (the worker's or anyone's), no gitlink change and no HEAD movement. With a git grant the `Git:` lines
+ * already describe the commits of the task cwd's repository, so its HEAD movement is not repeated here.
+ */
+export function formatTaskChanges(report: Pick<TaskDetails, "changes" | "otherChanges" | "submodules" | "headMoved">, options: { concurrentWarning?: boolean; grant?: boolean } = {}): string[] {
+  const { changes, otherChanges, submodules = [], headMoved } = report;
+  if (!changes.length && !otherChanges.length && !submodules.length && !headMoved) return ["No files changed"];
+  return [
+    changes.length ? `Changed files: ${listPaths(changes)}${options.concurrentWarning ? CONCURRENT_NOTE : ""}`
+      : `Changed files: none${otherChanges.length ? " attributed to this worker" : ""}`,
+    ...(otherChanges.length ? [`Other workspace changes observed during the task (${OTHER_CHANGES_NOTE}): ${listPaths(otherChanges)}`] : []),
+    ...(headMoved && !options.grant ? moveLines("HEAD", headMoved, NO_GRANT_NOTE) : []),
+    ...submoduleLines(submodules),
+  ];
+}
+
+/**
+ * The stale-context section for a reused worker: what changed since its previous assignment ended, none of it by this
+ * worker (the same split as in the result, with an empty "changed by this worker" list). Undefined: no audit.
+ */
+function formatStaleContext(report: (Pick<TaskDetails, "submodules" | "headMoved"> & { changes: readonly WorkspaceChange[] }) | undefined): string {
+  const { changes = [], submodules = [], headMoved } = report ?? {};
+  const files = changes.slice(0, MAX_LISTED_FILES).map(change => `${change.path} (${change.status})`);
+  if (changes.length > MAX_LISTED_FILES) files.push(`… ${changes.length - MAX_LISTED_FILES} more`);
+  const lines = [
+    ...(files.length ? [`Changed while none of your assignments was running (${OTHER_CHANGES_NOTE}):`, ...files] : []),
+    ...(headMoved ? moveLines("HEAD", headMoved) : []),
+    ...submoduleLines(submodules),
+  ];
+  const body = !report ? "Workspace audit unavailable (not a git work tree)." : lines.length ? lines.join("\n") : "No files changed.";
+  return `## Stale context: workspace changes since your previous assignment\n${body}\nRe-read changed evidence before relying on retained context.\n\n`;
+}
+
 
 
 function assignmentPrompt(args: TaskParameters, commands: readonly string[], imagesAvailable = false, grant?: GitGrant): string {
@@ -353,13 +522,47 @@ export class WorkerPool {
     const tasks: TaskItem[] = [{ id: worker.id, owner: worker.id, description: "Single-worker assignment", files: files ?? [], status: "running" }];
     return (await checkWriteRealPath({ toolName, input, cwd: worker.cwd, agentId: worker.id, assignmentKind: worker.role, tasks }))?.reason;
   }
+  /**
+   * Run one assignment. Resolves with the result text and details; rejects with a plain Error before a worker ran
+   * (arguments, unknown or busy worker, startup), and with a {@link TaskFailedError} when a worker ran and the task failed,
+   * timed out or was cancelled. A worker that completed and reported `blocked` or `passed: false` resolves (details.status).
+   */
   execute(args: OrcheRunArgs & TaskParameters): Promise<{ text: string; details: TaskDetails }> {
+    // The details of the assignment that ran, once one did: the controller replaces whatever the callback threw when the
+    // task is cancelled, even after the assignment completed.
+    let ran: TaskDetails | undefined;
     return this.options.controller.task(args.signal, async signal => {
       const reused = args.worker ? this.workers.get(args.worker) : undefined;
       if (reused) clearTimeout(reused.timer);
-      try { return await this.executeAssignment(args, signal); }
-      finally { if (reused && this.workers.has(reused.id) && this.manager?.get(reused.id).status === "idle") this.idle(reused); }
+      try {
+        const result = await this.executeAssignment(args, signal);
+        ran = result.details;
+        return result;
+      } catch (error) {
+        if (error instanceof TaskFailedError) ran = error.details;
+        throw error;
+      } finally { if (reused && this.workers.has(reused.id) && this.manager?.get(reused.id).status === "idle") this.idle(reused); }
+    }).catch((error: unknown): never => {
+      if (ran && !(error instanceof TaskFailedError) && error instanceof Error && CANCELLED_TEXT.test(error.message)) {
+        throw new TaskFailedError(error.message, { ...ran, status: "cancelled" }, {
+          kind: "cancelled", status: "cancelled", reason: error.message, ...(error.message.endsWith("by user") ? { cancelledByUser: true as const } : {}),
+        });
+      }
+      throw error;
     });
+  }
+  /**
+   * {@link execute} as an orche_task tool result: the text and details on success; for a {@link TaskFailedError} an
+   * `isError` result with the same text and the structured details; anything else still rejects.
+   */
+  async executeTool(args: OrcheRunArgs & TaskParameters): Promise<AgentToolResult<TaskDetails> | ErrorToolResult<TaskDetails>> {
+    try {
+      const result = await this.execute(args);
+      return { content: [{ type: "text", text: result.text }], details: result.details };
+    } catch (error) {
+      if (error instanceof TaskFailedError) return error.toolResult();
+      throw error;
+    }
   }
   private async executeAssignment(args: OrcheRunArgs & TaskParameters, signal: AbortSignal): Promise<{ text: string; details: TaskDetails }> {
     if (this.disposed) throw new Error("Worker pool is disposed");
@@ -426,11 +629,20 @@ export class WorkerPool {
       const route = args.role === "game-asset" || args.role === "video"
         ? resolveSpecialistRoute(config.routes, routeRole, (provider, id) => !!runtime.getModel(provider, id))
         : resolveRoute(config.routes, routeRole);
+      meta.model = route.model;
       const customTools = images ? [createGenerateImageTool({ cwd: args.cwd, runtime, images })] : [];
       await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name)], customTools, peerMessaging: false,
         instructions: `${taskWorkerInstructions}\nYou work alone: there are no peer workers. Reply in the language of the request.`,
         onContextWindow: info => { meta.contextWindow = info.contextWindow; },
-        toolGuard: (name, input) => this.guard(meta, name, input),
+        toolGuard: async (name, input) => {
+          const blocked = await this.guard(meta, name, input);
+          if (blocked) return blocked;
+          // A write-capable call that may start: the tracker snapshots the quiet period it ends (see WorkspaceActivity.enter).
+          await meta.activity?.enter(meta.id, name);
+          return undefined;
+        },
+        // Resolved at event time: the tracker belongs to the assignment in flight, not to the worker's lifetime.
+        onToolExecution: event => meta.activity?.record(meta.id, event),
       });
       if (this.disposed) { await this.manager.dispose(id); throw new Error("Worker pool is disposed"); }
       this.workers.set(id, worker);
@@ -443,7 +655,13 @@ export class WorkerPool {
     let requests = 0;
     let audit: WorkspaceAudit | undefined;
     let before: string | undefined;
+    /** Changed by the worker, and the rest of what changed in the workspace meanwhile. */
     let changes: WorkspaceChange[] = [];
+    let otherChanges: OtherChange[] = [];
+    let gitlinks: GitlinkChange[] = [];
+    let activity: WorkspaceActivity | undefined;
+    let gitBaseline: GitBaseline | undefined;
+    const readOnly = !WRITING_KINDS.has(args.role);
     let assigned = false;
     let stopPromise: Promise<void> | undefined;
     const abort = () => { if (assigned) stopPromise ??= this.manager!.stop(meta.id); };
@@ -456,33 +674,67 @@ export class WorkerPool {
       if (event.type === "usage") { requests++; meta.latestInput = event.input + event.cacheRead; }
       progress();
     });
+    /** The workspace and git part of a result, as of now: the worker is not running any more when this is called. */
+    const collect = async (): Promise<{ changeReport: ChangeReport; gitReport?: GitReport }> => {
+      if (audit && before) {
+        // Queued boundary snapshots finish first; the last window is closed with the final snapshot.
+        await activity?.drain();
+        const after = activity ? await activity.checkpoint() : await audit.snapshot();
+        const compared = await audit.compare(before, after);
+        ({ own: changes, other: otherChanges } = attributeChanges(compared.changes, activity, readOnly));
+        gitlinks = compared.gitlinks;
+        meta.tree = after;
+      }
+      const gitReport = grant && gitBaseline ? await reportGit(args.cwd, grant, gitBaseline) : undefined;
+      const headMoved = audit ? await headMovement(args.cwd, gitBaseline) : undefined;
+      const submodules = await submoduleMoves(args.cwd, gitlinks);
+      return { changeReport: { changes, otherChanges, ...(submodules.length ? { submodules } : {}), ...(headMoved ? { headMoved } : {}) }, ...(gitReport ? { gitReport } : {}) };
+    };
+    /** TaskDetails of an assignment that did not complete. What the audit cannot read is left out: the failure matters more. */
+    const failedDetails = async (status: string): Promise<TaskDetails> => {
+      let report: ChangeReport = { changes: [], otherChanges: [] };
+      let gitReport: GitReport | undefined;
+      try { ({ changeReport: report, gitReport } = await collect()); } catch { /* keep the empty lists */ }
+      return {
+        worker: meta.id, role: args.role, status, ...(meta.model ? { model: meta.model } : {}), durationMs: Date.now() - started, requests, ...report, roster: this.roster(),
+        ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}),
+      };
+    };
     signal.addEventListener("abort", abort, { once: true });
     try {
       signal.throwIfAborted();
-      // Use an uncancelled audit so cancellation still records changes made before stop.
-      audit = await WorkspaceAudit.open(args.cwd);
+      // Use an uncancelled audit so cancellation still records changes made before stop. Submodules are part of the
+      // task's workspace: edits inside them count (as `sub/file`) and so do moved submodule HEADs.
+      audit = await WorkspaceAudit.open(args.cwd, undefined, { submodules: true });
+      // HEAD before the snapshot: a commit made in between then shows up as a HEAD move instead of vanishing.
+      gitBaseline = grant || audit ? await captureGitBaseline(args.cwd, grant, signal) : undefined;
       before = await audit?.snapshot();
-      const stale = audit && before && meta.tree ? await audit.diff(meta.tree, before) : [];
-      const prefix = reusedContext ? `## Stale context: workspace changes since your previous assignment\n${stale.length ? stale.map(change => `${change.path} (${change.status})`).join("\n") : audit ? "No files changed." : "Workspace audit unavailable (not a git work tree)."}\nRe-read changed evidence before relying on retained context.\n\n` : "";
-      const gitBaseline = grant ? await captureGitBaseline(args.cwd, grant, signal) : undefined;
+      let prefix = "";
+      if (reusedContext) {
+        const stale = audit && before && meta.tree ? await audit.compare(meta.tree, before) : undefined;
+        const headSince = meta.head && gitBaseline?.available && gitBaseline.head && meta.head.sha !== gitBaseline.head
+          ? { ...(meta.head.sha ? { from: meta.head.sha } : {}), to: gitBaseline.head, ...await commitsBetween(args.cwd, meta.head.sha, gitBaseline.head) } : undefined;
+        // No tool of this worker runs between two assignments: everything seen since is someone else's.
+        prefix = formatStaleContext(audit ? { changes: stale?.changes ?? [], ...(stale?.gitlinks.length ? { submodules: await submoduleMoves(args.cwd, stale.gitlinks) } : {}), ...(headSince ? { headMoved: headSince } : {}) } : undefined);
+      }
+      if (audit && before && !readOnly) {
+        const tracked = audit;
+        activity = new WorkspaceActivity({ cwd: args.cwd, tree: before, snapshot: () => tracked.snapshot(), diff: (from, to) => tracked.diff(from, to), cancelled: () => signal.aborted });
+        meta.activity = activity;
+      }
       signal.throwIfAborted();
       this.manager.assign(meta.id, args.role, prefix + assignmentPrompt({ ...args, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant));
       assigned = true;
       if (signal.aborted) abort();
       progress();
       const waited = await this.manager.wait(meta.id, limits.assignmentMs);
-      if (signal.aborted) { await stopPromise; throw new Error("cancelled"); }
-      if (waited.type === "timeout") { await this.manager.stop(meta.id); await this.manager.wait(meta.id, 0); throw new Error(`Worker ${meta.id} timed out after ${limits.assignmentMs}ms`); }
-      if (waited.type !== "outcome") throw new Error(`Worker ${meta.id} returned no result`);
+      if (signal.aborted) { await stopPromise; throw new WorkerFailure("cancelled", "cancelled", "cancelled"); }
+      if (waited.type === "timeout") { await this.manager.stop(meta.id); await this.manager.wait(meta.id, 0); throw new WorkerFailure(`Worker ${meta.id} timed out after ${limits.assignmentMs}ms`, "failed", "timeout"); }
+      if (waited.type !== "outcome") throw new WorkerFailure(`Worker ${meta.id} returned no result`, "failed", "no_result");
       const outcome = waited.outcome;
-      if (outcome.status !== "completed" || !outcome.result) throw new Error(outcome.error ?? outcome.lastText ?? `Worker ${meta.id}: ${outcome.status}`);
+      if (outcome.status !== "completed" || !outcome.result) throw new WorkerFailure(outcome.error ?? outcome.lastText ?? `Worker ${meta.id}: ${outcome.status}`, "failed", outcome.status);
       meta.summary = outcome.result.summary;
-      if (audit && before) {
-        const after = await audit.snapshot();
-        changes = await audit.diff(before, after);
-        meta.tree = after;
-      }
-      const gitReport = grant && gitBaseline ? await reportGit(args.cwd, grant, gitBaseline) : undefined;
+      const { changeReport, gitReport } = await collect();
       meta.lastUsed = Date.now();
       if (meta.contextWindow && meta.latestInput >= meta.contextWindow * 0.7) {
         await this.retire(meta.id); retired.push(meta.id);
@@ -495,17 +747,27 @@ export class WorkerPool {
       const note = data.status === "blocked" ? "the worker reported blocked" : args.role === "verify" && data.passed === false ? "verification failed" : args.role === "implement" && changes.length >= 4 ? "the implementation changed four or more files" : undefined;
       const roster = this.roster();
       const gitLines = gitReport ? formatGitReport(gitReport) : [];
-      const changed = changes.length ? `Changed files: ${changes.map(change => change.path).join(", ")}${warning ? " (may include changes made by the other pi session(s); check before attributing them to this task)" : ""}` : "No files changed";
-      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, "", meta.summary, ...roleData, "", audit ? changed : "Workspace audit unavailable (not a git work tree)", ...gitLines, `Workers: ${roster}`, ...retirementLines,
+      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, "", meta.summary, ...roleData, "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, `Workers: ${roster}`, ...retirementLines,
         ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: consider orche_run (multi) — ${note}`] : [])].join("\n");
-      return { text, details: { worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, durationMs, requests, changes, roster, ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}) } };
+      return { text, details: { worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, ...(meta.model ? { model: meta.model } : {}), durationMs, requests, ...changeReport, roster, ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}) } };
     } catch (error) {
-      throw warning ? withConcurrentWarning(error, warning) : error;
+      const base = error instanceof Error ? error.message : String(error);
+      const thrown = warning ? withConcurrentWarning(error, warning) : error;
+      if (!(error instanceof WorkerFailure)) throw thrown; // before the worker ran, or an unexpected error: a plain error
+      // The worker ran: same message as ever (warning first), now with the details of what it did.
+      throw new TaskFailedError(thrown instanceof Error ? thrown.message : base, await failedDetails(error.status), { kind: error.kind, status: error.status, reason: failureReason(base) });
     } finally {
       signal.removeEventListener("abort", abort);
       await stopPromise;
       unsubscribe();
+      // Nothing may snapshot on the private index while the tracker still has jobs queued.
+      meta.activity = undefined;
+      await activity?.drain().catch(() => undefined);
       if (audit && before) meta.tree = await audit.snapshot().catch(() => meta.tree);
+      if (audit) {
+        const now = await captureGitBaseline(args.cwd, undefined).catch(() => undefined);
+        meta.head = now?.available ? { ...(now.head ? { sha: now.head } : {}) } : undefined;
+      }
       await audit?.close();
       if (this.workers.has(meta.id)) this.idle(meta);
       args.onProgress?.([]);

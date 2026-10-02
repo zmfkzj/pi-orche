@@ -162,6 +162,146 @@ describe("workspace audit", () => {
   });
 });
 
+describe("workspace audit: submodules", () => {
+  const gitx = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "protocol.file.allow=always", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
+  /** A repository holding `sub` (a submodule with file.txt) and `top.txt`, everything committed. */
+  async function withSubmodule() {
+    const lib = await repo({ "file.txt": "one\n", "keep.txt": "keep\n" });
+    const dir = await repo({ "top.txt": "top\n" });
+    gitx(dir, "submodule", "add", "-q", lib, "sub");
+    gitx(dir, "commit", "-qm", "add sub");
+    return { dir, sub: join(dir, "sub") };
+  }
+
+  it("reports an uncommitted edit inside a submodule as sub/file, keeping the user's indexes and HEADs untouched", async () => {
+    const { dir, sub } = await withSubmodule();
+    const audit = (await WorkspaceAudit.open(dir, undefined, { submodules: true }))!;
+    const state = () => [git(dir, "rev-parse", "HEAD"), git(sub, "rev-parse", "HEAD"), git(dir, "status", "--porcelain"), git(sub, "status", "--porcelain"), git(dir, "ls-files", "-s"), git(sub, "ls-files", "-s")];
+    const before = await audit.snapshot();
+    await writeFile(join(sub, "file.txt"), "two\n");
+    await writeFile(join(sub, "new.txt"), "new\n");
+    await rm(join(sub, "keep.txt"));
+    await writeFile(join(dir, "top.txt"), "top changed\n");
+    const dirty = state();
+    const after = await audit.snapshot();
+    expect(await audit.compare(before, after)).toEqual({
+      changes: [
+        { path: "sub/file.txt", status: "modified" }, { path: "sub/keep.txt", status: "deleted" }, { path: "sub/new.txt", status: "added" },
+        { path: "top.txt", status: "modified" },
+      ],
+      gitlinks: [], // the submodule HEAD did not move
+    });
+    expect(await audit.diff(before, after)).toHaveLength(4);
+    // Snapshotting never touched the user's index, HEAD or work tree, in the superproject or in the submodule.
+    expect(state()).toEqual(dirty);
+    expect(git(sub, "status", "--porcelain")).toContain("M file.txt"); // still dirty and unstaged: the edit is the user's to keep
+    expect(git(sub, "diff", "--cached", "--name-only")).toBe("");
+    expect(await audit.compare(after, await audit.snapshot())).toEqual({ changes: [], gitlinks: [] });
+    await audit.close();
+  });
+
+  it("reports a moved submodule HEAD as a gitlink change, not as a file, and keeps file edits next to it", async () => {
+    const { dir, sub } = await withSubmodule();
+    const audit = (await WorkspaceAudit.open(dir, undefined, { submodules: true }))!;
+    const start = gitx(sub, "rev-parse", "HEAD");
+    const before = await audit.snapshot();
+    // Same content as the work tree already has: only the commit pointer moves.
+    gitx(sub, "commit", "-q", "--allow-empty", "-m", "empty");
+    const moved = await audit.snapshot();
+    const end = gitx(sub, "rev-parse", "HEAD");
+    expect(await audit.compare(before, moved)).toEqual({ changes: [], gitlinks: [{ path: "sub", from: start, to: end }] });
+    // An uncommitted edit on top of it is a file change; the gitlink is reported once.
+    await writeFile(join(sub, "file.txt"), "three\n");
+    const edited = await audit.snapshot();
+    expect(await audit.compare(before, edited)).toEqual({ changes: [{ path: "sub/file.txt", status: "modified" }], gitlinks: [{ path: "sub", from: start, to: end }] });
+    // Committing the edit changes the tree of the submodule HEAD, not what the work tree holds.
+    gitx(sub, "commit", "-qam", "edit");
+    const committed = await audit.snapshot();
+    expect((await audit.compare(edited, committed)).changes).toEqual([]);
+    expect((await audit.compare(edited, committed)).gitlinks).toHaveLength(1);
+    await audit.close();
+  });
+
+  it("stays as before without the option: a submodule is only its gitlink, and ids stay plain tree ids", async () => {
+    const { dir, sub } = await withSubmodule();
+    const audit = (await WorkspaceAudit.open(dir))!;
+    const before = await audit.snapshot();
+    expect(before).toMatch(/^[0-9a-f]{40,64}$/);
+    await writeFile(join(sub, "file.txt"), "two\n"); // invisible: the gitlink did not move
+    const edited = await audit.snapshot();
+    expect(edited).toBe(before);
+    expect(await audit.compare(before, edited)).toEqual({ changes: [], gitlinks: [] });
+    gitx(sub, "commit", "-qam", "edit");
+    const moved = await audit.snapshot();
+    expect(moved).toMatch(/^[0-9a-f]{40,64}$/);
+    expect(await audit.diff(before, moved)).toEqual([{ path: "sub", status: "modified" }]);
+    expect(await audit.compare(before, moved)).toEqual({ changes: [{ path: "sub", status: "modified" }], gitlinks: [] });
+    await audit.close();
+  });
+
+  it("keeps a plain repository's snapshot id when the option is on, and still checkpoints a composite snapshot", async () => {
+    const plain = await repo();
+    const flat = (await WorkspaceAudit.open(plain, undefined, { submodules: true }))!;
+    expect(await flat.snapshot()).toMatch(/^[0-9a-f]{40,64}$/);
+    await flat.close();
+    const { dir } = await withSubmodule();
+    const audit = (await WorkspaceAudit.open(dir, undefined, { submodules: true }))!;
+    const id = await audit.snapshot();
+    expect(id).toContain("+");
+    const commit = await audit.checkpoint(id);
+    expect(git(dir, "rev-parse", `${commit}^{tree}`)).toBe(id.split("+")[0]);
+    await audit.close();
+  });
+
+  it("fails soft: an uninitialized or broken submodule is left out, never failing the audit", async () => {
+    const { dir, sub } = await withSubmodule();
+    const audit = (await WorkspaceAudit.open(dir, undefined, { submodules: true }))!;
+    const before = await audit.snapshot();
+    // A submodule whose repository went away: nothing to snapshot, nothing to throw.
+    await rm(join(sub, ".git"), { force: true });
+    await writeFile(join(sub, "file.txt"), "two\n");
+    await writeFile(join(dir, "top.txt"), "top changed\n");
+    const after = await audit.snapshot();
+    expect(after.split("+")[0]).toBeTruthy();
+    expect((await audit.compare(before, after)).changes.map(change => change.path)).toContain("top.txt");
+    // A garbled id loses only its submodule part.
+    expect((await audit.compare(`${before.split("+")[0]}+!!`, after)).changes.map(change => change.path)).toContain("top.txt");
+    // No .gitmodules / an uninitialized checkout: plain behaviour.
+    const clone = await mkdtemp(join(tmpdir(), "orche-clone-"));
+    dirs.push(clone);
+    gitx(dir, "clone", "-q", dir, join(clone, "c"));
+    const fresh = (await WorkspaceAudit.open(join(clone, "c"), undefined, { submodules: true }))!;
+    expect(await fresh.snapshot()).toMatch(/^[0-9a-f]{40,64}$/);
+    await fresh.close();
+    await audit.close();
+  });
+
+  it("recurses into nested submodules and reports only submodules under the audited directory", async () => {
+    const inner = await repo({ "deep.txt": "deep\n" });
+    const lib = await repo({ "file.txt": "one\n" });
+    gitx(lib, "submodule", "add", "-q", inner, "inner");
+    gitx(lib, "commit", "-qm", "add inner");
+    const dir = await repo({ "top.txt": "top\n", "pkg/own.txt": "own\n" });
+    gitx(dir, "submodule", "add", "-q", lib, "sub");
+    gitx(dir, "submodule", "update", "--init", "--recursive", "-q");
+    gitx(dir, "commit", "-qm", "add sub");
+    const audit = (await WorkspaceAudit.open(dir, undefined, { submodules: true }))!;
+    const before = await audit.snapshot();
+    await writeFile(join(dir, "sub/inner/deep.txt"), "deeper\n");
+    const after = await audit.snapshot();
+    expect((await audit.compare(before, after)).changes).toEqual([{ path: "sub/inner/deep.txt", status: "modified" }]);
+    await audit.close();
+    // Audited from a subdirectory, the submodule next to it is out of scope.
+    const scoped = (await WorkspaceAudit.open(join(dir, "pkg"), undefined, { submodules: true }))!;
+    const scopedBefore = await scoped.snapshot();
+    expect(scopedBefore).toMatch(/^[0-9a-f]{40,64}$/);
+    await writeFile(join(dir, "sub/inner/deep.txt"), "deepest\n");
+    expect(await scoped.compare(scopedBefore, await scoped.snapshot())).toEqual({ changes: [], gitlinks: [] });
+    await scoped.close();
+  });
+});
+
+
 describe("workspace audit in a run", () => {
   const task = { id: "change", description: "set value", owner: "A1", files: ["core.mjs"], status: "pending" };
   it("reports a bash change to an unowned file as a violation and lists every change with recovery", async () => {

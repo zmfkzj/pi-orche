@@ -42,6 +42,11 @@ import type { WorkspaceChange } from "../workspace.js";
  *
  * All snapshot work runs on one promise chain, so windows never overlap and the flags below are only
  * written from chain jobs. The tracker only needs snapshot/diff functions, not WorkspaceAudit.
+ *
+ * Users: orche_run (auditWorkspace, one tracker per run) and orche_task workers (src/extension/workers.ts, one
+ * tracker per write-role assignment: `isWritten` and the active windows are the worker's changes, changes seen only
+ * in quiet windows are reported as other workspace changes). With a submodule-aware WorkspaceAudit the snapshot ids
+ * are opaque strings and `diff` paths such as `sub/file` flow through unchanged.
  */
 
 /** Orche's own coordination tools never touch files: they must not open active windows. */

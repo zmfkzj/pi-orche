@@ -6,6 +6,7 @@ import { formatOutcome, OrcheBusyError, OrcheController, type OrcheControllerOpt
 import type { MainMode } from "../orchestration/routing.js";
 import { delegationRules, discoverMainMode, guardToolCall, isMainMode, MainModeState } from "./mode.js";
 import { orcheTaskParameters, WorkerPool } from "./workers.js";
+import { runErrorResult } from "./tool-result.js";
 
 export const RESULT_MESSAGE_TYPE = "orche-result";
 /** Pi built-ins that stay Pi's own but are switched on next to our tools. */
@@ -254,8 +255,9 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           currentSession: currentSession(ctx),
           onProgress: lines => onUpdate?.({ content: [{ type: "text", text: lines.join("\n") }], details: { progress: lines } }),
         });
-        if (outcome.cancelledByUser) throw new Error(`cancelled by user\n\n${formatOutcome(outcome)}`);
-        if (outcome.report.status !== "done") throw new Error(formatOutcome(outcome));
+        // A run that ended failed or cancelled is still an error to the model, but returned (not thrown) so the
+        // transcript keeps outcome.details (see tool-result.ts). Errors before an outcome exists still throw.
+        if (outcome.cancelledByUser || outcome.report.status !== "done") return runErrorResult(outcome);
         return { content: [{ type: "text", text: formatOutcome(outcome) }], details: outcome.details };
       },
     });
@@ -271,7 +273,9 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       parameters: orcheTaskParameters,
       executionMode: "sequential",
       execute: async (_id, params, signal, onUpdate, ctx) => {
-        const result = await pool().execute({
+        // A task whose worker ran and failed, timed out or was cancelled comes back as an isError result that keeps its
+        // details; argument validation and errors before a worker ran still throw (see WorkerPool.executeTool).
+        return pool().executeTool({
           ...params,
           cwd: ctx.cwd,
           model: ctx.model,
@@ -284,7 +288,6 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
             onUpdate?.({ content: [{ type: "text", text: lines.join("\n") }], details: { progress: lines } });
           },
         });
-        return { content: [{ type: "text", text: result.text }], details: result.details };
       },
     });
   };
