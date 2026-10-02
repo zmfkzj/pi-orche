@@ -1,22 +1,23 @@
-# Advisor study: advisors ON vs OFF
+# Advisor study: advisors ON vs OFF, and cheap vs high-end audit model
 
-This descriptive experiment measures the effect of the [advisor layer](advisor.md) on result quality and cost, with the Pi default prompt held constant. All 32 planned cells are complete: A0 task pass 15/16, A1 16/16. Advisor review added 126.1 s to mean wall time overall. Runtime-version and source-drift caveats prevent a clean causal interpretation; see Results and the chunk appendix below.
+This descriptive experiment measures the effect of the [advisor layer](advisor.md) on result quality and cost, with the Pi default prompt held constant. The first 32 cells compare advisors OFF (A0) with the proposed high-end configuration (A1): A0 task pass 15/16, A1 16/16, advisor review added 126.1 s to mean wall time overall. A third arm A2 (16 cells, added afterwards) keeps `verification-audit` on the cheap route of the user's production config (`cliproxyapi/gpt-6-luna` / `low`) so A1 vs A2 isolates the audit model; see [A1 vs A2](#a1-vs-a2-high-end-vs-cheap-verification-audit-model). Runtime-version and source-drift caveats prevent a clean causal interpretation; see Results and the chunk appendix below.
 
 ## Method
 
 | Arm | Prompt variant | Advisor setting |
 |---|---|---|
 | A0 | C0 (Pi default, no replacement `baseSystemPrompt`) | OFF; routes identical to C0 |
-| A1 | C0 | ON; the production advisor configuration below |
+| A1 | C0 | ON; the proposed high-end configuration below (`advisor` = `cliproxyapi/claude-opus-5-5` / `xhigh`) |
+| A2 | C0 | ON; identical to A1 except `advisor` = `cliproxyapi/gpt-6-luna` / `low` (the user's production `verification-audit` route); `plan-review` unchanged |
 
-`--variants` accepts study arm names `A0,A1` alongside the existing `C0,C1,C2` prompt arms. C0/C1/C2 still have advisors off. A0 is a separate name so both advisor-study arms are fresh runs, not a comparison against old C0 artifacts. Source/runtime changes during execution are disclosed in Results.
+`--variants` accepts study arm names `A0,A1,A2` alongside the existing `C0,C1,C2` prompt arms. The advisor arms share one definition in `src/eval/arms.ts` (`advisorRouteSets`): `high-end` (A1) and `cheap-audit` (A2) differ only in the `advisor` route, so A1's routes are byte-identical to the original study and A2's `allowedModelEffortPairs` accept `gpt-6-luna`/`low` only for `advisor:verification-audit`. C0/C1/C2 still have advisors off. A0 is a separate name so both advisor-study arms are fresh runs, not a comparison against old C0 artifacts. Source/runtime changes during execution are disclosed in Results.
 
 The harness uses a small provider-to-extension map: a `cliproxyapi` base model automatically adds `providerExtensions: ["npm:@router-for-me/pi-cliproxyapi-provider"]` to **every** arm, including A0. A1 also needs this extension for its advisors even with the default OpenAI base. It uses exactly these enabled advisors, both targeting the coordinator:
 
 | Preset | Route | Model / thinking | Triggers | Call budgets (run / target) |
 |---|---|---|---|---|
 | `plan-review` | `advisor-plan` | `cliproxyapi/gpt-6-astra` / `xhigh` | One `coordinator_decision` trigger: `decisions: ["assign"]`, `await: true` | 4 / 4 (preset defaults) |
-| `verification-audit` | `advisor` | `cliproxyapi/claude-opus-5-5` / `xhigh` | `assignment_result` with `kinds: ["implement", "fix", "verify"]`; plus `before_complete` | 8 / 8 |
+| `verification-audit` | `advisor` | A1: `cliproxyapi/claude-opus-5-5` / `xhigh`; A2: `cliproxyapi/gpt-6-luna` / `low` | `assignment_result` with `kinds: ["implement", "fix", "verify"]`; plus `before_complete` | 8 / 8 |
 
 Both presets retain `cooldownMs: 0`; the default advisor timeout is 90,000 ms. `before_complete` is always awaited. Advice is a NOTE, not a gate: the coordinator may retain or revise its decision. There are no worker-targeted advisors in these arms.
 
@@ -99,9 +100,17 @@ npx tsx src/eval/compare.ts --study --tasks c4-malformed-lines,a2-discount-codes
 # After all four chunks have completed, this schedules zero new runs.
 npx tsx src/eval/compare.ts --study --tasks b7-api-docs,a3-refactor-tax,a7-auth-rotation,b5-ctx-migration,c4-malformed-lines,a2-discount-codes,c5-aggregate-perf,b4-router-review \
   --variants A0,A1 --repeats 2 --concurrency 4 --base-model cliproxyapi/gpt-6.1-sol --out results/advisor-study/full --resume
+# A2 (cheap verification-audit model), added after the 32-cell A0/A1 study, into the same directory (Chunk 5).
+npx tsx src/eval/compare.ts --study --tasks b7-api-docs,a3-refactor-tax,a7-auth-rotation,b5-ctx-migration \
+  --variants A2 --repeats 2 --concurrency 4 --base-model cliproxyapi/gpt-6.1-sol --out results/advisor-study/full --resume
+npx tsx src/eval/compare.ts --study --tasks b7-api-docs,a3-refactor-tax,a7-auth-rotation,b5-ctx-migration,c4-malformed-lines,a2-discount-codes,c5-aggregate-perf,b4-router-review \
+  --variants A0,A1,A2 --repeats 2 --concurrency 4 --base-model cliproxyapi/gpt-6.1-sol --out results/advisor-study/full --resume
 npx tsx results/advisor-study/verify-arms.ts --study results/advisor-study/full --out results/advisor-study/full/arm-verification.json
 npx tsx results/advisor-study/analyze.ts --study results/advisor-study/full --out results/advisor-study/full/analysis
+node results/advisor-study/supplement.mjs --study results/advisor-study/full   # arm-agnostic supplement: medians, per-advisor activity, concerns, provenance
 ```
+
+`analyze.ts` writes one per-task table per arm pair (A0 vs A1, A0 vs A2, A1 vs A2). Saved `artifactDir` values are as-run absolute paths; a relocated study directory is resolved from its layout, and `summary.json` rebuilt by a later invocation records the directory actually read.
 
 `--resume` skips any cell whose `meta.json` has `completed: true`, **including terminal failures**; it schedules missing/incomplete cells, not automatic retries of failures. Without it, an existing completed cell is an error. Each invocation rewrites `study-manifest.json` for its requested task subset and rebuilds each arm's summary from all saved runs; the final all-task command restores the complete manifest. Use a fresh study directory if routes or source revisions change, and preserve failed artifacts rather than silently replacing them.
 
@@ -151,7 +160,47 @@ Checks: `npx tsc --noEmit -p .` clean; `npx vitest run test/eval`: 7 files, 73/7
 
 ## Results
 
-All **32 planned cells** are complete (31 runner `done`, one preserved behavioral failure). A0 passed 15/16 tasks; A1 passed 16/16. This is descriptive evidence from this suite, not a causal or statistically established quality improvement. The all-eight-task manifest is restored; Chunk 4 skipped 24 completed cells, including the failed cell, and launched only eight new runs. No full-study cell was rerun.
+All **32 planned A0/A1 cells** are complete (31 runner `done`, one preserved behavioral failure). A0 passed 15/16 tasks; A1 passed 16/16. This is descriptive evidence from this suite, not a causal or statistically established quality improvement. The all-eight-task manifest is restored; Chunk 4 skipped 24 completed cells, including the failed cell, and launched only eight new runs. No full-study cell was rerun. The 16 A2 cells added later (Chunk 5) are reported in [A1 vs A2](#a1-vs-a2-high-end-vs-cheap-verification-audit-model); the subsections up to "Interpretation" describe the original A0/A1 comparison and were not rewritten, while `analysis/tables.md` now covers all three arms (the three-arm supplement there supersedes the two-arm `analysis/final.json` figures where they overlap).
+
+### A1 vs A2: high-end vs cheap verification-audit model
+
+A2 was run after the A0/A1 study (Chunk 5, 16 cells, same tasks, repeats, base model and triggers). It differs from A1 in exactly one route: `verification-audit` runs on `cliproxyapi/gpt-6-luna` / `low` (the user's production `advisor` route) instead of `cliproxyapi/claude-opus-5-5` / `xhigh`; `plan-review` stays on `gpt-6-astra` / `xhigh`. Source: `results/advisor-study/full/analysis/tables.md` (per-arm table, A1-vs-A2 task table and the three-arm supplement), `analysis/supplement.json`, `analysis/concerns.md`, `arm-verification.json`.
+
+**Headline (all 16 cells per arm, including failures; wall excludes grading):**
+
+| Arm | Task pass | Visible | Hidden | Rubric | Wall mean / median s | Requests mean / median | In+out tokens mean / median | CacheRead mean | Advisor share of requests / in+out tokens |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A0 (off) | 15/16 | 16/16 | 13/14 | 4/4 | 261.4 / 228.9 | 21.8 / 19.5 | 56,089 / 53,363 | 123,696 | — |
+| A1 (opus xhigh audit) | 16/16 | 16/16 | 14/14 | 4/4 | 387.5 / 332.4 | 40.5 / 31 | 132,523 / 106,239 | 301,953 | 37.0% / 53.7% |
+| A2 (luna low audit) | 14/16 | 16/16 | 14/14 | 3/4 | 386.2 / 379.7 | 35.2 / 30 | 106,733 / 99,807 | 198,872 | 23.1% / 32.5% |
+
+Pairwise mean deltas (supplement): A1 − A0 = +126.1 s (+48.2%), +18.7 requests, +76,434 in+out tokens; A2 − A0 = +124.9 s (+47.8%), +13.4 requests, +50,644 tokens; **A2 − A1 = −1.2 s (−0.3%), −5.3 requests, −25,790 tokens**. The cheap audit model did not reduce wall time at all and reduced total in+out tokens by about 19%; its own calls are cheap (advisor in+out 554k vs 1,139k tokens; 130 vs 240 sent requests; advisor output 11k vs 154k tokens, i.e. almost no reasoning output at `low`), but the arm spent more on everything else: coordinator 88 vs 70 requests (200k vs 154k input tokens) and workers 345 vs 338 requests (829k vs 712k input tokens).
+
+**Per task (A1 vs A2; `analysis/tables.md` "Per task A1 vs A2"):** A2 was faster on a2-discount-codes (−86.7 s), a7-auth-rotation (−149.3 s), b4-router-review (−60.1 s) and c4-malformed-lines (−20.5 s), and slower on a3-refactor-tax (+63.3 s), b5-ctx-migration (+51.1 s), b7-api-docs (+153.4 s) and c5-aggregate-perf (+39.3 s). Task pass differs on a2-discount-codes (A1 2/2, A2 1/2) and b7-api-docs (A1 2/2, A2 1/2); all other tasks 2/2 in both arms.
+
+**Advisor activity (supplement "Per-advisor activity"):**
+
+| Arm | Advisor | Triggered | ok | concern | Delivered | Failed (timeouts) | Sent requests | Coordinator reconsiderations (arm total) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| A1 | plan-review (astra xhigh) | 16 | 16 | 0 | 0 | 0 | 34 | 5 |
+| A1 | verification-audit (opus xhigh) | 55 | 45 | 8 | 8 | 2 (2) | 206 | 5 |
+| A2 | plan-review (astra xhigh) | 17 | 16 | 1 | 1 | 0 | 36 | 26 |
+| A2 | verification-audit (luna low) | 57 | 20 | 37 | 37 | 0 (0) | 94 | 26 |
+
+The cheap audit model returned `concern` on **37 of 57 calls (65%)** versus **8 of 55 (15%)** for the high-end model, with the same triggers and budgets. Every concern was delivered, and the coordinator reconsidered 26 times in A2 versus 5 in A1. Two A2 reconsiderations changed the decision type from `complete` to `verification_failed` (A2/a3-refactor-tax/r1, A2/b7-api-docs/r1; both cells then passed after a fix round); the other 24 kept the type (`complete` → `complete`, `answer_from_worker` → `answer_from_worker`, `assign` → `assign`) or were not identifiable. No A2 advisor call timed out (A1 had two 90 s timeouts), so the cheap model's latency is lower per call; the extra reconsiderations and fix rounds absorbed that saving.
+
+**Substance of the concerns (`analysis/concerns.md`, verbatim):** a keyword scan for evidence-visibility complaints ("not evidenced/supported/verifiable", "no test output", "cannot check", "transcript") matches **15 of 38 A2 concerns versus 1 of 8 A1 concerns**. The advisor only sees a bounded transcript excerpt and the workspace diff (see [advisor.md](advisor.md)); the cheap model frequently objected that evidence was not visible to it rather than establishing a defect, and often repeated the same objection on `assignment_result` and again on `before_complete` in the same cell (e.g. b5-ctx-migration r1/r2: four concerns each about the missing direct-call tests, which A1's single opus concern per cell also raised). Substantive overlaps with A1: the missing regression test on a7-auth-rotation (both arms, both repeats), the missing direct-invocation tests on b5-ctx-migration (both arms), and the review-answer completeness check on b4-router-review `before_complete` (both arms). Substantive differences: A1's opus audit found the fixed-discount float-drift tax bug on a2-discount-codes/r2 (the verifier had passed it; fixed in one round). A2's luna audit did not find that bug: on a2-discount-codes/r1 it discussed fixed-amount rounding policy and concluded "no material issue"; on a2-discount-codes/r2 it echoed the independent verifier's half-cent findings after the verifier had already failed the round. The one plan-review concern in the whole study (A2/c5-aggregate-perf/r1, astra xhigh) corrected ownership paths (`test/` not `tests/`, nonexistent `logtool/`) and the coordinator resubmitted `assign` unchanged in type.
+
+**A2 failures (supplement "Failed cells"):**
+
+| Cell | Category | What happened | Advisor involvement |
+|---|---|---|---|
+| A2/a2-discount-codes/r2 | verification / fix-round budget | Runner `failed`: the independent verifier (base model) failed round 0 on a 90%-off-$1.05 half-cent case and round 1 on a 99.9%-off-$5 case; `maxFixRounds` (1) was exhausted and the run ended `FAILED`. The grader still passed the workspace (visible and hidden tests). | The audit's concerns echoed the verifier's findings after each failed verification; the first `verification_failed` was recorded with `reconsidered: true`. The verifier, not the advisor, rejected the rounds; the advisor did not prevent the failure. |
+| A2/b7-api-docs/r2 | rubric (model-judged) | Runner `done`, rubric item `pagination` unsatisfied: the docs omit that the last page can contain fewer than `limit` items (the same failure class as the earlier comparison's Pi failure). | The audit raised one `before_complete` concern about the static path-traversal example, not pagination; the coordinator resubmitted `complete`. A1 passed this rubric item in both repeats. |
+
+**Caveats specific to A2:** A2 ran later than A0/A1 under pi SDK 1.0.0 only and under four further source revisions (R4–R7 in the provenance table; the user's concurrent session committed `995096a`/`069c59e` and kept editing the tree between Chunk 5a and 5b), so A2 vs A1 pairs are not same-revision pairs; the 32-cell A0/A1 pairs ran closer together. N = 2 per cell; the two extra A2 failures are one verifier/budget failure and one rubric miss, each a single run. Request verification covers all 48 runs / 1,560 requests with zero violations: A2 advisor requests are 94 × `gpt-6-luna`/`low` and 36 × `gpt-6-astra`/`xhigh`; all 433 non-advisor A2 requests are `gpt-6.1-sol`/`high`.
+
+**Interpretation (evidence-bound):** with identical triggers, the low-effort audit model behaved as a noisy critic — a 4× higher concern rate, 5× more coordinator reconsiderations, no wall-time saving and about 19% fewer total tokens than the high-end audit — and in this suite it did not reproduce the one clearly valuable high-end finding (the a2 float-drift bug). The pass-rate difference (14/16 vs 16/16) rests on two single runs and is weak evidence; the activity profile (concern rate, reconsiderations, evidence-visibility complaints, zero timeouts) is consistent across all 16 A2 cells. If cost is the motivation, the data point toward narrowing the audit's triggers (e.g. `verify` results and `before_complete` only) or raising its effort rather than switching to the cheapest model at `low`, because the downstream churn, not the advisor's own tokens, dominated A2's cost.
 
 ### Headline and actor costs
 
@@ -289,7 +338,9 @@ Source for the following revision/SDK table: all per-run `meta.json` files under
 
 High-end-model advisors attached successfully, produced evidence-backed concerns and prompted reconsideration/additional work. In this small suite A1 reached perfect task pass, while A0 had one behavioral failure; this does not establish that an advisor caused the quality difference. Review added substantial request/token use and increased mean wall time on every task. Plan-review emitted no concerns, and the only A0 failure fell outside the existing advisor triggers. The evidence supports operational feasibility and measured cost, not an unconditional quality benefit or model superiority.
 
-A stronger follow-up should freeze both sources and dependency versions, randomize comparable backend/time conditions, use harder tasks and more repeats, include forced-concern and early-failure coverage cases, and add a cheaper-advisor-model arm. Independent/human review and confidence-aware grading would help distinguish useful corrections from redundant notes and extra work. Repeating only the successful cells or removing the failed baseline would bias the comparison.
+A stronger follow-up should freeze both sources and dependency versions, randomize comparable backend/time conditions, use harder tasks and more repeats, include forced-concern and early-failure coverage cases, and add a cheaper-advisor-model arm (done afterwards as A2, see above). Independent/human review and confidence-aware grading would help distinguish useful corrections from redundant notes and extra work. Repeating only the successful cells or removing the failed baseline would bias the comparison.
+
+Across all three arms the per-arm counts are: A0 15/16, A1 16/16, A2 14/16 task pass; mean wall 261.4 / 387.5 / 386.2 s; mean in+out tokens 56k / 133k / 107k. Both advisor arms cost about the same wall time over A0 (+48%); the high-end audit spent it on its own reasoning (54% of A1 tokens), the cheap audit on coordinator/worker churn it provoked (26 reconsiderations).
 
 ## Appendix: chunk progress history
 
@@ -369,3 +420,22 @@ Executed the all-eight-task command in `chunk-4.json`: **24 skipped, 8 run, 8 do
 Start HEAD: `d321400f0439bc4f4361646cbec9a18e4e6419a0`. Installed `pi-coding-agent` / `pi-ai` / `pi-agent-core`: **1.0.0 / 1.0.0 / 1.0.0**, read from each installed package.json; post-run versions and HEAD also matched. Start `git status --short` paths (names only): `README.md`, `docs/advisor-study.md`, `package-lock.json`, `package.json`, `src/extension/workers.ts`, `src/orchestration/ownership.ts`, `src/orchestration/routing.ts`, `src/tools/generate-image.ts`, `test/extension/images.test.ts`, `test/live/`, `test/orchestration/images-config.test.ts`, `test/tools/generate-image.test.ts`. No unrelated paths were touched or reverted. All eight new metas record source revision `67a80c253cdea9d1c9a6d948889479828a9b0910333d79c40a3d7d3611a46cc9` and Pi 1.0.0.
 
 No infrastructure-failed cells or HTTP 429/5xx. A1/router-review/r1 had one 90000 ms verification-audit timeout and one unknown-usage aborted request, but passed the task; no rerun. Router-review/r2 delivered a concern and explicitly resubmitted `answer_from_worker` unchanged in type. Final verification passed 32 runs / 997 captured requests, zero violations. Final tables, medians, model mix, shares and provenance are saved in `full/analysis/{tables.md,final.json,final-tables.json,results-section.md}`; `analysis/finalize.mjs` performs saved-artifact aggregation only, never calls models. `docs/advisor.md` already links this study without claiming that results are pending, so no link change was needed.
+
+### Chunk 5 (A2, cheap verification-audit model)
+
+Run by the supervising session directly (the orche extension was unavailable after the repository moved to `/home/arthur/Code/oh-my-pi-extensions/orche`); all commands from that directory. Harness change before the run: `src/eval/arms.ts` gained the shared `advisorRouteSets` (`high-end` = A1, `cheap-audit` = A2) and `test/eval/arms.test.ts` an A2 test (`npx tsc --noEmit -p .` clean, `npx vitest run test/eval` 74/74 before the run). `results/advisor-study/analyze.ts` now emits one per-task table per arm pair and resolves relocated artifact directories; `src/eval/compare.ts` records the directory actually read as `artifactDir` when rebuilding summaries (the saved as-run absolute paths pointed at the old location); `results/advisor-study/supplement.mjs` replaces the chunk-4-specific `analysis/finalize.mjs` for three arms.
+
+Two invocations into the same directory: (5a) `--tasks b7-api-docs,a3-refactor-tax,a7-auth-rotation,b5-ctx-migration --variants A2` → 8 new cells; (5b) the all-eight-task command with `--variants A0,A1,A2` → 32 + 8 skipped, 8 new cells, manifest rewritten for all three arms (`study-manifest.json` `arms` = A0, A1, A2; `jobOrder` listed only the eight remaining A2 cells). **16 run, 15 runner `done`, 1 runner `failed` (A2/a2-discount-codes/r2), 1 rubric failure (A2/b7-api-docs/r2); 0 HTTP 429/5xx, 0 provider/auth errors, 0 advisor timeouts, 0 reruns.** Elapsed: 5a ≈ 23 min (04:57–05:20 UTC), 5b ≈ 11 min (05:20–05:31 UTC).
+
+| Task | Arm | Repeat 1 wall ms | Repeat 2 wall ms | r1 / r2 concerns (reconsiderations) |
+|---|---|---:|---:|---|
+| b7-api-docs | A2 | 846387 | 432477 (rubric fail) | 3 (3) / 1 (1) |
+| a3-refactor-tax | A2 | 508832 | 203038 | 3 (3) / 3 (2) |
+| a7-auth-rotation | A2 | 595549 | 503186 | 3 (1) / 4 (2) |
+| b5-ctx-migration | A2 | 499269 | 539706 | 4 (2) / 4 (2) |
+| c4-malformed-lines | A2 | 208963 | 244657 | 1 (1) / 0 (0) |
+| a2-discount-codes | A2 | 279419 | 420928 (failed) | 2 (2) / 4 (2) |
+| c5-aggregate-perf | A2 | 325697 | 338404 | 3 (2) / 1 (1) |
+| b4-router-review | A2 | 131719 | 101759 | 1 (1) / 1 (1) |
+
+Provenance (`full/chunk-5-runtime.json`, `full/chunk-5b-runtime.json`): 5a started at HEAD `d321400` with a dirty tree (names: README.md, docs/advisor-study.md, package-lock.json, package.json, src/eval/arms.ts, src/extension/workers.ts, src/orchestration/ownership.ts, src/orchestration/routing.ts, test/eval/arms.test.ts, src/tools/generate-image.ts, test/extension/images.test.ts, test/live/, test/orchestration/images-config.test.ts, test/tools/generate-image.test.ts); pi-coding-agent / pi-ai / pi-agent-core 1.0.0 / 1.0.0 / 1.0.0. During 5a the user's concurrent session committed `995096a` (the A2 arm) and `069c59e` (generate_image, SDK 1.0.0), so 5b started at HEAD `069c59e`, still dirty. A2 cells therefore record four source revisions (R4: 8 cells of 5b; R5: 4, R6: 3, R7: 1 of 5a); none matches an A0/A1 revision. Final verification: 48 runs / 1,560 captured requests, zero violations (A0 349 base; A1 408 base + 34 astra/xhigh + 206 opus/xhigh; A2 433 base + 36 astra/xhigh + 94 luna/low). Unknown-usage requests: A0 4, A1 6, A2 4.

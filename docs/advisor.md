@@ -4,7 +4,7 @@ A configurable, multi-advisor review layer. It merges what OMP does with its `or
 
 Advisors are advisory only. They never redirect, stop, gate or cancel a tool; the coordinator decides what to do with a NOTE. Everything is off unless an enabled advisor is configured, in which case behaviour (and request counts) are exactly the same as before.
 
-For the controlled advisors ON/OFF evaluation, commands and smoke-run status, see [advisor-study.md](advisor-study.md).
+For the controlled evaluation (advisors OFF vs ON, and a high-end vs cheap `verification-audit` model: arms A0/A1/A2, 48 runs), commands and results, see [advisor-study.md](advisor-study.md).
 
 ## Configuration
 
