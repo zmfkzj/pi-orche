@@ -254,8 +254,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.registerTool({
       name: "orche_task",
       label: "orche task",
-      description: "Delegate one self-contained request to one persistent worker. Choose explore, answer, implement or verify; pass worker to reuse a live worker with its retained context and original model. Implement may write within files (or the workspace when omitted); other roles are read-only. Only one task or multi run can be active.",
-      promptSnippet: "orche_task: one cohesive unit, investigation, answer or verification with one reusable worker",
+      description: "Delegate one self-contained request to one persistent worker. Choose explore, answer, implement, verify, game-asset (create/modify game art, audio and model assets) or video (produce/edit video); pass worker to reuse a live worker with its retained context and original model. Implement, game-asset and video may write within files (or the workspace when omitted); other roles are read-only. Only one task or multi run can be active.",
+      promptSnippet: "orche_task: one reusable worker for explore, answer, implement, verify, game-asset (game art/audio/model assets) or video (production/editing)",
       parameters: orcheTaskParameters,
       executionMode: "sequential",
       execute: async (_id, params, signal, onUpdate, ctx) => {

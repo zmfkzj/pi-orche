@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { readFile, symlink, writeFile } from "node:fs/promises";
+import { readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fauxAssistantMessage as reply, fauxProvider, type FauxResponseStep, type ToolCall } from "@earendil-works/pi-ai";
 import { AgentManager } from "../../src/agent/agent-manager.js";
@@ -96,6 +96,85 @@ describe("orche_task persistent session workers", () => {
     expect(await readFile(join(h.cwd, "allowed.txt"), "utf8")).toBe("allowed");
     expect(outcome.text).toContain("Changed files: allowed.txt");
     expect(outcome.details.changes).toEqual([{ path: "allowed.txt", status: "added" }]);
+  });
+
+  it.each(["game-asset", "video"] as const)("spawns a %s route, enforces its files scope and reports output count", async role => {
+    const spawned = vi.spyOn(AgentManager.prototype, "spawn");
+    let rejected = "";
+    const outputs = Array.from({ length: 4 }, (_, i) => ({ path: `deliverables/output-${i}.svg`, type: "image/svg+xml", spec: "16x16 SVG" }));
+    const { h, pool, execute } = await fixture([
+      tool("write", { path: "other.txt", content: "forbidden" }),
+      context => { rejected = JSON.stringify(context.messages); return tool("write", { path: outputs[0]!.path, content: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"/>' }); },
+      ...outputs.slice(1).map(output => tool("write", { path: output.path, content: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"/>' })),
+      result(role, "Scoped production", { status: "done", outputs, evidence: ["SVG outputs"] }),
+    ]);
+    const outcome = await execute({ role, files: ["deliverables/**"] });
+    expect(spawned.mock.calls[0]?.[0]).toMatchObject({ role, route: { role, model: h.orche.route.model } });
+    expect(rejected).toContain("outside your owned files");
+    await expect(readFile(join(h.cwd, "other.txt"))).rejects.toThrow();
+    for (const output of outputs) expect(await readFile(join(h.cwd, output.path), "utf8")).toContain("<svg");
+    expect(outcome.details.changes).toHaveLength(4);
+    expect(outcome.text).toContain("outputs: 4");
+    expect(outcome.text).not.toContain("files ignored");
+    expect(outcome.text).not.toContain("consider orche_run");
+    const prompt = JSON.stringify(pool.session("W1").messages);
+    expect(prompt).toContain("deliverables/");
+    expect(prompt).toContain("command -v");
+    expect(prompt).toContain("read tool");
+    expect(prompt).toContain(role === "game-asset" ? "Unity .meta" : "Render a short draft");
+  });
+
+  it.each(["game-asset", "video"] as const)("allows unscoped %s writes only inside the workspace", async role => {
+    let rejected = "";
+    const { h, execute } = await fixture([
+      tool("write", { path: "../outside.txt", content: "forbidden" }),
+      context => { rejected = JSON.stringify(context.messages); return tool("write", { path: "nested/allowed.txt", content: "allowed" }); },
+      result(role, "Workspace production", { status: "done", outputs: [{ path: "nested/allowed.txt", type: "text", spec: "production notes" }] }),
+    ]);
+    await execute({ role });
+    expect(rejected).toContain("outside the workspace");
+    await expect(readFile(join(h.cwd, "../outside.txt"))).rejects.toThrow();
+    expect(await readFile(join(h.cwd, "nested/allowed.txt"), "utf8")).toBe("allowed");
+  });
+
+  it.each(["game-asset", "video"] as const)("gives %s no write access with an empty scope and rejects globs", async role => {
+    let rejected = "";
+    const { h, execute } = await fixture([
+      tool("write", { path: "forbidden.txt", content: "forbidden" }),
+      context => { rejected = JSON.stringify(context.messages); return result(role, "No scope", { status: "blocked", reason: "empty write scope", outputs: [] }); },
+    ]);
+    const outcome = await execute({ role, files: [] });
+    expect(rejected).toContain("outside your owned files (none)");
+    await expect(readFile(join(h.cwd, "forbidden.txt"))).rejects.toThrow();
+    expect(outcome.text).not.toContain("files ignored");
+    await expect(execute({ role, files: ["assets/*.png"] })).rejects.toThrow("Unsupported ownership path");
+  });
+
+  for (const sessionSource of [false, true]) it.each(["game-asset", "video"] as const)(`uses the default provider's specialist model for %s (session source: ${sessionSource})`, async role => {
+    const spawned = vi.spyOn(AgentManager.prototype, "spawn");
+    const { h, pool } = await fixture([]);
+    const faux = fauxProvider({ provider: h.orche.faux.provider.id, models: [{ id: h.orche.faux.getModel().id }, { id: "claude-opus-5-5" }] });
+    faux.setResponses([result(role, "Produced", { status: "done", outputs: [] })]);
+    h.runtime.registerNativeProvider(faux.provider);
+    const configPath = join(h.agentDir, "orche.config.json");
+    if (sessionSource) await rm(configPath);
+    else await writeFile(configPath, JSON.stringify({ routes: {}, default: { model: h.orche.route.model, thinking: "high", extendedContext: true } }));
+    await pool.execute({ role, request: "Produce", cwd: h.cwd, projectTrusted: false, model: h.orche.faux.getModel(), thinking: "high" });
+    expect(spawned.mock.calls[0]?.[0]).toMatchObject({ role, route: { role, model: `${faux.provider.id}/claude-opus-5-5`, thinking: "high", ...(!sessionSource ? { extendedContext: true } : {}) } });
+    expect(pool.session("W1").model?.id).toBe("claude-opus-5-5");
+  });
+
+  it.each(["game-asset", "video"] as const)("rejects malformed %s reports and accepts same-turn repair", async role => {
+    let rejected = "";
+    const { execute } = await fixture([
+      result(role, "Malformed", { status: "done" }),
+      context => { rejected = JSON.stringify(context.messages); return result(role, "Repaired", { status: "done", outputs: [], evidence: ["no deliverables requested"] }); },
+    ]);
+    const outcome = await execute({ role });
+    expect(rejected).toContain("outputs");
+    expect(rejected).toContain("Result rejected:");
+    expect(outcome.text).toContain("Repaired");
+    expect(outcome.text).toContain("outputs: 0");
   });
 
   for (const explicit of [true, false]) it(`blocks a symlinked allowed.txt before execution (explicit scope: ${explicit})`, async context => {

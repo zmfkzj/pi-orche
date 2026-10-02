@@ -155,6 +155,20 @@ export function resolveRoute(config: RouteConfig, role: string): ModelRoute {
   const extendedContext = route.extendedContext ?? config.extendedContext;
   return { role, ...route, ...(extendedContext !== undefined ? { extendedContext } : {}) };
 }
+
+export const SPECIALIST_DEFAULT_MODELS: Readonly<Record<string, string>> = {
+  "game-asset": "claude-opus-5-5",
+  video: "claude-opus-5-5",
+};
+/** Explicit routes win; otherwise prefer the specialist model on the default provider
+ * only when the runtime has it. Preserve all effective default settings and errors. */
+export function resolveSpecialistRoute(config: RouteConfig, role: string, hasModel: (provider: string, id: string) => boolean): ModelRoute {
+  const route = resolveRoute(config, role);
+  if (Object.hasOwn(config.routes, role) || !Object.hasOwn(SPECIALIST_DEFAULT_MODELS, role)) return route;
+  const id = SPECIALIST_DEFAULT_MODELS[role]!;
+  const provider = route.model.slice(0, route.model.indexOf("/"));
+  return hasModel(provider, id) ? { ...route, model: `${provider}/${id}` } : route;
+}
 export function parseRouteOverride(override: string): ModelRoute {
   const equals = override.indexOf("=");
   if (equals <= 0 || equals !== override.lastIndexOf("=")) throw new RouteConfigError("Override must be role=provider/modelId[:thinking]");

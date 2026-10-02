@@ -27,6 +27,11 @@ describe("advisor config", () => {
     expect(routes.advisors).toHaveLength(1);
     expect(() => parseRouteConfig({ routes: {}, advisor: [] })).toThrow("unknown field");
   });
+  it.each(["assignment_started", "assignment_result"])("accepts specialist kinds in %s filters", on => {
+    const triggers = [{ on, kinds: ["game-asset", "video"] }];
+    expect(parseAdvisorConfigs([{ ...minimal, triggers }])[0]?.triggers).toEqual(triggers);
+    expect(parseRouteConfig({ routes: {}, advisors: [{ ...minimal, triggers }] }).advisors?.[0]?.triggers).toEqual(triggers);
+  });
   const invalid: [string, unknown, string][] = [
     ["non-array", {}, "config.advisors: expected array"],
     ["unknown field", [{ ...minimal, trigger: [] }], 'config.advisors[0]: unknown field "trigger"'],

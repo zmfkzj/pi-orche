@@ -29,6 +29,19 @@ export const implementResultSchema = Type.Object({
   evidence,
 });
 
+/** Production reports require a verdict and an inventory of delivered outputs. */
+export const gameAssetResultSchema = Type.Object({
+  status: Type.Union([Type.Literal("done"), Type.Literal("blocked")]),
+  reason: Type.Optional(Type.String()),
+  outputs: Type.Array(Type.Object({
+    path: Type.String({ minLength: 1 }),
+    type: Type.String({ minLength: 1 }),
+    spec: Type.String({ minLength: 1 }),
+  })),
+  evidence,
+});
+export const videoResultSchema = gameAssetResultSchema;
+
 /** `data` of a verify RESULT: an explicit boolean verdict is required. */
 export const verifyResultSchema = Type.Object({
   passed: Type.Boolean(),
@@ -46,5 +59,7 @@ export const orchestrationResultSchemas: Readonly<Record<string, ResultDataSchem
   backlog_proposal: { schema: proposalSchema },
   implement: { schema: implementResultSchema, optional: true },
   fix: { schema: implementResultSchema, optional: true },
+  "game-asset": { schema: gameAssetResultSchema },
+  video: { schema: videoResultSchema },
   verify: { schema: verifyResultSchema },
 };

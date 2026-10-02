@@ -5,7 +5,7 @@ import { normalizeOwnedPath, type TaskItem } from "./backlog.js";
 /** Tools that write files through an explicit `path` argument; guarded before they run. */
 export const WRITE_TOOLS: ReadonlySet<string> = new Set(["edit", "write", "ast_rewrite"]);
 /** Assignment kinds that may write at all, and then only to the worker's owned files. */
-const WRITING_KINDS: ReadonlySet<string> = new Set(["implement", "fix"]);
+export const WRITING_KINDS: ReadonlySet<string> = new Set(["implement", "fix", "game-asset", "video"]);
 
 /** Whether `file` (repository-relative, normalized) lies inside one owned path. */
 export function ownsPath(owned: string, file: string): boolean {
@@ -38,7 +38,7 @@ export type RealWritePaths = { readonly cwd: string; readonly target: string } |
 
 /**
  * Pre-execution ownership decision for one write-tool call: undefined allows it.
- * Only implement/fix assignments may write, and only inside files their worker owns in the
+ * Only implement/fix/game-asset/video assignments may write, and only inside files their worker owns in the
  * canonical backlog. `ast_rewrite` needs an explicit owned `path` (its default is the whole
  * workspace) unless it is a dry run.
  */
@@ -59,7 +59,7 @@ export function checkWrite(check: WriteCheck, real?: RealWritePaths): BlockedWri
   }
   const file = normalizeOwnedPath(rel);
   if (!check.assignmentKind || !WRITING_KINDS.has(check.assignmentKind)) {
-    return { file, reason: `Blocked: assignment ${check.assignmentKind ?? "(none)"} is read-only; only implement/fix assignments may write files.` };
+    return { file, reason: `Blocked: assignment ${check.assignmentKind ?? "(none)"} is read-only; only implement/fix/game-asset/video assignments may write files.` };
   }
   if (!owned.some(path => ownsPath(path, file))) {
     return { file, reason: `Blocked: ${file} is outside your owned files (${ownedText}); other workers own their files. ${advice}` };

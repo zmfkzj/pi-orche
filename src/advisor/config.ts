@@ -91,8 +91,8 @@ const decisionTypes: Record<CoordinatorDecision["type"], true> = {
   collect_backlog: true, assign: true, verify: true, verification_failed: true, replan: true, complete: true, fail: true,
 };
 const phaseNames: Record<Phase, true> = { EXPLORE: true, CONVERGE: true, BACKLOG: true, EXECUTE: true, VERIFY: true, DONE: true, FAILED: true };
-/** Assignment kinds the orchestrator issues. */
-export const ASSIGNMENT_KINDS = ["explore", "backlog_proposal", "implement", "fix", "verify", "answer"] as const;
+/** Assignment kinds issued by the orchestrator or single-worker tool. */
+export const ASSIGNMENT_KINDS = ["explore", "backlog_proposal", "implement", "fix", "verify", "answer", "game-asset", "video"] as const;
 /** Decisions that end the run (checked by before_complete). */
 export const COMPLETING_DECISIONS: readonly string[] = ["complete", "answer", "answer_from_worker"];
 

@@ -63,6 +63,13 @@ describe("mainMode: tool sets", () => {
     expect(seen[1]).toContain("parallel hypotheses");
     expect(seen[2]).toContain("orche_run is disabled in mode single");
     expect(seen[2]).toContain("/orche mode auto or multi");
+    for (const system of seen.slice(1)) {
+      expect(system).toContain("explore | answer | implement | verify | game-asset | video");
+      expect(system).toContain("game-asset for creating/modifying game art/audio/model assets");
+      expect(system).toContain("video for producing/editing video");
+    }
+    expect(auto.session.getToolDefinition("orche_task")?.description).toContain("game-asset");
+    expect(auto.session.getToolDefinition("orche_task")?.description).toContain("video");
   });
 });
 

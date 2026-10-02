@@ -59,7 +59,7 @@ Builtin domains carry fixed review instructions (`domainInstructions` in `src/ad
 | Trigger | Fires | Filters |
 | --- | --- | --- |
 | `coordinator_decision` | When the coordinator has produced a valid decision, before it is applied. | `decisions` (decision types such as `classify`, `assign`, `root_cause_accepted`, `complete`), `phases` (`EXPLORE`, `CONVERGE`, `BACKLOG`, `EXECUTE`, `VERIFY`), `await` |
-| `assignment_started` | A worker assignment starts. | `kinds`: `explore`, `backlog_proposal`, `implement`, `fix`, `verify`, `answer` |
+| `assignment_started` | A worker assignment starts. | `kinds`: `explore`, `backlog_proposal`, `implement`, `fix`, `verify`, `answer`, `game-asset`, `video` |
 | `assignment_result` | A worker assignment ended with a result, no result or a failure (not when the coordinator itself superseded/stopped it). | `kinds` |
 | `turn_end` | Every `every`-th model turn of a worker (counted per advisor, trigger and worker, across assignments). | `every` |
 | `tool_error` | A worker tool call failed (`report_result` / `send_message` protocol errors are ignored). | — |

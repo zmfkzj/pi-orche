@@ -8,11 +8,11 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { AgentManager } from "../agent/agent-manager.js";
 import type { AgentSnapshot } from "../agent/agent-handle.js";
 import { normalizeOwnedPath, type TaskItem } from "../orchestration/backlog.js";
-import { checkWriteRealPath, WRITE_TOOLS } from "../orchestration/ownership.js";
+import { checkWriteRealPath, WRITE_TOOLS, WRITING_KINDS } from "../orchestration/ownership.js";
 import { resolveRunLimits } from "../orchestration/limits.js";
 import { workerInstructions } from "../orchestration/prompts.js";
 import { orchestrationResultSchemas } from "../orchestration/result-schemas.js";
-import { resolveRoute } from "../orchestration/routing.js";
+import { resolveRoute, resolveSpecialistRoute } from "../orchestration/routing.js";
 import { WorkspaceAudit, type WorkspaceChange } from "../orchestration/workspace.js";
 import { WORKER_TOOL_NAMES } from "../tools/index.js";
 import { loadProviderExtensions, type ProviderExtensionHost } from "../pi/provider-extensions.js";
@@ -20,7 +20,7 @@ import { describeSource, discoverOrcheConfig, NoRouteError } from "./config.js";
 import { OrcheController, type OrcheRunArgs } from "./controller.js";
 
 export const orcheTaskParameters = Type.Object({
-  role: Type.Union([Type.Literal("explore"), Type.Literal("answer"), Type.Literal("implement"), Type.Literal("verify")]),
+  role: Type.Union([Type.Literal("explore"), Type.Literal("answer"), Type.Literal("implement"), Type.Literal("verify"), Type.Literal("game-asset"), Type.Literal("video")]),
   request: Type.String({ minLength: 1 }),
   context: Type.Optional(Type.String({ maxLength: 30_000 })),
   worker: Type.Optional(Type.String()),
@@ -68,10 +68,13 @@ function scopePaths(files: readonly string[]): string[] {
 }
 function assignmentPrompt(args: TaskParameters, commands: readonly string[]): string {
   const task = args.context?.trim() ? `${args.request}\n\n## Context from the requesting session\n${args.context.trim()}` : args.request;
+  const scope = args.files === undefined ? "anywhere inside the workspace" : JSON.stringify(args.files);
   const instructions: Record<TaskRole, string> = {
     explore: 'Investigate independently, read source and reproduce. DO NOT EDIT. Report findings with concrete evidence and optionally data.cause. report_result {kind:"explore",summary,data:{cause,evidence}}.',
     answer: 'Strictly read-only. Inspect relevant files and provide an evidence-backed answer, concrete code references and explanations. Never change files. report_result {kind:"answer",summary:FULL_EVIDENCED_ANSWER,data:{evidence}}.',
-    implement: `Implement completely, preserving unrelated changes. Write scope: ${args.files === undefined ? "anywhere inside the workspace" : JSON.stringify(args.files)}. Run local checks on touched files. report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks]}}.`,
+    implement: `Implement completely, preserving unrelated changes. Write scope: ${scope}. Run local checks on touched files. report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks]}}.`,
+    "game-asset": `Game asset production. Create or modify game assets (sprites, sprite sheets/atlases, tilesets, textures, icons/UI art, 3D models, animations, VFX, SFX/music, fonts, and their engine import/metadata files) inside the write scope ${scope}. First detect the engine and the project's conventions (Unity .meta, Godot .import/.tres, Unreal, Phaser/Pixi atlas JSON; existing naming, folder layout, resolution/pixels-per-unit, palette, pivot/origin, power-of-two, compression). Produce assets with locally available tools via bash (check command -v first: ImageMagick, Inkscape, Blender --background with Python, Aseprite --batch, ffmpeg, sox, Python Pillow/numpy, or hand-written SVG/procedural scripts); keep reusable generator scripts with the assets when the project has a place for them, and leave no temp files in the workspace. Never hand-fabricate binary bytes. Verify every output is valid (identify/file/ffprobe/blender), and view raster outputs or rendered previews with the read tool. Do not download third-party assets unless the request allows it; record source and license when you do. report_result {kind:"game-asset",summary,data:{status:"done" or "blocked",reason,outputs:[{path,type,spec}],evidence:[checks]}}. spec is a descriptive string.`,
+    video: `Video production. Plan and produce video deliverables inside the write scope ${scope}: script/storyboard/shot list, editing and compositing, motion graphics (code-based such as Remotion, Motion Canvas or manim when the project uses them), subtitles (SRT/VTT), audio mixing and loudness normalization, thumbnails and final encodes. Use locally available tools via bash (check command -v first: ffmpeg/ffprobe, the project's own video tooling, Python, ImageMagick, sox). Render a short draft before long renders; make final encode settings explicit (container, video codec, resolution, fps, CRF/bitrate, pixel format, audio codec/sample rate, loudness target). Verify every output with ffprobe (duration, streams, resolution, fps) and inspect extracted frames with the read tool. Leave no intermediate files in the workspace unless requested. report_result {kind:"video",summary,data:{status:"done" or "blocked",reason,outputs:[{path,type,spec}],evidence:[checks]}}. spec is a descriptive string.`,
     verify: `Independent read-only review. DO NOT EDIT. ${commands.length ? `Run configured checks via bash: ${commands.map(command => JSON.stringify(command)).join(", ")}` : "Discover and run the project's own checks via bash (package.json, Makefile, pyproject.toml, Cargo.toml, go.mod or CI config)"}, plus focused checks; inspect source and git diff. report_result {kind:"verify",summary,data:{passed:boolean,evidence:[commands and outcomes],issues:[{file,description}]}}. passed:true requires actual passing checks; unexecuted checks never count as passed.`,
   };
   return `Assignment: ${args.role}. You work alone; there are no peers or backlog.\n${task}\n\n${instructions[args.role]}`;
@@ -160,7 +163,7 @@ export class WorkerPool {
     const started = Date.now();
     const retired: string[] = [];
     const retirementLines: string[] = [];
-    const files = args.role === "implement" && args.files !== undefined ? scopePaths(args.files) : undefined;
+    const files = WRITING_KINDS.has(args.role) && args.files !== undefined ? scopePaths(args.files) : undefined;
     let worker = args.worker ? this.workers.get(args.worker) : undefined;
     if (args.worker && !worker) {
       const live = this.list().map(item => `${item.id} (${item.status}, ${item.role})`).join(", ") || "none";
@@ -197,8 +200,11 @@ export class WorkerPool {
       const id = `W${this.nextId++}`;
       worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0 };
       const meta = worker;
-      const routeRole = args.role === "answer" ? "analyst" : args.role === "explore" ? config.routes.workers?.explorerRoles?.[0] ?? "explorer-path" : args.role === "implement" ? "implementer" : "verifier";
-      await this.manager.spawn({ id, role: routeRole, route: resolveRoute(config.routes, routeRole), cwd: args.cwd, tools: [...WORKER_TOOL_NAMES], peerMessaging: false,
+      const routeRole = args.role === "answer" ? "analyst" : args.role === "explore" ? config.routes.workers?.explorerRoles?.[0] ?? "explorer-path" : args.role === "implement" ? "implementer" : args.role === "verify" ? "verifier" : args.role;
+      const route = args.role === "game-asset" || args.role === "video"
+        ? resolveSpecialistRoute(config.routes, routeRole, (provider, id) => !!runtime.getModel(provider, id))
+        : resolveRoute(config.routes, routeRole);
+      await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, tools: [...WORKER_TOOL_NAMES], peerMessaging: false,
         instructions: `${workerInstructions}\nYou work alone: there are no peer workers. Reply in the language of the request.`,
         onContextWindow: info => { meta.contextWindow = info.contextWindow; },
         toolGuard: (name, input) => this.guard(meta, name, input),
@@ -260,10 +266,11 @@ export class WorkerPool {
       const durationMs = Date.now() - started;
       const data = outcome.result.data && typeof outcome.result.data === "object" ? outcome.result.data as Record<string, unknown> : {};
       const roleData = ["status", "reason", "passed", "issues", "cause"].filter(key => data[key] !== undefined).map(key => `${key}: ${typeof data[key] === "string" ? data[key] : JSON.stringify(data[key])}`);
+      if (Array.isArray(data.outputs)) roleData.push(`outputs: ${data.outputs.length}`);
       const note = data.status === "blocked" ? "the worker reported blocked" : args.role === "verify" && data.passed === false ? "verification failed" : args.role === "implement" && changes.length >= 4 ? "the implementation changed four or more files" : undefined;
       const roster = this.roster();
       const text = [`orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, "", meta.summary, ...roleData, "", audit ? changes.length ? `Changed files: ${changes.map(change => change.path).join(", ")}` : "No files changed" : "Workspace audit unavailable (not a git work tree)", `Workers: ${roster}`, ...retirementLines,
-        ...(args.role !== "implement" && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: consider orche_run (multi) — ${note}`] : [])].join("\n");
+        ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: consider orche_run (multi) — ${note}`] : [])].join("\n");
       return { text, details: { worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, durationMs, requests, changes, roster, ...(retired.length ? { retired } : {}) } };
     } finally {
       signal.removeEventListener("abort", abort);
