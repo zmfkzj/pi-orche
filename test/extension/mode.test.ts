@@ -192,7 +192,7 @@ describe("mainMode: shell guard diagnostics", () => {
   });
   it("distinguishes mutation from unverified syntax and offers safe alternatives", () => {
     const mutation = guardToolCall("multi", "bash", { command: "touch file" });
-    const unsupported = guardToolCall("multi", "bash", { command: "ls *.ts" });
+    const unsupported = guardToolCall("multi", "bash", { command: "curl http://x" }); // `ls *.ts` is read-only and now allowed
     expect(mutation).toContain("explicitly requests mutation");
     expect(mutation).toContain("Do not retry it directly: delegate");
     expect(unsupported).toContain("could not be verified");
@@ -204,6 +204,65 @@ describe("mainMode: shell guard diagnostics", () => {
     }
     expect(guardToolCall("multi", "bash", { command: "npm test" })).toBeUndefined();
     expect(delegationRules("multi")).toContain("trusted project checks that may create generated files");
+  });
+  // Exact wording for mode "multi"; the suggestion is only ever appended after it.
+  const MULTI_ADVICE = "Use read with offset/limit, grep, simple static Bash inspection commands, or delegate with orche_run. Supported tests and linters are trusted project checks that may create generated files and execute project configuration, not guaranteed read-only.";
+  const MULTI_DELEGATE = "Do not retry it directly: delegate the change with the orche_run tool (a self-contained request: goal, decisions so far, relevant files and findings, constraints, acceptance criteria).";
+  it("leaves a block without a hint exactly as before", () => {
+    expect(guardToolCall("multi", "bash", { command: "curl http://x" })).toBe(
+      `Blocked by orche mode "multi": this shell command could not be verified (command curl); unsupported does not mean mutating. ${MULTI_ADVICE}`,
+    );
+    expect(guardToolCall("multi", "bash", { command: "touch file" })).toBe(
+      `Blocked by orche mode "multi": this shell command explicitly requests mutation (command touch). ${MULTI_DELEGATE} ${MULTI_ADVICE}`,
+    );
+    for (const command of ["node -e 1", "echo hi > out.txt", "npm --prefix x run fix", "npm --prefix x install"]) {
+      expect(guardToolCall("multi", "bash", { command }), command).not.toContain("Suggestion:");
+    }
+  });
+  it("suggests quoting or the find/grep/ls tools for a blocked expansion", () => {
+    const suggestion = "Suggestion: quote literal patterns or use the find/grep/ls tools (e.g. find with pattern '**/*.ts').";
+    expect(guardToolCall("multi", "bash", { command: "rm *" })).toBe(
+      `Blocked by orche mode "multi": this shell command could not be verified (active brace/glob/tilde expansion (quote literal patterns)); unsupported does not mean mutating. ${MULTI_ADVICE} ${suggestion}`,
+    );
+    for (const mode of ["auto", "single", "multi"] as const) {
+      for (const command of ["git log *", "cat $(echo x)", "ls ~user", "echo `id`", "test -n \"$(id)\""]) {
+        const error = guardToolCall(mode, "bash", { command });
+        expect(error, `${mode}: ${command}`).toContain(`Blocked by orche mode "${mode}":`);
+        expect(error, `${mode}: ${command}`).toContain(suggestion);
+        expect(error, `${mode}: ${command}`).not.toContain("explicitly requests mutation");
+      }
+    }
+  });
+  it("suggests `cd <dir> && <tool> run <script>` for an unknown leading option", () => {
+    expect(guardToolCall("multi", "bash", { command: "npm --foo test" })).toContain("Suggestion: use `cd <dir> && npm run <script>` instead of the leading --foo option.");
+    expect(guardToolCall("multi", "bash", { command: "pnpm --foo test" })).toContain("Suggestion: use `cd <dir> && pnpm run <script>` instead of the leading --foo option.");
+    expect(guardToolCall("multi", "bash", { command: "yarn --foo test" })).toContain("use `cd <dir> && yarn run <script>`");
+    expect(guardToolCall("multi", "bash", { command: "git -c a=b diff" })).toContain("Suggestion: use `cd <dir> && git <subcommand>` instead of the leading -c option.");
+    const error = guardToolCall("multi", "bash", { command: "npm --foo test" })!;
+    expect(error).toContain("could not be verified");
+    expect(error).toContain("Blocked by orche mode \"multi\":");
+    expect(error.endsWith(".")).toBe(true);
+  });
+  it("lists the allowed read-only git subcommands when a git command is blocked, keeping the mutation/unverified wording", () => {
+    const allowedGit = "Suggestion: allowed read-only git: status, diff, log, show, ….";
+    const mutation = guardToolCall("multi", "bash", { command: "git commit -m x" })!;
+    expect(mutation).toContain("explicitly requests mutation (git commit)");
+    expect(mutation).toContain(MULTI_DELEGATE);
+    expect(mutation.endsWith(allowedGit)).toBe(true);
+    for (const command of ["git branch newname", "git submodule update", "git frobnicate"]) {
+      const unverified = guardToolCall("multi", "bash", { command })!;
+      expect(unverified, command).toContain("could not be verified");
+      expect(unverified, command).not.toContain("explicitly requests mutation");
+      expect(unverified.endsWith(allowedGit), command).toBe(true);
+    }
+    expect(guardToolCall("multi", "bash", { command: "git commit -h" })).toBeUndefined();
+    expect(guardToolCall("multi", "bash", { command: "git status" })).toBeUndefined();
+  });
+  it("does not touch other tools' messages or the direct mode", () => {
+    expect(guardToolCall("direct", "bash", { command: "rm *" })).toBeUndefined();
+    expect(guardToolCall("multi", "edit", {})).not.toContain("Suggestion:");
+    expect(guardToolCall("multi", "powershell", { command: "ls" })).not.toContain("Suggestion:");
+    expect(guardToolCall("multi", "bash", { command: "" })).not.toContain("Suggestion:");
   });
 });
 

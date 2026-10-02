@@ -46,12 +46,16 @@ const positives: Record<string, string[]> = {
     "CI='1' npm test", "CI=\"1\" npm test", "NODE_ENV=test TZ='UTC' node --test", "CI=\\1 npm test",
   ],
   versionsAndListing: ["node --version", "node -v", "python --version", "python3 -V", "go version", "tsc --version", "npm --version", "pnpm -v", "yarn --version", "bun --version", "cargo --version", "cargo -V", "npm run", "pnpm run", "yarn run", "bun run"],
+  // Moved from negatives.grammar: intentionally allowed by the read-only false-positive fix. A glob is an
+  // argument of a command whose every option is read-only (ls), and a leading `~` is a static $HOME prefix.
+  // The full allow/block regression suite lives in bash-policy-readonly.test.ts.
+  expansionAllowances: ["ls *.ts", "echo ~"],
 };
 const negatives: Record<string, string[]> = {
   grammar: [
     "echo ok # '\ntouch unexpected.txt\n#'", "echo $VAR", 'echo "$VAR"', "echo ${VAR}", "echo $(touch x)",
     "echo `touch x`", 'echo "$(touch x)"', "echo $((1+2))", "git log --{oneline,output=out.txt}",
-    "echo {a,b}", "ls *.ts", "echo ~", "diff <(ls a) <(ls b)", "echo >(cat)", "(cd src && ls)",
+    "echo {a,b}", "diff <(ls a) <(ls b)", "echo >(cat)", "(cd src && ls)",
     "sleep 100 &", "cat <<EOF\nhi\nEOF", "cat <<<literal", "cat <>file", "echo 'unterminated", 'echo "unterminated',
     "echo trailing\\", "ls &&", "ls ||", "ls |", "ls &&\n# comment", "| ls", "ls || | ls", "ls && ; ls", "echo \r",
     "; ls", "ls ;; ls", "ls\n| ls",

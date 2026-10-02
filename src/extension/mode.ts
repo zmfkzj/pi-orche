@@ -2,7 +2,7 @@ import { access } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_MAIN_MODE, loadRouteConfig, MAIN_MODES, type MainMode } from "../orchestration/routing.js";
-import { classifyBash } from "./bash-policy.js";
+import { classifyBash, READ_ONLY_GIT_SUBCOMMANDS, type BashHint } from "./bash-policy.js";
 import { CONFIG_FILE } from "./config.js";
 
 export const MODE_ENTRY_TYPE = "orche-mode";
@@ -54,6 +54,20 @@ export function delegationRules(mode: MainMode): string {
   }
 }
 
+/** A concrete allowed alternative for a blocked shell command, derived from the verdict's hint. */
+function hintSuggestion(hint: BashHint): string {
+  switch (hint.kind) {
+    case "expansion":
+      return "quote literal patterns or use the find/grep/ls tools (e.g. find with pattern '**/*.ts')";
+    case "leading-option": {
+      const run = hint.tool === "git" ? "git <subcommand>" : `${hint.tool} run <script>`;
+      return `use \`cd <dir> && ${run}\`${hint.option ? ` instead of the leading ${hint.option} option` : ""}`;
+    }
+    case "git-subcommand":
+      return `allowed read-only git: ${READ_ONLY_GIT_SUBCOMMANDS.slice(0, 4).join(", ")}, …`;
+  }
+}
+
 /**
  * Why a tool call must not run in `mode`, or undefined if it may. Delegation guards are against habitual direct edits,
  * not a sandbox: see bash-policy.ts for what the shell allowlist can and cannot know.
@@ -75,8 +89,9 @@ export function guardToolCall(mode: MainMode, toolName: string, input: Record<st
     if (typeof input.command !== "string" || !input.command.trim()) return `${prefix} invalid command; command must be a non-blank string and could not be verified. ${shellAdvice}`;
     const verdict = classifyBash(input.command);
     if (!verdict.allowed) {
-      if (verdict.category === "mutation") return `${prefix} this shell command explicitly requests mutation (${verdict.reason}). ${delegate} ${shellAdvice}`;
-      return `${prefix} this shell command could not be verified (${verdict.reason}); unsupported does not mean mutating. ${shellAdvice}`;
+      const suggestion = verdict.hint ? ` Suggestion: ${hintSuggestion(verdict.hint)}.` : "";
+      if (verdict.category === "mutation") return `${prefix} this shell command explicitly requests mutation (${verdict.reason}). ${delegate} ${shellAdvice}${suggestion}`;
+      return `${prefix} this shell command could not be verified (${verdict.reason}); unsupported does not mean mutating. ${shellAdvice}${suggestion}`;
     }
   }
   return undefined;
