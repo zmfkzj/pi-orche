@@ -1,9 +1,12 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { fauxProvider, fauxAssistantMessage as reply, fauxToolCall as call, type FauxProviderHandle } from "@earendil-works/pi-ai";
 import { loadProviderExtensions, ProviderExtensionError } from "../../src/pi/provider-extensions.js";
+import { MODEL_ID, PROVIDER_ID } from "../../src/pi/bundled-images.js";
+import { ensureBundledImageProvider } from "../../src/pi/register-bundled-image-provider.js";
 import { runOrchestrated } from "../../src/orchestration/coordinator.js";
 import { parseRouteConfig } from "../../src/orchestration/routing.js";
 import { fauxRuntime } from "../helpers/faux.js";
@@ -12,6 +15,8 @@ interface Globals { __orcheTestProvider?: FauxProviderHandle; __orcheRogueLoaded
 const shared = globalThis as Globals;
 const roots: string[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   delete shared.__orcheTestProvider;
   delete shared.__orcheRogueLoaded;
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
@@ -92,5 +97,48 @@ describe("provider extensions in orche's own runtime", () => {
     for (const bad of [[], "npm:x", [""], [" npm:x"], [1], ["a", "a"], ["a", "b", "c", "d", "e"]]) {
       expect(() => parseRouteConfig({ ...base, providerExtensions: bad })).toThrow("config.providerExtensions");
     }
+  });
+
+  describe("with the bundled cliproxyapi-images provider", () => {
+    const bundled = { model: `${PROVIDER_ID}/${MODEL_ID}` };
+
+    it("is not registered again when a providerExtensions package already provides it", async () => {
+      const installed = await installProviderPackage();
+      await writeFile(join(installed.source, "index.ts"), `export default function (pi) {\n  pi.registerProvider(${JSON.stringify(PROVIDER_ID)}, { name: "From extension", apiKey: "x", models: [{ type: "image", id: ${JSON.stringify(MODEL_ID)}, name: "From extension", api: "ext-images", baseUrl: "https://invalid.example/v1", input: ["text"], output: ["image"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }], images: { "ext-images": { generateImages: async () => { throw new Error("unused"); } } } });\n}\n`);
+      const f = await fauxRuntime();
+      const host = await loadProviderExtensions(f.runtime, [installed.source], { cwd: installed.root, agentDir: installed.agentDir });
+      try {
+        expect(f.runtime.getModelOfType("image", PROVIDER_ID, MODEL_ID)).toMatchObject({ name: "From extension" });
+        const register = vi.spyOn(f.runtime, "registerProvider");
+        expect(ensureBundledImageProvider({ runtime: f.runtime, images: bundled, agentDir: installed.agentDir })).toBe(false);
+        expect(register).not.toHaveBeenCalled();
+        expect(f.runtime.getModelOfType("image", PROVIDER_ID, MODEL_ID)).toMatchObject({ name: "From extension" });
+      } finally {
+        host.dispose();
+      }
+    });
+
+    it("coexists with the real pi-images package listed in providerExtensions (no conflict, no double registration)", async () => {
+      const installed = await installProviderPackage();
+      // That package's extension calls createProviderConfig() with the default agent dir: point it at the temp one.
+      vi.stubEnv("PI_CODING_AGENT_DIR", installed.agentDir);
+      vi.stubEnv("CLIPROXYAPI_BASE_URL", "");
+      vi.stubEnv("CLIPROXYAPI_API_KEY", "");
+      const f = await fauxRuntime();
+      const piImages = fileURLToPath(new URL("../../node_modules/pi-gateway-images", import.meta.url));
+      const host = await loadProviderExtensions(f.runtime, [piImages], { cwd: installed.root, agentDir: installed.agentDir });
+      try {
+        const loaded = f.runtime.getModelOfType("image", PROVIDER_ID, MODEL_ID);
+        expect(loaded).toBeDefined();
+        const register = vi.spyOn(f.runtime, "registerProvider");
+        expect(ensureBundledImageProvider({ runtime: f.runtime, images: bundled, agentDir: installed.agentDir })).toBe(false);
+        expect(ensureBundledImageProvider({ runtime: f.runtime, images: bundled, agentDir: installed.agentDir })).toBe(false);
+        expect(register).not.toHaveBeenCalled();
+        expect(f.runtime.getModelOfType("image", PROVIDER_ID, MODEL_ID)).toMatchObject({ name: loaded!.name, baseUrl: loaded!.baseUrl });
+        expect(f.runtime.getModelsOfType("image", PROVIDER_ID)).toHaveLength(1);
+      } finally {
+        host.dispose();
+      }
+    });
   });
 });

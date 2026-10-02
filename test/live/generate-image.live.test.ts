@@ -12,9 +12,9 @@ describe.skipIf(process.env.LIVE_IMAGES !== "1")("generate_image live gateway e2
   it("generates and saves a transparent 32x32 RGBA coin sprite through a real ModelRuntime", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "orche-image-live-"));
     try {
-      // Variable dynamic import keeps this optional sibling package out of normal test loading.
-      const providerSource = "../../../images/src/index.ts";
-      const { createProviderConfig, PROVIDER_ID, MODEL_ID } = await import(providerSource);
+      // Lazy import of the bundled provider (the pi-gateway-images dependency, via orche's single import point):
+      // nothing is loaded and no credentials are read unless LIVE_IMAGES=1.
+      const { createProviderConfig, PROVIDER_ID, MODEL_ID } = await import("../../src/pi/bundled-images.js");
       const runtime = await ModelRuntime.create({
         credentials: new InMemoryCredentialStore(), modelsPath: null,
         modelsStorePath: join(cwd, "models-store.json"), refreshOnCreate: false,

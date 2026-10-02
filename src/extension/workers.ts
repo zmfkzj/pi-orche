@@ -17,6 +17,7 @@ import { WorkspaceAudit, type WorkspaceChange } from "../orchestration/workspace
 import { WORKER_TOOL_NAMES } from "../tools/index.js";
 import { createGenerateImageTool } from "../tools/generate-image.js";
 import { loadProviderExtensions, type ProviderExtensionHost } from "../pi/provider-extensions.js";
+import { ensureBundledImageProvider } from "../pi/register-bundled-image-provider.js";
 import { describeSource, discoverOrcheConfig, NoRouteError } from "./config.js";
 import { OrcheController, type OrcheRunArgs } from "./controller.js";
 
@@ -193,6 +194,9 @@ export class WorkerPool {
     }
     const images = args.role === "game-asset" || args.role === "video" ? config.routes.images : undefined;
     const imageConfig = images ? JSON.stringify(images) : undefined;
+    // The bundled cliproxyapi-images provider is registered lazily: only for game-asset/video with images configured,
+    // after providerExtensions (which may already provide it); otherwise no provider config or credential file is read.
+    ensureBundledImageProvider({ runtime, images, agentDir: this.options.agentDir ?? getAgentDir() });
     // Tools cannot be unregistered from a session. Recreate only when this optional
     // capability changes, so neither tool registration nor old instructions leak roles.
     if (worker && worker.imageConfig !== imageConfig) {

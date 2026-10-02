@@ -17,16 +17,28 @@ The CLI prints a JSON final report and exits nonzero on failure. `--route` is re
 
 ### Raster image generation
 
-Configure an image provider in orche's own runtime (separate from the main Pi session). The [pi-images](https://github.com/zmfkzj/pi-images) package provides `cliproxyapi-images/gpt-image-2.5`; install it first with `pi install git:github.com/zmfkzj/pi-images`, since `providerExtensions` loads only packages installed at user scope:
+The `cliproxyapi-images/gpt-image-2.5` image model (CLIProxyAPI gateway, from [pi-images](https://github.com/zmfkzj/pi-images)) is **bundled with pi-orche**: `pi install git:github.com/zmfkzj/pi-orche` brings its provider along, so there is no separate install and no `providerExtensions` entry. Set the model in `orche.config.json` (merge into your existing file, retaining `routes` and `default`):
 
 ```json
 {
-  "providerExtensions": ["npm:@router-for-me/pi-cliproxyapi-provider", "git:github.com/zmfkzj/pi-images"],
   "images": { "model": "cliproxyapi-images/gpt-image-2.5", "timeoutMs": 180000 }
 }
 ```
 
-Merge these keys into your existing `orche.config.json`, retaining `routes` and `default`. Sources use Pi package syntax (`npm:`, `git:`, or local paths resolved relative to `~/.pi/agent`). `images.model` must be `provider/modelId`; the optional timeout is a positive finite number of milliseconds (default 180000). Unknown image fields or invalid values are errors. Gateway credentials stay in the provider's environment/user configuration, never in this routing file.
+When `images.model` names `cliproxyapi-images`, orche registers the bundled provider into its own runtime (separate from the main Pi session) the first time a **game-asset** or **video** task needs it. This is lazy: nothing is registered, and no config or credential file is read, when `images` is unset, for other roles, or for another provider. It is also idempotent, and it is skipped when that provider is already registered, so also listing `git:github.com/zmfkzj/pi-images` in `providerExtensions` is harmless but unnecessary.
+
+Credentials come from the `CLIPROXYAPI_API_KEY` and `CLIPROXYAPI_BASE_URL` environment variables, or from `cliproxyapi.json` (`apiKey`/`baseUrl`) or the `cliproxyapi` entry of `auth.json` in the Pi agent directory (the same one orche uses for its own config). They are resolved when an image is requested and never go in this routing file.
+
+`providerExtensions` is needed only for **other** image providers. Install the provider's Pi package first (`pi install <source>`, since `providerExtensions` loads only packages installed at user scope), list it, and point `images.model` at its model:
+
+```json
+{
+  "providerExtensions": ["npm:@scope/pi-other-image-provider"],
+  "images": { "model": "other-images/some-model" }
+}
+```
+
+Sources use Pi package syntax (`npm:`, `git:`, or local paths resolved relative to `~/.pi/agent`). `images.model` must be `provider/modelId`; the optional timeout is a positive finite number of milliseconds (default 180000). Unknown image fields or invalid values are errors.
 
 Only `orche_task` **game-asset** and **video** workers get `generate_image`, and only when `images.model` is configured. It accepts a prompt, workspace-relative `.png`/`.webp`/`.jpg` output path, optional workspace raster `references` (sent as image-edit inputs), background (`transparent`, `opaque`, `auto`), width/height, fit (`contain` default, `cover`, `fill`, `inside`) and resize kernel (`lanczos3` default, `nearest` for pixel art). All writes use the existing real-path ownership guard; references cannot escape the workspace, including via symlinks. PNG/WebP retain alpha. Output includes the saved image, final/original dimensions, token usage and elapsed time. The gateway ignores requested size and returns roughly 1254x1254: always specify width/height for exact sprites/icons, request transparent backgrounds, inspect outputs with `read`, and record the prompt in `outputs[].spec`. Keep procedural/SVG tools for vector or pixel-exact assets.
 

@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@ast-grep/napi": "^0.45.3",
+    "pi-gateway-images": "github:zmfkzj/pi-images",
     "sharp": "^0.34.5",
     "typescript": "^5.9.3"
   },
