@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { writeFileSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { cleanupWorkspaces, runToolScript, tempWorkspace } from "./harness.js";
 
@@ -13,6 +13,22 @@ const anchorOf = (text: string, needle: string) => {
 };
 
 describe("anchored read/edit on a real session", () => {
+  it.each(["absolute", "parent-relative"] as const)("edits a user-requested external %s path without cwd confinement", async pathKind => {
+    // tempWorkspace uses os.tmpdir(); cleanupWorkspaces removes this entire fixture.
+    const root = await tempWorkspace();
+    const cwd = join(root, "workspace");
+    await mkdir(cwd);
+    const file = join(root, "external.txt");
+    await writeFile(file, "before\n");
+    const path = pathKind === "absolute" ? file : "../external.txt";
+    const results = await runToolScript(cwd, ["read", "edit"], [
+      () => ({ name: "read", args: { path } }),
+      read => ({ name: "edit", args: { path, edits: [{ op: "replace", at: anchorOf(read!.text, "before"), text: "after" }] } }),
+    ]);
+    expect(results.map(result => result.isError)).toEqual([false, false]);
+    expect(await readFile(file, "utf8")).toBe("after\n");
+  });
+
   it("read tags lines and edit applies by anchor; chained edit uses the anchors the result prints", async () => {
     const cwd = await tempWorkspace();
     const file = join(cwd, "a.txt");

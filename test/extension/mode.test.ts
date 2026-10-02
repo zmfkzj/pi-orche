@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fauxAssistantMessage as reply, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { delegationRules, discoverMainMode, guardToolCall } from "../../src/extension/mode.js";
 import { parseRouteConfig } from "../../src/orchestration/routing.js";
@@ -25,6 +25,7 @@ const toolResults = (h: Harness) => h.session.messages.filter(message => message
 const lastResult = (h: Harness) => JSON.stringify(toolResults(h).at(-1));
 const notes = (h: Harness) => h.notifications.map(note => note.message);
 const systemOf = (context: { messages: { role: string }[] }) => JSON.stringify(context.messages.find(message => message.role === "system"));
+const EXTERNAL_PERMISSION = "You may edit user-requested paths outside the cwd/workspace";
 
 describe("mainMode: tool sets", () => {
   it("defaults to auto: mutators are off, both delegation tools and inspection are on", async () => {
@@ -70,6 +71,102 @@ describe("mainMode: tool sets", () => {
     }
     expect(auto.session.getToolDefinition("orche_task")?.description).toContain("game-asset");
     expect(auto.session.getToolDefinition("orche_task")?.description).toContain("video");
+  });
+});
+
+describe("mainMode: external paths", () => {
+  it("authorizes only the main direct session, without granting OS privileges or changing worker scope", () => {
+    const rules = delegationRules("direct");
+    for (const text of [EXTERNAL_PERMISSION, "absolute paths and ../ paths", "Delegated workers' workspace confinement does not restrict this main direct session", "their scope remains unchanged", "Existing OS permissions and other policies still apply", "does not grant elevated OS privileges or bypass those restrictions"])
+      expect(rules).toContain(text);
+    for (const mode of ["auto", "single", "multi"] as const) {
+      expect(delegationRules(mode)).not.toContain(EXTERNAL_PERMISSION);
+      expect(delegationRules(mode)).toContain("You cannot edit files in this session");
+    }
+  });
+
+  it.each([join(tmpdir(), "orche-external.txt"), "../orche-external.txt"])("keeps the tool guard matrix unchanged for external path %s", path => {
+    for (const name of MUTATORS) {
+      expect(guardToolCall("direct", name, { path })).toBeUndefined();
+      for (const mode of ["auto", "single", "multi"] as const)
+        expect(guardToolCall(mode, name, { path })).toContain(`Blocked by orche mode "${mode}"`);
+    }
+    for (const name of ["orche_task", "orche_run"])
+      expect(guardToolCall("direct", name, {})).toContain("is disabled");
+  });
+
+  it.each([
+    ["one-turn", "absolute"], ["one-turn", "parent-relative"],
+    ["persistent", "absolute"], ["persistent", "parent-relative"],
+  ] as const)("%s direct writes and edits an external %s path with the explicit permission", async (activation, pathKind) => {
+    const root = await mkdtemp(join(tmpdir(), "orche-direct-external-"));
+    roots.push(root);
+    const file = join(root, "external.txt");
+    const h = await harness({ mainSteps: [], orcheSteps: [], mainMode: "multi" });
+    const path = pathKind === "absolute" ? file : relative(h.cwd, file);
+    if (pathKind === "parent-relative") expect(path).toMatch(/^\.\.\//);
+    let system = "";
+    h.main.faux.setResponses([
+      context => { system = systemOf(context); return tool("write", { path, content: "written\n" }); },
+      tool("read", { path }),
+      context => {
+        const result = context.messages.findLast(message => message.role === "toolResult");
+        const at = JSON.stringify(result).match(/1#[0-9a-f]{16}/)?.[0];
+        if (!at) throw new Error("external read did not return an anchor");
+        return tool("edit", { path, edits: [{ op: "replace", at, text: "edited" }] });
+      },
+      reply("edited externally"),
+    ]);
+    if (activation === "persistent") await h.session.prompt("/orche mode direct");
+    await h.session.prompt(`${activation === "one-turn" ? "/orche direct " : ""}Please write and edit ${path}`);
+    expect(system).toContain(EXTERNAL_PERMISSION);
+    expect(toolResults(h).map(result => result.isError)).toEqual([false, false, false]);
+    expect(await readFile(file, "utf8")).toBe("edited\n");
+    expect(h.orche.faux.state.callCount).toBe(0);
+
+    if (activation === "persistent") {
+      // A second ordinary turn still has direct permission and can write externally.
+      system = "";
+      h.main.faux.setResponses([
+        context => { system = systemOf(context); return tool("write", { path, content: "persistent\n" }); },
+        reply("done"),
+      ]);
+      await h.session.prompt(`Please update ${path} again`);
+      expect(system).toContain(EXTERNAL_PERMISSION);
+      expect(await readFile(file, "utf8")).toBe("persistent\n");
+      await h.session.prompt("/orche mode multi");
+    }
+    // One-turn restoration / leaving persistent direct must restore the restriction.
+    for (const name of MUTATORS) expect(h.session.getActiveToolNames()).not.toContain(name);
+    h.session.setActiveToolsByName([...h.session.getActiveToolNames(), "write"]);
+    const before = await readFile(file, "utf8");
+    h.main.faux.setResponses([tool("write", { path, content: "forbidden" }), reply("blocked")]);
+    await h.session.prompt(`Please update ${path} without direct mode`);
+    expect(lastResult(h)).toContain('Blocked by orche mode \\"multi\\"');
+    expect(h.session.systemPrompt).not.toContain(EXTERNAL_PERMISSION);
+    expect(await readFile(file, "utf8")).toBe(before);
+  });
+
+  it.each(["auto", "single", "multi"] as const)("%s blocks external writes even if write is reactivated", async mainMode => {
+    const root = await mkdtemp(join(tmpdir(), "orche-blocked-external-"));
+    roots.push(root);
+    const file = join(root, "external.txt");
+    await writeFile(file, "unchanged\n");
+    const h = await harness({ mainSteps: [], orcheSteps: [], mainMode });
+    h.session.setActiveToolsByName([...h.session.getActiveToolNames(), "write"]);
+    h.main.faux.setResponses([
+      tool("write", { path: file, content: "forbidden absolute" }),
+      tool("write", { path: relative(h.cwd, file), content: "forbidden relative" }),
+      reply("blocked"),
+    ]);
+    await h.session.prompt(`Please update external file ${file}`);
+    expect(toolResults(h)).toHaveLength(2);
+    for (const result of toolResults(h)) {
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toContain(`Blocked by orche mode \\"${mainMode}\\"`);
+    }
+    expect(h.session.systemPrompt).not.toContain(EXTERNAL_PERMISSION);
+    expect(await readFile(file, "utf8")).toBe("unchanged\n");
   });
 });
 

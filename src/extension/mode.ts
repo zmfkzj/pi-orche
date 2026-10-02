@@ -32,7 +32,7 @@ const MULTI_CRITERIA = "the change spans two or more independent write sets or u
 export function delegationRules(mode: MainMode): string {
   switch (mode) {
     case "direct":
-      return "orche mode: direct. Delegation tools are disabled; make changes directly with your own tools.";
+      return "orche mode: direct. Delegation tools are disabled; make changes directly with your own tools. You may edit user-requested paths outside the cwd/workspace, including absolute paths and ../ paths. Delegated workers' workspace confinement does not restrict this main direct session; their scope remains unchanged. Existing OS permissions and other policies still apply; direct mode does not grant elevated OS privileges or bypass those restrictions.";
     case "multi":
       return `orche mode: multi. You cannot edit files in this session: edit, write and ast_rewrite are disabled; explicit shell mutations and unverified shell syntax are blocked. Delegate every change with the orche_run tool. orche_task is disabled in this mode; switch with /orche mode auto or single to use one delegated worker, or /orche mode direct to make changes directly. You keep the conversation, inspection (read, grep, find, ls, ast_search, diagnostics, simple static Bash such as git status), trusted project checks that may create generated files or execute project configuration, and composing the delegation request. PowerShell is unsupported in multi.\n${REQUEST_RULES}`;
     case "auto":
