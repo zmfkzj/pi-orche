@@ -4,6 +4,7 @@ import { DEFAULT_LIVENESS_WINDOW_MS } from "../../src/agent/liveness.js";
 import { parseRouteConfig, RouteConfigError } from "../../src/orchestration/routing.js";
 import { defaultRunLimits as exportedDefaults, runOrchestrated } from "../../src/orchestration/coordinator.js";
 import { runBaseline } from "../../src/eval/baseline.js";
+import { ExtendableDeadline } from "../../src/orchestration/run/extension.js";
 
 const invalid = [null, [], 42, "3600000", { typo: 1 }, { overallMs: "1" }, { overallMs: NaN }, { overallMs: Infinity }, { explorationMs: -1 }, { assignmentMs: null }, { decisionMs: false }, { maxFixRounds: 0.5 }, { decisionRepairs: 3 }, { decisionRepairs: 1.5 }, { assignmentRequests: 1.5 }, { assignmentRequests: Number.MAX_SAFE_INTEGER + 1 }, { overallMs: undefined },
   // The extension keys are validated like the others: finite non-negative numbers, `maxExtensions` an integer.
@@ -13,12 +14,15 @@ const invalid = [null, [], 42, "3600000", { typo: 1 }, { overallMs: "1" }, { ove
   { extensions: 3 }, { extensionMS: 1 }];
 
 describe("run limits", () => {
-  it("defaults to thirty minutes (base) with three 30-minute extensions and retains compatible exports", () => {
+  it("defaults to thirty minutes (base) with ten 30-minute extensions (a 5h30m ceiling) and retains compatible exports", () => {
     expect(resolveRunLimits()).toEqual({
       overallMs: 1800000, explorationMs: 600000, assignmentMs: 1800000, decisionMs: 900000, maxFixRounds: 1, decisionRepairs: 2, assignmentRequests: 150,
-      extensionMs: 1800000, maxExtensions: 3, activityWindowMs: DEFAULT_LIVENESS_WINDOW_MS,
+      extensionMs: 1800000, maxExtensions: 10, activityWindowMs: DEFAULT_LIVENESS_WINDOW_MS,
     });
-    expect(defaultRunLimits).toMatchObject({ overallMs: 1_800_000, extensionMs: 1_800_000, maxExtensions: 3, activityWindowMs: 120_000 });
+    expect(defaultRunLimits).toMatchObject({ overallMs: 1_800_000, extensionMs: 1_800_000, maxExtensions: 10, activityWindowMs: 120_000 });
+    // The default hard ceiling: overallMs + maxExtensions × extensionMs = 30 min + 10 × 30 min = 5 h 30 min.
+    expect(ExtendableDeadline.fromLimits(resolveRunLimits()).hardLimitMs).toBe(19_800_000);
+    expect(ExtendableDeadline.fromLimits(resolveRunLimits({ maxExtensions: 5, extensionMs: 600_000 })).hardLimitMs).toBe(1_800_000 + 5 * 600_000);
     // The default phase caps are the ones derived from the default base overall cap.
     expect(resolveRunLimits()).toEqual({ ...defaultRunLimits, explorationMs: defaultRunLimits.overallMs / 3, assignmentMs: defaultRunLimits.overallMs, decisionMs: defaultRunLimits.overallMs / 2 });
     expect(exportedDefaults).toBe(defaultRunLimits);

@@ -78,7 +78,7 @@ describe("a run's deadline is extended while the run is working (real sessions, 
     expect(report.extensions![0]!.previousDeadline).toBe(report.startedAt + 600);
     // One event, in the stream, before the run finished; the two timers that expired together did not extend twice.
     const extended = ofType(events, "deadline_extended");
-    expect(extended).toEqual([expect.objectContaining({ type: "deadline_extended", scope: "overall", stage: "answer outcomes", extension: 1, maxExtensions: 3, extensionMs: 5000, newDeadline: report.startedAt + 5600 })]);
+    expect(extended).toEqual([expect.objectContaining({ type: "deadline_extended", scope: "overall", stage: "answer outcomes", extension: 1, maxExtensions: 3, extensionMs: 5000, newDeadline: report.startedAt + 5600, overallDeadline: report.startedAt + 5600 })]);
     expect(events.findIndex(event => event.type === "deadline_extended")).toBeLessThan(events.findIndex(event => event.type === "run_finished"));
     expect(ofType(events, "run_timeout")).toEqual([]);
   });
@@ -118,6 +118,8 @@ describe("a run's deadline is extended while the run is working (real sessions, 
     expect(report.extensions![0]!.newDeadline - report.extensions![0]!.previousDeadline).toBe(1000);
     expect(report.extensions![0]!.overallDeadline).toBe(report.startedAt + 600 + 1000); // the overall deadline moved by the same extension
     expect(ofType(events, "deadline_extended")).toHaveLength(1);
+    // The event carries the overall deadline after the extension, which a UI needs to show the current cap (here the phase cap moved it too).
+    expect(ofType(events, "deadline_extended")[0]).toMatchObject({ scope: "phase", overallDeadline: report.startedAt + 600 + 1000 });
   });
 
   it("(g) the user's cancellation during an extension window cancels at once", async () => {
@@ -155,7 +157,7 @@ describe("a run's deadline is extended while the run is working (real sessions, 
     expect(report.summary).toContain("overall timeout at startup/runtime");
     expect(report.summary).toContain("(not extended: no activity in the last 2m)");
     expect(report.extensions).toBeUndefined();
-    expect(report.timeouts![0]).toMatchObject({ scope: "overall", stage: "startup/runtime", configuredCapMs: 60, effectiveCapMs: 60, extensions: { used: 0, max: 3, notExtended: { reason: "idle", message: "not extended: no activity in the last 2m" } } });
+    expect(report.timeouts![0]).toMatchObject({ scope: "overall", stage: "startup/runtime", configuredCapMs: 60, effectiveCapMs: 60, extensions: { used: 0, max: 10, notExtended: { reason: "idle", message: "not extended: no activity in the last 2m" } } });
     expect(ofType(events, "deadline_extended")).toEqual([]);
   });
 
@@ -195,7 +197,7 @@ describe("a scripted coordinator under fake time", () => {
     expect(report.finishedAt - report.startedAt).toBe(50);
     expect(report.extensions).toBeUndefined();
     expect(ofType(events, "deadline_extended")).toEqual([]);
-    expect(report.timeouts![0]!.extensions).toEqual({ used: 0, max: 3, extensionMs: 1_800_000, windowMs: 120_000, notExtended: { reason: "idle", message: "not extended: no activity in the last 2m" } });
+    expect(report.timeouts![0]!.extensions).toEqual({ used: 0, max: 10, extensionMs: 1_800_000, windowMs: 120_000, notExtended: { reason: "idle", message: "not extended: no activity in the last 2m" } });
     // The same words reach the progress line of the timeout.
     expect(describeProgress(ofType(events, "run_timeout")[0]!)).toBe("overall timeout at Coordinator decision (50ms; cap 50ms): not extended: no activity in the last 2m");
     expect(vi.getTimerCount()).toBe(0);

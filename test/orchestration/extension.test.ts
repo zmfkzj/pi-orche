@@ -534,8 +534,10 @@ describe("formatting (j)", () => {
   it("builds the deadline_extended run event", () => {
     expect(extensionEvent(first)).toEqual({
       type: "deadline_extended", timestamp: 1_800_000, scope: "overall", stage: "implement backlog", extension: 1, maxExtensions: 3,
-      extensionMs: 1_800_000, newDeadline: 3_600_000, reasons: ["W2 bash running 12m, cpu progressing", "coordinator streaming"],
+      extensionMs: 1_800_000, newDeadline: 3_600_000, overallDeadline: 3_600_000, reasons: ["W2 bash running 12m, cpu progressing", "coordinator streaming"],
     });
+    // A phase cap that did not reach the overall deadline leaves it where it was: the event says so through `overallDeadline`.
+    expect(extensionEvent({ ...first, scope: "phase", newDeadline: 2_000_000, overallDeadline: 1_800_000, overallExtended: false })).toMatchObject({ scope: "phase", newDeadline: 2_000_000, overallDeadline: 1_800_000 });
     const event = extensionEvent(first);
     (event.reasons as string[]).length = 0;
     expect(first.reasons).toHaveLength(2); // the record is not aliased

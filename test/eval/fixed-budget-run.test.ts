@@ -11,7 +11,7 @@ import { fauxRuntime } from '../helpers/faux.js';
 
 /**
  * (h) at run time: with the evaluation limits an ACTIVE run (a model request that never answers counts as active) still times out at
- * its fixed budget. With the product default (3 extensions of 30 minutes) the same run would be extended instead.
+ * its fixed budget. With the product default (10 extensions of 30 minutes) the same run would be extended instead.
  */
 afterEach(() => vi.restoreAllMocks());
 const tool = (name: string, args: ToolCall['arguments']) => reply([call(name, args)], { stopReason: 'toolUse' });

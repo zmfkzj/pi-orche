@@ -11,6 +11,10 @@ import { CONFIG_FILE, loadOrcheConfigFile } from "./config.js";
 import { orcheTaskParameters, WorkerPool } from "./workers.js";
 import { runErrorResult } from "./tool-result.js";
 import { formatRecordList, listRecords } from "./records.js";
+import { partialUpdate } from "./progress.js";
+import { orcheRunRenderers, orcheTaskRenderers } from "./render.js";
+import { defaultRunLimits } from "../orchestration/limits.js";
+import { formatDuration } from "../agent/liveness.js";
 
 export const RESULT_MESSAGE_TYPE = "orche-result";
 /** Pi built-ins that stay Pi's own but are switched on next to our tools. */
@@ -34,6 +38,19 @@ async function discoverConfiguredMainMode(options: { cwd: string; agentDir: stri
   }
   return {};
 }
+/**
+ * The time-budget sentence of the orche_run / orche_task descriptions, written from the default limits (so that it cannot drift from limits.ts):
+ * base cap, extension length and count, and the ceiling they make. `limits` in orche.config.json override the defaults.
+ */
+function timeBudget(subject: "run" | "assignment"): string {
+  const { overallMs, assignmentMs, extensionMs, maxExtensions } = defaultRunLimits;
+  const minutes = (ms: number) => ms / 60_000;
+  const base = subject === "run" ? `base ${minutes(overallMs)} minutes` : `base ${minutes(assignmentMs)} minutes per assignment`;
+  const active = subject === "run" ? "run" : "worker";
+  const ceiling = formatDuration((subject === "run" ? overallMs : assignmentMs) + maxExtensions * extensionMs);
+  return `${base}; when the deadline passes while the ${active} is still actively working (using tools or producing output) it is extended by ${minutes(extensionMs)} minutes, at most ${maxExtensions} times (${maxExtensions}×${minutes(extensionMs)} minutes at most, ${ceiling} in total; these are the defaults, limits.maxExtensions / limits.extensionMs in orche.config.json change them);`;
+}
+
 /** How long a one-turn override waits for the session to start the turn it just queued before giving up. */
 const SINGLE_START_TIMEOUT_MS = 10_000;
 
@@ -276,10 +293,11 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       name: "orche_run",
       label: "orche",
       description:
-        "Delegate a coding request to the pi-orche orchestrator: a coordinator plans, parallel workers explore/implement in this workspace, and an independent verifier checks the result. Returns the final report. The orchestrator does NOT see this conversation, so the request must be self-contained: goal, decisions so far, relevant files and findings, constraints, acceptance criteria. Only one run can be active; it can take several minutes and edits files in the current directory. Time budget: base 30 minutes; when the deadline passes while the run is still actively working (using tools or producing output) it is extended by 30 minutes, at most 3 times (3×30 minutes at most); an idle run times out at the base deadline, and the report says why a timeout was not extended.",
+        `Delegate a coding request to the pi-orche orchestrator: a coordinator plans, parallel workers explore/implement in this workspace, and an independent verifier checks the result. Returns the final report. The orchestrator does NOT see this conversation, so the request must be self-contained: goal, decisions so far, relevant files and findings, constraints, acceptance criteria. Only one run can be active; it can take several minutes and edits files in the current directory. Time budget: ${timeBudget("run")} an idle run times out at the base deadline, and the report says why a timeout was not extended.`,
       promptSnippet: "orche_run: delegate a substantial change/investigation to the multi-agent orchestrator and get its verified report",
       parameters: orcheRunParameters,
       executionMode: "sequential",
+      ...orcheRunRenderers,
       execute: async (_id, params, signal, onUpdate, ctx) => {
         const outcome = await controller.run({
           request: params.request,
@@ -290,7 +308,9 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           projectTrusted: ctx.isProjectTrusted(),
           signal,
           currentSession: currentSession(ctx),
-          onProgress: lines => onUpdate?.({ content: [{ type: "text", text: lines.join("\n") }], details: { progress: lines } }),
+          // Every update carries the start time and the deadline (details.startedAt / details.deadline) for the TUI's elapsed timer (render.ts); the text stays the progress lines.
+          onTiming: (timing, lines) => onUpdate?.(partialUpdate(lines, timing)),
+          onProgress: (lines, timing) => onUpdate?.(partialUpdate(lines, timing)),
         });
         // A run that ended failed or cancelled is still an error to the model, but returned (not thrown) so the
         // transcript keeps outcome.details (see tool-result.ts). Errors before an outcome exists still throw.
@@ -301,13 +321,14 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.registerTool({
       name: "orche_task",
       label: "orche task",
-      description: "Delegate one self-contained request to one persistent worker. Choose explore, answer, implement, verify, game-asset (create/modify game art, audio and model assets) or video (produce/edit video); pass worker to reuse a live worker with its retained context and original model. Implement, game-asset and video may write within files (or the workspace when omitted); other roles are read-only. Workers never git commit or push unless this assignment carries `git` ({commit, push, remote, branch}; implement, game-asset and video only): set it only when the user explicitly asked in this conversation to commit or push, and scope the commit to the task's files where possible. Only one task or multi run can be active. Time budget: base 30 minutes per assignment; when the deadline passes while the worker is still actively working (using tools or producing output) it is extended by 30 minutes, at most 3 times (3×30 minutes at most); an idle worker times out at the base deadline, and the result says why a timeout was not extended.",
+      description: `Delegate one self-contained request to one persistent worker. Choose explore, answer, implement, verify, game-asset (create/modify game art, audio and model assets) or video (produce/edit video); pass worker to reuse a live worker with its retained context and original model. Implement, game-asset and video may write within files (or the workspace when omitted); other roles are read-only. Workers never git commit or push unless this assignment carries \`git\` ({commit, push, remote, branch}; implement, game-asset and video only): set it only when the user explicitly asked in this conversation to commit or push, and scope the commit to the task's files where possible. Only one task or multi run can be active. Time budget: ${timeBudget("assignment")} an idle worker times out at the base deadline, and the result says why a timeout was not extended.`,
       promptSnippet: "orche_task: one reusable worker for explore, answer, implement, verify, game-asset (game art/audio/model assets) or video (production/editing)",
       promptGuidelines: [
         "orche_task workers never git commit or push on their own. Pass `git` ({commit:true} or {push:true, remote?, branch?}) only when the user explicitly asked in this conversation to commit or push; never on your own initiative. Only implement, game-asset and video accept it; explore, answer and verify reject it.",
         "The `git` grant covers that one assignment only: a reused worker's next assignment without it may not commit. Scope the commit to the task's files where possible (pass `files`, name the paths in `request`), and check the commits listed in the result before reporting.",
       ],
       parameters: orcheTaskParameters,
+      ...orcheTaskRenderers,
       executionMode: "sequential",
       execute: async (_id, params, signal, onUpdate, ctx) => {
         // A task whose worker ran and failed, timed out or was cancelled comes back as an isError result that keeps its
@@ -320,9 +341,10 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           projectTrusted: ctx.isProjectTrusted(),
           signal,
           currentSession: currentSession(ctx),
-          onProgress: lines => {
+          onTiming: (timing, lines) => onUpdate?.(partialUpdate(lines, timing)),
+          onProgress: (lines, timing) => {
             ctx.ui.setStatus("orche", lines.at(-1));
-            onUpdate?.({ content: [{ type: "text", text: lines.join("\n") }], details: { progress: lines } });
+            onUpdate?.(partialUpdate(lines, timing));
           },
         });
       },

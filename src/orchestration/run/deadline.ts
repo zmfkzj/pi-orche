@@ -92,7 +92,7 @@ export function cancellationDiagnostic(ctx: RunContext): CancellationDiagnostic 
     ...diagnosticSnapshot(ctx, ctx.stage ?? "run", deadline.overallCapMs, deadline.overallRemainingMs(Date.now()), true),
   };
 }
-/** ` (extended 1/3; not extended: no activity in the last 2m)` / ` (extension budget 3/3 used)`; empty when there is nothing to say. */
+/** ` (extended 1/10; not extended: no activity in the last 2m)` / ` (extension budget 10/10 used)`; empty when there is nothing to say. */
 function extensionNote(extensions: ExtensionDiagnostic | undefined): string {
   const refusal = extensions?.notExtended;
   if (!extensions || !refusal) return "";

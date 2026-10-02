@@ -11,7 +11,7 @@ import { defaultRunLimits, resolveRunLimits } from '../../src/orchestration/limi
 
 /**
  * (h) The evaluation and benchmark paths keep FIXED budgets: the activity-aware timeout extension of orche_run / orche_task
- * (maxExtensions 3 by default) is off there unless a caller sets `maxExtensions` itself, so arms stay comparable.
+ * (maxExtensions 10 by default) is off there unless a caller sets `maxExtensions` itself, so arms stay comparable.
  */
 vi.mock('@earendil-works/pi-coding-agent', async importOriginal => ({ ...await importOriginal<typeof import('@earendil-works/pi-coding-agent')>(), ModelRuntime: { create: async () => ({ streamSimple: vi.fn() }) } }));
 const report = { status: 'done' as const, taskClass: 'unclassified', answer: 'ok', summary: 'ok', tasks: [], startedAt: 1, finishedAt: 2 };
@@ -31,8 +31,9 @@ const tempDir = async () => { const dir = await mkdtemp(join(tmpdir(), 'fixed-bu
 
 describe('fixed budgets for the evaluation paths', () => {
   it('the helpers turn extension off by default, keep every other limit, and let a caller opt in explicitly', () => {
-    expect(defaultRunLimits.maxExtensions).toBe(3); // the product default...
+    expect(defaultRunLimits.maxExtensions).toBe(10); // the product default...
     expect(fixedBudgetLimits()).toEqual({ maxExtensions: 0 }); // ...is not the evaluation default
+    expect(resolveRunLimits(undefined, fixedBudgetLimits()).maxExtensions).toBe(0); // and it is what an evaluation run resolves to
     expect(fixedBudgetLimits({ overallMs: 5000, decisionMs: 100 })).toEqual({ overallMs: 5000, decisionMs: 100, maxExtensions: 0 });
     expect(fixedBudgetLimits({ maxExtensions: 2 })).toEqual({ maxExtensions: 2 });
     expect(evalRunLimits(90)).toEqual({ overallMs: 90_000, maxExtensions: 0 });

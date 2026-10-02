@@ -29,6 +29,7 @@ import { describeSource, discoverOrcheConfig, NoRouteError } from "./config.js";
 import { OrcheController, recordsIgnorePaths, routesSummary, withConcurrentWarning, withRecordLine, type OrcheRunArgs } from "./controller.js";
 import type { ConcurrentActivitySummary } from "./concurrent-sessions.js";
 import { errorToolResult, failureReason, type ErrorToolResult, type ToolFailure, type ToolFailureKind } from "./tool-result.js";
+import { deadlineInfoOf, initialDeadline, type DeadlineInfo, type RunTiming } from "./progress.js";
 import { createRunRecord, pruneRecordsOnce, resolveRecords, workerSessionFile } from "./records.js";
 import { ExtendableDeadline, extensionEvent, formatExtensionProgress, formatExtensionSummary, waitExtendable, withNotExtended, type DeadlineExtension } from "../orchestration/run/extension.js";
 
@@ -70,6 +71,13 @@ export interface TaskDetails {
   /** Model route of the worker (`provider/model`), when known. */
   model?: string;
   durationMs: number;
+  /**
+   * When the assignment started and ended (epoch ms; `finishedAt - startedAt` is `durationMs`) and its deadline as it stood at the end (cap, extensions
+   * used / allowed). UI-only, like the same keys of every partial update (see {@link RunTiming}). Absent in results recorded before they existed.
+   */
+  startedAt?: number;
+  finishedAt?: number;
+  deadline?: DeadlineInfo;
   requests: number;
   /** Changed by this worker: paths written by its edit/write tools plus changes made while one of its write-capable tool calls ran. Submodule files are `sub/file`. Always empty for read-only roles. */
   changes: WorkspaceChange[];
@@ -616,6 +624,11 @@ export class WorkerPool {
       if (latest) { concurrent = latest; warning = latest.warning; }
     };
     const limits = resolveRunLimits(config.routes.limits);
+    // The deadline the UI shows next to the elapsed time: the assignment's own, from the same limits. Replaced by the live ExtendableDeadline's state
+    // once the worker has its assignment (see below), and after each extension.
+    let deadlineInfo: DeadlineInfo = initialDeadline(limits.assignmentMs, limits, started);
+    const timingNow = (): RunTiming => ({ startedAt: started, deadline: deadlineInfo });
+    args.onTiming?.(timingNow(), warning ? [warning] : []);
     const runtime = await this.options.controller.modelRuntime();
     if (this.disposed) throw new Error("Worker pool is disposed");
     signal.throwIfAborted();
@@ -725,7 +738,7 @@ export class WorkerPool {
     const progress = () => {
       const snapshot = this.manager!.get(meta.id);
       // The extension lines stay (they are part of how the task is going), ahead of the live status line, which stays last: the UI status shows the last line.
-      args.onProgress?.([...(warning ? [warning] : []), ...extensions.map(extension => formatExtensionProgress(extension)), `${meta.id} ${args.role} · ${requests} requests${snapshot.lastToolName ? ` · last tool: ${snapshot.lastToolName}` : ""}`]);
+      args.onProgress?.([...(warning ? [warning] : []), ...extensions.map(extension => formatExtensionProgress(extension)), `${meta.id} ${args.role} · ${requests} requests${snapshot.lastToolName ? ` · last tool: ${snapshot.lastToolName}` : ""}`], timingNow());
     };
     const unsubscribe = this.manager.subscribe(event => {
       if (!("agentId" in event) || event.agentId !== meta.id) return;
@@ -756,8 +769,9 @@ export class WorkerPool {
       let report: ChangeReport = { changes: [], otherChanges: [] };
       let gitReport: GitReport | undefined;
       try { ({ changeReport: report, gitReport } = await collect()); } catch { /* keep the empty lists */ }
+      const finishedAt = Date.now();
       return {
-        worker: meta.id, role: args.role, status, ...(meta.model ? { model: meta.model } : {}), durationMs: Date.now() - started, requests, ...report, roster: this.roster(),
+        worker: meta.id, role: args.role, status, ...(meta.model ? { model: meta.model } : {}), durationMs: finishedAt - started, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...report, roster: this.roster(),
         ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(),
         ...(record ? { record: record.dir } : {}),
       };
@@ -809,6 +823,7 @@ export class WorkerPool {
       // One deadline per assignment: base `assignmentMs`, pushed out by `extensionMs` (at most `maxExtensions` times) each time it expires while the worker is
       // still active (src/orchestration/run/extension.ts). Cancellation wins at every point: `aborted` comes back at once, in an extension window too.
       const deadline = ExtendableDeadline.fromLimits(limits, { baseMs: limits.assignmentMs });
+      deadlineInfo = deadlineInfoOf(deadline);
       const manager = this.manager;
       const waited = await waitExtendable({
         deadline, signal, stage: `${meta.id} ${args.role}`, scope: "assignment",
@@ -818,6 +833,7 @@ export class WorkerPool {
           extensions.push({ ...extension, reasons: [...extension.reasons] });
           record?.appendEvent(extensionEvent(extension));
           record?.update({ extensions: extensions.map(granted => ({ ...granted, reasons: [...granted.reasons] })) });
+          deadlineInfo = deadlineInfoOf(deadline);
           progress();
         },
       });
@@ -841,7 +857,8 @@ export class WorkerPool {
         await this.retire(meta.id); retired.push(meta.id);
         retirementLines.push(`${meta.id} retired: context nearly full; start a new worker with the contract and evidence`);
       }
-      const durationMs = Date.now() - started;
+      const finishedAt = Date.now();
+      const durationMs = finishedAt - started;
       const data = outcome.result.data && typeof outcome.result.data === "object" ? outcome.result.data as Record<string, unknown> : {};
       const roleData = ["status", "reason", "passed", "issues", "cause"].filter(key => data[key] !== undefined).map(key => `${key}: ${typeof data[key] === "string" ? data[key] : JSON.stringify(data[key])}`);
       if (Array.isArray(data.outputs)) roleData.push(`outputs: ${data.outputs.length}`);
@@ -849,7 +866,7 @@ export class WorkerPool {
       const roster = this.roster();
       const gitLines = gitReport ? formatGitReport(gitReport) : [];
       const details: TaskDetails = {
-        worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, ...(meta.model ? { model: meta.model } : {}), durationMs, requests, ...changeReport, roster,
+        worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, ...(meta.model ? { model: meta.model } : {}), durationMs, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...changeReport, roster,
         ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(), ...(record ? { record: record.dir } : {}),
       };
       finishRecord("done", details, { summary: meta.summary });
@@ -887,7 +904,7 @@ export class WorkerPool {
       }
       await audit?.close();
       if (this.workers.has(meta.id)) this.idle(meta);
-      args.onProgress?.([]);
+      args.onProgress?.([], timingNow());
     }
   }
 }

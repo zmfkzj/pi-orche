@@ -8,7 +8,8 @@ import {
   type ConcurrentActivitySummary, type ConcurrentSessionsResult, type DetectConcurrentSessionsOptions,
 } from "./concurrent-sessions.js";
 import { describeSource, discoverOrcheConfig, NoRouteError, type ConcurrentSessionsSettings, type ConfigSource } from "./config.js";
-import { describeProgress } from "./progress.js";
+import { describeProgress, extendDeadline, initialDeadline, type DeadlineInfo, type RunTiming } from "./progress.js";
+import { resolveRunLimits } from "../orchestration/limits.js";
 import { describeWorkspaceChanges, inspectSubmodules, type SubmoduleState } from "../orchestration/workspace.js";
 import type { RouteConfig } from "../orchestration/routing.js";
 import { createRunRecord, pruneRecordsOnce, resolveRecords, type ResolvedRecords, type RunRecord } from "./records.js";
@@ -32,8 +33,16 @@ export interface OrcheRunArgs {
   projectTrusted: boolean;
   /** Tool/command cancellation. */
   signal?: AbortSignal;
-  /** Receives the latest progress lines (newest last) whenever one is added. */
-  onProgress?: (lines: readonly string[]) => void;
+  /**
+   * Receives the latest progress lines (newest last) whenever one is added, with the run's {@link RunTiming} (when it started, the deadline as it
+   * stands) so that a UI can show the elapsed time and the cap next to them.
+   */
+  onProgress?: (lines: readonly string[], timing?: RunTiming) => void;
+  /**
+   * Called once when execution starts, before any progress line exists: when it started and the initial deadline, with the lines to show (the
+   * concurrent-session warning, if any). With a warning the first {@link OrcheRunArgs.onProgress} call carries the timing instead.
+   */
+  onTiming?: (timing: RunTiming, lines: readonly string[]) => void;
   /**
    * The calling Pi session (`ctx.sessionManager`): its file and id are never reported as another session, and its
    * directory locates the session store scanned for other sessions.
@@ -65,6 +74,13 @@ export interface OrcheRunDetails {
   status: RunReport["status"];
   taskClass: RunReport["taskClass"];
   durationMs: number;
+  /**
+   * When the run started and ended (epoch ms) and the deadline as it stood at the end (cap, extensions used / allowed); UI-only, like the same keys
+   * of every partial update (see {@link RunTiming}). Absent in results recorded before they existed.
+   */
+  startedAt?: number;
+  finishedAt?: number;
+  deadline?: DeadlineInfo;
   config: string;
   ignoredConfigs: readonly string[];
   tasks: number;
@@ -288,6 +304,8 @@ export class OrcheController {
   }
 
   private async execute(args: OrcheRunArgs, signal: AbortSignal): Promise<OrcheOutcome> {
+    /** When this call started doing work: the origin of the elapsed time the UI shows (`details.startedAt`). */
+    const startedAt = Date.now();
     const sessionModel = args.model ? `${args.model.provider}/${args.model.id}` : undefined;
     const agentDir = this.options.agentDir ?? getAgentDir();
     const config = await discoverOrcheConfig({
@@ -296,6 +314,16 @@ export class OrcheController {
       projectTrusted: args.projectTrusted,
       session: { model: sessionModel, thinking: args.thinking },
     });
+    // The deadline the UI shows next to the elapsed time: the run's own (runOrchestrated resolves the same limits from `routes.limits`), moved by each
+    // `deadline_extended` event below. UI-only: a run whose limits cannot be shown is still a run.
+    let deadline: DeadlineInfo | undefined;
+    try {
+      const limits = resolveRunLimits(config.routes.limits);
+      deadline = initialDeadline(limits.overallMs, limits, startedAt);
+    } catch { /* no deadline display */ }
+    /** The clock the run's deadline counts from: the `run_started` event's, until it arrives this call's start. */
+    let deadlineOrigin = startedAt;
+    const timing = (): RunTiming => ({ startedAt, ...(deadline ? { deadline } : {}) });
     // Records: the manifest, the event stream and every sub-session's transcript, under <agent dir>/orche/records and never in the
     // workspace (see records.ts). Best effort: a run without a record is still a run.
     const resolved = resolveRecords({ agentDir, cwd: args.cwd, settings: config.records });
@@ -347,11 +375,17 @@ export class OrcheController {
         const byModel = (models[actor] ??= {});
         byModel[event.model] = (byModel[event.model] ?? 0) + 1;
       }
+      if (event.type === "run_started") {
+        deadlineOrigin = event.timestamp;
+        if (deadline && deadline.extensionsUsed === 0) deadline = { ...deadline, deadlineAt: deadlineOrigin + deadline.capMs };
+      } else if (event.type === "deadline_extended" && deadline) {
+        deadline = extendDeadline(deadline, { n: event.extension, max: event.maxExtensions, extensionMs: event.extensionMs, scope: event.scope, overallDeadline: event.overallDeadline }, deadlineOrigin);
+      }
       const line = describeProgress(event);
       if (!line) return;
       if (event.type === "concurrent_sessions_detected") {
         appeared = line;
-        args.onProgress?.(progressLines());
+        args.onProgress?.(progressLines(), timing());
         return;
       }
       if (event.type === "worker_activity" || event.type === "coordinator_activity") {
@@ -373,9 +407,10 @@ export class OrcheController {
           activityActor = undefined;
         }
       }
-      args.onProgress?.(progressLines());
+      args.onProgress?.(progressLines(), timing());
     };
-    if (concurrent) args.onProgress?.(progressLines());
+    // The first update: with a concurrent-session warning it is the progress update that carries the timing, else a timing-only one.
+    if (concurrent) args.onProgress?.(progressLines(), timing()); else args.onTiming?.(timing(), progressLines());
     let report: RunReport;
     try {
       report = await (this.options.run ?? runOrchestrated)({
@@ -421,6 +456,10 @@ export class OrcheController {
       usage: { ...totals, models, contextWindows },
       ...(latest ? { concurrentSessions: latest.activity } : {}),
     });
+    // The extensions the report lists are authoritative for the final deadline (a run that emitted no events still shows what it was granted).
+    const lastExtension = report.extensions?.at(-1);
+    if (deadline && lastExtension && lastExtension.n > deadline.extensionsUsed) deadline = extendDeadline(deadline, lastExtension, deadlineOrigin);
+    const finishedAt = Date.now();
     return {
       report,
       text,
@@ -432,6 +471,7 @@ export class OrcheController {
         status: report.status,
         taskClass: report.taskClass,
         durationMs: report.finishedAt - report.startedAt,
+        startedAt, finishedAt, ...(deadline ? { deadline } : {}),
         config: describeSource(config.source),
         ignoredConfigs: config.ignored,
         tasks: report.tasks.length,

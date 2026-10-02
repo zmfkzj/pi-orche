@@ -259,7 +259,7 @@ export function asLiveness(value: Liveness | SessionLiveness | undefined): Liven
   return { active: value.active, reasons: value.active ? [`${value.id} ${value.detail}`] : [], sessions: [value] };
 }
 
-/** `not extended: no activity in the last 2m` | `extension budget 3/3 used` | undefined (extending is disabled: there is nothing to explain). */
+/** `not extended: no activity in the last 2m` | `extension budget 10/10 used` | undefined (extending is disabled: there is nothing to explain). */
 export function describeNotExtended(result: Pick<NotExtended, "reason" | "n" | "max" | "windowMs">): string | undefined {
   if (result.reason === "idle") return `not extended: no activity in the last ${formatDuration(result.windowMs)}`;
   if (result.reason === "budget") return `extension budget ${result.n}/${result.max} used`;
@@ -272,7 +272,7 @@ export function withNotExtended(message: string, notExtended: Pick<NotExtended, 
   return reason ? `${message} (${reason})` : message;
 }
 
-/** The progress line: `⏱ timeout extended 1/3 (+30m): W2 bash running 12m, cpu progressing; coordinator streaming`. At most `maxReasons` reasons are shown. */
+/** The progress line: `⏱ timeout extended 1/10 (+30m): W2 bash running 12m, cpu progressing; coordinator streaming`. At most `maxReasons` reasons are shown. */
 export function formatExtensionProgress(extension: { n: number; max: number; extensionMs: number; reasons: readonly string[] }, maxReasons = 4): string {
   const shown = extension.reasons.slice(0, Math.max(1, maxReasons));
   const more = extension.reasons.length - shown.length;
@@ -280,14 +280,14 @@ export function formatExtensionProgress(extension: { n: number; max: number; ext
   return `⏱ timeout extended ${extension.n}/${extension.max} (+${formatDuration(extension.extensionMs)}): ${reasons}`;
 }
 
-/** One line per extension for the report: `1/3 at 30m, overall "implement backlog": W2 bash running 12m, cpu progressing`. */
+/** One line per extension for the report: `1/10 at 30m, overall "implement backlog": W2 bash running 12m, cpu progressing`. */
 export function formatExtensionLine(extension: DeadlineExtension): string {
   const both = extension.scope === "phase" && extension.overallExtended ? " (overall extended too)" : "";
   return `${extension.n}/${extension.max} at ${formatDuration(extension.elapsedMs)}, ${extension.scope} "${extension.stage}"${both}: ${extension.reasons.join("; ") || "still active"}`;
 }
 
 /**
- * The final report's part about extensions: `Timeout extensions: 2/3 used (+30m each)` and one indented line per extension, then why the
+ * The final report's part about extensions: `Timeout extensions: 2/10 used (+30m each)` and one indented line per extension, then why the
  * last deadline was not extended when it expired anyway (`notExtended`). Empty when there is nothing to tell.
  */
 export function formatExtensionSummary(extensions: readonly DeadlineExtension[], options: { maxExtensions: number; extensionMs?: number; notExtended?: Pick<NotExtended, "reason" | "n" | "max" | "windowMs"> }): string[] {
@@ -306,7 +306,8 @@ export type DeadlineExtendedEvent = Extract<CoordinatorEvent, { type: "deadline_
 export function extensionEvent(extension: DeadlineExtension): DeadlineExtendedEvent {
   return {
     type: "deadline_extended", timestamp: extension.at, scope: extension.scope, stage: extension.stage, extension: extension.n,
-    maxExtensions: extension.max, extensionMs: extension.extensionMs, newDeadline: extension.newDeadline, reasons: [...extension.reasons],
+    maxExtensions: extension.max, extensionMs: extension.extensionMs, newDeadline: extension.newDeadline, overallDeadline: extension.overallDeadline,
+    reasons: [...extension.reasons],
   };
 }
 

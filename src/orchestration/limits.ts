@@ -3,7 +3,9 @@ import { DEFAULT_LIVENESS_WINDOW_MS } from "../agent/liveness.js";
 /**
  * Time caps are milliseconds; zero is an immediate cap, not unlimited. `overallMs` is the BASE cap: while a run (or an orche_task
  * assignment) is still actively working when a deadline expires, it is extended by `extensionMs`, at most `maxExtensions` times in
- * total (see src/orchestration/run/extension.ts), so the hard ceiling is `overallMs + maxExtensions * extensionMs`.
+ * total (see src/orchestration/run/extension.ts), so the hard ceiling is `overallMs + maxExtensions * extensionMs`: with the defaults
+ * (30 min base, 10 extensions of 30 min) 30 min + 10 × 30 min = 5 h 30 min. Both keys can be set in the `limits` object of
+ * `orche.config.json` (user: `<agentDir>/orche.config.json`, project: `.pi/orche.config.json`).
  */
 export interface RunLimits {
   overallMs: number;
@@ -14,9 +16,9 @@ export interface RunLimits {
   decisionRepairs: number;
   /** Soft model-request budget per worker assignment (0 disables). */
   assignmentRequests: number;
-  /** How far an expired deadline is pushed out when the run is still active. */
+  /** How far an expired deadline is pushed out when the run is still active (default 30 minutes). */
   extensionMs: number;
-  /** Extensions allowed per run / per task assignment, shared by every deadline of it (a non-negative integer; 0 disables extending). */
+  /** Extensions allowed per run / per task assignment, shared by every deadline of it (a non-negative integer; default 10; 0 disables extending). */
   maxExtensions: number;
   /** "Still active" means: some model output, tool event or progressing command within this window before the deadline. */
   activityWindowMs: number;
@@ -32,7 +34,7 @@ export const defaultRunLimits: RunLimits = {
   decisionRepairs: 2,
   assignmentRequests: 150,
   extensionMs: 1_800_000,
-  maxExtensions: 3,
+  maxExtensions: 10,
   activityWindowMs: DEFAULT_LIVENESS_WINDOW_MS,
 };
 
