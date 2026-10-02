@@ -15,7 +15,12 @@ function baseRoutes(baseModel: string): RouteConfig {
 }
 export const piRoutes = baseRoutes(piModel);
 export const promptVariants: Readonly<Record<string, string | null>> = { C0: null, C1: 'prompts/c1-engineering-discipline.md', C2: 'prompts/c2-omp-derived.md' };
-export const studyArms: Readonly<Record<string, { promptVariant: string; advisors: boolean }>> = { C0: { promptVariant: 'C0', advisors: false }, C1: { promptVariant: 'C1', advisors: false }, C2: { promptVariant: 'C2', advisors: false }, A0: { promptVariant: 'C0', advisors: false }, A1: { promptVariant: 'C0', advisors: true } };
+/** Advisor routes of the advisor arms. A1 is the proposed high-end configuration; A2 keeps verification-audit on the cheap route of the user's production config (only `advisor` differs). */
+const advisorRouteSets: Readonly<Record<string, Record<string, RouteSettings>>> = {
+  'high-end': { advisor: { model: 'cliproxyapi/claude-opus-5-5', thinking: 'xhigh' }, 'advisor-plan': { model: 'cliproxyapi/gpt-6-astra', thinking: 'xhigh' } },
+  'cheap-audit': { advisor: { model: 'cliproxyapi/gpt-6-luna', thinking: 'low' }, 'advisor-plan': { model: 'cliproxyapi/gpt-6-astra', thinking: 'xhigh' } },
+};
+export const studyArms: Readonly<Record<string, { promptVariant: string; advisors: keyof typeof advisorRouteSets | false }>> = { C0: { promptVariant: 'C0', advisors: false }, C1: { promptVariant: 'C1', advisors: false }, C2: { promptVariant: 'C2', advisors: false }, A0: { promptVariant: 'C0', advisors: false }, A1: { promptVariant: 'C0', advisors: 'high-end' }, A2: { promptVariant: 'C0', advisors: 'cheap-audit' } };
 export interface AllowedModelEffortPair { actor: string; model: string; effort: string; route?: string }
 export interface StudyArmMetadata { name: string; baseModel: string; promptVariant: string; advisors: ResolvedAdvisor[]; advisorRoutes: Record<string, RouteSettings>; providerExtensions: readonly string[]; allowedModelEffortPairs: AllowedModelEffortPair[] }
 export interface StudyArm extends StudyArmMetadata { routes: RouteConfig }
@@ -27,7 +32,7 @@ export function buildStudyArm(name: string, baseModel = piModel): StudyArm {
   const piRoutes = baseRoutes(baseModel);
   const routes = parseRouteConfig(definition.advisors ? {
     ...piRoutes,
-    routes: { ...piRoutes.routes, advisor: { model: 'cliproxyapi/claude-opus-5-5', thinking: 'xhigh' }, 'advisor-plan': { model: 'cliproxyapi/gpt-6-astra', thinking: 'xhigh' } },
+    routes: { ...piRoutes.routes, ...advisorRouteSets[definition.advisors] },
     providerExtensions: ['npm:@router-for-me/pi-cliproxyapi-provider'],
     advisors: [
       { preset: 'plan-review', enabled: true, route: 'advisor-plan', triggers: [{ on: 'coordinator_decision', decisions: ['assign'], await: true }] },
