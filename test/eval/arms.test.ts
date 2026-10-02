@@ -14,7 +14,7 @@ const row = (model: string, effort: string, actor?: string) => ({ type: 'provide
 
 describe('study arm registry', () => {
   it('keeps prompt arms unchanged and makes A0 identical to C0 except for its name', () => {
-    expect(Object.keys(studyArms)).toEqual(['C0','C1','C2','A0','A1']);
+    expect(Object.keys(studyArms)).toEqual(['C0','C1','C2','A0','A1','A2']);
     for (const name of ['C0','C1','C2','A0']) {
       const arm = buildStudyArm(name);
       expect(arm.routes).toEqual(piRoutes);
@@ -55,6 +55,24 @@ describe('study arm registry', () => {
     ]);
     expect(arm.routes.advisors?.every(advisor => advisor.enabled === true)).toBe(true);
     expect(arm.allowedModelEffortPairs).toHaveLength(3);
+  });
+  it('A2 differs from A1 only in the verification-audit route (cheap production advisor)', () => {
+    const a1 = buildStudyArm('A1', 'cliproxyapi/gpt-6.1-sol'), a2 = buildStudyArm('A2', 'cliproxyapi/gpt-6.1-sol');
+    expect(a2.promptVariant).toBe('C0');
+    expect(a2.advisorRoutes).toEqual({ advisor: { model: 'cliproxyapi/gpt-6-luna', thinking: 'low' }, 'advisor-plan': { model: 'cliproxyapi/gpt-6-astra', thinking: 'xhigh' } });
+    const { advisor: _a1, ...a1Rest } = a1.routes.routes, { advisor: _a2, ...a2Rest } = a2.routes.routes;
+    expect(a2Rest).toEqual(a1Rest);
+    expect(a2.routes.default).toEqual(a1.routes.default);
+    expect(a2.routes.providerExtensions).toEqual(a1.routes.providerExtensions);
+    expect(a2.advisors).toEqual(a1.advisors);
+    expect(a2.allowedModelEffortPairs).toEqual([
+      { actor: 'non-advisor', model: 'cliproxyapi/gpt-6.1-sol', effort: 'high' },
+      { actor: 'advisor:plan-review', model: 'cliproxyapi/gpt-6-astra', effort: 'xhigh', route: 'advisor-plan' },
+      { actor: 'advisor:verification-audit', model: 'cliproxyapi/gpt-6-luna', effort: 'low', route: 'advisor' },
+    ]);
+    expect(extractPiRequestUsage(jsonl([row('cliproxyapi/gpt-6-luna','low','advisor:verification-audit')]), a2).validModelEffort).toBe(true);
+    for (const invalid of [row('cliproxyapi/gpt-6-luna','low'), row('cliproxyapi/claude-opus-5-5','xhigh','advisor:verification-audit'), row('cliproxyapi/gpt-6-luna','low','advisor:plan-review')]) expect(extractPiRequestUsage(jsonl([invalid]), a2).validModelEffort).toBe(false);
+    expect(extractPiRequestUsage(jsonl([row('cliproxyapi/gpt-6-luna','low','advisor:verification-audit')]), a1).validModelEffort).toBe(false);
   });
   it('records the resolved arm in runner command/overlay and passes its routes', async () => {
     const outDir = await mkdtemp(join(tmpdir(), 'arm-runner-'));

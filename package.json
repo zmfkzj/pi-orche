@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@ast-grep/napi": "^0.45.3",
+    "sharp": "^0.34.5",
     "typescript": "^5.9.3"
   },
   "peerDependencies": {
@@ -22,9 +23,9 @@
     "@sinclair/typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.99.1",
-    "@earendil-works/pi-ai": "0.99.1",
-    "@earendil-works/pi-coding-agent": "0.99.1",
+    "@earendil-works/pi-agent-core": "1.0.0",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-coding-agent": "1.0.0",
     "@sinclair/typebox": "^0.34.41",
     "@types/node": "^24.0.0",
     "tsx": "^4.20.6",

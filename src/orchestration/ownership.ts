@@ -3,7 +3,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { normalizeOwnedPath, type TaskItem } from "./backlog.js";
 
 /** Tools that write files through an explicit `path` argument; guarded before they run. */
-export const WRITE_TOOLS: ReadonlySet<string> = new Set(["edit", "write", "ast_rewrite"]);
+export const WRITE_TOOLS: ReadonlySet<string> = new Set(["edit", "write", "ast_rewrite", "generate_image"]);
 /** Assignment kinds that may write at all, and then only to the worker's owned files. */
 export const WRITING_KINDS: ReadonlySet<string> = new Set(["implement", "fix", "game-asset", "video"]);
 

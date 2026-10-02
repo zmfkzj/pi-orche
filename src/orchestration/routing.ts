@@ -11,12 +11,15 @@ export type MainMode = (typeof MAIN_MODES)[number];
 export const DEFAULT_MAIN_MODE: MainMode = "auto";
 export interface ModelRoute { role: string; model: string; thinking?: ThinkingLevel; extendedContext?: boolean }
 export interface RouteSettings { readonly model: string; readonly thinking?: ThinkingLevel; readonly extendedContext?: boolean }
+export interface ImageSettings { readonly model: string; readonly timeoutMs?: number }
 export interface RouteConfig {
   readonly routes: Readonly<Record<string, RouteSettings>>;
   readonly default?: RouteSettings;
   readonly advisors?: readonly AdvisorConfig[];
   /** Pi package sources (installed at user scope) whose extensions register model providers for orche's own runtime. */
   readonly providerExtensions?: readonly string[];
+  /** Raster generation for game-asset/video tasks; the provider must be loaded into orche's runtime. */
+  readonly images?: ImageSettings;
   /** Default for routes that do not say: use the curated maximum context window of models that have one (see src/pi/extended-context.ts). */
   readonly extendedContext?: boolean;
   /** Shell commands the verifier must run (e.g. ["npm test"]); without them it discovers the project's own checks. */
@@ -53,7 +56,7 @@ function parseSettings(value: unknown, location: string): RouteSettings {
 export function parseRouteConfig(value: unknown): RouteConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config: expected object");
   const config = value as Record<string, unknown>;
-  if (Object.keys(config).some(key => key !== "routes" && key !== "default" && key !== "advisors" && key !== "providerExtensions" && key !== "extendedContext" && key !== "verifyCommands" && key !== "mainMode" && key !== "workers" && key !== "limits" && key !== "audit")) throw new RouteConfigError("config: unknown field");
+  if (Object.keys(config).some(key => key !== "routes" && key !== "default" && key !== "advisors" && key !== "providerExtensions" && key !== "extendedContext" && key !== "verifyCommands" && key !== "mainMode" && key !== "workers" && key !== "limits" && key !== "audit" && key !== "images")) throw new RouteConfigError("config: unknown field");
   let limits: Partial<RunLimits> | undefined;
   if (config.limits !== undefined) {
     try { limits = parseRunLimits(config.limits, "config.limits"); }
@@ -98,12 +101,22 @@ export function parseRouteConfig(value: unknown): RouteConfig {
     ...(config.default !== undefined ? { default: parseSettings(config.default, "config.default") } : {}),
     ...(advisors ? { advisors } : {}),
     ...(providerExtensions ? { providerExtensions } : {}),
+    ...(config.images !== undefined ? { images: parseImages(config.images) } : {}),
     ...(config.extendedContext !== undefined ? { extendedContext: config.extendedContext } : {}),
     ...(verifyCommands ? { verifyCommands } : {}),
     ...(config.workers !== undefined ? { workers: parseWorkers(config.workers) } : {}),
     ...(config.mainMode !== undefined ? { mainMode: config.mainMode as MainMode } : {}),
   };
 }
+function parseImages(value: unknown): ImageSettings {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.images: expected object");
+  const images = value as Record<string, unknown>;
+  if (Object.keys(images).some(key => key !== "model" && key !== "timeoutMs")) throw new RouteConfigError("config.images: unknown field");
+  if (typeof images.model !== "string" || !/^[^\s/:]+\/[^\s:]+$/.test(images.model)) throw new RouteConfigError("config.images.model: expected provider/modelId");
+  if (images.timeoutMs !== undefined && (typeof images.timeoutMs !== "number" || !Number.isFinite(images.timeoutMs) || images.timeoutMs <= 0)) throw new RouteConfigError("config.images.timeoutMs: expected a positive finite number");
+  return { model: images.model, ...(images.timeoutMs !== undefined ? { timeoutMs: images.timeoutMs as number } : {}) };
+}
+
 function parseAudit(value: unknown): AuditSettings {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.audit: expected object");
   const audit = value as Record<string, unknown>;

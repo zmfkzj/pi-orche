@@ -15,6 +15,7 @@ import { orchestrationResultSchemas } from "../orchestration/result-schemas.js";
 import { resolveRoute, resolveSpecialistRoute } from "../orchestration/routing.js";
 import { WorkspaceAudit, type WorkspaceChange } from "../orchestration/workspace.js";
 import { WORKER_TOOL_NAMES } from "../tools/index.js";
+import { createGenerateImageTool } from "../tools/generate-image.js";
 import { loadProviderExtensions, type ProviderExtensionHost } from "../pi/provider-extensions.js";
 import { describeSource, discoverOrcheConfig, NoRouteError } from "./config.js";
 import { OrcheController, type OrcheRunArgs } from "./controller.js";
@@ -47,6 +48,7 @@ interface Worker {
   lastUsed: number;
   tree?: string;
   contextWindow?: number;
+  imageConfig?: string;
   latestInput: number;
   timer?: ReturnType<typeof setTimeout>;
 }
@@ -66,7 +68,7 @@ function scopePaths(files: readonly string[]): string[] {
     return path;
   }))];
 }
-function assignmentPrompt(args: TaskParameters, commands: readonly string[]): string {
+function assignmentPrompt(args: TaskParameters, commands: readonly string[], imagesAvailable = false): string {
   const task = args.context?.trim() ? `${args.request}\n\n## Context from the requesting session\n${args.context.trim()}` : args.request;
   const scope = args.files === undefined ? "anywhere inside the workspace" : JSON.stringify(args.files);
   const instructions: Record<TaskRole, string> = {
@@ -77,7 +79,8 @@ function assignmentPrompt(args: TaskParameters, commands: readonly string[]): st
     video: `Video production. Plan and produce video deliverables inside the write scope ${scope}: script/storyboard/shot list, editing and compositing, motion graphics (code-based such as Remotion, Motion Canvas or manim when the project uses them), subtitles (SRT/VTT), audio mixing and loudness normalization, thumbnails and final encodes. Use locally available tools via bash (check command -v first: ffmpeg/ffprobe, the project's own video tooling, Python, ImageMagick, sox). Render a short draft before long renders; make final encode settings explicit (container, video codec, resolution, fps, CRF/bitrate, pixel format, audio codec/sample rate, loudness target). Verify every output with ffprobe (duration, streams, resolution, fps) and inspect extracted frames with the read tool. Leave no intermediate files in the workspace unless requested. report_result {kind:"video",summary,data:{status:"done" or "blocked",reason,outputs:[{path,type,spec}],evidence:[checks]}}. spec is a descriptive string.`,
     verify: `Independent read-only review. DO NOT EDIT. ${commands.length ? `Run configured checks via bash: ${commands.map(command => JSON.stringify(command)).join(", ")}` : "Discover and run the project's own checks via bash (package.json, Makefile, pyproject.toml, Cargo.toml, go.mod or CI config)"}, plus focused checks; inspect source and git diff. report_result {kind:"verify",summary,data:{passed:boolean,evidence:[commands and outcomes],issues:[{file,description}]}}. passed:true requires actual passing checks; unexecuted checks never count as passed.`,
   };
-  return `Assignment: ${args.role}. You work alone; there are no peers or backlog.\n${task}\n\n${instructions[args.role]}`;
+  const rasterInstructions = imagesAvailable ? '\nUse generate_image for raster art (sprites, textures, icons, concept art, thumbnails). Request background "transparent" for sprites/icons. Always pass width/height for the exact target size: the gateway ignores size and returns roughly 1254x1254. Use kernel "nearest" for pixel art. Inspect results with read. Keep procedural/SVG generation for vector or pixel-exact assets. Record the generation prompt in outputs[].spec.' : "";
+  return `Assignment: ${args.role}. You work alone; there are no peers or backlog.\n${task}\n\n${instructions[args.role]}${rasterInstructions}`;
 }
 
 export class WorkerPool {
@@ -188,6 +191,17 @@ export class WorkerPool {
         this.providers.set(key, host);
       }
     }
+    const images = args.role === "game-asset" || args.role === "video" ? config.routes.images : undefined;
+    const imageConfig = images ? JSON.stringify(images) : undefined;
+    // Tools cannot be unregistered from a session. Recreate only when this optional
+    // capability changes, so neither tool registration nor old instructions leak roles.
+    if (worker && worker.imageConfig !== imageConfig) {
+      await this.retire(worker.id);
+      retired.push(worker.id);
+      retirementLines.push(`${worker.id} retired: image tool configuration changed; starting a fresh worker.`);
+      worker = undefined;
+    }
+    const reusedContext = !!worker;
     this.manager ??= new AgentManager(runtime, { resultSchemas: orchestrationResultSchemas, requestBudget: limits.assignmentRequests });
     if (!worker) {
       if (this.workers.size >= 3) {
@@ -198,13 +212,14 @@ export class WorkerPool {
         retirementLines.push(`${oldest.id} retired: least-recently-used idle worker (pool cap 3).`);
       }
       const id = `W${this.nextId++}`;
-      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0 };
+      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig };
       const meta = worker;
       const routeRole = args.role === "answer" ? "analyst" : args.role === "explore" ? config.routes.workers?.explorerRoles?.[0] ?? "explorer-path" : args.role === "implement" ? "implementer" : args.role === "verify" ? "verifier" : args.role;
       const route = args.role === "game-asset" || args.role === "video"
         ? resolveSpecialistRoute(config.routes, routeRole, (provider, id) => !!runtime.getModel(provider, id))
         : resolveRoute(config.routes, routeRole);
-      await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, tools: [...WORKER_TOOL_NAMES], peerMessaging: false,
+      const customTools = images ? [createGenerateImageTool({ cwd: args.cwd, runtime, images })] : [];
+      await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name)], customTools, peerMessaging: false,
         instructions: `${workerInstructions}\nYou work alone: there are no peer workers. Reply in the language of the request.`,
         onContextWindow: info => { meta.contextWindow = info.contextWindow; },
         toolGuard: (name, input) => this.guard(meta, name, input),
@@ -240,9 +255,9 @@ export class WorkerPool {
       audit = await WorkspaceAudit.open(args.cwd);
       before = await audit?.snapshot();
       const stale = audit && before && meta.tree ? await audit.diff(meta.tree, before) : [];
-      const prefix = args.worker ? `## Stale context: workspace changes since your previous assignment\n${stale.length ? stale.map(change => `${change.path} (${change.status})`).join("\n") : audit ? "No files changed." : "Workspace audit unavailable (not a git work tree)."}\nRe-read changed evidence before relying on retained context.\n\n` : "";
+      const prefix = reusedContext ? `## Stale context: workspace changes since your previous assignment\n${stale.length ? stale.map(change => `${change.path} (${change.status})`).join("\n") : audit ? "No files changed." : "Workspace audit unavailable (not a git work tree)."}\nRe-read changed evidence before relying on retained context.\n\n` : "";
       signal.throwIfAborted();
-      this.manager.assign(meta.id, args.role, prefix + assignmentPrompt({ ...args, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? []));
+      this.manager.assign(meta.id, args.role, prefix + assignmentPrompt({ ...args, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images));
       assigned = true;
       if (signal.aborted) abort();
       progress();
