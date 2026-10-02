@@ -1,4 +1,5 @@
 import type { TimeoutDiagnostic } from "./run/deadline.js";
+import type { ExtensionScope } from "./run/extension.js";
 import type { CoordinatorDecision, Phase, TaskClass } from "./phases.js";
 import type { AdvisorTriggerKind } from "../advisor/config.js";
 import type { TaskItem, TaskStatus } from "./backlog.js";
@@ -8,6 +9,13 @@ export interface AdvisorNote { domain: string; text: string; evidence?: string }
 export type CoordinatorEvent =
   | { type: "run_started"; timestamp: number; mode: RunMode; problem: string }
   | { type: "run_timeout"; timestamp: number; diagnostic: TimeoutDiagnostic }
+  /**
+   * A deadline expired while the run was still actively working and was pushed out by `extensionMs` instead of timing out.
+   * `extension` is the running count of the run (n of `maxExtensions`, shared by every deadline); `newDeadline` is the new
+   * epoch-ms deadline of `scope` (a phase cap extended past the overall deadline extends that too, still counted once);
+   * `reasons` are the liveness lines that justified it (e.g. `W2 bash running 12m, output 20s ago`).
+   */
+  | { type: "deadline_extended"; timestamp: number; scope: ExtensionScope; stage: string; extension: number; maxExtensions: number; extensionMs: number; newDeadline: number; reasons: readonly string[] }
   | { type: "request_classified"; timestamp: number; taskClass: TaskClass; workerCount: number; language: string; reason: string }
   | { type: "phase_changed"; timestamp: number; from: Phase | "INIT"; to: Phase }
   | { type: "coordinator_usage"; timestamp: number; model: string; input: number; output: number; cacheRead: number; cacheWrite: number }

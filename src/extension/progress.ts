@@ -1,4 +1,5 @@
 import type { RunEvent } from "../orchestration/events.js";
+import { formatExtensionProgress } from "../orchestration/run/extension.js";
 import { CREATED_FILE_ADVICE } from "../orchestration/artifacts.js";
 
 /** One short human line per notable run event; undefined for events that are not worth showing. */
@@ -12,8 +13,13 @@ export function describeProgress(event: RunEvent): string | undefined {
       return `coordinator deciding (${event.phase})`;
     case "coordinator_reconsidering":
       return "coordinator reconsidering after advisor notes";
-    case "run_timeout":
-      return `${event.diagnostic.scope} timeout at ${event.diagnostic.stage} (${event.diagnostic.elapsedMs}ms; cap ${event.diagnostic.effectiveCapMs}ms)`;
+    case "run_timeout": {
+      // Why the deadline was not extended (no activity in the window / budget used up) is part of the line.
+      const why = event.diagnostic.extensions?.notExtended?.message;
+      return `${event.diagnostic.scope} timeout at ${event.diagnostic.stage} (${event.diagnostic.elapsedMs}ms; cap ${event.diagnostic.effectiveCapMs}ms)${why ? `: ${why}` : ""}`;
+    }
+    case "deadline_extended":
+      return formatExtensionProgress({ n: event.extension, max: event.maxExtensions, extensionMs: event.extensionMs, reasons: event.reasons });
     case "request_classified":
       return `classified as ${event.taskClass} with ${event.workerCount} worker${event.workerCount === 1 ? "" : "s"}`;
     case "phase_changed":

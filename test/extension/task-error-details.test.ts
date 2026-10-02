@@ -147,7 +147,8 @@ describe("orche_task failure keeps its details", () => {
 
   it("a timed-out assignment is a failure with the timeout status, and the worker is idle again", async () => {
     const entered = deferred();
-    const { pool, execute } = await fixture(() => [blocked(entered)], { limits: { assignmentMs: 150 } });
+    // A worker waiting for the model counts as active, so with the default extension budget this wait would be extended: this test is about the plain timeout (see task-extension.test.ts).
+    const { pool, execute } = await fixture(() => [blocked(entered)], { limits: { assignmentMs: 150, maxExtensions: 0 } });
     const error = await failure(execute());
     expect(error.message).toBe("Worker W1 timed out after 150ms");
     expect(error.failure).toEqual({ kind: "failed", status: "timeout", reason: "Worker W1 timed out after 150ms" });

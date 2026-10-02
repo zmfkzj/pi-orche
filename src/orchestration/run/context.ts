@@ -1,4 +1,5 @@
-import { abortable, runLiveness, timeoutError } from "./deadline.js";
+import { abortable, expiry, runDeadline, runLiveness } from "./deadline.js";
+import type { PhaseDeadline } from "./extension.js";
 import type { AgentManager } from "../../agent/agent-manager.js";
 import type { ManagerEvent, Outcome } from "../../agent/agent-handle.js";
 import type { LivenessEvent } from "../../agent/liveness.js";
@@ -13,8 +14,9 @@ export function emit(ctx: RunContext, event: CoordinatorEvent | LivenessEvent): 
   if (ctx.reported) return;
   ctx.options.sink?.(event);
 }
+/** `cap` ms from now, bounded by the run's CURRENT overall deadline (the base cap plus the extensions granted so far). */
 export function remaining(ctx: RunContext, cap: number): number {
-  return Math.max(0, Math.min(cap, ctx.limits.overallMs - (Date.now() - ctx.startedAt)));
+  return runDeadline(ctx).remaining(cap);
 }
 /** Spawn guard: a cancelled run must not create new sessions after teardown began. */
 export async function spawnWorker(ctx: RunContext, options: Parameters<AgentManager["spawn"]>[0]): Promise<void> {
@@ -37,16 +39,27 @@ export { runLiveness };
 export function ensureLiveness(ctx: RunContext): void {
   ctx.liveness ??= (now, windowMs) => runLiveness(ctx, now, windowMs);
 }
-export async function bounded<T>(ctx: RunContext, operation: Promise<T>, cap: number, label: string): Promise<T> {
+/**
+ * Bounds `operation` by a phase cap: `cap` ms from now (a new {@link PhaseDeadline}), or the given phase, whose deadline is then shared with
+ * whoever else waits on it. Both are bounded by the run's overall deadline. When the bounding deadline expires while the run is still
+ * actively working the deadline is extended and the timer re-armed (see `expiry`); otherwise the run is cancelled with the timeout.
+ * The user's cancellation (the run's signal) always wins at once: a timer that fires on top of it neither extends nor times out.
+ */
+export async function bounded<T>(ctx: RunContext, operation: Promise<T>, cap: number | PhaseDeadline, label: string): Promise<T> {
   ctx.stage = label;
-  const effective = remaining(ctx, cap);
+  const phase = typeof cap === "number" ? runDeadline(ctx).phase(cap, label) : cap;
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      const error = timeoutError(ctx, label, cap, effective, effective < cap ? "overall" : "phase");
-      ctx.cancel?.(error);
-      reject(error);
-    }, effective);
+    const arm = () => {
+      timer = setTimeout(() => {
+        if (ctx.signal?.aborted) { reject(ctx.signal.reason ?? new Error("cancelled")); return; }
+        const error = expiry(ctx, label, phase);
+        if (!error) { arm(); return; }
+        ctx.cancel?.(error);
+        reject(error);
+      }, phase.remainingMs());
+    };
+    arm();
   });
   try { return await Promise.race([abortable(operation, ctx.signal), timeout]); }
   finally { clearTimeout(timer); }
@@ -79,14 +92,16 @@ export function bufferMainNote(ctx: RunContext, note: NoteMessage): void {
 }
 export async function waitOutcomes(ctx: RunContext, kind: string, expected: Set<string>): Promise<Outcome[]> {
   const outcomes: Outcome[] = [];
-  ctx.stage = `${kind} outcomes`;
-  const effective = remaining(ctx, ctx.limits.assignmentMs);
-  const deadline = Date.now() + effective;
+  const stage = `${kind} outcomes`;
+  ctx.stage = stage;
+  const phase = runDeadline(ctx).phase(ctx.limits.assignmentMs, stage);
   while (expected.size) {
-    const event = await ctx.manager.wait("any", Math.max(0, deadline - Date.now()));
+    const event = await ctx.manager.wait("any", phase.remainingMs());
     if (event.type === "timeout") {
       if (ctx.signal?.aborted) throw ctx.signal.reason;
-      const error = timeoutError(ctx, `${kind} outcomes`, ctx.limits.assignmentMs, effective, effective < ctx.limits.assignmentMs ? "overall" : "phase");
+      if (ctx.cancelled) throw new Error("cancelled"); // a closed manager answers at once: never spin on it
+      const error = expiry(ctx, stage, phase);
+      if (!error) continue; // extended (the run is still active), or not due yet: wait again until the new deadline
       ctx.cancel?.(error);
       throw error;
     }

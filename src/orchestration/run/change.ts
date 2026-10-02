@@ -1,4 +1,4 @@
-import { timeoutError } from "./deadline.js";
+import { expiry, runDeadline } from "./deadline.js";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ResultPayload } from "../../agent/agent-handle.js";
 import { READ_ONLY_TOOL_NAMES, WORKER_TOOL_NAMES } from "../../tools/index.js";
@@ -6,7 +6,7 @@ import { dedupeProposals, isBacklogDone, readyTasks, updateTaskStatus, type Back
 import { coveringTasks } from "../ownership.js";
 import { resolveRoute } from "../routing.js";
 import { implementationPrompt, verificationPrompt, workerInstructions } from "../prompts.js";
-import { apply, bounded, bufferMainNote, emit, remaining, spawnWorker, waitOutcomes } from "./context.js";
+import { apply, bounded, bufferMainNote, emit, spawnWorker, waitOutcomes } from "./context.js";
 import { decide } from "./decisions.js";
 import { auditWorkspace } from "./audit.js";
 import type { RunContext } from "./types.js";
@@ -28,9 +28,10 @@ export async function spawnChangeWorkers(ctx: RunContext, runtime: ModelRuntime)
 async function executeBacklog(ctx: RunContext): Promise<string[]> {
   const kind = ctx.state.fixRounds ? "fix" : "implement";
   const blockedReasons: string[] = [];
-  ctx.stage = `${kind} backlog`;
-  const effective = remaining(ctx, ctx.limits.assignmentMs);
-  const deadline = Date.now() + effective;
+  const stage = `${kind} backlog`;
+  ctx.stage = stage;
+  // One phase deadline for the whole backlog: the owner settle below and the outcome waits share it (and its extensions).
+  const phase = runDeadline(ctx).phase(ctx.limits.assignmentMs, stage);
   while (!isBacklogDone(ctx.state.tasks)) {
     for (const task of readyTasks(ctx.state.tasks)) {
       if (ctx.manager.get(task.owner!).status !== "idle") continue;
@@ -44,17 +45,19 @@ async function executeBacklog(ctx: RunContext): Promise<string[]> {
       // A ready task whose owner is still settling an interruption waits for it instead of failing.
       const busy = [...new Set(readyTasks(ctx.state.tasks).map(task => task.owner!))].filter(owner => ctx.manager.get(owner).status !== "idle");
       if (busy.length) {
-        await bounded(ctx, Promise.all(busy.map(owner => ctx.manager.settle(owner))), Math.max(0, deadline - Date.now()), "Owner settle");
+        await bounded(ctx, Promise.all(busy.map(owner => ctx.manager.settle(owner))), phase, "Owner settle");
         const stillBusy = busy.filter(owner => ctx.manager.get(owner).status !== "idle");
         if (!stillBusy.length) continue;
         throw new Error(`Backlog blocked: owners not idle: ${stillBusy.join(", ")}`);
       }
       throw new Error("Backlog blocked: no task can run");
     }
-    const event = await ctx.manager.wait("any", Math.max(0, deadline - Date.now()));
+    const event = await ctx.manager.wait("any", phase.remainingMs());
     if (event.type === "timeout") {
       if (ctx.signal?.aborted) throw ctx.signal.reason;
-      const error = timeoutError(ctx, `${kind} backlog`, ctx.limits.assignmentMs, effective, effective < ctx.limits.assignmentMs ? "overall" : "phase");
+      if (ctx.cancelled) throw new Error("cancelled"); // a closed manager answers at once: never spin on it
+      const error = expiry(ctx, stage, phase);
+      if (!error) continue; // extended (the run is still active), or not due yet: wait again until the new deadline
       ctx.cancel?.(error);
       throw error;
     }

@@ -47,7 +47,7 @@ describe("OrcheController", () => {
       await rm(join(cwd, ".pi", "orche.config.json"));
       await rm(join(agentDir, "orche.config.json"));
       expect((await ctl.run(input)).source.kind).toBe("session");
-      expect(resolveRunLimits(seen[2]!.routes.limits).overallMs).toBe(3600000);
+      expect(resolveRunLimits(seen[2]!.routes.limits).overallMs).toBe(1800000); // the default base cap is 30 minutes (extended while the run is active)
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
@@ -150,6 +150,36 @@ describe("OrcheController", () => {
       "advisor verification-audit: concern → delivered → queued for the coordinator's next decision",
       "T2 done", "A1 implement · 12 requests · last tool: bash",
     ]);
+  });
+
+  it("shows a timeout extension as a milestone that supersedes stale activity, and reports the extensions the run used", async () => {
+    const reasons = ["W2 bash running 12m, cpu progressing", "coordinator streaming 3s ago"];
+    const extension = {
+      n: 1, max: 3, scope: "overall" as const, stage: "implement backlog", extensionMs: 1_800_000, at: 1_800_000, elapsedMs: 1_800_000,
+      previousDeadline: 1_800_000, newDeadline: 3_600_000, overallDeadline: 3_600_000, overallExtended: true, reasons,
+    };
+    const lines: string[][] = [];
+    const c = await controller(async options => {
+      options.sink?.({ type: "worker_activity", timestamp: 0, agentId: "A1", assignmentId: "x", kind: "implement", requestCount: 3, lastToolName: "bash" });
+      options.sink?.({ type: "deadline_extended", timestamp: 1, scope: "overall", stage: "implement backlog", extension: 1, maxExtensions: 3, extensionMs: 1_800_000, newDeadline: 3_600_000, reasons });
+      return report({ extensions: [extension] });
+    });
+    const outcome = await c.controller.run(args(c.model, { onProgress: (progress: readonly string[]) => lines.push([...progress]) }));
+    expect(lines).toEqual([
+      ["A1 implement · 3 requests · last tool: bash"],
+      // A milestone, and the activity line that preceded it is gone (the deadline moved: what it said is stale).
+      ["⏱ timeout extended 1/3 (+30m): W2 bash running 12m, cpu progressing; coordinator streaming 3s ago"],
+    ]);
+    expect(outcome.details.progress).toEqual(["⏱ timeout extended 1/3 (+30m): W2 bash running 12m, cpu progressing; coordinator streaming 3s ago"]);
+    expect(outcome.details.extensions).toEqual([extension]);
+    expect(formatOutcome(outcome)).toContain("final answer\n\nTimeout extensions: 1/3 used (+30m each)\n  1/3 at 30m, overall \"implement backlog\": W2 bash running 12m, cpu progressing; coordinator streaming 3s ago");
+  });
+
+  it("has nothing to say about extensions when the run used none", async () => {
+    const c = await controller(async () => report());
+    const outcome = await c.controller.run(args(c.model));
+    expect(outcome.details).not.toHaveProperty("extensions");
+    expect(formatOutcome(outcome)).not.toContain("Timeout extensions");
   });
 
 

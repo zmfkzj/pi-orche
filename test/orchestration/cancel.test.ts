@@ -47,7 +47,7 @@ describe("RunOptions.signal", () => {
     expect(report).toMatchObject({ status: "failed", summary: "cancelled" });
     expect(report.cancellation).toMatchObject({
       scope: "cancelled", phase: "EXECUTE", stage: "implement backlog", elapsedMs: expect.any(Number), timestamp: expect.any(Number),
-      configuredCapMs: 3600000, effectiveCapMs: expect.any(Number),
+      configuredCapMs: 1800000, effectiveCapMs: expect.any(Number),
       workers: expect.arrayContaining([
         expect.objectContaining({ id: "A1", status: "running", kind: "implement", taskId: "change", assignmentId: expect.any(String), requestCount: 1, lastToolName: "read", lastToolAt: expect.any(Number), lastActivityAt: expect.any(Number) }),
         expect.objectContaining({ id: "V1", status: "idle" }),
@@ -70,7 +70,7 @@ describe("RunOptions.signal", () => {
       decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "edit" }),
       decision({ type: "assign", tasks: [task] }),
       tool("read", { path: "nonexistent.txt" }), blocked,
-    ], new AbortController(), events, { overallMs: 250, assignmentMs: 1000, decisionMs: 1000 });
+    ], new AbortController(), events, { overallMs: 250, assignmentMs: 1000, decisionMs: 1000, maxExtensions: 0 });
     expect(report.summary).toContain("overall timeout at implement backlog");
     expect(report.timeouts?.[0]).toMatchObject({ scope: "overall", workers: expect.arrayContaining([expect.objectContaining({
       id: "A1", taskId: "change", kind: "implement", assignmentId: expect.any(String), requestCount: 1,

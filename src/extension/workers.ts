@@ -30,6 +30,7 @@ import { OrcheController, recordsIgnorePaths, routesSummary, withConcurrentWarni
 import type { ConcurrentActivitySummary } from "./concurrent-sessions.js";
 import { errorToolResult, failureReason, type ErrorToolResult, type ToolFailure, type ToolFailureKind } from "./tool-result.js";
 import { createRunRecord, pruneRecordsOnce, resolveRecords, workerSessionFile } from "./records.js";
+import { ExtendableDeadline, extensionEvent, formatExtensionProgress, formatExtensionSummary, waitExtendable, withNotExtended, type DeadlineExtension } from "../orchestration/run/extension.js";
 
 export const orcheTaskParameters = Type.Object({
   role: Type.Union([Type.Literal("explore"), Type.Literal("answer"), Type.Literal("implement"), Type.Literal("verify"), Type.Literal("game-asset"), Type.Literal("video")]),
@@ -86,6 +87,10 @@ export interface TaskDetails {
   git?: GitReport;
   /** The record directory of this assignment (`<agent dir>/orche/records/<session>/<timestamp>_task-<id>`: `run.json`); the worker's transcript is the one session file it keeps across its assignments. Absent when records are off. */
   record?: string;
+  /** Present when the assignment's deadline was extended because the worker was still active (see src/orchestration/run/extension.ts): every extension granted, in order. */
+  extensions?: DeadlineExtension[];
+  /** Present when the assignment timed out with extensions enabled: why the expired deadline was not extended (`idle`: no activity in the activity window; `budget`: all extensions used). */
+  notExtended?: { reason: "idle" | "budget"; message: string };
 }
 /** The workspace/git part of a task's details. */
 type ChangeReport = Pick<TaskDetails, "changes" | "otherChanges" | "submodules" | "headMoved">;
@@ -698,6 +703,13 @@ export class WorkerPool {
       },
     });
     let requests = 0;
+    /** The extensions this assignment's deadline was granted (progress lines, details, record), and why the last expiry was not extended. */
+    const extensions: DeadlineExtension[] = [];
+    let notExtended: TaskDetails["notExtended"];
+    const extensionDetails = (): Pick<TaskDetails, "extensions" | "notExtended"> => ({
+      ...(extensions.length ? { extensions: extensions.map(extension => ({ ...extension, reasons: [...extension.reasons] })) } : {}),
+      ...(notExtended ? { notExtended: { ...notExtended } } : {}),
+    });
     let audit: WorkspaceAudit | undefined;
     let before: string | undefined;
     /** Changed by the worker, and the rest of what changed in the workspace meanwhile. */
@@ -712,7 +724,8 @@ export class WorkerPool {
     const abort = () => { if (assigned) stopPromise ??= this.manager!.stop(meta.id); };
     const progress = () => {
       const snapshot = this.manager!.get(meta.id);
-      args.onProgress?.([...(warning ? [warning] : []), `${meta.id} ${args.role} · ${requests} requests${snapshot.lastToolName ? ` · last tool: ${snapshot.lastToolName}` : ""}`]);
+      // The extension lines stay (they are part of how the task is going), ahead of the live status line, which stays last: the UI status shows the last line.
+      args.onProgress?.([...(warning ? [warning] : []), ...extensions.map(extension => formatExtensionProgress(extension)), `${meta.id} ${args.role} · ${requests} requests${snapshot.lastToolName ? ` · last tool: ${snapshot.lastToolName}` : ""}`]);
     };
     const unsubscribe = this.manager.subscribe(event => {
       if (!("agentId" in event) || event.agentId !== meta.id) return;
@@ -745,7 +758,7 @@ export class WorkerPool {
       try { ({ changeReport: report, gitReport } = await collect()); } catch { /* keep the empty lists */ }
       return {
         worker: meta.id, role: args.role, status, ...(meta.model ? { model: meta.model } : {}), durationMs: Date.now() - started, requests, ...report, roster: this.roster(),
-        ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}),
+        ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(),
         ...(record ? { record: record.dir } : {}),
       };
     };
@@ -762,6 +775,7 @@ export class WorkerPool {
         workspace: { changes: details.changes, otherChanges: details.otherChanges, ...(details.submodules ? { submodules: details.submodules } : {}), ...(details.headMoved ? { headMoved: details.headMoved } : {}) },
         ...(details.git ? { git: details.git } : {}),
         ...(retired.length ? { retired } : {}),
+        ...(details.extensions ? { extensions: details.extensions } : {}), ...(details.notExtended ? { notExtended: details.notExtended } : {}),
         ...(concurrent ? { concurrentSessions: concurrent.activity } : {}),
       });
     };
@@ -792,9 +806,31 @@ export class WorkerPool {
       assigned = true;
       if (signal.aborted) abort();
       progress();
-      const waited = await this.manager.wait(meta.id, limits.assignmentMs);
-      if (signal.aborted) { await stopPromise; throw new WorkerFailure("cancelled", "cancelled", "cancelled"); }
-      if (waited.type === "timeout") { await this.manager.stop(meta.id); await this.manager.wait(meta.id, 0); throw new WorkerFailure(`Worker ${meta.id} timed out after ${limits.assignmentMs}ms`, "failed", "timeout"); }
+      // One deadline per assignment: base `assignmentMs`, pushed out by `extensionMs` (at most `maxExtensions` times) each time it expires while the worker is
+      // still active (src/orchestration/run/extension.ts). Cancellation wins at every point: `aborted` comes back at once, in an extension window too.
+      const deadline = ExtendableDeadline.fromLimits(limits, { baseMs: limits.assignmentMs });
+      const manager = this.manager;
+      const waited = await waitExtendable({
+        deadline, signal, stage: `${meta.id} ${args.role}`, scope: "assignment",
+        wait: ms => manager.wait(meta.id, ms),
+        liveness: (now, windowMs) => this.workerLiveness(meta.id, now, windowMs),
+        onExtended: extension => {
+          extensions.push({ ...extension, reasons: [...extension.reasons] });
+          record?.appendEvent(extensionEvent(extension));
+          record?.update({ extensions: extensions.map(granted => ({ ...granted, reasons: [...granted.reasons] })) });
+          progress();
+        },
+      });
+      if (signal.aborted || waited.type === "aborted") { await stopPromise; throw new WorkerFailure("cancelled", "cancelled", "cancelled"); }
+      if (waited.type === "timeout") {
+        const why = waited.notExtended;
+        if (why.message && why.reason !== "disabled") notExtended = { reason: why.reason, message: why.message };
+        await this.manager.stop(meta.id); await this.manager.wait(meta.id, 0);
+        // `overallCapMs` is the base plus the extensions it received; the first line carries why it was not extended, the rest what was extended.
+        const history = formatExtensionSummary(extensions, { maxExtensions: deadline.maxExtensions, extensionMs: deadline.extensionMs });
+        const headline = withNotExtended(`Worker ${meta.id} timed out after ${deadline.overallCapMs}ms`, why);
+        throw new WorkerFailure(history.length ? `${headline}\n${history.join("\n")}` : headline, "failed", "timeout");
+      }
       if (waited.type !== "outcome") throw new WorkerFailure(`Worker ${meta.id} returned no result`, "failed", "no_result");
       const outcome = waited.outcome;
       if (outcome.status !== "completed" || !outcome.result) throw new WorkerFailure(outcome.error ?? outcome.lastText ?? `Worker ${meta.id}: ${outcome.status}`, "failed", outcome.status);
@@ -814,10 +850,10 @@ export class WorkerPool {
       const gitLines = gitReport ? formatGitReport(gitReport) : [];
       const details: TaskDetails = {
         worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, ...(meta.model ? { model: meta.model } : {}), durationMs, requests, ...changeReport, roster,
-        ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...(record ? { record: record.dir } : {}),
+        ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(), ...(record ? { record: record.dir } : {}),
       };
       finishRecord("done", details, { summary: meta.summary });
-      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, "", meta.summary, ...roleData, "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, `Workers: ${roster}`, ...retirementLines,
+      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, "", meta.summary, ...roleData, "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
         ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: consider orche_run (multi) — ${note}`] : [])].join("\n");
       return { text: withRecordLine(text, record?.dir), details };
     } catch (error) {

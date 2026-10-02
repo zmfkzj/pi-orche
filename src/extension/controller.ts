@@ -12,6 +12,7 @@ import { describeProgress } from "./progress.js";
 import { describeWorkspaceChanges, inspectSubmodules, type SubmoduleState } from "../orchestration/workspace.js";
 import type { RouteConfig } from "../orchestration/routing.js";
 import { createRunRecord, pruneRecordsOnce, resolveRecords, type ResolvedRecords, type RunRecord } from "./records.js";
+import { formatExtensionSummary } from "../orchestration/run/extension.js";
 
 export class OrcheBusyError extends Error {
   override readonly name = "OrcheBusyError";
@@ -79,6 +80,8 @@ export interface OrcheRunDetails {
   cancelled: boolean;
   progress: readonly string[];
   timeouts?: RunReport["timeouts"];
+  /** Timeout extensions the run was granted (a deadline that expired while the run was still working, pushed out), in order; absent when none. */
+  extensions?: RunReport["extensions"];
   cancellation?: RunReport["cancellation"];
   cleanup?: RunReport["cleanup"];
   /** Other pi sessions that were active on the repository when the run started (the run was flagged with `concurrentActivity`). */
@@ -365,7 +368,7 @@ export class OrcheController {
         if (milestones.length > PROGRESS_LINES) milestones.shift();
         // Lifecycle/decision milestones supersede stale activity. Advice does not interrupt
         // active work: keep that activity visible while its NOTE waits for the next decision.
-        if (event.type === "phase_changed" || (event.type === "task_finished" && event.agentId === activityActor) || event.type === "run_timeout" || event.type === "coordinator_deciding" || event.type === "coordinator_reconsidering") {
+        if (event.type === "phase_changed" || (event.type === "task_finished" && event.agentId === activityActor) || event.type === "run_timeout" || event.type === "deadline_extended" || event.type === "coordinator_deciding" || event.type === "coordinator_reconsidering") {
           activity = undefined;
           activityActor = undefined;
         }
@@ -413,6 +416,7 @@ export class OrcheController {
       },
       ...(report.cleanup ? { cleanup: report.cleanup } : {}),
       ...(report.timeouts ? { timeouts: report.timeouts } : {}),
+      ...(report.extensions ? { extensions: report.extensions } : {}),
       ...(report.cancellation ? { cancellation: report.cancellation } : {}),
       usage: { ...totals, models, contextWindows },
       ...(latest ? { concurrentSessions: latest.activity } : {}),
@@ -437,6 +441,7 @@ export class OrcheController {
         cancelled,
         progress: progressLines(),
         ...(report.timeouts ? { timeouts: report.timeouts } : {}),
+        ...(report.extensions ? { extensions: report.extensions } : {}),
         ...(report.cancellation ? { cancellation: report.cancellation } : {}),
         ...(report.cleanup ? { cleanup: report.cleanup } : {}),
         ...(latest ? { concurrentSessions: latest.activity } : {}),
@@ -476,10 +481,13 @@ export function formatOutcome(outcome: OrcheOutcome): string {
     const tool = worker.lastToolName ? `, last tool ${worker.lastToolName}${worker.lastToolAt !== undefined ? ` ${Math.max(0, Math.round((diagnostic.timestamp - worker.lastToolAt) / 1000))}s ago` : ""}` : "";
     return `${worker.id} ${worker.kind} (${worker.requestCount ?? 0} requests${tool})`;
   }).join(", ") || "none"}`;
+  // The extensions the run used (and what each justified), for finished, failed and cancelled runs alike; nothing when it never needed one.
+  const granted = report.extensions ?? [];
+  const extensions = granted.length ? `\n\n${formatExtensionSummary(granted, { maxExtensions: granted[0]!.max, extensionMs: granted[0]!.extensionMs }).join("\n")}` : "";
   // Other pi sessions seen at the start come first, for finished, failed and cancelled runs alike.
   const concurrent = outcome.concurrentWarning ? `${outcome.concurrentWarning}\n\n` : "";
   // Other pi sessions seen during the run come first; where the transcripts and the manifest are (records.ts) comes last.
-  return withRecordLine(`${concurrent}${head}\n\n${outcome.text}${preserved}${cancellation}${workspace}${cleanup}`, details.record);
+  return withRecordLine(`${concurrent}${head}\n\n${outcome.text}${preserved}${cancellation}${extensions}${workspace}${cleanup}`, details.record);
 }
 
 /** `text` followed by the `Record: <dir>` line of a result that has a record (finished, failed or cancelled alike); `text` itself when it has none. */

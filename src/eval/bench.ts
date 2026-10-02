@@ -8,6 +8,7 @@ import { runOrchestrated, type RunReport, type RunOptions } from '../orchestrati
 import { runBaseline } from './baseline.js';
 import { problemA, prepareWorkspace, gradeWorkspace, type GradeResult, type PreparedWorkspace } from './scenarios.js';
 import { computeMetrics, computeUsageByKind, numericMetrics, statistics, type RunMetrics, type TokenTotals } from './metrics.js';
+import { fixedBudgetLimits } from './limits.js';
 
 export interface Trial { mode: RunMode; trial: number; round?: number; artifactDir: string; report: RunReport; grade: GradeResult | null; metrics: RunMetrics; usageByKind: Record<string, TokenTotals>; error?: string }
 export async function runBenchmark(args: { runs: number; modes: readonly RunMode[]; config: string; outputDir?: string; limits?: RunOptions['limits'] }) {
@@ -16,7 +17,9 @@ export async function runBenchmark(args: { runs: number; modes: readonly RunMode
   const routes = await loadRouteConfig(args.config);
   const outputDir = args.outputDir ?? join('results', 'bench', new Date().toISOString().replaceAll(':', '-'));
   await mkdir(outputDir, { recursive: true });
-  await writeFile(join(outputDir, 'config.json'), JSON.stringify({ routes, runs: args.runs, modes: args.modes, limits: args.limits ?? null }, null, 2));
+  // Fixed budgets for both arms: no activity-aware timeout extension unless the caller passes `maxExtensions` itself (see ./limits.ts).
+  const limits = fixedBudgetLimits(args.limits);
+  await writeFile(join(outputDir, 'config.json'), JSON.stringify({ routes, runs: args.runs, modes: args.modes, limits }, null, 2));
   const trials: Trial[] = [];
   for (let i = 1; i <= args.runs; i++) for (const mode of args.modes) {
     const artifactDir = join(outputDir, `${mode}-${i}`);
@@ -30,7 +33,7 @@ export async function runBenchmark(args: { runs: number; modes: readonly RunMode
     try {
       workspace = await prepareWorkspace();
       const run = mode === 'baseline' ? runBaseline : runOrchestrated;
-      report = await run({ problem: problemA.userProblemPrompt, cwd: workspace.dir, routes, sink: event => events.push(event), ...(args.limits ? { limits: args.limits } : {}) });
+      report = await run({ problem: problemA.userProblemPrompt, cwd: workspace.dir, routes, sink: event => events.push(event), limits });
       grade = await gradeWorkspace(workspace.dir);
     } catch (caught) {
       error = caught instanceof Error ? caught.stack ?? caught.message : String(caught);

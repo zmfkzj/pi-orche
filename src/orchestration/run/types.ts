@@ -14,6 +14,7 @@ import type { AuditSettings } from "../artifacts.js";
 import type { WorkspaceActivity } from "./activity.js";
 
 import type { Liveness, LivenessTracker } from "../../agent/liveness.js";
+import type { DeadlineExtension, ExtendableDeadline } from "./extension.js";
 import type { SessionRecords } from "../../agent/records.js";
 import type { RunLimits } from "../limits.js";
 export { defaultRunLimits, type RunLimits } from "../limits.js";
@@ -96,6 +97,12 @@ export interface RunReport {
   /** The `answer` was produced by a run that ended `failed` (violation, timeout, error): it may be incomplete. */
   answerFromFailedRun?: boolean;
   timeouts?: readonly TimeoutDiagnostic[];
+  /**
+   * Deadline extensions the run was granted (a deadline that expired while the run was still actively working, pushed out by
+   * `limits.extensionMs`; at most `limits.maxExtensions`, shared by all deadlines), in order. Present only when there were some;
+   * each also went out as a `deadline_extended` event.
+   */
+  extensions?: readonly DeadlineExtension[];
   /** Signal cancellation diagnostics captured before sessions are stopped; summary stays "cancelled". */
   cancellation?: CancellationDiagnostic;
   cleanup?: { incomplete: boolean; pending: readonly string[] };
@@ -114,6 +121,13 @@ export interface RunContext {
   /** Resolved new-file policy (programmatic options over routes.audit). */
   auditSettings?: AuditSettings;
   startedAt: number;
+  /**
+   * The run's deadline: `startedAt + limits.overallMs` plus the extensions granted, and the one extension budget that every deadline
+   * of the run (overall and each phase cap) shares. Everything that was `startedAt + base cap` reads it (`remaining`, `bounded`,
+   * the outcome waits, the cleanup budget, the diagnostics). Created with the context; a context built by hand gets one on first
+   * use (see `runDeadline` in deadline.ts).
+   */
+  deadline: ExtendableDeadline;
   state: PhaseState;
   manager: AgentManager;
   coordinator?: AgentSession;
@@ -122,8 +136,9 @@ export interface RunContext {
   /**
    * Is the run still actively working? Aggregates the coordinator and every worker (see {@link Liveness} and src/agent/liveness.ts):
    * `active` when any of them had model output, a tool event, tool output or a progressing bash heartbeat within `windowMs`
-   * (default 2 minutes), or has a request / non-bash tool in flight within its bound. Read-only; it changes no
-   * timeout. Installed together with the first session of the run (see `ensureLiveness` in context.ts); {@link runLiveness} works on any context.
+   * (default `limits.activityWindowMs`, 2 minutes), or has a request / non-bash tool in flight within its bound. It is only read: the
+   * deadlines ask it when they expire (see `expiry` in deadline.ts) and extend while it says active. Installed together with the
+   * first session of the run (see `ensureLiveness` in context.ts); {@link runLiveness} works on any context.
    */
   liveness?: (now?: number, windowMs?: number) => Liveness;
   /** Records bookkeeping of the coordinator session (created with it); see {@link RunOptions.records}. */

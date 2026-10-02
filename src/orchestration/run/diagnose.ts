@@ -1,4 +1,4 @@
-import { timeoutError } from "./deadline.js";
+import { expiry, runDeadline } from "./deadline.js";
 import { randomUUID } from "node:crypto";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Value } from "@sinclair/typebox/value";
@@ -8,7 +8,7 @@ import type { BacklogProposal } from "../backlog.js";
 import { resolveRoute } from "../routing.js";
 import { explorationPrompt, proposalPrompt, workerInstructions } from "../prompts.js";
 import { proposalSchema } from "../result-schemas.js";
-import { apply, bounded, emit, remaining, spawnWorker, waitOutcomes } from "./context.js";
+import { apply, bounded, emit, spawnWorker, waitOutcomes } from "./context.js";
 import { decide, explorationPlanProblem } from "./decisions.js";
 import { explorerRolesFor } from "../team.js";
 import { auditWorkspace } from "./audit.js";
@@ -65,14 +65,16 @@ async function converge(ctx: RunContext, cause: string, effects: readonly Coordi
 export async function exploreUntilAccepted(ctx: RunContext): Promise<void> {
   const claims: RootCauseClaim[] = [];
   const finished = new Set<string>();
-  ctx.stage = "Exploration without accepted cause";
-  const effective = remaining(ctx, ctx.limits.explorationMs);
-  const deadline = Date.now() + effective;
+  const stage = "Exploration without accepted cause";
+  ctx.stage = stage;
+  const phase = runDeadline(ctx).phase(ctx.limits.explorationMs, stage);
   while (ctx.state.phase === "EXPLORE") {
-    const event = await ctx.manager.wait("any", Math.max(0, deadline - Date.now()));
+    const event = await ctx.manager.wait("any", phase.remainingMs());
     if (event.type === "timeout") {
       if (ctx.signal?.aborted) throw ctx.signal.reason;
-      const error = timeoutError(ctx, "Exploration without accepted cause", ctx.limits.explorationMs, effective, effective < ctx.limits.explorationMs ? "overall" : "phase");
+      if (ctx.cancelled) throw new Error("cancelled"); // a closed manager answers at once: never spin on it
+      const error = expiry(ctx, stage, phase);
+      if (!error) continue; // extended (the run is still active), or not due yet: wait again until the new deadline
       ctx.cancel?.(error);
       throw error;
     }

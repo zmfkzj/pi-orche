@@ -20,7 +20,8 @@ import { DEFAULT_RECORDS_RETENTION_DAYS, type RecordsSettings } from "./config.j
  *     <ISO-timestamp>_<run|task>-<shortid>/      one directory per orche_run / orche_task assignment ("a record")
  *       run.json                                 manifest: written at start (status "running"), rewritten atomically at the end
  *       events.jsonl                             the RunEvent stream of an orche_run, one bounded JSON per line (`liveness` samples: one
- *                                                compact line when a session's state changes, never per heartbeat; see agent/liveness.ts)
+ *                                                compact line when a session's state changes, never per heartbeat; see agent/liveness.ts;
+ *                                                `deadline_extended`: one line per timeout extension, see orchestration/run/extension.ts)
  *       sessions/<agentId>.jsonl                 pi session JSONL of each sub-session
  *     workers/<workerId>-<spawn-timestamp>.jsonl a persistent orche_task worker's session: one stable file across its assignments
  * ```
@@ -98,6 +99,12 @@ export interface RunManifestFields {
   /** Workspace changes / external changes / ownership violations of the run. */
   workspace?: unknown;
   cleanup?: unknown;
+  /**
+   * Timeout extensions granted to the run / task assignment (a deadline that expired while the work was still active, pushed out by
+   * `limits.extensionMs`; at most `limits.maxExtensions`), in order: `DeadlineExtension[]` of orchestration/run/extension.ts (n, max,
+   * scope, stage, extensionMs, elapsedMs, newDeadline, reasons, ...). Absent when there were none.
+   */
+  extensions?: unknown;
   /** Names relative to the record directory. */
   files: { events?: string; sessions: string };
 }

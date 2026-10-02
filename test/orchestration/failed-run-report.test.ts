@@ -99,7 +99,7 @@ describe("a failed run keeps what it produced", () => {
       decision({ type: "classify", taskClass: "answer", workerCount: 2, language: "en", reason: "read-only" }),
       tool("report_result", { kind: "answer", summary: "ANALYSIS: the value is 0 (core.mjs:1).", data: { evidence: ["core.mjs"] } }),
       blocked,
-    ], { overallMs: 10_000, assignmentMs: 500, decisionMs: 1000 });
+    ], { overallMs: 10_000, assignmentMs: 500, decisionMs: 1000, maxExtensions: 0 });
     const { report } = outcome;
     expect(report.status).toBe("failed");
     expect(report.summary).toContain("timeout");

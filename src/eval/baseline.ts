@@ -19,7 +19,8 @@ const finalSchema = Type.Object({ summary: Type.String({ minLength: 1 }) });
 
 export async function runBaseline(options: RunOptions): Promise<RunReport> {
   const startedAt = Date.now();
-  const limits = resolveRunLimits(options.routes.limits, options.limits);
+  // The baseline arm has no timeout extension: its deadline below is the fixed `startedAt + overallMs`, so whatever `maxExtensions` a config or caller carries is resolved to 0.
+  const limits = resolveRunLimits(options.routes.limits, { ...options.limits, maxExtensions: 0 });
   const emit = (event: CoordinatorEvent) => options.sink?.(event);
   let tasks: readonly TaskItem[] = [], rootCause: string | undefined, phase: Phase | 'INIT' = 'INIT';
   let main: AgentSession | undefined;

@@ -1,4 +1,10 @@
-/** Time caps are milliseconds; zero is an immediate cap, not unlimited. */
+import { DEFAULT_LIVENESS_WINDOW_MS } from "../agent/liveness.js";
+
+/**
+ * Time caps are milliseconds; zero is an immediate cap, not unlimited. `overallMs` is the BASE cap: while a run (or an orche_task
+ * assignment) is still actively working when a deadline expires, it is extended by `extensionMs`, at most `maxExtensions` times in
+ * total (see src/orchestration/run/extension.ts), so the hard ceiling is `overallMs + maxExtensions * extensionMs`.
+ */
 export interface RunLimits {
   overallMs: number;
   explorationMs: number;
@@ -8,16 +14,26 @@ export interface RunLimits {
   decisionRepairs: number;
   /** Soft model-request budget per worker assignment (0 disables). */
   assignmentRequests: number;
+  /** How far an expired deadline is pushed out when the run is still active. */
+  extensionMs: number;
+  /** Extensions allowed per run / per task assignment, shared by every deadline of it (a non-negative integer; 0 disables extending). */
+  maxExtensions: number;
+  /** "Still active" means: some model output, tool event or progressing command within this window before the deadline. */
+  activityWindowMs: number;
 }
 
+/** The derived phase caps are computed from the base overall cap as in {@link resolveRunLimits}: exploration = overall / 3, assignment = overall, decision = overall / 2. */
 export const defaultRunLimits: RunLimits = {
-  overallMs: 3_600_000,
-  explorationMs: 1_200_000,
-  assignmentMs: 3_600_000,
-  decisionMs: 1_800_000,
+  overallMs: 1_800_000,
+  explorationMs: 600_000,
+  assignmentMs: 1_800_000,
+  decisionMs: 900_000,
   maxFixRounds: 1,
   decisionRepairs: 2,
   assignmentRequests: 150,
+  extensionMs: 1_800_000,
+  maxExtensions: 3,
+  activityWindowMs: DEFAULT_LIVENESS_WINDOW_MS,
 };
 
 export class RunLimitsError extends Error {
@@ -39,6 +55,8 @@ export function parseRunLimits(value: unknown, location = "limits"): Partial<Run
       throw new RunLimitsError(`${location}.${key}: expected an integer 0-2`);
     if (key === "assignmentRequests" && !Number.isSafeInteger(number))
       throw new RunLimitsError(`${location}.${key}: expected a non-negative safe integer (0 disables)`);
+    if (key === "maxExtensions" && !Number.isSafeInteger(number))
+      throw new RunLimitsError(`${location}.${key}: expected a non-negative integer (0 disables extensions)`);
     limits[key as keyof RunLimits] = number;
   }
   return limits;

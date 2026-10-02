@@ -183,7 +183,7 @@ it("(i) an overall timeout while the coordinator is streaming names it in the ru
   });
   vi.mocked(createSession).mockResolvedValue(session({ prompt, subscribe: vi.fn((listener: (event: unknown) => void) => { listeners.push(listener); return () => {}; }) as never }));
   const events: RunEvent[] = [];
-  const report = await finish(runOrchestrated(options({ sink: event => events.push(event) })));
+  const report = await finish(runOrchestrated(options({ sink: event => events.push(event), limits: { overallMs: 50, decisionMs: 500, assignmentMs: 500, maxExtensions: 0 } })));
   expect(report.timeouts?.[0]).toMatchObject({
     scope: "overall", stage: "Coordinator decision",
     coordinator: { state: "streaming", active: true },

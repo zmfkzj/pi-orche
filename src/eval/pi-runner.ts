@@ -12,6 +12,7 @@ import { createSession } from '../pi/session-factory.js';
 import { directorySessionRecords } from '../agent/records.js';
 import { runProcess, runnerResultSchema, type RunnerOptions, type RunnerResult, type RunnerUsage, type SessionUsage, type UsageTotals, type UnknownUsageRequest } from './omp-runner.js';
 import { buildStudyArm, matchArmRequest, studyArmMetadata, piModel, promptVariants, type StudyArmMetadata } from './arms.js';
+import { evalRunLimits } from './limits.js';
 export { piModel, piRoutes, promptVariants } from './arms.js';
 
 export interface PiRunnerOptions extends RunnerOptions {
@@ -191,14 +192,16 @@ export async function runPiChild(options: PiRunnerOptions): Promise<RunnerResult
   const observed = await observedPiRuntime(traceFile, variant ? { systemDir: join(options.outDir, 'system-prompts') } : undefined, armMetadata);
   await writeFile(eventsFile, '');
   const startedAt = Date.now();
-  const report = await runOrchestrated({ cwd: options.cwd, problem: options.instruction, routes: arm.routes, modelRuntime: observed.runtime, limits: { overallMs: options.timeoutSec * 1000 }, baseSystemPrompt: variant?.text, sink: event => appendFileSync(eventsFile, JSON.stringify(event) + '\n'), ...(options.recordsDir ? { records: directorySessionRecords(resolve(options.recordsDir)) } : {}) });
+  // A fixed budget: the run's overall cap is the task's timeout and is never extended while the run is busy (see ./limits.ts); the same limits go into the command metadata.
+  const limits = evalRunLimits(options.timeoutSec);
+  const report = await runOrchestrated({ cwd: options.cwd, problem: options.instruction, routes: arm.routes, modelRuntime: observed.runtime, limits, baseSystemPrompt: variant?.text, sink: event => appendFileSync(eventsFile, JSON.stringify(event) + '\n'), ...(options.recordsDir ? { records: directorySessionRecords(resolve(options.recordsDir)) } : {}) });
   await observed.drain();
   const finishedAt = Date.now();
   const usage = extractPiRequestUsage(await readFile(traceFile, 'utf8'), armMetadata);
   await writeFile(join(options.outDir, 'report.json'), JSON.stringify(report, null, 2));
   const status = report.status === 'done' && usage.validModelEffort ? 'done' : 'failed';
   return { status, answer: report.answer ?? report.summary, startedAt, finishedAt, exitCode: status === 'done' ? 0 : 1,
-    ...(status === 'failed' ? { error: report.summary } : {}), usage, command: ['runOrchestrated', JSON.stringify({ routes: arm.routes, arm: armMetadata, limits: { overallMs: options.timeoutSec * 1000 }, ...(variant ? { promptVariant: variant.name, promptSha256: variant.sha256 } : {}) })], overlay: { ...arm.routes, arm: armMetadata } };
+    ...(status === 'failed' ? { error: report.summary } : {}), usage, command: ['runOrchestrated', JSON.stringify({ routes: arm.routes, arm: armMetadata, limits, ...(variant ? { promptVariant: variant.name, promptSha256: variant.sha256 } : {}) })], overlay: { ...arm.routes, arm: armMetadata } };
 }
 
 /** The outer process-group timeout also bounds uncooperative tools/disposal. */
@@ -211,15 +214,17 @@ export async function runPi(options: PiRunnerOptions): Promise<RunnerResult> {
   const root = fileURLToPath(new URL('../../', import.meta.url));
   const args = ['tsx', fileURLToPath(import.meta.url), '--child', input, '--result', output];
   const startedAt = Date.now();
+  // The child runs with exactly these (fixed, never extended) limits: record them in the command metadata too.
+  const limits = evalRunLimits(options.timeoutSec);
   const processResult = await runProcess('npx', args, { cwd: root, timeoutMs: (options.timeoutSec + 30) * 1000, stdoutFile: join(outDir, 'stdout.txt'), stderrFile: join(outDir, 'stderr.txt') });
   try {
     const raw: unknown = JSON.parse(await readFile(output, 'utf8'));
     if (!Value.Check(runnerResultSchema, raw)) throw new Error('Malformed Pi child result');
-    return { ...raw, startedAt, finishedAt: Date.now(), command: ['npx', ...args, JSON.stringify({ arm: armMetadata })] };
+    return { ...raw, startedAt, finishedAt: Date.now(), command: ['npx', ...args, JSON.stringify({ arm: armMetadata, limits })] };
   } catch (error) {
     let usage: RunnerUsage = { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, sessions: [], sessionCount: 0, models: [], thinking: [], complete: false, limitations: ['Pi child did not return a final result'], validModelEffort: false, knownUsageRequests: 0, unknownUsageRequests: { count: 0, requests: [] }, blockedRequests: { count: 0, requests: [] }, enforcedRequests: { count: 0, requests: [] } };
     try { usage = extractPiRequestUsage(await readFile(join(outDir, 'provider-requests.jsonl'), 'utf8'), armMetadata); } catch { /* Explicit partial usage remains. */ }
-    return { status: processResult.timedOut ? 'timeout' : 'failed', answer: '', startedAt, finishedAt: Date.now(), exitCode: processResult.exitCode, error: processResult.stderr || (error instanceof Error ? error.message : String(error)), usage, command: ['npx', ...args, JSON.stringify({ arm: armMetadata })], overlay: { ...arm.routes, arm: armMetadata } };
+    return { status: processResult.timedOut ? 'timeout' : 'failed', answer: '', startedAt, finishedAt: Date.now(), exitCode: processResult.exitCode, error: processResult.stderr || (error instanceof Error ? error.message : String(error)), usage, command: ['npx', ...args, JSON.stringify({ arm: armMetadata, limits })], overlay: { ...arm.routes, arm: armMetadata } };
   }
 }
 

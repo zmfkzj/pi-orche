@@ -128,7 +128,7 @@ describe("LLM coordinator with real persistent Pi sessions", () => {
       return reply("aborted");
     };
     const f = await configured([[plan], [stall], [stall], [stall], []]);
-    const report = await runOrchestrated({ problem: "fix", cwd: outsideGit, routes: f.routes, modelRuntime: f.runtime, limits: { explorationMs: 50 } });
+    const report = await runOrchestrated({ problem: "fix", cwd: outsideGit, routes: f.routes, modelRuntime: f.runtime, limits: { explorationMs: 50, maxExtensions: 0 } });
     expect(report).toMatchObject({ status: "failed", summary: expect.stringContaining("phase timeout at Exploration") });
     expect(report.timeouts?.[0]).toMatchObject({ scope: "phase", configuredCapMs: 50, effectiveCapMs: 50,
       workers: expect.arrayContaining([expect.objectContaining({ id: "A1", kind: "explore", assignmentId: expect.any(String), requestCount: 0, lastActivityAt: expect.any(Number) })]) });

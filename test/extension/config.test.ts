@@ -6,6 +6,7 @@ import {
   DEFAULT_CONCURRENT_SESSIONS, DEFAULT_RECORDS, discoverOrcheConfig, loadOrcheConfigFile, MAX_RECORDS_RETENTION_DAYS, NoRouteError, parseConcurrentSessionsConfig, parseRecordsConfig,
   resolveConcurrentSessions, resolveRecordsSettings,
 } from "../../src/extension/config.js";
+import { resolveRunLimits } from "../../src/orchestration/limits.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -32,6 +33,33 @@ describe("orche config discovery", () => {
     expect((await discoverOrcheConfig({ ...files, projectTrusted: false, session })).routes.limits).toEqual({ decisionMs: 45000 });
     const broken = await layout({ user: { ...cfg("u/user"), limits: { overallMs: -1 } } });
     await expect(discoverOrcheConfig({ ...broken, projectTrusted: true, session })).rejects.toThrow("config.limits.overallMs");
+  });
+
+  it("(i) passes the timeout-extension keys through discovery and validates them like the other limits", async () => {
+    const limits = { overallMs: 600000, extensionMs: 300000, maxExtensions: 2, activityWindowMs: 60000 };
+    const files = await layout({ user: { ...cfg("u/user"), limits } });
+    const found = await discoverOrcheConfig({ ...files, projectTrusted: false, session });
+    expect(found.routes.limits).toEqual(limits); // explicit values only: nothing is prefilled
+    expect(resolveRunLimits(found.routes.limits)).toMatchObject({ ...limits, explorationMs: 200000, assignmentMs: 600000, decisionMs: 300000 });
+    // Absent keys resolve to the defaults (30 minutes, 3 extensions of 30 minutes, a 2 minute activity window); 0 turns extension off.
+    expect(resolveRunLimits(undefined)).toMatchObject({ overallMs: 1_800_000, assignmentMs: 1_800_000, extensionMs: 1_800_000, maxExtensions: 3, activityWindowMs: 120_000 });
+    const off = await layout({ user: { ...cfg("u/user"), limits: { maxExtensions: 0 } } });
+    expect(resolveRunLimits((await discoverOrcheConfig({ ...off, projectTrusted: false, session })).routes.limits).maxExtensions).toBe(0);
+
+    const invalid: [Record<string, unknown>, string][] = [
+      [{ maxExtensions: 1.5 }, "config.limits.maxExtensions: expected a non-negative integer"],
+      [{ maxExtensions: -1 }, "config.limits.maxExtensions: expected a finite non-negative number"],
+      [{ maxExtensions: "3" }, "config.limits.maxExtensions"],
+      [{ extensionMs: -1 }, "config.limits.extensionMs: expected a finite non-negative number"],
+      [{ extensionMs: null }, "config.limits.extensionMs"],
+      [{ activityWindowMs: "2m" }, "config.limits.activityWindowMs"],
+      [{ activityWindowMs: Number.POSITIVE_INFINITY }, "config.limits.activityWindowMs"],
+      [{ maxExtension: 3 }, "config.limits.maxExtension: unknown limit"],
+    ];
+    for (const [bad, message] of invalid) {
+      const broken = await layout({ user: { ...cfg("u/user"), limits: bad } });
+      await expect(discoverOrcheConfig({ ...broken, projectTrusted: false, session }), JSON.stringify(bad)).rejects.toThrow(message);
+    }
   });
 
   it("prefers the trusted project file, then the user file, then the session model", async () => {

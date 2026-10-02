@@ -1,5 +1,5 @@
-import { abortable, cancellationDiagnostic, cleanupWait, timeoutError } from "./run/deadline.js";
-import { remaining } from "./run/context.js";
+import { abortable, cancellationDiagnostic, cleanupWait, expiry } from "./run/deadline.js";
+import { ExtendableDeadline } from "./run/extension.js";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { AgentManager } from "../agent/agent-manager.js";
 import { loadProviderExtensions } from "../pi/provider-extensions.js";
@@ -32,6 +32,8 @@ export async function runOrchestrated(options: RunOptions): Promise<RunReport> {
   const team = resolveTeam(options.routes.workers);
   const ctx: RunContext = {
     options, limits, startedAt,
+    // The run's one deadline: base overallMs plus the extensions granted; the budget of extensions is shared by every deadline of the run.
+    deadline: ExtendableDeadline.fromLimits(limits, { startedAt }),
     team,
     auditSettings: { ...options.routes.audit, ...options.audit },
     state: createPhaseState(limits.maxFixRounds, team.maxWorkers),
@@ -74,20 +76,32 @@ export async function runOrchestrated(options: RunOptions): Promise<RunReport> {
     ctx.cancellation = cancellationDiagnostic(ctx);
     ctx.cancel!(new Error("cancelled"));
   };
-  const overallTimer = setTimeout(() => {
-    if (!controller.signal.aborted) ctx.cancel!(timeoutError(ctx, ctx.stage ?? "run", limits.overallMs, limits.overallMs, "overall"));
-  }, remaining(ctx, limits.overallMs));
+  // The overall timer follows the CURRENT overall deadline: when it fires while the run is still actively working the deadline is
+  // extended and the timer re-armed from it (a phase extension that moved the deadline meanwhile just re-arms it); otherwise the run is
+  // cancelled with the timeout, exactly as before. Cancellation never waits for it: the run's signal does not depend on this timer.
+  let overallTimer: NodeJS.Timeout | undefined;
+  const armOverall = () => {
+    overallTimer = setTimeout(() => {
+      if (controller.signal.aborted) return;
+      const error = expiry(ctx, ctx.stage ?? "run");
+      if (error) ctx.cancel!(error); else armOverall();
+    }, ctx.deadline.overallRemainingMs());
+  };
+  armOverall();
   if (options.signal?.aborted) onAbort(); else options.signal?.addEventListener("abort", onAbort, { once: true });
   let executing = true;
   let failure: string | undefined;
   const pending: string[] = [];
-  const cleanupBudget = () => ctx.signal?.aborted ? 0 : remaining(ctx, limits.overallMs);
+  const cleanupBudget = () => ctx.signal?.aborted ? 0 : ctx.deadline.overallRemainingMs();
   let workspace: RunReport["workspace"];
   let providerDisposed = false;
   const disposeProvider = (host: Awaited<NonNullable<RunContext["providerHost"]>>) => { if (!providerDisposed) { providerDisposed = true; host.dispose(); } };
   const execute = async () => {
     if (ctx.cancelled) return;
-    if (remaining(ctx, limits.overallMs) === 0) { ctx.cancel!(timeoutError(ctx, ctx.stage!, limits.overallMs, 0, "overall")); return; }
+    if (ctx.deadline.overallRemainingMs() === 0) {
+      const error = expiry(ctx, ctx.stage!);
+      if (error) { ctx.cancel!(error); return; }
+    }
     const runtime = options.modelRuntime ?? await (options.createRuntime?.() ?? ModelRuntime.create());
     if (ctx.cancelled) return;
     if (options.routes.providerExtensions?.length) {
@@ -185,6 +199,7 @@ export async function runOrchestrated(options: RunOptions): Promise<RunReport> {
     startedAt, finishedAt, ownershipViolations: ctx.violations,
     ...(workspace ? { workspace } : {}),
     ...(ctx.timeouts?.length ? { timeouts: ctx.timeouts } : {}),
+    ...(ctx.deadline.used ? { extensions: ctx.deadline.extensions } : {}),
     ...(ctx.cancellation ? { cancellation: ctx.cancellation } : {}),
     cleanup: { incomplete: pending.length > 0, pending },
     taskClass: ctx.state.taskClass ?? "unclassified",
