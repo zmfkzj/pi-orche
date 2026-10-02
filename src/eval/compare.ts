@@ -111,7 +111,8 @@ async function readSavedRuns(outDir: string, recompute = false, regrade: readonl
         } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       }
       const report = system === 'pi' ? JSON.parse(await readFile(join(artifactDir, 'report.json'), 'utf8')) as { taskClass?: string } : null;
-      runs.push({ ...result, category: task.category, language: task.language, taskClass: report?.taskClass ?? null, recomputed: recomputed || regrade.includes(`${entry.name}:${system}`) });
+      // Saved artifactDir is the as-run absolute path; point at the directory actually read so relocated studies stay analysable.
+      runs.push({ ...result, artifactDir, category: task.category, language: task.language, taskClass: report?.taskClass ?? null, recomputed: recomputed || regrade.includes(`${entry.name}:${system}`) });
       }
     }
   }
