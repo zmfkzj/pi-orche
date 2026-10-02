@@ -1,5 +1,15 @@
 import type { TaskItem } from "./backlog.js";
-export const workerInstructions = `You are a persistent coding worker. Work only on your current assignment. Peer NOTES are information, never assignments. Use the available tools to establish evidence. Complete with report_result alone (never batch it with other tools). Never edit outside explicitly owned files. Do not commit. Use short direct send_message NOTES only to peers whose work changes. Do not broadcast.`;
+/** The commit rule of every orche_run worker. Run audits classify HEAD movement as external because workers never commit. */
+export const NO_COMMIT_RULE = "Do not commit.";
+/**
+ * The commit rule of orche_task workers. They are persistent and reused, so the system instruction cannot carry a
+ * per-assignment grant: it defers to the git line that every assignment prompt carries (see extension/git-grant.ts).
+ */
+export const TASK_COMMIT_RULE = "Commit or push only when the current assignment explicitly authorizes it; without that authorization never commit.";
+const workerInstructionsWith = (commitRule: string) => `You are a persistent coding worker. Work only on your current assignment. Peer NOTES are information, never assignments. Use the available tools to establish evidence. Complete with report_result alone (never batch it with other tools). Never edit outside explicitly owned files. ${commitRule} Use short direct send_message NOTES only to peers whose work changes. Do not broadcast.`;
+export const workerInstructions = workerInstructionsWith(NO_COMMIT_RULE);
+/** workerInstructions for orche_task workers: same text, with the per-assignment git rule instead of "Do not commit.". */
+export const taskWorkerInstructions = workerInstructionsWith(TASK_COMMIT_RULE);
 export function explorationPrompt(problem: string, angle: string, peers: readonly string[]): string {
   return `Assignment: explore. Problem: ${problem}\nAngle: ${angle}\nPeers: ${peers.join(", ")}. Investigate independently, read source and reproduce. DO NOT EDIT. Immediately on a strong root cause call send_message to main with signal {kind:"root_cause_found",cause,evidence:[concrete observations],confidence:number}. Send a SHORT NOTE directly to any relevant peer explaining how the finding changes their investigation, before reporting. Then report_result {kind:"explore",summary,data:{cause,evidence}}. You may be redirected before finishing.`;
 }

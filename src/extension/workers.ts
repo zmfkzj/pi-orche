@@ -5,12 +5,14 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { AgentManager } from "../agent/agent-manager.js";
 import type { AgentSnapshot } from "../agent/agent-handle.js";
 import { normalizeOwnedPath, type TaskItem } from "../orchestration/backlog.js";
 import { checkWriteRealPath, WRITE_TOOLS, WRITING_KINDS } from "../orchestration/ownership.js";
 import { resolveRunLimits } from "../orchestration/limits.js";
-import { workerInstructions } from "../orchestration/prompts.js";
+import { taskWorkerInstructions } from "../orchestration/prompts.js";
 import { orchestrationResultSchemas } from "../orchestration/result-schemas.js";
 import { resolveRoute, resolveSpecialistRoute } from "../orchestration/routing.js";
 import { WorkspaceAudit, type WorkspaceChange } from "../orchestration/workspace.js";
@@ -28,6 +30,15 @@ export const orcheTaskParameters = Type.Object({
   context: Type.Optional(Type.String({ maxLength: 30_000 })),
   worker: Type.Optional(Type.String()),
   files: Type.Optional(Type.Array(Type.String())),
+  git: Type.Optional(Type.Object({
+    commit: Type.Optional(Type.Boolean({ description: "Authorize git commit for this assignment." })),
+    push: Type.Optional(Type.Boolean({ description: "Authorize git push (implies commit). Never force-push." })),
+    remote: Type.Optional(Type.String({ minLength: 1, description: "Push remote; origin when only branch is given; omit both to push the current branch to its upstream." })),
+    branch: Type.Optional(Type.String({ minLength: 1, description: "Push branch; the current branch when omitted." })),
+  }, {
+    additionalProperties: false,
+    description: "Git grant for THIS assignment only, allowed for implement, game-asset and video (rejected for explore, answer, verify). Set it only when the user explicitly asked in this conversation to commit and/or push; otherwise omit it and the worker will not commit. Scope the commit to this task's files where possible (pass files and name them in request).",
+  })),
 });
 export type TaskParameters = Static<typeof orcheTaskParameters>;
 export type TaskRole = TaskParameters["role"];
@@ -42,6 +53,8 @@ export interface TaskDetails {
   retired?: string[];
   /** Other pi sessions that were active on the repository when the task started. */
   concurrentSessions?: ConcurrentActivitySummary;
+  /** Present when the assignment carried a git grant: the commits it created and whether a push was detected. */
+  git?: GitReport;
 }
 interface Worker {
   id: string;
@@ -72,7 +85,190 @@ function scopePaths(files: readonly string[]): string[] {
     return path;
   }))];
 }
-function assignmentPrompt(args: TaskParameters, commands: readonly string[], imagesAvailable = false): string {
+// ---- git grant: validation, the line every assignment prompt carries, and the read-only commit/push report ----
+const execFileAsync = promisify(execFile);
+/** Roles that may write, hence the only ones that can be allowed to commit. */
+export const GIT_GRANT_ROLES: readonly string[] = ["implement", "game-asset", "video"];
+/** Commit lines listed in a result; `commitCount` keeps the true number. */
+const MAX_COMMITS = 20;
+const MAX_GITLINKS = 10;
+const GIT_TIMEOUT_MS = 10_000;
+const GIT_MAX_BUFFER = 1024 * 1024;
+const REMOTE_NAME = /^[A-Za-z0-9][\w.-]{0,99}$/;
+const BRANCH_NAME = /^[A-Za-z0-9_][\w./+-]{0,199}$/;
+
+/** The validated grant: `commit` is always true (push implies it); `remote` is set whenever `branch` is. */
+export interface GitGrant {
+  commit: true;
+  push: boolean;
+  remote?: string;
+  branch?: string;
+}
+/** What a granted assignment did to the repository (TaskDetails.git). */
+export interface GitReport {
+  grant: GitGrant;
+  /** False outside a git work tree (or when git fails): nothing below is known. */
+  available: boolean;
+  /** HEAD when the task started / ended (absent: unborn branch or unreadable) and the branch it ended on (absent: detached). */
+  headBefore?: string;
+  headAfter?: string;
+  branch?: string;
+  /** Commits reachable from the final HEAD but not from the starting one; `commits` lists at most 20 of them (`git log --oneline`, newest first). */
+  commitCount: number;
+  commits: string[];
+  /** Submodule gitlinks that differ between the starting and the final HEAD: `path (old → new)`. */
+  gitlinks: string[];
+  /** Whether a remote-tracking ref (the upstream, or the granted target) moved to a commit now contained in HEAD. */
+  push: "detected" | "not-detected" | "unknown";
+  /** The remote-tracking refs that were compared; `pushed`: the ref moved to a commit now contained in HEAD. */
+  refs: { ref: string; before?: string; after?: string; pushed: boolean }[];
+}
+interface GitBaseline {
+  available: boolean;
+  head?: string;
+  refs: Map<string, string | undefined>;
+}
+
+/** Validate the `git` argument for `role`. Undefined: no grant (not given, or it enables nothing). */
+export function resolveGitGrant(role: string, input: TaskParameters["git"]): GitGrant | undefined {
+  if (input === undefined) return undefined;
+  if (!GIT_GRANT_ROLES.includes(role)) throw new Error(`Unsupported git grant for role ${role}; only ${GIT_GRANT_ROLES.join(", ")} may commit or push. Omit git for read-only roles.`);
+  if (input.push === true && input.commit === false) throw new Error("Unsupported git grant: push requires commit; omit commit or set it to true.");
+  if (input.push !== true && (input.remote !== undefined || input.branch !== undefined)) throw new Error("Unsupported git grant: remote and branch apply only with push true.");
+  if (input.remote !== undefined && !REMOTE_NAME.test(input.remote)) throw new Error(`Unsupported git grant remote ${JSON.stringify(input.remote)}; use a remote name such as origin.`);
+  if (input.branch !== undefined && (!BRANCH_NAME.test(input.branch) || input.branch.includes("..") || input.branch.endsWith("/") || input.branch.endsWith(".lock"))) {
+    throw new Error(`Unsupported git grant branch ${JSON.stringify(input.branch)}; use a plain branch name such as main.`);
+  }
+  const push = input.push === true;
+  if (!push && input.commit !== true) return undefined;
+  const remote = input.remote ?? (input.branch !== undefined ? "origin" : undefined);
+  return { commit: true, push, ...(remote ? { remote } : {}), ...(input.branch !== undefined ? { branch: input.branch } : {}) };
+}
+
+const pushTarget = (grant: GitGrant) => grant.remote && grant.branch ? `${grant.remote}/${grant.branch}` : grant.remote ? `${grant.remote} (current branch)` : "the current branch's upstream";
+/** The line that ends every assignment prompt: an explicit authorization, or an explicit refusal. Reused workers keep
+ * their system instruction, so each assignment states its own grant and a later one without it says so. */
+export function gitAssignmentLine(grant: GitGrant | undefined): string {
+  if (!grant) return "Git commit/push is NOT authorized for this assignment; do not commit.";
+  return `This assignment authorizes git commit${grant.push ? ` and push to ${pushTarget(grant)}` : ""}. Commit only the changes this assignment describes (stage paths explicitly; never \`git add -A\` of unrelated files); do not force-push, rewrite history, or change git config.${grant.push ? " Push only to that target." : " Do not push."} This authorization applies to this assignment only.`;
+}
+
+/** Read-only, bounded and fail-soft: undefined when git fails; an abort still propagates. */
+async function git(cwd: string, args: readonly string[], signal?: AbortSignal): Promise<string | undefined> {
+  signal?.throwIfAborted();
+  try {
+    const { stdout } = await execFileAsync("git", args, { cwd, signal, timeout: GIT_TIMEOUT_MS, killSignal: "SIGKILL", maxBuffer: GIT_MAX_BUFFER, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } });
+    return stdout.trim();
+  } catch {
+    signal?.throwIfAborted(); // cancellation must not look like "git failed"
+    return undefined;
+  }
+}
+const rev = async (cwd: string, ref: string, signal?: AbortSignal) => (await git(cwd, ["rev-parse", "--verify", "-q", ref], signal)) || undefined;
+const short = (sha: string | undefined) => sha ? sha.slice(0, 7) : "none";
+const remoteRef = (ref: string) => ref.replace(/^refs\/remotes\//, "");
+
+/** Remote-tracking refs whose movement means a push: the upstream, and the granted target when it names one. */
+async function trackedRefs(cwd: string, grant: GitGrant, signal?: AbortSignal): Promise<string[]> {
+  const names = new Set<string>();
+  const upstream = await git(cwd, ["rev-parse", "--symbolic-full-name", "@{upstream}"], signal);
+  if (upstream?.startsWith("refs/")) names.add(upstream);
+  if (grant.push && (grant.remote || grant.branch)) {
+    const branch = grant.branch ?? await git(cwd, ["symbolic-ref", "-q", "--short", "HEAD"], signal);
+    if (branch) names.add(`refs/remotes/${grant.remote ?? "origin"}/${branch}`);
+  }
+  return [...names];
+}
+
+/** HEAD and the tracked remote refs before the worker starts (`available: false` when git cannot say). */
+async function captureGitBaseline(cwd: string, grant: GitGrant, signal?: AbortSignal): Promise<GitBaseline> {
+  if (await git(cwd, ["rev-parse", "--is-inside-work-tree"], signal) !== "true") return { available: false, refs: new Map() };
+  const head = await rev(cwd, "HEAD", signal);
+  const refs = new Map<string, string | undefined>();
+  for (const name of await trackedRefs(cwd, grant, signal)) refs.set(name, await rev(cwd, name, signal));
+  return { available: true, ...(head ? { head } : {}), refs };
+}
+
+/** Submodule entries (mode 160000) that differ between two commits; the diff output cap bounds the cost. */
+async function changedGitlinks(cwd: string, from: string, to: string): Promise<string[]> {
+  const raw = await git(cwd, ["-c", "core.quotepath=false", "diff-tree", "-r", "--raw", "--no-renames", "--no-commit-id", from, to]);
+  const links: string[] = [];
+  for (const line of raw?.split("\n") ?? []) {
+    const [meta = "", path = ""] = line.split("\t");
+    const [oldMode, newMode, oldSha, newSha] = meta.slice(1).split(" ");
+    if (oldMode !== "160000" && newMode !== "160000") continue;
+    const sha = (value: string | undefined) => value && /[^0]/.test(value) ? short(value) : "none";
+    links.push(`${path} (${sha(oldSha)} → ${sha(newSha)})`);
+  }
+  return links;
+}
+
+/** Commits, gitlinks and push evidence since `baseline`. Never throws: unreadable parts are left out or "unknown". */
+async function reportGit(cwd: string, grant: GitGrant, baseline: GitBaseline): Promise<GitReport> {
+  const empty: GitReport = { grant, available: false, commitCount: 0, commits: [], gitlinks: [], push: "unknown", refs: [] };
+  if (!baseline.available) return empty;
+  try {
+    const headAfter = await rev(cwd, "HEAD");
+    const branch = await git(cwd, ["symbolic-ref", "-q", "--short", "HEAD"]);
+    let commitCount = 0;
+    let commits: string[] = [];
+    let gitlinks: string[] = [];
+    if (headAfter && headAfter !== baseline.head) {
+      const range = baseline.head ? `${baseline.head}..${headAfter}` : headAfter;
+      const log = await git(cwd, ["log", "--no-color", "--no-decorate", "--no-show-signature", "--oneline", `--max-count=${MAX_COMMITS}`, range]);
+      commits = log ? log.split("\n") : [];
+      const count = Number.parseInt(await git(cwd, ["rev-list", "--count", range]) ?? "", 10);
+      commitCount = Number.isFinite(count) ? Math.max(count, commits.length) : commits.length;
+      if (baseline.head) gitlinks = (await changedGitlinks(cwd, baseline.head, headAfter)).slice(0, MAX_GITLINKS);
+    }
+    const names = new Set(baseline.refs.keys());
+    const upstream = await git(cwd, ["rev-parse", "--symbolic-full-name", "@{upstream}"]);
+    if (upstream?.startsWith("refs/")) names.add(upstream);
+    const refs: GitReport["refs"] = [];
+    for (const ref of names) {
+      const before = baseline.refs.get(ref);
+      const after = await rev(cwd, ref);
+      // Moved: a push puts HEAD (or one of its ancestors) there; a fetch of someone else's commits does not.
+      const pushed = !!after && after !== before && !!headAfter && (after === headAfter || await git(cwd, ["merge-base", "--is-ancestor", after, headAfter]) !== undefined);
+      refs.push({ ref, ...(before ? { before } : {}), ...(after ? { after } : {}), pushed });
+    }
+    return {
+      grant, available: true,
+      ...(baseline.head ? { headBefore: baseline.head } : {}), ...(headAfter ? { headAfter } : {}), ...(branch ? { branch } : {}),
+      commitCount, commits, gitlinks, push: refs.length ? refs.some(item => item.pushed) ? "detected" : "not-detected" : "unknown", refs,
+    };
+  } catch {
+    return empty;
+  }
+}
+
+/** Result lines for a report. Bounded: at most 20 commits, 10 gitlinks and one line per compared ref. */
+export function formatGitReport(report: GitReport): string[] {
+  if (!report.available) return ["Git: commit/push report unavailable (not a git work tree, or git failed)"];
+  const lines: string[] = [];
+  const { headBefore, headAfter } = report;
+  if (report.commitCount > 0) {
+    lines.push(`Git: ${report.commitCount} commit${report.commitCount === 1 ? "" : "s"} created on ${report.branch ?? "a detached HEAD"} (${headBefore ? short(headBefore) : "unborn"} → ${short(headAfter)}):`);
+    lines.push(...report.commits.map(commit => `  ${commit}`));
+    if (report.commitCount > report.commits.length) lines.push(`  … ${report.commitCount - report.commits.length} more`);
+  } else if (headAfter !== headBefore) {
+    lines.push(`Git: HEAD moved ${short(headBefore)} → ${short(headAfter)} without new commits (reset or checkout?)`);
+  } else {
+    lines.push(`Git: no commits created (HEAD ${headAfter ? `still ${short(headAfter)}` : "unborn"})`);
+  }
+  if (report.gitlinks.length) lines.push(`Submodule gitlinks changed: ${report.gitlinks.join(", ")}`);
+  if (report.push === "detected") {
+    lines.push(`Push: detected (${report.refs.filter(item => item.pushed).map(item => `${remoteRef(item.ref)} ${short(item.before)} → ${short(item.after)}`).join(", ")})${report.grant.push ? "" : "; the grant did not authorize push"}`);
+  } else if (report.grant.push) {
+    lines.push(report.push === "unknown"
+      ? "Push: cannot be detected (no upstream or remote-tracking ref); check the remote"
+      : `Push: not detected (${report.refs.map(item => item.after && item.after !== item.before ? `${remoteRef(item.ref)} moved ${short(item.before)} → ${short(item.after)}, not to a commit of this HEAD` : `${remoteRef(item.ref)} still at ${short(item.after)}`).join(", ")})`);
+  }
+  return lines;
+}
+
+
+function assignmentPrompt(args: TaskParameters, commands: readonly string[], imagesAvailable = false, grant?: GitGrant): string {
   const task = args.context?.trim() ? `${args.request}\n\n## Context from the requesting session\n${args.context.trim()}` : args.request;
   const scope = args.files === undefined ? "anywhere inside the workspace" : JSON.stringify(args.files);
   const instructions: Record<TaskRole, string> = {
@@ -84,7 +280,7 @@ function assignmentPrompt(args: TaskParameters, commands: readonly string[], ima
     verify: `Independent read-only review. DO NOT EDIT. ${commands.length ? `Run configured checks via bash: ${commands.map(command => JSON.stringify(command)).join(", ")}` : "Discover and run the project's own checks via bash (package.json, Makefile, pyproject.toml, Cargo.toml, go.mod or CI config)"}, plus focused checks; inspect source and git diff. report_result {kind:"verify",summary,data:{passed:boolean,evidence:[commands and outcomes],issues:[{file,description}]}}. passed:true requires actual passing checks; unexecuted checks never count as passed.`,
   };
   const rasterInstructions = imagesAvailable ? '\nUse generate_image for raster art (sprites, textures, icons, concept art, thumbnails). Request background "transparent" for sprites/icons. Always pass width/height for the exact target size: the gateway ignores size and returns roughly 1254x1254. Use kernel "nearest" for pixel art. Inspect results with read. Keep procedural/SVG generation for vector or pixel-exact assets. Record the generation prompt in outputs[].spec.' : "";
-  return `Assignment: ${args.role}. You work alone; there are no peers or backlog.\n${task}\n\n${instructions[args.role]}${rasterInstructions}`;
+  return `Assignment: ${args.role}. You work alone; there are no peers or backlog.\n${task}\n\n${instructions[args.role]}${rasterInstructions}\n\n${gitAssignmentLine(grant)}`;
 }
 
 export class WorkerPool {
@@ -167,6 +363,7 @@ export class WorkerPool {
   }
   private async executeAssignment(args: OrcheRunArgs & TaskParameters, signal: AbortSignal): Promise<{ text: string; details: TaskDetails }> {
     if (this.disposed) throw new Error("Worker pool is disposed");
+    const grant = resolveGitGrant(args.role, args.git); // before any worker is touched: a bad grant spawns and changes nothing
     const started = Date.now();
     const retired: string[] = [];
     const retirementLines: string[] = [];
@@ -231,7 +428,7 @@ export class WorkerPool {
         : resolveRoute(config.routes, routeRole);
       const customTools = images ? [createGenerateImageTool({ cwd: args.cwd, runtime, images })] : [];
       await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name)], customTools, peerMessaging: false,
-        instructions: `${workerInstructions}\nYou work alone: there are no peer workers. Reply in the language of the request.`,
+        instructions: `${taskWorkerInstructions}\nYou work alone: there are no peer workers. Reply in the language of the request.`,
         onContextWindow: info => { meta.contextWindow = info.contextWindow; },
         toolGuard: (name, input) => this.guard(meta, name, input),
       });
@@ -267,8 +464,9 @@ export class WorkerPool {
       before = await audit?.snapshot();
       const stale = audit && before && meta.tree ? await audit.diff(meta.tree, before) : [];
       const prefix = reusedContext ? `## Stale context: workspace changes since your previous assignment\n${stale.length ? stale.map(change => `${change.path} (${change.status})`).join("\n") : audit ? "No files changed." : "Workspace audit unavailable (not a git work tree)."}\nRe-read changed evidence before relying on retained context.\n\n` : "";
+      const gitBaseline = grant ? await captureGitBaseline(args.cwd, grant, signal) : undefined;
       signal.throwIfAborted();
-      this.manager.assign(meta.id, args.role, prefix + assignmentPrompt({ ...args, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images));
+      this.manager.assign(meta.id, args.role, prefix + assignmentPrompt({ ...args, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant));
       assigned = true;
       if (signal.aborted) abort();
       progress();
@@ -284,6 +482,7 @@ export class WorkerPool {
         changes = await audit.diff(before, after);
         meta.tree = after;
       }
+      const gitReport = grant && gitBaseline ? await reportGit(args.cwd, grant, gitBaseline) : undefined;
       meta.lastUsed = Date.now();
       if (meta.contextWindow && meta.latestInput >= meta.contextWindow * 0.7) {
         await this.retire(meta.id); retired.push(meta.id);
@@ -295,10 +494,11 @@ export class WorkerPool {
       if (Array.isArray(data.outputs)) roleData.push(`outputs: ${data.outputs.length}`);
       const note = data.status === "blocked" ? "the worker reported blocked" : args.role === "verify" && data.passed === false ? "verification failed" : args.role === "implement" && changes.length >= 4 ? "the implementation changed four or more files" : undefined;
       const roster = this.roster();
+      const gitLines = gitReport ? formatGitReport(gitReport) : [];
       const changed = changes.length ? `Changed files: ${changes.map(change => change.path).join(", ")}${warning ? " (may include changes made by the other pi session(s); check before attributing them to this task)" : ""}` : "No files changed";
-      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, "", meta.summary, ...roleData, "", audit ? changed : "Workspace audit unavailable (not a git work tree)", `Workers: ${roster}`, ...retirementLines,
+      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, "", meta.summary, ...roleData, "", audit ? changed : "Workspace audit unavailable (not a git work tree)", ...gitLines, `Workers: ${roster}`, ...retirementLines,
         ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: consider orche_run (multi) — ${note}`] : [])].join("\n");
-      return { text, details: { worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, durationMs, requests, changes, roster, ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}) } };
+      return { text, details: { worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, durationMs, requests, changes, roster, ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}) } };
     } catch (error) {
       throw warning ? withConcurrentWarning(error, warning) : error;
     } finally {

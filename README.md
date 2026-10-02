@@ -101,6 +101,21 @@ Configure it with the top-level `concurrentSessions` object of the Pi agent or t
 
 `enabled` (default `true`) switches detection and the warning off with `false`; `windowMinutes` (default `10`, a number greater than 0 and at most 1440) is how recently a session file must have been written to count as active. Unknown fields and values of the wrong type are rejected like the other settings.
 
+### Commits and pushes from `orche_task`
+
+In `auto`/`single` the main session cannot run `git commit` or `git push` itself, and workers never commit unless the assignment says so. `orche_task` therefore takes an optional per-assignment grant:
+
+```json
+{ "role": "implement", "request": "…", "files": ["src/a.ts"], "git": { "commit": true } }
+{ "role": "implement", "request": "…", "git": { "push": true, "remote": "origin", "branch": "main" } }
+```
+
+`commit` allows `git commit`; `push` allows `git push` and implies `commit` (`push: true` with `commit: false` is an error); `remote` and `branch` name the push target and need `push` (a `branch` alone means `origin/<branch>`, a `remote` alone pushes the current branch to it, and with neither the current branch goes to its upstream). Only `implement`, `game-asset` and `video` accept `git`; `explore`, `answer` and `verify` reject it with an error. The main agent is told to set it only when the user explicitly asked to commit or push in this conversation, and to scope the commit to the task's `files`.
+
+The grant is per assignment. Task workers are told to commit only when the current assignment authorizes it, and every assignment prompt (new or reused worker) ends with either an authorization line (stage paths explicitly, no `git add -A` of unrelated files, no force-push, history rewrite or git config change) or `Git commit/push is NOT authorized for this assignment; do not commit.` `orche_run` workers are unchanged: they never commit, and the run audit relies on that to tell a commit made elsewhere from their own work.
+
+With a grant the result also reports, read-only and bounded, what happened in the task's directory: the commits created since the task started (`git log --oneline`, at most 20 listed, plus the true count), submodule gitlinks those commits changed, and whether a push was detected. A push is detected when a remote-tracking ref (the upstream, or the granted `remote/branch`) moved to a commit now contained in HEAD; this sees only pushes that update that ref, so "not detected" is not proof that nothing was pushed. The same data is in `details.git`. Outside a git work tree the report says it is unavailable.
+
 ## Architecture
 
 - `src/pi/`: Pi session factory and runtime adapter; persistent contexts, lifecycle events, abort and context-only messages.
