@@ -4,6 +4,7 @@ import { Value } from '@sinclair/typebox/value';
 import { AgentManager } from '../agent/agent-manager.js';
 import type { Outcome } from '../agent/agent-handle.js';
 import { createSession } from '../pi/session-factory.js';
+import { reportAgent, targetOf } from '../agent/records.js';
 import { resolveRoute } from '../orchestration/routing.js';
 import { readyTasks, updateTaskStatus, validateBacklog, type TaskItem } from '../orchestration/backlog.js';
 import { type RunOptions, type RunReport } from '../orchestration/coordinator.js';
@@ -24,6 +25,7 @@ export async function runBaseline(options: RunOptions): Promise<RunReport> {
   let main: AgentSession | undefined;
   let manager: AgentManager | undefined;
   let serial = 0;
+  const mainStats = { requests: 0, models: {} as Record<string, number> };
   let verificationEvidence: unknown;
   const deadline = startedAt + limits.overallMs;
   const remaining = (ms: number) => {
@@ -35,7 +37,7 @@ export async function runBaseline(options: RunOptions): Promise<RunReport> {
   emit({ type: 'run_started', timestamp: startedAt, mode: 'baseline', problem: options.problem });
   try {
     const runtime = options.modelRuntime ?? await ModelRuntime.create();
-    manager = new AgentManager(runtime);
+    manager = new AgentManager(runtime, options.records ? { records: options.records } : {});
     manager.subscribe(event => {
       options.sink?.(event);
       if (event.type === 'assignment_outcome' && event.outcome.kind === 'explore') {
@@ -55,10 +57,14 @@ export async function runBaseline(options: RunOptions): Promise<RunReport> {
         return { content: [{ type: 'text', text: 'Decision accepted' }], details: {}, terminate: true };
       },
     };
-    main = await createSession({ cwd: options.cwd, route: resolveRoute(options.routes, 'coordinator'), modelRuntime: runtime, tools: ['read', 'grep', 'find', 'ls', 'submit_decision'], customTools: [tool], instructions: 'You are the main fork-join coding coordinator. Workers investigate independently. Wait for every exploration result before integrating. Return structured decisions using submit_decision, alone. Do not implement yourself.' });
+    // Records are opt-in (`options.records`): without them every baseline session stays in memory.
+    main = await createSession({ cwd: options.cwd, route: resolveRoute(options.routes, 'coordinator'), ...targetOf(options.records, { id: 'coordinator', role: 'coordinator', kind: 'coordinator' }), modelRuntime: runtime, tools: ['read', 'grep', 'find', 'ls', 'submit_decision'], customTools: [tool], instructions: 'You are the main fork-join coding coordinator. Workers investigate independently. Wait for every exploration result before integrating. Return structured decisions using submit_decision, alone. Do not implement yourself.' });
     main.subscribe(event => {
       if (event.type === 'message_end' && event.message.role === 'assistant') {
         const u = event.message.usage;
+        mainStats.requests++;
+        const answered = `${event.message.provider}/${event.message.model}`;
+        mainStats.models[answered] = (mainStats.models[answered] ?? 0) + 1;
         emit({ type: 'coordinator_usage', timestamp: Date.now(), model: `${event.message.provider}/${event.message.model}`, input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite });
       }
     });
@@ -151,5 +157,16 @@ export async function runBaseline(options: RunOptions): Promise<RunReport> {
     const finishedAt = Date.now(), summary = error instanceof Error ? error.message : String(error);
     emit({ type: 'run_finished', timestamp: finishedAt, status: 'failed', summary });
     return { status: 'failed', taskClass: 'diagnose_fix', answer: summary, summary, ...(rootCause ? { rootCause } : {}), tasks, startedAt, finishedAt };
-  } finally { await manager?.dispose(); main?.dispose(); }
+  } finally {
+    await manager?.dispose();
+    main?.dispose();
+    if (main && options.records?.onAgent) {
+      const route = resolveRoute(options.routes, 'coordinator');
+      reportAgent(options.records, {
+        id: 'coordinator', role: 'coordinator', kind: 'coordinator', model: route.model, ...(route.thinking ? { thinking: route.thinking } : {}),
+        requests: mainStats.requests, models: mainStats.models, durationMs: Math.max(0, Date.now() - startedAt), startedAt, status: (phase as string) === 'DONE' ? 'completed' : 'failed',
+        ...(main.sessionFile ? { sessionFile: main.sessionFile } : {}),
+      });
+    }
+  }
 }

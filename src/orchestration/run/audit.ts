@@ -1,9 +1,10 @@
+import { abortable } from "./deadline.js";
 import { classifyNewFile } from "../artifacts.js";
 import { coveringTasks } from "../ownership.js";
 import { WorkspaceAudit, type ExternalWorkspaceChange, type WorkspaceChange } from "../workspace.js";
 import { WorkspaceActivity, type ActivityScope } from "./activity.js";
 import { emit } from "./context.js";
-import type { RunContext, RunReport } from "./types.js";
+import type { ConcurrentActivity, RunContext, RunReport } from "./types.js";
 
 /** Git-snapshot workspace audit of a run: baseline, per-phase violations and the final change list. */
 
@@ -28,9 +29,47 @@ interface Attribution {
   shellAmbiguous: Set<string>;
 }
 
-/** Concurrent pi sessions were detected when the run started (once; never re-detected). */
+/**
+ * Other pi sessions seen by a re-detection at an audit point (`RunOptions.detectConcurrentActivity`), per run. Kept beside the
+ * context so that the run's own state needs no field for a feature only some callers enable.
+ */
+interface ConcurrentWatch {
+  /** `RunOptions.concurrentActivity.count` when the run started. */
+  initial: number;
+  /** The latest re-detection that found sessions. Sticky: a later empty answer (the sessions went quiet) does not unflag the run. */
+  latest?: ConcurrentActivity;
+  warned: boolean;
+}
+const watches = new WeakMap<RunContext, ConcurrentWatch>();
+
+/**
+ * Concurrent pi sessions were detected: when the run started (`concurrentActivity`), or later, at an audit point
+ * (`detectConcurrentActivity`, see {@link refreshConcurrentSessions}). Once true it stays true for the run.
+ */
 export function concurrentSessionsFlagged(ctx: RunContext): boolean {
-  return (ctx.options.concurrentActivity?.count ?? 0) > 0;
+  return (ctx.options.concurrentActivity?.count ?? 0) > 0 || (watches.get(ctx)?.latest?.count ?? 0) > 0;
+}
+
+/**
+ * Re-detect other pi sessions at a workspace audit point, so a session that started after the run did is taken into account.
+ * The callback owns the caching and the cost; here it only has to be fail-soft: a rejection, a malformed answer, a cancelled run
+ * or `undefined` all mean "nothing new" and never reach the audit. The first time the count exceeds the one known at the start, one
+ * `concurrent_sessions_detected` event (the progress warning) is emitted.
+ */
+async function refreshConcurrentSessions(ctx: RunContext): Promise<void> {
+  const detect = ctx.options.detectConcurrentActivity;
+  // `ctx.cancelled` is also set while a finished run is torn down (finalWorkspace still looks): only the signal says "cancelled".
+  if (!detect || ctx.signal?.aborted) return;
+  let found: ConcurrentActivity | undefined;
+  try { found = await abortable(Promise.resolve().then(detect), ctx.signal); }
+  catch { return; }
+  if (!found || typeof found.count !== "number" || !(found.count > 0)) return;
+  const watch = watches.get(ctx) ?? { initial: ctx.options.concurrentActivity?.count ?? 0, warned: false };
+  watches.set(ctx, watch);
+  watch.latest = found;
+  if (watch.warned || found.count <= watch.initial) return;
+  watch.warned = true;
+  emit(ctx, { type: "concurrent_sessions_detected", timestamp: Date.now(), phase: ctx.state.phase, count: found.count, detail: String(found.detail ?? "") });
 }
 
 /**
@@ -101,7 +140,8 @@ function reportExternal(ctx: RunContext, external: readonly ExternalWorkspaceCha
  *
  * Concurrent sessions. A file the run's bash (or another non-edit/write tool) may have written, that
  * `allowed` rejects and no edit/write call wrote, is normally a violation. When the run is flagged
- * ({@link concurrentSessionsFlagged}: other pi sessions were detected active at start) its writer is
+ * ({@link concurrentSessionsFlagged}: other pi sessions were detected active at start, or re-detected at this or an earlier
+ * audit point through `RunOptions.detectConcurrentActivity`) its writer is
  * unknowable, so it is external with {@link CONCURRENT_SESSION_AMBIGUOUS}, never a violation. Edit/write
  * calls outside ownership remain violations, flagged or not.
  */
@@ -113,6 +153,9 @@ export async function auditWorkspace(ctx: RunContext, actors: readonly string[],
     // fully covered by classified windows.
     const tree = ctx.activity ? await ctx.activity.checkpoint() : await ctx.audit.snapshot();
     const changes = await ctx.audit.diff(ctx.auditTree, tree);
+    if (ctx.cancelled) return;
+    // The window just closed may hold writes of a session that started after the run did: look again (the caller caches).
+    await refreshConcurrentSessions(ctx);
     if (ctx.cancelled) return;
     ctx.auditTree = tree;
     const agentId = actors.join(",");
@@ -202,6 +245,8 @@ export async function finalWorkspace(ctx: RunContext): Promise<RunReport["worksp
     await ctx.activity?.drain();
     const tree = ctx.activity ? await ctx.activity.checkpoint() : await ctx.audit.snapshot();
     const changes = await ctx.audit.diff(ctx.baseline.tree, tree);
+    // Last look for other sessions, so the report (and its warning) knows about sessions that appeared at the very end.
+    await refreshConcurrentSessions(ctx);
     const attributed = await attribute(ctx, tree, changes, "run", ctx.state.taskClass === "answer");
     const { external } = attributed;
     const run = attributed.run.filter(change =>

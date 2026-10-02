@@ -362,21 +362,134 @@ function chunked(paths: readonly string[]): string[][] {
 }
 
 /**
+ * What the recovery advice needs to know about one submodule (a gitlink: a path that the superproject
+ * records as a commit id, not as files). Gathered live by {@link inspectSubmodules}; the advice functions
+ * stay pure and take it as an argument. Without it they treat every path as a plain file of the audited
+ * repository, which is wrong for `sub/file` (inside a submodule) and for `sub` itself (its HEAD).
+ */
+export interface SubmoduleState {
+  /** Path relative to the audit's cwd. */
+  readonly path: string;
+  /** Path of the submodule that records this one (nested submodules); absent when the audited repository records it. */
+  readonly parent?: string;
+  /** Commit the baseline recorded for it (absent: unknown, or it did not exist then). */
+  readonly from?: string;
+  /** Commit its checked-out HEAD points at now (absent: not checked out, or unreadable). */
+  readonly to?: string;
+  /** Commit the index of the repository that records it holds now (absent: not in that index). */
+  readonly indexed?: string;
+  /** Of the reported files inside it, those its own index knows (absent: not looked up). */
+  readonly tracked?: readonly string[];
+}
+
+/** Where a changed path lives: inside a submodule, at a submodule's own (gitlink) path, or neither. Longest submodule wins. */
+function locate<T extends SubmoduleState>(path: string, states: readonly T[]): { inside?: T; gitlink?: T } {
+  let best: T | undefined;
+  for (const state of states) {
+    if ((path === state.path || path.startsWith(`${state.path}/`)) && (!best || state.path.length > best.path.length)) best = state;
+  }
+  if (!best) return {};
+  return best.path === path ? { gitlink: best } : { inside: best };
+}
+
+/** Advice for a submodule whose gitlink (its HEAD commit) is among the changes. `command` is set only when one actually works. */
+interface GitlinkAdvice { line: string; command?: string }
+/** Run files inside one submodule: `restore` can be restored there, `skipped` cannot (nothing in the submodule knows them). */
+interface SubmoduleGroup { state: SubmoduleState; restore: string[]; skipped: string[] }
+interface RecoveryPlan { restore: string[]; remove: string[]; groups: SubmoduleGroup[]; gitlinks: GitlinkAdvice[] }
+
+const short = (commit: string) => commit.slice(0, 12);
+
+function gitlinkAdvice(change: WorkspaceChange, state: SubmoduleState): GitlinkAdvice {
+  /** `git submodule update` runs in the repository that records the submodule, with the path relative to it. */
+  const update = (init: boolean) => {
+    const here = state.parent ? state.path.slice(state.parent.length + 1) : state.path;
+    return `${state.parent ? `git -C ${quote(state.parent)}` : "git"} submodule update${init ? " --init" : ""} -- ${quote(here)}`;
+  };
+  if (change.status === "added") {
+    return { line: `submodule ${state.path} was added by this run; no command is suggested (removing a submodule is a deliberate git submodule deinit / git rm)` };
+  }
+  if (change.status === "deleted") {
+    if (state.indexed) {
+      const command = update(true);
+      return { line: `submodule ${state.path} was removed from the work tree; to bring it back: ${command}`, command };
+    }
+    return { line: `submodule ${state.path} was removed from the work tree and its index entry is gone too; no command is suggested${state.from ? ` (baseline commit ${short(state.from)})` : ""}` };
+  }
+  const { from, to } = state;
+  if (!from || !to) {
+    return { line: `submodule ${state.path} HEAD changed (baseline ${from ? short(from) : "unknown"}, now ${to ? short(to) : "unreadable"}); no command is suggested` };
+  }
+  if (from === to) return { line: `submodule ${state.path} HEAD is back at the baseline commit ${short(from)}; nothing to move` };
+  const command = `git -C ${quote(state.path)} checkout ${from}`;
+  const alternative = state.indexed === from ? ` (or: ${update(false)}, the index still records ${short(from)})` : "";
+  return { line: `submodule ${state.path} HEAD moved ${short(from)}→${short(to)}; to go back: ${command}${alternative}`, command };
+}
+
+/**
+ * Sort the run's files into what a command can really restore. Plain files: `git restore --source=<baseline>`
+ * (added ones: `rm`). A file inside a submodule is not in the superproject's baseline commit (that holds
+ * only the gitlink), so `git restore --source=<baseline> -- sub/file` is invalid; such files are restored
+ * inside the submodule instead. The gitlink itself is not a file: `git restore -- sub` leaves its HEAD alone.
+ */
+function planRecovery(own: readonly WorkspaceChange[], states: readonly SubmoduleState[]): RecoveryPlan {
+  const plan: RecoveryPlan = { restore: [], remove: [], groups: [], gitlinks: [] };
+  const groups = new Map<SubmoduleState, SubmoduleGroup>();
+  for (const change of own) {
+    const { inside, gitlink } = locate(change.path, states);
+    if (gitlink) { plan.gitlinks.push(gitlinkAdvice(change, gitlink)); continue; }
+    // A file the run created is removed by path wherever it lives.
+    if (change.status === "added") { plan.remove.push(change.path); continue; }
+    if (!inside) { plan.restore.push(change.path); continue; }
+    let group = groups.get(inside);
+    if (!group) {
+      group = { state: inside, restore: [], skipped: [] };
+      groups.set(inside, group);
+      plan.groups.push(group);
+    }
+    const rel = change.path.slice(inside.path.length + 1);
+    (inside.to === undefined || (inside.tracked && !inside.tracked.includes(rel)) ? group.skipped : group.restore).push(rel);
+  }
+  return plan;
+}
+
+const baselineCommands = (commit: string, plan: RecoveryPlan): string[] => [
+  ...chunked(plan.restore.map(quote)).map(paths => `git restore --source=${commit} --worktree -- ${paths.join(" ")}`),
+  ...chunked(plan.remove.map(quote)).map(paths => `rm -- ${paths.join(" ")}`),
+];
+
+/** Per chunk: the read-only preview and the restore, both for exactly the same files. */
+const submoduleCommands = (group: SubmoduleGroup) => chunked(group.restore.map(quote)).map(paths => ({
+  inspect: `git -C ${quote(group.state.path)} diff -- ${paths.join(" ")}`,
+  restore: `git -C ${quote(group.state.path)} restore -- ${paths.join(" ")}`,
+}));
+
+/**
  * Shell commands that put the run-attributed files back to their pre-run contents.
  *
  * Every command is built from an explicit path list (chunked when long); there is deliberately
  * no blanket `-- .` form, because the worktree may also hold work of other processes (other
  * sessions, the user, their commits). `external` files are never restored: they are dropped from
  * the lists even if a caller passes them in `changes` too.
+ *
+ * `submodules` (see {@link inspectSubmodules}) makes the advice submodule-aware. A path inside a submodule
+ * is restored with `git -C <sub> restore -- <file>` (never from the superproject baseline, which cannot
+ * name it); a gitlink path gets `git -C <sub> checkout <old commit>` when its HEAD moved and no
+ * `git restore` at all. Pass a gitlink move as a change at the submodule's path (what a plain audit
+ * reports for it; for {@link WorkspaceAudit.compare} results add `{ path, status: "modified" }`).
  */
-export function recoveryCommands(commit: string, changes: readonly WorkspaceChange[], external: readonly WorkspaceChange[] = []): string[] {
+export function recoveryCommands(
+  commit: string,
+  changes: readonly WorkspaceChange[],
+  external: readonly WorkspaceChange[] = [],
+  submodules: readonly SubmoduleState[] = [],
+): string[] {
   const foreign = new Set(external.map(change => change.path));
-  const own = changes.filter(change => !foreign.has(change.path));
-  const restore = own.filter(change => change.status !== "added").map(change => quote(change.path));
-  const remove = own.filter(change => change.status === "added").map(change => quote(change.path));
+  const plan = planRecovery(changes.filter(change => !foreign.has(change.path)), submodules);
   return [
-    ...chunked(restore).map(paths => `git restore --source=${commit} --worktree -- ${paths.join(" ")}`),
-    ...chunked(remove).map(paths => `rm -- ${paths.join(" ")}`),
+    ...baselineCommands(commit, plan),
+    ...plan.groups.flatMap(group => submoduleCommands(group).map(command => command.restore)),
+    ...plan.gitlinks.flatMap(advice => advice.command ? [advice.command] : []),
   ];
 }
 
@@ -386,11 +499,14 @@ export function recoveryCommands(commit: string, changes: readonly WorkspaceChan
  * `changes` are the run-attributed files: only they get restore commands. `external` files
  * (committed or edited by someone else while the run was going) are listed separately and
  * explicitly marked not to be restored. Returns "" when there is nothing to report.
+ *
+ * `submodules` is optional (see {@link recoveryCommands}); without it every path is treated as a plain file.
  */
 export function describeWorkspaceChanges(
   commit: string,
   changes: readonly WorkspaceChange[],
   external: readonly (WorkspaceChange & { reason?: string })[] = [],
+  submodules: readonly SubmoduleState[] = [],
 ): string {
   const foreign = new Set(external.map(change => change.path));
   const own = changes.filter(change => !foreign.has(change.path));
@@ -398,8 +514,12 @@ export function describeWorkspaceChanges(
   const lines: string[] = [];
   if (own.length) {
     const tooMany = own.length > MAX_COMMAND_PATHS;
+    const where = (path: string) => {
+      const { inside, gitlink } = locate(path, submodules);
+      return inside ? ` (inside submodule ${inside.path})` : gitlink ? " (submodule HEAD)" : "";
+    };
     lines.push(`Workspace changes made by this run (baseline ${commit.slice(0, 12)}, ref ${BASELINE_REF}):`);
-    lines.push(...own.slice(0, MAX_LISTED).map(change => `- ${change.status}: ${change.path}`));
+    lines.push(...own.slice(0, MAX_LISTED).map(change => `- ${change.status}: ${change.path}${where(change.path)}`));
     if (own.length > MAX_LISTED) {
       lines.push(`- … ${own.length - MAX_LISTED} more run files (${tooMany ? "not listed here" : "all are covered by the commands below"})`);
     }
@@ -410,8 +530,32 @@ export function describeWorkspaceChanges(
         "(that also lists files changed outside this run, if any); restore only files that belong to this run.",
       );
     } else {
-      lines.push("To restore the pre-run contents of these run files only:");
-      lines.push(...recoveryCommands(commit, own).map(command => `  ${command}`));
+      const plan = planRecovery(own, submodules);
+      const plain = baselineCommands(commit, plan);
+      if (plain.length) {
+        lines.push("To restore the pre-run contents of these run files only:");
+        lines.push(...plain.map(command => `  ${command}`));
+      }
+      for (const group of plan.groups) {
+        const path = group.state.path;
+        if (group.restore.length) {
+          lines.push(
+            `Inside submodule ${path}: the baseline commit holds only its gitlink, so these files cannot be restored from it.`,
+            `Inspect first, then restore: this takes the files back to the state of the submodule's own index (its HEAD content unless something is staged there) and DISCARDS their uncommitted changes in submodule ${path}, including any made before this run (an empty diff means the change was committed inside the submodule):`,
+          );
+          for (const command of submoduleCommands(group)) lines.push(`  ${command.inspect}`, `  ${command.restore}`);
+        }
+        if (group.skipped.length) {
+          const listed = group.skipped.slice(0, MAX_LISTED).map(rel => `${path}/${rel}`).join(", ");
+          lines.push(`No restore command for ${listed}${group.skipped.length > MAX_LISTED ? `, … ${group.skipped.length - MAX_LISTED} more` : ""}: the submodule's own index does not know them (untracked or staged for deletion) or it is not checked out; inspect with: git -C ${quote(path)} status`);
+        }
+      }
+      if (plan.gitlinks.length) {
+        lines.push(
+          "Submodule HEAD changes (a submodule is a gitlink, not files: restoring its path as a file would leave its HEAD where it is, so no such command is suggested; checking out the old commit leaves the submodule on a detached HEAD, switch back to your branch afterwards):",
+          ...plan.gitlinks.map(advice => `- ${advice.line}`),
+        );
+      }
     }
   } else {
     lines.push("No workspace change is attributed to this run.");
@@ -425,4 +569,89 @@ export function describeWorkspaceChanges(
     if (external.length > MAX_EXTERNAL_LISTED) lines.push(`- … ${external.length - MAX_EXTERNAL_LISTED} more changed outside this run`);
   }
   return lines.join("\n");
+}
+
+/**
+ * Look up, live, the submodules the advice needs for `paths` (the changed paths, relative to `cwd`): every
+ * gitlink that is one of the paths or contains one, found in the index (`git ls-files -s`, mode 160000, so
+ * embedded repositories count too) and, for a path that went away, in the baseline commit (`git ls-tree`).
+ * For each: the commit the baseline recorded, the commit its HEAD is at now, the commit the index records,
+ * and which of the paths its own index knows. Nested submodules are followed under the same bounds as
+ * {@link WorkspaceAudit} (32 submodules, 3 levels, ~20 s).
+ *
+ * Read-only and fail-soft: it never throws and never touches an index, HEAD or work tree; anything it cannot
+ * read is simply absent from the result. `signal` is optional on purpose: a report written after a cancel
+ * should not pass the already-aborted signal (an aborted lookup returns what it has so far).
+ * Pass the result to {@link describeWorkspaceChanges} / {@link recoveryCommands}.
+ */
+export async function inspectSubmodules(cwd: string, commit: string, paths: readonly string[], signal?: AbortSignal): Promise<SubmoduleState[]> {
+  type Draft = { -readonly [K in keyof SubmoduleState]: SubmoduleState[K] };
+  const wanted = [...new Set(paths)].slice(0, MAX_COMMAND_PATHS); // beyond that the report spells out no commands
+  const found: Draft[] = [];
+  if (!wanted.length) return found;
+  const started = Date.now();
+  const read = (dir: string, args: readonly string[]) => git(dir, ["--literal-pathspecs", ...args], {}, signal);
+  const queue: { path: string; baseline: string | undefined; depth: number }[] = [{ path: "", baseline: commit || undefined, depth: 0 }];
+  while (queue.length && found.length < MAX_SUBMODULES && Date.now() - started <= SUBMODULE_BUDGET_MS) {
+    const repo = queue.shift()!;
+    const dir = repo.path ? join(cwd, repo.path) : cwd;
+    const prefix = repo.path ? `${repo.path}/` : "";
+    // Paths relative to this repository.
+    const inside = wanted.filter(path => path.startsWith(prefix)).map(path => path.slice(prefix.length));
+    const touches = (link: string) => inside.some(path => path === link || path.startsWith(`${link}/`));
+    try {
+      const indexed = new Map<string, string>();
+      for (const entry of (await read(dir, ["ls-files", "-s", "-z"])).split("\0")) {
+        const match = /^160000 ([0-9a-f]+) \d\t([\s\S]+)$/.exec(entry);
+        if (match && touches(match[2]!)) indexed.set(match[2]!, match[1]!);
+      }
+      // The baseline's gitlinks among the same paths: also finds a submodule that went away from the index.
+      const baseline = new Map<string, string>();
+      if (repo.baseline) {
+        try {
+          for (const entry of (await read(dir, ["ls-tree", "-z", repo.baseline, "--", ...new Set([...inside, ...indexed.keys()])])).split("\0")) {
+            const match = /^160000 commit ([0-9a-f]+)\t([\s\S]+)$/.exec(entry);
+            if (match) baseline.set(match[2]!, match[1]!);
+          }
+        } catch {
+          if (signal?.aborted) break; // otherwise: the baseline commit is unknown here, `from` stays absent
+        }
+      }
+      for (const link of new Set([...indexed.keys(), ...baseline.keys()])) {
+        if (found.length >= MAX_SUBMODULES) break;
+        const full = prefix + link;
+        const abs = join(dir, link);
+        let to: string | undefined;
+        if (await exists(join(abs, ".git"))) {
+          try {
+            to = (await git(abs, ["rev-parse", "--verify", "-q", "HEAD"], {}, signal)).trim() || undefined;
+          } catch {
+            if (signal?.aborted) break;
+          }
+        }
+        const from = baseline.get(link);
+        const recorded = indexed.get(link);
+        found.push({ path: full, ...(repo.path ? { parent: repo.path } : {}), ...(from ? { from } : {}), ...(to ? { to } : {}), ...(recorded ? { indexed: recorded } : {}) });
+        // Only a submodule that holds more of the changed paths is worth descending into.
+        if (to && repo.depth + 1 < MAX_SUBMODULE_DEPTH && inside.some(path => path.startsWith(`${link}/`))) queue.push({ path: full, baseline: from, depth: repo.depth + 1 });
+      }
+    } catch {
+      if (signal?.aborted) break; // this repository could not be read: its submodules are left out
+    }
+  }
+  // Which of the files inside each submodule does its own index know (restorable there)?
+  const inner = new Map<Draft, string[]>();
+  for (const path of wanted) {
+    const { inside } = locate(path, found);
+    if (inside) inner.set(inside, [...(inner.get(inside) ?? []), path.slice(inside.path.length + 1)]);
+  }
+  for (const [state, files] of inner) {
+    if (!state.to) continue;
+    try {
+      state.tracked = (await read(join(cwd, state.path), ["ls-files", "-z", "--", ...files])).split("\0").filter(Boolean);
+    } catch {
+      if (signal?.aborted) break;
+    }
+  }
+  return found.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }

@@ -1,6 +1,6 @@
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import type { WorkspaceChange } from "../orchestration/workspace.js";
-import { formatOutcome, type OrcheOutcome, type OrcheRunDetails } from "./controller.js";
+import { formatOutcome, withRecordLine, type OrcheOutcome, type OrcheRunDetails } from "./controller.js";
 
 /**
  * Error tool results that keep their structured `details`.
@@ -48,9 +48,15 @@ export const FAILURE_LIST_ENTRIES = 50;
  * Error result for a call that ran and failed: `content` is `text` (what the model reads, identical to what a thrown
  * error would have shown) and `details` is a copy of `details` with the `failure` summary added. `failure` is a reserved
  * key of `details`. The result is `isError: true`, so the model sees an error exactly as for a thrown error.
+ *
+ * Records: when `details.record` (the record directory, see records.ts) is set, `content` ends with the one line
+ * `Record: <dir>` (unless `text` already says it, as {@link runErrorResult}'s does), so a failed or cancelled call can be traced
+ * to its transcripts exactly like a successful one.
  */
 export function errorToolResult<D extends object, F extends ToolFailure>(text: string, details: D, failure: F): ErrorToolResult<D, F> {
-  return { content: [{ type: "text", text }], details: { ...details, failure }, isError: true };
+  const record = (details as { record?: unknown }).record;
+  const shown = typeof record === "string" && record && !text.includes(`Record: ${record}`) ? withRecordLine(text, record) : text;
+  return { content: [{ type: "text", text: shown }], details: { ...details, failure }, isError: true };
 }
 
 /** First non-empty line of `text`, whitespace collapsed and cut to `max` characters (marked with an ellipsis). */

@@ -1,16 +1,39 @@
+import { access } from "node:fs/promises";
+import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createOrcheTools } from "../tools/index.js";
 import { spillToolResult } from "../tools/spill.js";
 import { formatOutcome, OrcheBusyError, OrcheController, type OrcheControllerOptions } from "./controller.js";
 import type { MainMode } from "../orchestration/routing.js";
-import { delegationRules, discoverMainMode, guardToolCall, isMainMode, MainModeState } from "./mode.js";
+import { delegationRules, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
+import { CONFIG_FILE, loadOrcheConfigFile } from "./config.js";
 import { orcheTaskParameters, WorkerPool } from "./workers.js";
 import { runErrorResult } from "./tool-result.js";
+import { formatRecordList, listRecords } from "./records.js";
 
 export const RESULT_MESSAGE_TYPE = "orche-result";
 /** Pi built-ins that stay Pi's own but are switched on next to our tools. */
 const ACTIVATE_BUILTINS = ["grep", "find", "ls"];
+
+/**
+ * `mainMode` of the config file the routes come from (trusted project file, else user file), read through `loadOrcheConfigFile`: it knows the
+ * extension-only keys (`concurrentSessions`, `records`) that the plain route parser behind `discoverMainMode` (mode.ts) rejects as unknown, which
+ * made a config with `records` look invalid at session start and drop its `mainMode`.
+ */
+async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup> {
+  const candidates = [...(options.projectTrusted ? [join(options.cwd, ".pi", CONFIG_FILE)] : []), join(options.agentDir, CONFIG_FILE)];
+  for (const path of candidates) {
+    try { await access(path); } catch { continue; }
+    try {
+      const { routes } = await loadOrcheConfigFile(path);
+      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), path };
+    } catch (error) {
+      return { path, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  return {};
+}
 /** How long a one-turn override waits for the session to start the turn it just queued before giving up. */
 const SINGLE_START_TIMEOUT_MS = 10_000;
 
@@ -24,17 +47,19 @@ const orcheRunParameters = Type.Object({
     description: "Background from the conversation that supports the request (findings, earlier decisions, file excerpts). Appended to the request.",
   })),
 });
-export const ORCHE_USAGE = "Usage: /orche single|multi|direct <PROMPT> | /orche mode [auto|single|multi|direct] | /orche workers | /orche stop <id>|all | /orche cancel";
+export const ORCHE_USAGE = "Usage: /orche single|multi|direct <PROMPT> | /orche mode [auto|single|multi|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche cancel";
 export type OrcheCommand =
   | { mode: "single" | "multi" | "direct"; prompt: string }
   | { mode: "cancel" }
   | { mode: "workers" }
+  | { mode: "records" }
   | { mode: "stop"; worker: string }
   | { mode: "mode"; value?: MainMode };
 /** Strict command grammar: extra tokens on control commands never start work. */
 export function parseOrcheCommand(args: string): OrcheCommand | undefined {
   if (/^\s*cancel\s*$/.test(args)) return { mode: "cancel" };
   if (/^\s*workers\s*$/.test(args)) return { mode: "workers" };
+  if (/^\s*records\s*$/.test(args)) return { mode: "records" };
   const stop = /^\s*stop\s+(\S+)\s*$/.exec(args);
   if (stop?.[1]) return { mode: "stop", worker: stop[1] };
   const switchMode = /^\s*mode(?:\s+(\S+))?\s*$/.exec(args);
@@ -93,7 +118,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         const extra = ACTIVATE_BUILTINS.filter(name => registered.has(name) && !active.includes(name));
         if (extra.length) pi.setActiveTools([...active, ...extra]);
       }
-      const found = await discoverMainMode({ cwd: ctx.cwd, agentDir: options.agentDir ?? getAgentDir(), projectTrusted: ctx.isProjectTrusted() });
+      const found = await discoverConfiguredMainMode({ cwd: ctx.cwd, agentDir: options.agentDir ?? getAgentDir(), projectTrusted: ctx.isProjectTrusted() });
       state.setConfig(found.mode, found.path);
       state.restore(ctx.sessionManager.getBranch());
       state.apply();
@@ -116,7 +141,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
 
     // (2) Delegation, one-turn overrides and worker/session controls.
     pi.registerCommand("orche", {
-      description: "/orche single <prompt>: delegate to one worker for one turn. /orche multi <prompt>: run the multi-agent orchestrator. /orche direct <prompt>: edit directly for one turn. /orche mode [auto|single|multi|direct]: show/set delegation. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche cancel: stop the active task or run.",
+      description: "/orche single <prompt>: delegate to one worker for one turn. /orche multi <prompt>: run the multi-agent orchestrator. /orche direct <prompt>: edit directly for one turn. /orche mode [auto|single|multi|direct]: show/set delegation. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent run records (transcripts and manifests of orche runs and tasks). /orche cancel: stop the active task or run.",
       handler: async (args, ctx: ExtensionCommandContext) => {
         const parsed = parseOrcheCommand(args);
         if (!parsed) {
@@ -134,6 +159,18 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         }
         if (parsed.mode === "workers") {
           ctx.ui.notify(workers?.formatWorkers() ?? "no workers", "info");
+          return;
+        }
+        if (parsed.mode === "records") {
+          // The records of the calling session, newest first: where each run's transcripts and run.json are.
+          const resolved = await controller.recordsFor({ cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted(), ...(ctx.model ? { model: ctx.model } : {}), thinking: ctx.thinkingLevel ?? pi.getThinkingLevel() });
+          if (!resolved.enabled) {
+            ctx.ui.notify(`orche records are off: ${resolved.reason}`, "info");
+            return;
+          }
+          const sessionId = ctx.sessionManager.getSessionId() || undefined;
+          const list = await listRecords(resolved, { ...(sessionId ? { parentSessionId: sessionId } : {}), limit: 10 });
+          ctx.ui.notify(list.length ? `orche records (${resolved.root}):\n${formatRecordList(list)}` : formatRecordList(list), "info");
           return;
         }
         if (parsed.mode === "stop") {

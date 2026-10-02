@@ -40,6 +40,13 @@ export type CoordinatorEvent =
   | { type: "workspace_external_change"; timestamp: number; agentId?: string; file: string; reason: string }
   | { type: "workspace_baseline"; timestamp: number; commit: string }
   | { type: "workspace_audit_unavailable"; timestamp: number; reason: string }
+  /**
+   * Other pi sessions are active on the repository that were not known when the run started: found by a re-detection at a
+   * workspace audit point (`RunOptions.detectConcurrentActivity`). Emitted at most once per run, the first time the count
+   * exceeds the one given at the start. From then on ambiguous changes made while a worker command ran are classified as
+   * external (see `auditWorkspace`).
+   */
+  | { type: "concurrent_sessions_detected"; timestamp: number; phase: Phase; count: number; detail: string }
   | { type: "verification"; timestamp: number; passed: boolean; round: number; summary: string }
   | { type: "advisor_triggered"; timestamp: number; name: string; target: string; trigger: AdvisorTriggerKind; subject: string; await: boolean }
   | { type: "advisor_result"; timestamp: number; name: string; target: string; trigger: AdvisorTriggerKind; verdict: "ok" | "concern" | "blocker"; notes: readonly AdvisorNote[]; delivered: boolean }

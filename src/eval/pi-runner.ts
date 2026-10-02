@@ -9,11 +9,16 @@ import { Type, type Static } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 import { runOrchestrated } from '../orchestration/coordinator.js';
 import { createSession } from '../pi/session-factory.js';
+import { directorySessionRecords } from '../agent/records.js';
 import { runProcess, runnerResultSchema, type RunnerOptions, type RunnerResult, type RunnerUsage, type SessionUsage, type UsageTotals, type UnknownUsageRequest } from './omp-runner.js';
 import { buildStudyArm, matchArmRequest, studyArmMetadata, piModel, promptVariants, type StudyArmMetadata } from './arms.js';
 export { piModel, piRoutes, promptVariants } from './arms.js';
 
-export interface PiRunnerOptions extends RunnerOptions { promptVariant?: string; arm?: string; baseModel?: string }
+export interface PiRunnerOptions extends RunnerOptions {
+  promptVariant?: string; arm?: string; baseModel?: string;
+  /** Opt-in: keep the transcripts of the run's sessions (coordinator, workers, advisors) as pi session JSONL files in this directory. Default: none, every session stays in memory. */
+  recordsDir?: string;
+}
 export interface LoadedPromptVariant { name: string; file: string | null; text: string | undefined; sha256: string | null; chars: number }
 export async function loadPromptVariant(name: string): Promise<LoadedPromptVariant> {
   if (!Object.hasOwn(promptVariants, name)) throw new Error(`Unknown prompt variant ${name}; expected ${Object.keys(promptVariants).join(', ')}`);
@@ -186,7 +191,7 @@ export async function runPiChild(options: PiRunnerOptions): Promise<RunnerResult
   const observed = await observedPiRuntime(traceFile, variant ? { systemDir: join(options.outDir, 'system-prompts') } : undefined, armMetadata);
   await writeFile(eventsFile, '');
   const startedAt = Date.now();
-  const report = await runOrchestrated({ cwd: options.cwd, problem: options.instruction, routes: arm.routes, modelRuntime: observed.runtime, limits: { overallMs: options.timeoutSec * 1000 }, baseSystemPrompt: variant?.text, sink: event => appendFileSync(eventsFile, JSON.stringify(event) + '\n') });
+  const report = await runOrchestrated({ cwd: options.cwd, problem: options.instruction, routes: arm.routes, modelRuntime: observed.runtime, limits: { overallMs: options.timeoutSec * 1000 }, baseSystemPrompt: variant?.text, sink: event => appendFileSync(eventsFile, JSON.stringify(event) + '\n'), ...(options.recordsDir ? { records: directorySessionRecords(resolve(options.recordsDir)) } : {}) });
   await observed.drain();
   const finishedAt = Date.now();
   const usage = extractPiRequestUsage(await readFile(traceFile, 'utf8'), armMetadata);
@@ -239,7 +244,7 @@ export async function probePi(options: RunnerOptions): Promise<RunnerResult> {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const args = process.argv.slice(2);
   const inputPath = args[args.indexOf('--child') + 1], resultPath = args[args.indexOf('--result') + 1];
-  const schema = Type.Object({ cwd: Type.String(), instruction: Type.String(), outDir: Type.String(), timeoutSec: Type.Number({ exclusiveMinimum: 0 }), promptVariant: Type.Optional(Type.String()), arm: Type.Optional(Type.String()), baseModel: Type.Optional(Type.String()) });
+  const schema = Type.Object({ cwd: Type.String(), instruction: Type.String(), outDir: Type.String(), timeoutSec: Type.Number({ exclusiveMinimum: 0 }), promptVariant: Type.Optional(Type.String()), arm: Type.Optional(Type.String()), baseModel: Type.Optional(Type.String()), recordsDir: Type.Optional(Type.String()) });
   const raw: unknown = JSON.parse(await readFile(inputPath!, 'utf8'));
   if (!Value.Check(schema, raw) || !resultPath) throw new Error('Invalid Pi child invocation');
   await writeFile(resultPath, JSON.stringify(await runPiChild(raw), null, 2));

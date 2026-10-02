@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_CONCURRENT_SESSIONS, discoverOrcheConfig, loadOrcheConfigFile, NoRouteError, parseConcurrentSessionsConfig, resolveConcurrentSessions } from "../../src/extension/config.js";
+import {
+  DEFAULT_CONCURRENT_SESSIONS, DEFAULT_RECORDS, discoverOrcheConfig, loadOrcheConfigFile, MAX_RECORDS_RETENTION_DAYS, NoRouteError, parseConcurrentSessionsConfig, parseRecordsConfig,
+  resolveConcurrentSessions, resolveRecordsSettings,
+} from "../../src/extension/config.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -131,5 +134,76 @@ describe("orche config discovery", () => {
     await expect(loadOrcheConfigFile(join(typo.agentDir, "missing.json"))).rejects.toThrow("Cannot load route config");
     const array = await layout({ user: [] });
     await expect(loadOrcheConfigFile(join(array.agentDir, "orche.config.json"))).rejects.toThrow("config: expected object");
+  });
+
+  it("defaults records to enabled with 30 days retention, from every config source", async () => {
+    const expected = { enabled: true, retentionDays: 30 };
+    expect(DEFAULT_RECORDS).toEqual(expected);
+    expect(resolveRecordsSettings()).toEqual(expected);
+    const noSetting = await layout({ user: cfg("u/user") });
+    expect((await discoverOrcheConfig({ ...noSetting, projectTrusted: true, session })).records).toEqual(expected);
+    const none = await layout({});
+    expect((await discoverOrcheConfig({ ...none, projectTrusted: true, session })).records).toEqual(expected);
+    const empty = await layout({ user: { ...cfg("u/user"), records: {} } });
+    expect((await discoverOrcheConfig({ ...empty, projectTrusted: true, session })).records).toEqual(expected);
+  });
+
+  it("reads records from the selected file and keeps it out of the route config", async () => {
+    const files = await layout({
+      project: { ...cfg("p/project"), records: { dir: "/var/orche-records", retentionDays: 7, maxBytes: 1048576 } },
+      user: { ...cfg("u/user"), records: { enabled: false } },
+    });
+    const project = await discoverOrcheConfig({ ...files, projectTrusted: true, session });
+    expect(project.records).toEqual({ enabled: true, dir: "/var/orche-records", retentionDays: 7, maxBytes: 1048576 });
+    expect(project.routes).toEqual(cfg("p/project"));
+    // An untrusted project file is ignored entirely, including its records.
+    expect((await discoverOrcheConfig({ ...files, projectTrusted: false, session })).records).toEqual({ enabled: false, retentionDays: 30 });
+    const home = await layout({ user: { ...cfg("u/user"), records: { dir: "~/orche-records", retentionDays: 0.5 }, concurrentSessions: { windowMinutes: 3 } } });
+    const loaded = await loadOrcheConfigFile(join(home.agentDir, "orche.config.json"));
+    expect(loaded.records).toEqual({ enabled: true, dir: "~/orche-records", retentionDays: 0.5 });
+    expect(loaded.concurrentSessions).toEqual({ enabled: true, windowMinutes: 3 });
+    expect(loaded.routes).toEqual(cfg("u/user"));
+  });
+
+  it("validates records like the other settings", async () => {
+    expect(parseRecordsConfig({ enabled: false, dir: "/abs/records", retentionDays: 90, maxBytes: 5 })).toEqual({ enabled: false, dir: "/abs/records", retentionDays: 90, maxBytes: 5 });
+    expect(parseRecordsConfig({})).toEqual({});
+    expect(parseRecordsConfig({ dir: "~/records" })).toEqual({ dir: "~/records" });
+    expect(resolveRecordsSettings({ maxBytes: 10 })).toEqual({ enabled: true, retentionDays: 30, maxBytes: 10 });
+    const invalid: [unknown, string][] = [
+      [null, "config.records: expected object"],
+      [[], "config.records: expected object"],
+      [false, "config.records: expected object"],
+      [{ enable: false }, "config.records: unknown field"],
+      [{ enabled: "no" }, "config.records.enabled"],
+      [{ enabled: 1 }, "config.records.enabled"],
+      [{ dir: "" }, "config.records.dir"],
+      [{ dir: "relative/records" }, "config.records.dir"],
+      [{ dir: "./records" }, "config.records.dir"],
+      [{ dir: "~" }, "config.records.dir"],
+      [{ dir: "~other/records" }, "config.records.dir"],
+      [{ dir: " /padded" }, "config.records.dir"],
+      [{ dir: 5 }, "config.records.dir"],
+      [{ retentionDays: 0 }, "config.records.retentionDays"],
+      [{ retentionDays: -1 }, "config.records.retentionDays"],
+      [{ retentionDays: "30" }, "config.records.retentionDays"],
+      [{ retentionDays: Number.NaN }, "config.records.retentionDays"],
+      [{ retentionDays: Number.POSITIVE_INFINITY }, "config.records.retentionDays"],
+      [{ retentionDays: MAX_RECORDS_RETENTION_DAYS + 1 }, "config.records.retentionDays"],
+      [{ maxBytes: 0 }, "config.records.maxBytes"],
+      [{ maxBytes: 1.5 }, "config.records.maxBytes"],
+      [{ maxBytes: -5 }, "config.records.maxBytes"],
+      [{ maxBytes: "1000" }, "config.records.maxBytes"],
+    ];
+    for (const [value, message] of invalid) expect(() => parseRecordsConfig(value), JSON.stringify(value)).toThrow(message);
+    for (const [value, message] of [[{ retentionDays: 0 }, "retentionDays"], [{ bogus: 1 }, "unknown field"], ["x", "expected object"]] as const) {
+      const files = await layout({ user: { ...cfg("u/user"), records: value } });
+      await expect(discoverOrcheConfig({ ...files, projectTrusted: true, session }), JSON.stringify(value)).rejects.toThrow(message);
+    }
+  });
+
+  it("still rejects a mistyped records key", async () => {
+    const typo = await layout({ user: { ...cfg("u/user"), record: { enabled: false } } });
+    await expect(loadOrcheConfigFile(join(typo.agentDir, "orche.config.json"))).rejects.toThrow("config: unknown field");
   });
 });

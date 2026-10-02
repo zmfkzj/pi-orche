@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { AgentManager } from "../agent/agent-manager.js";
 import type { ManagerEvent } from "../agent/agent-handle.js";
+import type { SessionRecords } from "../agent/records.js";
 import type { CoordinatorEvent } from "../orchestration/events.js";
 import type { CoordinatorDecision } from "../orchestration/phases.js";
 import { resolveRoute, type ModelRoute, type RouteConfig } from "../orchestration/routing.js";
@@ -23,6 +24,8 @@ export interface AdvisorHost {
   coordinator: () => AgentSession | undefined;
   emit: (event: CoordinatorEvent) => void;
   signal?: AbortSignal;
+  /** Opt-in session records: each advisor call is a session of its own, actor id `advisor:<name>#<n>` (n = the advisor's call number). */
+  records?: SessionRecords;
 }
 interface Budget {
   calls: number; perTarget: Map<string, number>; lastStart: Map<string, number>; busy: Set<string>;
@@ -222,7 +225,7 @@ export class AdvisorEngine {
     budget.lastStart.set(recipient, now);
     budget.busy.add(recipient);
     this.host.emit({ type: "advisor_triggered", timestamp: now, name: advisor.name, target: recipient, trigger, subject, await: awaiting });
-    const task = this.execute(advisor, trigger, subject, recipient, detail, awaiting, maxMs);
+    const task = this.execute(advisor, trigger, subject, recipient, detail, awaiting, maxMs, budget.calls);
     const flight: Flight = { recipient, task };
     this.flights.add(flight);
     void task.finally(() => {
@@ -239,7 +242,7 @@ export class AdvisorEngine {
 
   private async execute(
     advisor: ResolvedAdvisor, trigger: AdvisorTriggerKind, subject: string, recipient: string,
-    detail: Record<string, unknown>, awaiting: boolean, maxMs: number,
+    detail: Record<string, unknown>, awaiting: boolean, maxMs: number, call: number,
   ): Promise<number> {
     const emitFailure = (reason: string) => {
       if (!this.disposed) this.host.emit({ type: "advisor_failed", timestamp: Date.now(), name: advisor.name, target: recipient, trigger, reason: clip(reason, 400) });
@@ -253,6 +256,7 @@ export class AdvisorEngine {
         onAbortPending: pending => { this.pendingAborts += pending ? 1 : -1; },
         onUsage: usage => this.host.emit({ type: "advisor_usage", timestamp: Date.now(), name: advisor.name, ...usage }),
         onContextWindow: info => this.host.emit({ type: "context_window", timestamp: Date.now(), actor: `advisor:${advisor.name}`, ...info }),
+        ...(this.host.records ? { records: this.host.records, call } : {}),
       });
       const delivered = await this.deliver(advisor, trigger, subject, recipient, verdict);
       if (!this.disposed) {

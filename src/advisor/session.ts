@@ -9,6 +9,7 @@ import type { ModelRoute } from "../orchestration/routing.js";
 import type { AdvisorNote } from "../orchestration/events.js";
 import { clip, LIMITS } from "./context.js";
 import type { ResolvedAdvisor } from "./config.js";
+import { reportAgent, targetOf, type SessionRecords } from "../agent/records.js";
 
 export type Verdict = "ok" | "concern" | "blocker";
 export interface AdvisorVerdict { verdict: Verdict; notes: AdvisorNote[] }
@@ -25,6 +26,10 @@ export interface AdvisorRun {
   onContextWindow: (info: ContextWindowInfo) => void;
   onCreationPending?: (pending: boolean) => void;
   onAbortPending?: (pending: boolean) => void;
+  /** Opt-in session records: persists this call's session and receives its manifest entry (actor `advisor:<name>#<call>`). */
+  records?: SessionRecords;
+  /** This call's number for the advisor (1-based); makes the actor id, and so the session file, unique. Default 1. */
+  call?: number;
 }
 /** Advisor sessions are short by construction: one prompt, read-only tools, a hard turn cap. */
 export const ADVISOR_MAX_TURNS = 8;
@@ -82,6 +87,11 @@ export async function runAdvisorSession(run: AdvisorRun): Promise<AdvisorVerdict
   let unsubscribe: (() => void) | undefined;
   let turns = 0;
   let modelError: string | undefined;
+  // Opt-in records: this call's actor and what it cost; all of it stays unused (and unallocated) without a hook.
+  const actor = { id: `advisor:${run.advisor.name}#${run.call ?? 1}`, role: "advisor", kind: "advisor" } as const;
+  const target = targetOf(run.records, actor);
+  const stats = { startedAt: Date.now(), requests: 0, models: {} as Record<string, number> };
+  let failure: unknown;
   try {
     run.onCreationPending?.(true);
     const creation = createSession({
@@ -90,6 +100,7 @@ export async function runAdvisorSession(run: AdvisorRun): Promise<AdvisorVerdict
       tools: [...READ_ONLY_TOOL_NAMES, "advisor_verdict"],
       customTools: [verdictTool(run.advisor, value => { if (!controller.signal.aborted) captured.verdict ??= value; })],
       instructions: advisorInstructions(run.advisor),
+      ...target,
     }).then(created => {
       if (controller.signal.aborted) { created.dispose(); throw controller.signal.reason; }
       return created;
@@ -106,7 +117,10 @@ export async function runAdvisorSession(run: AdvisorRun): Promise<AdvisorVerdict
       if (event.type === "turn_end" && ++turns >= ADVISOR_MAX_TURNS && !captured.verdict) controller.abort(new Error(`no verdict within ${ADVISOR_MAX_TURNS} turns`));
       if (event.type === "message_end" && event.message.role === "assistant") {
         const { usage } = event.message;
-        run.onUsage({ model: `${event.message.provider}/${event.message.model}`, input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite });
+        const answered = `${event.message.provider}/${event.message.model}`;
+        stats.requests++;
+        stats.models[answered] = (stats.models[answered] ?? 0) + 1;
+        run.onUsage({ model: answered, input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite });
         modelError = event.message.stopReason === "error" ? (event.message.errorMessage ?? "model error") : undefined;
       }
     });
@@ -114,10 +128,23 @@ export async function runAdvisorSession(run: AdvisorRun): Promise<AdvisorVerdict
     finally { controller.signal.removeEventListener("abort", stop); }
     if (!captured.verdict) throw new Error(modelError ?? "advisor ended without calling advisor_verdict");
     return captured.verdict;
+  } catch (error) {
+    failure = error;
+    throw error;
   } finally {
     clearTimeout(timer);
     run.signal.removeEventListener("abort", onAbort);
     unsubscribe?.();
     session?.dispose();
+    if (session && run.records?.onAgent) {
+      const cancelled = failure !== undefined && run.signal.aborted;
+      reportAgent(run.records, {
+        ...actor, model: run.route.model, ...(run.route.thinking ? { thinking: run.route.thinking } : {}),
+        requests: stats.requests, models: stats.models, durationMs: Math.max(0, Date.now() - stats.startedAt), startedAt: stats.startedAt,
+        status: failure === undefined ? "completed" : cancelled ? "cancelled" : "failed",
+        ...(session.sessionFile ? { sessionFile: session.sessionFile } : {}),
+        ...(failure !== undefined ? { error: failure instanceof Error ? failure.message : String(failure) } : {}),
+      });
+    }
   }
 }

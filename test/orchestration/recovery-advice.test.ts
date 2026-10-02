@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { describeProgress } from "../../src/extension/progress.js";
 import {
   describeWorkspaceChanges, recoveryCommands, WorkspaceAudit,
-  type ExternalWorkspaceChange, type WorkspaceChange,
+  type ExternalWorkspaceChange, type SubmoduleState, type WorkspaceChange,
 } from "../../src/orchestration/workspace.js";
 
 const COMMIT = "0123456789abcdef0123456789abcdef01234567";
@@ -205,3 +205,97 @@ describe("recovery advice on a real worktree", () => {
     await audit.close();
   });
 });
+
+/** Submodule information is optional and explicit: the advice functions stay pure (real repositories: submodule-recovery.test.ts). */
+describe("recovery advice with submodule information", () => {
+  const OLD = "a".repeat(40);
+  const NEW = "b".repeat(40);
+  const sub: SubmoduleState = { path: "libs/sub", from: OLD, to: NEW, indexed: OLD, tracked: ["file.txt", "dir/a b.txt", "gone.txt"] };
+  const change = (path: string, status: WorkspaceChange["status"] = "modified"): WorkspaceChange => ({ path, status });
+
+  it("puts a path inside a submodule on `git -C <sub>` and never on the superproject baseline form", () => {
+    const changes = [change("src/a.ts"), change("libs/sub/file.txt"), change("libs/sub/dir/a b.txt"), change("libs/sub/gone.txt", "deleted"), change("libs/sub/new.txt", "added")];
+    const commands = recoveryCommands(COMMIT, changes, [], [sub]);
+    expect(commands).toEqual([
+      `git restore --source=${COMMIT} --worktree -- src/a.ts`,
+      "rm -- libs/sub/new.txt",
+      "git -C libs/sub restore -- file.txt 'dir/a b.txt' gone.txt",
+    ]);
+    for (const command of commands.filter(command => command.startsWith("git restore"))) expect(command).not.toContain("libs/sub");
+    const text = describeWorkspaceChanges(COMMIT, changes, [], [sub]);
+    expect(commandLines(text).map(line => line.trim())).toEqual([
+      ...commands.slice(0, 2),
+      "git -C libs/sub diff -- file.txt 'dir/a b.txt' gone.txt",
+      commands[2],
+    ]);
+    expect(text).toContain("DISCARDS");
+  });
+
+  it("quotes the submodule path and chunks long file lists like any other command", () => {
+    const spaced: SubmoduleState = { path: "my libs/sub", to: NEW };
+    const files = Array.from({ length: 60 }, (_, i) => change(`my libs/sub/f${i}.ts`));
+    const commands = recoveryCommands(COMMIT, files, [], [spaced]);
+    expect(commands.length).toBeGreaterThan(1);
+    for (const command of commands) {
+      expect(command).toMatch(/^git -C 'my libs\/sub' restore -- f\d+\.ts/);
+      expect(command.split(" ").length).toBeLessThanOrEqual(40);
+    }
+    expect(commands.join(" ").match(/f\d+\.ts/g)).toHaveLength(60);
+  });
+
+  it("never emits `git restore` for a gitlink, whatever is known about it", () => {
+    const states: SubmoduleState[] = [
+      sub, { path: "libs/sub", from: OLD, to: OLD }, { path: "libs/sub", to: NEW }, { path: "libs/sub", from: OLD },
+      { path: "libs/sub", from: OLD, to: NEW, indexed: NEW }, { path: "libs/sub" },
+    ];
+    for (const status of ["modified", "added", "deleted"] as const) {
+      for (const state of states) {
+        const changes = [change("libs/sub", status)];
+        const text = describeWorkspaceChanges(COMMIT, changes, [], [state]);
+        expect(text).not.toMatch(/git restore/);
+        expect(text).not.toMatch(/\brm --/);
+        expect(recoveryCommands(COMMIT, changes, [], [state]).every(command => !command.startsWith("git restore") && !command.startsWith("rm"))).toBe(true);
+        expect(text).not.toMatch(BLANKET);
+      }
+    }
+    // The one command a moved HEAD gets, and its caveat.
+    const text = describeWorkspaceChanges(COMMIT, [change("libs/sub")], [], [sub]);
+    expect(text).toContain(`submodule libs/sub HEAD moved ${OLD.slice(0, 12)}→${NEW.slice(0, 12)}; to go back: git -C libs/sub checkout ${OLD}`);
+    expect(text).toContain("detached HEAD");
+    expect(text).toContain("(or: git submodule update -- libs/sub, the index still records");
+    expect(describeWorkspaceChanges(COMMIT, [change("libs/sub")], [], [{ ...sub, indexed: NEW }])).not.toContain("submodule update");
+  });
+
+  it("never advises external paths, inside a submodule or at its gitlink", () => {
+    const external: ExternalWorkspaceChange[] = [
+      { path: "libs/sub/file.txt", status: "modified", reason: "concurrent session active; ambiguous" },
+      { path: "libs/sub", status: "modified", reason: "committed outside this run" },
+    ];
+    const changes = [...external.map(({ path, status }) => ({ path, status })), change("libs/sub/gone.txt", "deleted"), change("src/a.ts")];
+    const commands = recoveryCommands(COMMIT, changes, external, [sub]);
+    expect(commands).toEqual([`git restore --source=${COMMIT} --worktree -- src/a.ts`, "git -C libs/sub restore -- gone.txt"]);
+    const text = describeWorkspaceChanges(COMMIT, changes, external, [sub]);
+    expect(text).not.toMatch(/checkout|submodule update/);
+    expect(text.slice(text.indexOf(NOTE))).toContain("- modified: libs/sub/file.txt — concurrent session active; ambiguous");
+    for (const line of commandLines(text)) expect(line).not.toContain("file.txt");
+  });
+
+  it("picks the innermost submodule and leaves similarly named plain paths alone", () => {
+    const outer: SubmoduleState = { path: "libs/sub", to: NEW };
+    const inner: SubmoduleState = { path: "libs/sub/inner", parent: "libs/sub", to: NEW };
+    const changes = [change("libs/sub/inner/deep.txt"), change("libs/sub/x.txt"), change("libs/subway/y.txt"), change("libs/sub-x.txt")];
+    expect(recoveryCommands(COMMIT, changes, [], [outer, inner])).toEqual([
+      `git restore --source=${COMMIT} --worktree -- libs/subway/y.txt libs/sub-x.txt`,
+      "git -C libs/sub/inner restore -- deep.txt",
+      "git -C libs/sub restore -- x.txt",
+    ]);
+  });
+
+  it("above 200 run files it is still inspection only, with or without submodule information", () => {
+    const many = [...run(260), change("libs/sub/file.txt")];
+    const text = describeWorkspaceChanges(COMMIT, many, [], [sub]);
+    expect(commandLines(text)).toEqual([]);
+    expect(text).toContain(`git diff --name-status ${COMMIT}`);
+  });
+});
+

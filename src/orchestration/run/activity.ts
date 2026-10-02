@@ -29,8 +29,11 @@ import type { WorkspaceChange } from "../workspace.js";
  *    direction). It is therefore awaited inside the write guard (`enter`). It adds one
  *    `git add --all` on the private index (stat cache reuse: cost grows with the number of files,
  *    not with the size of the change) to a tool call that already waits for a model round trip.
- *  - active→quiet: nobody waits for it, so it is queued. If an external write lands before it runs
- *    it is attributed to the active window, which is the safe (ambiguous) direction.
+ *  - active→quiet: the snapshot must also be taken before the worker's next step. Otherwise a write made right after the tool
+ *    ended (another session, an editor, even the next model step) can land before the snapshot reads the tree and be mistaken for
+ *    the run's own; under load a git snapshot easily takes longer than the worker's next step. `record` therefore returns the
+ *    queued job's promise and AgentManager awaits it on the tool's `end`, before the worker goes on (cancellation stops the wait).
+ *    It is the same job as before, so overlapping tools still share one snapshot and it counts against the same cap below.
  *  - Overlapping tools of several workers form one active window: one snapshot pair per burst, not
  *    per call. Read-only tools, report_result and send_message never snapshot.
  *  - Blocking time is capped at max(5s, 10% of the elapsed run). Past the cap (or after a snapshot
@@ -116,13 +119,18 @@ export class WorkspaceActivity {
     return [...this.executions.values()].map(({ agentId, toolName }) => ({ agentId, toolName }));
   }
 
-  /** Feed one worker's tool execution event. Synchronous: it never awaits the session. */
-  record(agentId: string, event: ToolExecutionEvent): void {
+  /**
+   * Feed one worker's tool execution event. The bookkeeping is synchronous. For the event that ends a burst (the last write-capable
+   * tool ended, or the session settled) the returned promise resolves once the snapshot that closes the active window has been taken:
+   * the caller (AgentManager, for `end`) holds the worker back until then, so that anything written after the tool ended, even by
+   * the worker's very next step, is seen in a quiet window. It never rejects.
+   */
+  record(agentId: string, event: ToolExecutionEvent): void | Promise<void> {
     if (event.phase === "settled") {
       // The session has no tool in flight any more: heals a missed end event.
       let removed = false;
       for (const [key, execution] of this.executions) if (execution.agentId === agentId) { this.executions.delete(key); removed = true; }
-      if (removed) this.afterEnd();
+      if (removed) return this.afterEnd();
       return;
     }
     if (!event.toolCallId || !event.toolName) return;
@@ -138,7 +146,7 @@ export class WorkspaceActivity {
     this.executions.delete(key);
     // Only a call that really ran counts: a blocked or failed edit wrote nothing.
     if (!event.isError && execution.path) { this.writtenPaths.run.add(execution.path); this.writtenPaths.phase.add(execution.path); }
-    this.afterEnd();
+    return this.afterEnd();
   }
 
   /**
@@ -215,10 +223,14 @@ export class WorkspaceActivity {
     return this.spentMs < allowed;
   }
 
-  private afterEnd(): void {
-    if (this.executions.size > 0 || this.broken) return;
-    // Nobody waits for this snapshot; a late one only widens the active window (safe direction).
-    void this.run(async () => {
+  /**
+   * Queue the snapshot that closes the active window once nothing of the run is executing. It is the quiet window's start, so it must
+   * be taken before the worker goes on (see {@link record}): a write that lands before it runs is attributed to the active window,
+   * which is the safe (ambiguous) direction but also the wrong one for a write that came after the tool ended.
+   */
+  private afterEnd(): Promise<void> | undefined {
+    if (this.executions.size > 0 || this.broken) return undefined;
+    return this.run(async () => {
       if (!this.windowActive || this.hasGated() || !this.canSnapshot()) return;
       try { await this.close(true); } catch { this.broken = true; }
     });

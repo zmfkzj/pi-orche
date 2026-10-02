@@ -1,5 +1,6 @@
 import type { TSchema } from "@sinclair/typebox";
 import type { SessionOptions } from "../pi/session-factory.js";
+import type { SessionRecords } from "./records.js";
 import type {
   NoteMessage,
   DeliveryReceipt,
@@ -66,6 +67,11 @@ export interface SpawnOptions extends SessionOptions {
    * running any more). Invoked synchronously from the session event, before the manager's
    * closed/disposed guard, so ends are still seen while a run tears down. Errors and rejections
    * are swallowed: observers cannot alter the worker lifecycle.
+   *
+   * A promise returned for an `end` event IS awaited: the worker does not go on (no tool-result message, no next model request)
+   * until it settles, or the assignment is stopped. This is how an observer takes a workspace snapshot at the tool boundary, before
+   * anything the worker does next can be confused with the tool's own writes. Keep it short and bounded. `start` and `settled` are
+   * never awaited.
    */
   onToolExecution?(event: ToolExecutionEvent): void | Promise<void>;
 }
@@ -86,6 +92,12 @@ export interface AgentManagerOptions {
    * has; a few requests later without a RESULT the assignment fails.
    */
   requestBudget?: number;
+  /**
+   * Opt-in session records. `sessionTarget` is asked for every spawned worker that was not given a `sessionDir`/`sessionFile` itself
+   * and persists its session as a regular pi JSONL; `onAgent` receives each worker's {@link AgentRecordEntry} once, when it is
+   * disposed. Absent (the default): workers live in memory only. {@link AgentManager.agentRecord} works either way.
+   */
+  records?: SessionRecords;
 }
 export type ManagerEvent = { timestamp: number } & (
   | { type: "assignment_started"; agentId: string; assignment: Assignment }

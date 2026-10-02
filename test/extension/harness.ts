@@ -44,6 +44,12 @@ export async function createHarness(options: {
   writeUserConfig?: boolean;
   /** `mainMode` in the user config (default auto delegates; unset omits the key). */
   mainMode?: "auto" | "single" | "multi" | "direct" | "unset";
+  /**
+   * `records` in the user config. The default is OFF here (`{ enabled: false }`), unlike the extension's own default (on): suites that do not
+   * look at records keep their exact result texts and write nothing. Pass `true` for the defaults, or a `records` object (`dir`, `retentionDays`,
+   * `maxBytes`) to switch records on; they then live under `<agentDir>/orche/records` of the harness, which `dispose` removes.
+   */
+  records?: boolean | { enabled?: boolean; dir?: string; retentionDays?: number; maxBytes?: number };
   /** `ctx.mode` the extension sees (default: the SDK default, i.e. not "tui"). */
   mode?: "tui" | "rpc" | "print" | "json";
 }): Promise<Harness> {
@@ -57,7 +63,8 @@ export async function createHarness(options: {
   const orche = await fauxRuntime(options.orcheSteps);
   main.runtime.registerNativeProvider(orche.faux.provider);
   if (options.writeUserConfig !== false) {
-    await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: orche.route.model }, ...(options.mainMode === "unset" ? {} : { mainMode: options.mainMode ?? "auto" }) }));
+    const records = options.records === true ? {} : options.records === undefined || options.records === false ? { enabled: false } : options.records;
+    await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: orche.route.model }, records, ...(options.mainMode === "unset" ? {} : { mainMode: options.mainMode ?? "auto" }) }));
   }
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
   const resourceLoader = new DefaultResourceLoader({

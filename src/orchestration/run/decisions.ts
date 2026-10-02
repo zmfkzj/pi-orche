@@ -2,6 +2,7 @@ import { ModelRuntime, type ToolDefinition } from "@earendil-works/pi-coding-age
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { createSession } from "../../pi/session-factory.js";
+import { reportAgent, targetOf } from "../../agent/records.js";
 import { READ_ONLY_TOOL_NAMES } from "../../tools/index.js";
 import { parseCoordinatorDecision, decisionSchemaForPhase, transition, type CoordinatorDecision, type Phase } from "../phases.js";
 import { validateBacklog } from "../backlog.js";
@@ -103,16 +104,26 @@ export async function createCoordinator(ctx: RunContext, runtime: ModelRuntime):
       return { content: [{ type: "text", text: "Plan captured" }], details: {}, terminate: true };
     },
   };
+  const route = resolveRoute(ctx.options.routes, "coordinator");
+  // Opt-in records: the caller's hook decides whether (and where) this session is persisted.
+  const target = targetOf(ctx.options.records, { id: "coordinator", role: "coordinator", kind: "coordinator" });
+  const startedAt = Date.now();
   ctx.coordinator = await createSession({
     onContextWindow: info => emit(ctx, { type: "context_window", timestamp: Date.now(), actor: "coordinator", ...info }),
     baseSystemPrompt: ctx.options.baseSystemPrompt,
     cwd: ctx.options.cwd,
-    route: resolveRoute(ctx.options.routes, "coordinator"),
+    route,
+    ...target,
     modelRuntime: runtime,
     tools: [...READ_ONLY_TOOL_NAMES, "coordinator_decision", "plan_exploration"],
     customTools: [decisionTool, planTool],
     instructions: "You are the coordinator. Read-only. First classify the request; do not mistake explanation, review or no-modification requests for code changes. Decisions must use structured tools alone. Reply in the user's language; Korean requests require Korean answers (한국어). Accept only evidenced causes. Merge minimal tasks, disjoint ownership, explicit dependencies and the SAME worker owners. Require actual verification for changes; answers must be grounded in read-only worker evidence. Never access hidden grading data.",
   });
+  const record: NonNullable<RunContext["coordinatorRecord"]> = {
+    startedAt, requests: 0, models: {}, model: route.model, ...(route.thinking ? { thinking: route.thinking } : {}),
+    ...(ctx.coordinator.sessionFile ? { sessionFile: ctx.coordinator.sessionFile } : {}),
+  };
+  ctx.coordinatorRecord = record;
   if (ctx.cancelled) {
     ctx.coordinator.dispose();
     ctx.coordinator = undefined;
@@ -122,6 +133,9 @@ export async function createCoordinator(ctx: RunContext, runtime: ModelRuntime):
   ctx.unsubscribers.push(ctx.coordinator.subscribe(event => {
     if (event.type !== "message_end" || event.message.role !== "assistant") return;
     const usage = event.message.usage;
+    const answered = `${event.message.provider}/${event.message.model}`;
+    record.requests++;
+    record.models[answered] = (record.models[answered] ?? 0) + 1;
     emit(ctx, {
       type: "coordinator_usage", timestamp: Date.now(),
       model: `${event.message.provider}/${event.message.model}`,
@@ -129,6 +143,23 @@ export async function createCoordinator(ctx: RunContext, runtime: ModelRuntime):
     });
     emit(ctx, { type: "coordinator_activity", timestamp: Date.now(), phase: ctx.state.phase, requestCount: ++requests });
   }));
+}
+/**
+ * Hand the coordinator's manifest entry to `options.records.onAgent`, once, when the run is over (status `completed`, `failed` or
+ * `cancelled`). Nothing to report when no coordinator session was ever created.
+ */
+export function reportCoordinator(ctx: RunContext, status: "completed" | "failed" | "cancelled", error?: string): void {
+  const record = ctx.coordinatorRecord;
+  if (!record || record.reported || !ctx.options.records?.onAgent) return;
+  record.reported = true;
+  reportAgent(ctx.options.records, {
+    id: "coordinator", role: "coordinator", kind: "coordinator", model: record.model,
+    ...(record.thinking ? { thinking: record.thinking } : {}),
+    requests: record.requests, models: { ...record.models }, durationMs: Math.max(0, Date.now() - record.startedAt),
+    startedAt: record.startedAt, status,
+    ...(record.sessionFile ? { sessionFile: record.sessionFile } : {}),
+    ...(error ? { error } : {}),
+  });
 }
 export async function classifyRequest(ctx: RunContext): Promise<void> {
   const decision = await decide(ctx, {

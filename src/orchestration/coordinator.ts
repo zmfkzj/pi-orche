@@ -8,7 +8,7 @@ import { createPhaseState } from "./phases.js";
 import { resolveTeam } from "./team.js";
 import { orchestrationResultSchemas } from "./result-schemas.js";
 import { apply, emit, forwardManagerEvent } from "./run/context.js";
-import { classifyRequest, createCoordinator } from "./run/decisions.js";
+import { classifyRequest, createCoordinator, reportCoordinator } from "./run/decisions.js";
 import { CONCURRENT_SESSION_AMBIGUOUS, finalWorkspace, openWorkspaceAudit } from "./run/audit.js";
 import { runAnswer } from "./run/answer.js";
 import { exploreUntilAccepted, collectProposals, planAndSpawnExplorers } from "./run/diagnose.js";
@@ -18,7 +18,7 @@ import type { WorkspaceChange } from "./workspace.js";
 import { resolveRunLimits } from "./limits.js";
 import { CREATED_FILE_ADVICE } from "./artifacts.js";
 
-export { defaultRunLimits, type ConcurrentActivity, type OwnershipViolation, type RunLimits, type RunOptions, type RunReport } from "./run/types.js";
+export { defaultRunLimits, type AgentRecordEntry, type ConcurrentActivity, type OwnershipViolation, type RecordedActor, type RunLimits, type RunOptions, type RunReport, type SessionRecords, type SessionTarget } from "./run/types.js";
 export { CONCURRENT_SESSION_AMBIGUOUS } from "./run/audit.js";
 export { explorationPlanProblem } from "./run/decisions.js";
 
@@ -35,7 +35,7 @@ export async function runOrchestrated(options: RunOptions): Promise<RunReport> {
     team,
     auditSettings: { ...options.routes.audit, ...options.audit },
     state: createPhaseState(limits.maxFixRounds, team.maxWorkers),
-    manager: new AgentManager(options.modelRuntime, { resultSchemas: orchestrationResultSchemas, requestBudget: limits.assignmentRequests }),
+    manager: new AgentManager(options.modelRuntime, { resultSchemas: orchestrationResultSchemas, requestBudget: limits.assignmentRequests, ...(options.records ? { records: options.records } : {}) }),
     decisionValue: undefined,
     decisionSet: false,
     activeTasks: new Map(),
@@ -101,7 +101,7 @@ export async function runOrchestrated(options: RunOptions): Promise<RunReport> {
       const engine = new AdvisorEngine(options.routes.advisors, {
         cwd: options.cwd, problem: options.problem, runtime, routes: options.routes, manager: ctx.manager,
         coordinator: () => ctx.coordinator, emit: event => emit(ctx, event),
-        signal: ctx.signal,
+        signal: ctx.signal, ...(options.records ? { records: options.records } : {}),
       });
       if (engine.active) {
         ctx.advisors = engine;
@@ -164,6 +164,7 @@ export async function runOrchestrated(options: RunOptions): Promise<RunReport> {
     for (const unsubscribe of ctx.unsubscribers) unsubscribe();
   }
   const status = !failure && ctx.state.phase === "DONE" && !ctx.violations.length ? "done" : "failed";
+  reportCoordinator(ctx, ctx.cancellation ? "cancelled" : status === "done" ? "completed" : "failed", status === "done" ? undefined : failure ?? ctx.state.failure);
   const violated = [...new Set(ctx.violations.map(violation => violation.file))];
   const created = [...new Set(ctx.violations.filter(violation => violation.created).map(violation => violation.file))];
   const baseSummary = ctx.cancellation ? "cancelled" : ctx.violations.length

@@ -28,6 +28,7 @@ import type {
   ToolExecutionEvent,
   WaitResult,
 } from "./agent-handle.js";
+import { reportAgent, targetOf, type AgentRecordEntry, type SessionRecords } from "./records.js";
 /** Requests a forced final report may take after a budget stop before the assignment fails. */
 export const BUDGET_GRACE_REQUESTS = 5;
 interface Worker {
@@ -48,6 +49,21 @@ interface Worker {
   budget: "none" | "noticed" | "stopping" | "final";
   abort?: Promise<void>;
   unsubscribe: () => void;
+  /** Records bookkeeping (see {@link AgentManager.agentRecord}); never read by the lifecycle itself. */
+  stats: WorkerStats;
+}
+interface WorkerStats {
+  startedAt: number;
+  /** Model requests over the worker's whole life (not reset per assignment). */
+  requests: number;
+  models: Record<string, number>;
+  /** Summed duration of the finished assignments; the one in flight is added by `assignedAt`. */
+  busyMs: number;
+  assignedAt?: number;
+  /** Outcome of the last finished assignment. */
+  last?: { status: Outcome["status"]; error?: string };
+  sessionFile?: string;
+  reported: boolean;
 }
 export class AgentManager {
   private readonly workers = new Map<string, Worker>();
@@ -64,6 +80,7 @@ export class AgentManager {
   private readonly resultSchemas: Readonly<Record<string, ResultDataSchema>>;
   private readonly resultSchemaRetries: number;
   private readonly requestBudget: number;
+  private readonly records: SessionRecords | undefined;
   private readonly closed = new AbortController();
   private readonly pendingSpawns = new Set<string>();
   /** One-way fence: prevents new assignments, prompts and manager tool side effects. */
@@ -89,6 +106,7 @@ export class AgentManager {
     this.requestBudget = options.requestBudget ?? 0;
     if (!Number.isSafeInteger(this.requestBudget) || this.requestBudget < 0)
       throw new Error("requestBudget must be a nonnegative safe integer");
+    this.records = options.records;
     this.modelRuntime = modelRuntime ? Promise.resolve(modelRuntime) : undefined;
   }
   async spawn(options: SpawnOptions): Promise<AgentHandle> {
@@ -187,6 +205,8 @@ export class AgentManager {
       "report_result",
       ...(options.peerMessaging === false ? [] : ["send_message"]),
     ];
+    // Opt-in persistence: the records hook decides where this worker's session goes unless the caller already did.
+    const target = options.sessionFile || options.sessionDir ? undefined : targetOf(this.records, { id: options.id, role: options.role, kind: "worker" });
     this.pendingSpawns.add(options.id);
     const signal = options.signal
       ? AbortSignal.any([this.closed.signal, options.signal]) : this.closed.signal;
@@ -194,7 +214,7 @@ export class AgentManager {
       const modelRuntime = options.modelRuntime ?? await (this.modelRuntime ??= ModelRuntime.create());
       this.assertOpen(signal);
       const session = await createSession({
-        ...options, modelRuntime, tools,
+        ...options, ...target, modelRuntime, tools,
         customTools: [...(options.customTools ?? []), report, ...(options.peerMessaging === false ? [] : [send])],
         instructions: `${options.instructions}\nComplete assignments with report_result.${options.peerMessaging === false ? "" : " Send peers information using send_message."} NOTES are informational, not new assignments.`,
       });
@@ -240,15 +260,33 @@ export class AgentManager {
       requests: 0,
       budget: "none",
       unsubscribe: () => {},
+      stats: { startedAt: Date.now(), requests: 0, models: {}, busyMs: 0, sessionFile: session.sessionFile, reported: false },
     };
-    worker.unsubscribe = adapter.subscribe((event) => {
+    // The end of a tool is observed through the Agent's own listener, not the session listener below: the Agent awaits its listeners,
+    // in order, before it goes on (tool-result message, next model request), so an observer that returns a promise (the workspace
+    // tracker's closing snapshot) holds the worker back until it settled. It runs right after the session's own handling of the same
+    // event. The wait is cut short when the run is aborted or the manager closes. A session without an Agent (a test double) falls
+    // back to the plain, unawaited notification below.
+    const unsubscribeEnds = options.onToolExecution && session.agent
+      ? session.agent.subscribe(async (event, runSignal) => {
+          if (event.type !== "tool_execution_end") return;
+          await until(notifyTool(options, { phase: "end", toolCallId: event.toolCallId, toolName: event.toolName, isError: event.isError }), runSignal, this.closed.signal);
+        })
+      : undefined;
+    const unsubscribeSession = adapter.subscribe((event) => {
       // Tool tracking comes first: an end or settle must still be seen while the manager closes,
       // otherwise the observer would think a tool is running forever. Arguments go to this callback
       // only, never into the public event stream.
       if (options.onToolExecution) {
-        if (event.type === "tool_execution_start") notifyTool(options, { phase: "start", toolCallId: event.toolCallId, toolName: event.toolName, args: event.args });
-        else if (event.type === "tool_execution_end") notifyTool(options, { phase: "end", toolCallId: event.toolCallId, toolName: event.toolName, isError: event.isError });
-        else if (event.type === "agent_settled") notifyTool(options, { phase: "settled" });
+        if (event.type === "tool_execution_start") void notifyTool(options, { phase: "start", toolCallId: event.toolCallId, toolName: event.toolName, args: event.args });
+        else if (event.type === "tool_execution_end" && !unsubscribeEnds) void notifyTool(options, { phase: "end", toolCallId: event.toolCallId, toolName: event.toolName, isError: event.isError });
+        else if (event.type === "agent_settled") void notifyTool(options, { phase: "settled" });
+      }
+      // Requests are counted for the records even while the manager closes: the cost of a cancelled run is the point.
+      if (event.type === "message_end" && event.message.role === "assistant") {
+        worker.stats.requests++;
+        const model = `${event.message.provider}/${event.message.model}`;
+        worker.stats.models[model] = (worker.stats.models[model] ?? 0) + 1;
       }
       if (this.closed.signal.aborted || worker.snapshot.status === "disposed") return;
       worker.snapshot.lastActivityAt = Date.now();
@@ -307,6 +345,7 @@ export class AgentManager {
         }
       }
     });
+    worker.unsubscribe = () => { unsubscribeEnds?.(); unsubscribeSession(); };
     this.workers.set(options.id, worker);
     return {
       id: options.id,
@@ -333,6 +372,7 @@ export class AgentManager {
     w.budget = "none";
     w.snapshot.requestCount = 0;
     w.snapshot.lastActivityAt = Date.now();
+    w.stats.assignedAt = Date.now();
     w.snapshot.lastToolName = undefined;
     w.snapshot.lastToolAt = undefined;
     this.emit({
@@ -500,6 +540,9 @@ export class AgentManager {
       ...(status === "no_result" ? { lastText: w.adapter.lastText } : {}),
       ...(w.failure ?? w.resultFailure ? { error: w.failure ?? w.resultFailure } : {}),
     };
+    if (w.stats.assignedAt !== undefined) w.stats.busyMs += Math.max(0, outcome.timestamp - w.stats.assignedAt);
+    w.stats.assignedAt = undefined;
+    w.stats.last = { status, ...(outcome.error ? { error: outcome.error } : {}) };
     w.snapshot.currentAssignment = undefined;
     w.snapshot.completedAssignments++;
     if (idle && w.snapshot.status !== "stopping") w.snapshot.status = "idle";
@@ -622,6 +665,41 @@ export class AgentManager {
     return this.require(id).adapter.session;
   }
   /**
+   * Manifest entry of one worker (never throws for a known id): who it is, which model it was routed to and which models actually
+   * answered, how many requests it made over its whole life, how long it worked and how its last assignment ended. Available
+   * whether or not records are enabled; `sessionFile` is set only for a persisted session.
+   */
+  agentRecord(id: string): AgentRecordEntry {
+    const w = this.require(id);
+    const { stats, snapshot } = w;
+    const running = snapshot.status === "running" || snapshot.status === "stopping";
+    return {
+      id: snapshot.id,
+      role: snapshot.role,
+      kind: "worker",
+      model: snapshot.route.model,
+      ...(snapshot.route.thinking ? { thinking: snapshot.route.thinking } : {}),
+      requests: stats.requests,
+      models: { ...stats.models },
+      durationMs: stats.busyMs + (stats.assignedAt !== undefined ? Math.max(0, Date.now() - stats.assignedAt) : 0),
+      startedAt: stats.startedAt,
+      status: running ? "running" : stats.last?.status ?? "idle",
+      assignments: snapshot.completedAssignments,
+      ...(stats.sessionFile ? { sessionFile: stats.sessionFile } : {}),
+      ...(stats.last?.error ? { error: stats.last.error } : {}),
+    };
+  }
+  /** {@link agentRecord} of every worker ever spawned here (disposed ones included), in spawn order. */
+  agentRecords(): AgentRecordEntry[] {
+    return [...this.workers.keys()].map(id => this.agentRecord(id));
+  }
+  /** Hand a worker's entry to `records.onAgent` once, after its session is disposed. */
+  private reportOnce(w: Worker): void {
+    if (w.stats.reported) return;
+    w.stats.reported = true;
+    if (this.records?.onAgent) reportAgent(this.records, this.agentRecord(w.snapshot.id));
+  }
+  /**
    * Fence the manager and dispose every registered session immediately. Wait at most timeoutMs
    * for owned abort promises, observing late rejections. Pending ids mean SDK abort did not
    * settle (including still-pending spawn ids); synchronous JS/dispose cannot be forcibly interrupted in-process.
@@ -641,6 +719,7 @@ export class AgentManager {
       this.finalize(w, w.result ? "completed" : "stopped", false);
       w.adapter.dispose();
       w.snapshot.status = "disposed";
+      this.reportOnce(w);
       waits.push(abort.then(() => { pending.delete(id); }, () => { pending.delete(id); }));
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -658,17 +737,31 @@ export class AgentManager {
       w.unsubscribe();
       w.adapter.dispose();
       w.snapshot.status = "disposed";
+      this.reportOnce(w);
     }
   }
 }
-/** Deliver a tool execution to the spawn-time observer; it can neither throw into nor await the session. */
-function notifyTool(options: SpawnOptions, event: ToolExecutionEvent): void {
+/**
+ * Deliver a tool execution to the spawn-time observer; it can neither throw into the session nor reject. The returned promise (when
+ * the observer returned one) settles when the observer's does; only the caller decides whether anything waits for it.
+ */
+function notifyTool(options: SpawnOptions, event: ToolExecutionEvent): Promise<void> | undefined {
   try {
     const pending = options.onToolExecution?.(event);
-    if (pending) void Promise.resolve(pending).catch(() => undefined);
+    return pending ? Promise.resolve(pending).catch(() => undefined) : undefined;
   } catch {
     /* Observers cannot alter worker lifecycle. */
+    return undefined;
   }
+}
+/** Wait for `pending`, but not past the first of `signals` to abort. */
+function until(pending: Promise<void> | undefined, ...signals: AbortSignal[]): Promise<void> {
+  if (!pending || signals.some(signal => signal.aborted)) return Promise.resolve();
+  return new Promise<void>(resolve => {
+    const done = () => { for (const signal of signals) signal.removeEventListener("abort", done); resolve(); };
+    for (const signal of signals) signal.addEventListener("abort", done, { once: true });
+    void pending.then(done);
+  });
 }
 /** Validation errors of a RESULT's `data`, or undefined when it satisfies the contract. */
 function resultDataErrors(contract: ResultDataSchema, data: unknown): string | undefined {

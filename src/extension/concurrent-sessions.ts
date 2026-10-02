@@ -57,6 +57,12 @@ export interface DetectConcurrentSessionsOptions {
   now?: number;
   /** Bound of the whole detection. Default 5 s. */
   timeoutMs?: number;
+  /**
+   * Directories whose files are never sessions, even when they sit inside a scanned store: the run records root (orche's own
+   * transcripts carry session headers too, and must not make a run look concurrent with itself). The default records root,
+   * `<agent dir>/orche/records`, is always ignored.
+   */
+  ignorePaths?: readonly string[];
 }
 
 export interface ConcurrentSessionsResult {
@@ -115,7 +121,7 @@ async function detect(options: DetectConcurrentSessionsOptions, signal: AbortSig
   const roots = typeof options.sessionsDir === "string" ? [options.sessionsDir] : options.sessionsDir ? [...options.sessionsDir] : defaultSessionsDirs();
 
   // 1. stat only, newest-named files first, bounded.
-  const names = await collectSessionFiles(roots);
+  const names = await collectSessionFiles(roots, [...(options.ignorePaths ?? []), ...(defaultRecordsRootDir() ? [defaultRecordsRootDir()!] : [])]);
   names.sort((a, b) => (basename(a) < basename(b) ? 1 : basename(a) > basename(b) ? -1 : 0));
   const fresh: { file: string; lastWriteMs: number }[] = [];
   const inspected = names.slice(0, maxFiles);
@@ -162,16 +168,48 @@ async function detect(options: DetectConcurrentSessionsOptions, signal: AbortSig
   return matched.sort((a, b) => b.lastWriteMs - a.lastWriteMs);
 }
 
-async function collectSessionFiles(roots: readonly string[]): Promise<string[]> {
+/** `<agent dir>/orche/records`: where orche keeps its run records (same layout as `defaultRecordsRoot` in records.ts, which this module cannot import: records.ts reaches config.ts, which needs this module's constants). */
+export function defaultRecordsRootDir(): string | undefined {
+  try { return join(getAgentDir(), "orche", "records"); } catch { return undefined; }
+}
+
+/** `realpath` of the longest existing prefix of `path`, the rest appended. */
+async function canonicalPath(path: string): Promise<string> {
+  const absolute = resolve(path);
+  const rest: string[] = [];
+  let current = absolute;
+  for (;;) {
+    try { return join(await realpath(current), ...[...rest].reverse()); }
+    catch {
+      const parent = dirname(current);
+      if (parent === current) return absolute;
+      rest.push(basename(current));
+      current = parent;
+    }
+  }
+}
+
+/**
+ * Every `*.jsonl` directly in a store root or in a directory directly below it. Anything that is, or lies inside, one of
+ * `ignoredPaths` (the records root) is left out, whether it is reached by its own path or through a symlink.
+ */
+async function collectSessionFiles(roots: readonly string[], ignoredPaths: readonly string[] = []): Promise<string[]> {
+  const ignored = [...new Set(ignoredPaths.filter(path => path.trim()).map(path => resolve(path)))];
+  const blocked = [...ignored, ...(await Promise.all(ignored.map(canonicalPath)))];
+  const skip = (path: string, real: string) => blocked.length > 0 && (isInsideAny(blocked, resolve(path)) || isInsideAny(blocked, real));
   const files = new Set<string>();
   const dirs: string[] = [];
   for (const root of new Set(roots)) {
+    const realRoot = blocked.length ? await canonicalPath(root) : root;
+    if (skip(root, realRoot)) continue;
     let entries: Dirent[];
     try { entries = await readdir(root, { withFileTypes: true }); }
     catch { continue; }
     for (const entry of entries) {
-      if (entry.isFile() && entry.name.endsWith(".jsonl")) files.add(join(root, entry.name));
-      else if (entry.isDirectory() && dirs.length < MAX_DIRS) dirs.push(join(root, entry.name));
+      const path = join(root, entry.name);
+      if (skip(path, join(realRoot, entry.name))) continue;
+      if (entry.isFile() && entry.name.endsWith(".jsonl")) files.add(path);
+      else if (entry.isDirectory() && dirs.length < MAX_DIRS) dirs.push(path);
     }
   }
   for (let index = 0; index < dirs.length; index += STAT_BATCH) {

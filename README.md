@@ -89,7 +89,7 @@ It is common to have several `pi` sessions open on one repository, or on its sup
 ⚠ 2 other pi sessions active in this repository (cwd /work/repo, /work/repo/packages/a, last write 12s ago); their changes are classified as external where possible
 ```
 
-and an `orche_run` is flagged as having concurrent activity. In `change`/`diagnose_fix` runs of a flagged run, a file that changed while a worker's bash command was in flight, that is not in that worker's ownership and that no worker `edit`/`write` call wrote is reported as `external` (reason `concurrent session active; ambiguous`) instead of as an ownership violation. Writes through worker `edit`/`write` outside ownership remain violations either way, and without concurrent sessions the audit is as strict as before. Detection runs once at the start and is never re-run.
+and an `orche_run` is flagged as having concurrent activity. In `change`/`diagnose_fix` runs of a flagged run, a file that changed while a worker's bash command was in flight, that is not in that worker's ownership and that no worker `edit`/`write` call wrote is reported as `external` (reason `concurrent session active; ambiguous`) instead of as an ownership violation. Writes through worker `edit`/`write` outside ownership remain violations either way, and without concurrent sessions the audit is as strict as before. Detection is repeated while the work goes on: an `orche_run` asks again at each workspace audit point and an `orche_task` when it ends, answered from a cache for at least 30 seconds in between, so a session that starts mid-run is taken into account too (a progress warning appears the first time one shows up); a repeated detection that fails keeps what was already known.
 
 Detection reads pi's session store only: it stats `<sessions dir>/<encoded cwd>/*.jsonl` (at most 2000 files, newest names first), reads just the first line of files written inside the window, ignores the current session, and spawns git for the run's own directory and for a few candidates whose path it cannot place. The sessions directory is `PI_CODING_AGENT_SESSION_DIR` when set, otherwise `<agent dir>/sessions` (`PI_CODING_AGENT_DIR`, default `~/.pi/agent`). Any error (missing or unreadable directory, malformed files, no git repository, a timeout of 5 seconds) means "no concurrent sessions" and no warning. A session that was closed within the window still counts, and sessions in another worktree of the same repository do not.
 
@@ -100,6 +100,31 @@ Configure it with the top-level `concurrentSessions` object of the Pi agent or t
 ```
 
 `enabled` (default `true`) switches detection and the warning off with `false`; `windowMinutes` (default `10`, a number greater than 0 and at most 1440) is how recently a session file must have been written to count as active. Unknown fields and values of the wrong type are rejected like the other settings.
+
+### Run records
+
+The sessions orche starts itself (the coordinator, every worker and verifier, advisor calls, and the persistent `orche_task` workers) used to live in memory only, so afterwards there was no way to see what a worker did, which model each role really used, how many requests each made, or what a failed run cost. Now every `orche_run` and `orche_task` leaves a **record**, by default under `<agent dir>/orche/records/` (`PI_CODING_AGENT_DIR`, default `~/.pi/agent`) — outside pi's own `sessions/` directory, so it never shows up in `/resume` or in concurrent-session detection, and never inside the workspace:
+
+```
+<records root>/<parent session id | no-session>/
+  <ISO timestamp>_<run|task>-<short id>/
+    run.json        manifest, written when the run starts (status "running") and rewritten when it ends — done, failed or cancelled
+    events.jsonl    the orche_run event stream, one bounded JSON object per line
+    sessions/       one regular pi session JSONL per agent: coordinator.jsonl, A1.jsonl, V1.jsonl, advisor-<name>-<n>.jsonl, ...
+  workers/<worker id>-<spawn timestamp>.jsonl   an orche_task worker: one stable session file across all its assignments
+```
+
+`run.json` holds the kind (`run`/`task`), the request and context as given, the working directory, the calling pi session (id and file), where the routes came from, the model and thinking level per role, start/end/duration, status, summary or failure, one entry per agent (`id`, `role`, `model`, `thinking`, `requests`, the models that actually answered, `durationMs`, `status`, `sessionFile`), the workspace changes / external changes / ownership violations, and the cleanup result. The session files are normal pi session files (`{"type":"session",...}` header, then messages), including the system prompt each agent ran with; one that was cut off by a cancellation or timeout keeps what was written and ends with an `orche:disposed` marker. Every `orche_run` / `orche_task` result carries one line `Record: <directory>` and `details.record` (error results too), and `/orche records` lists the last ten records of the current pi session (time, kind, status, summary, path).
+
+Transcripts can contain whatever tool output contained, including secrets, so directories are created `0700` and files `0600`. Writing is best effort: a records directory that cannot be created or written never fails a run or task, the sessions then simply stay in memory. The `orche_run`/`orche_task` code paths of the extension record by default; the eval and benchmark runners (`src/eval/`, `runOrchestrated`/`createSession` used as a library) write nothing unless the caller passes `records` / `sessionDir` / `sessionFile` explicitly (`PiRunnerOptions.recordsDir` for the Pi eval runner).
+
+Configure it with the top-level `records` object of the Pi agent or trusted project `orche.config.json` (not in a file passed to the CLI's `--config`):
+
+```json
+"records": { "enabled": true, "dir": "/home/me/orche-records", "retentionDays": 30, "maxBytes": 1073741824 }
+```
+
+`enabled` (default `true`) switches recording off with `false`. `dir` (absolute, or starting with `~/`; default `<agent dir>/orche/records`) moves the root; a directory inside the run's workspace (or one that contains it, the filesystem root or the home directory) is refused and records are then off for that run. `retentionDays` (default `30`, a number greater than 0 and at most 3650): when the first run of a process starts, record directories and worker session files that have not been modified for that long are deleted. `maxBytes` (optional, a positive integer): after that, the oldest remaining records are deleted until the root fits. The cleanup only ever touches names orche created (`<timestamp>_<run|task>-<id>` directories and `workers/<id>-<timestamp>.jsonl`) inside the records root, never follows symlinks, never deletes anything written in the last hour, is bounded in entries, deletions and time (3 seconds), and ignores errors. Unknown fields and values of the wrong type are rejected like the other settings.
 
 ### Commits and pushes from `orche_task`
 
@@ -118,14 +143,14 @@ With a grant the result also reports, read-only and bounded, what happened in th
 
 ## Architecture
 
-- `src/pi/`: Pi session factory and runtime adapter; persistent contexts, lifecycle events, abort and context-only messages.
-- `src/agent/`: AgentManager; assignment epochs, exactly-once outcomes, NOTE inbox, direct peer messaging, shared authenticated runtime.
+- `src/pi/`: Pi session factory and runtime adapter; persistent contexts, lifecycle events, abort and context-only messages. Sessions are in memory unless given a `sessionDir`/`sessionFile` (see Run records).
+- `src/agent/`: AgentManager; assignment epochs, exactly-once outcomes, NOTE inbox, direct peer messaging, shared authenticated runtime, per-agent manifest entries (`agentRecord`) and the neutral records hooks (`records.ts`: `SessionRecords`, `SessionTarget`) that `RunOptions.records` and `AgentManagerOptions.records` use.
 - `src/messaging/`: typed NOTE / REDIRECT / STOP messages and process-local ID deduplication.
 - `src/orchestration/phases.ts`, `backlog.ts`, `routing.ts`: pure transitions, proposal deduplication, ownership/dependency validation and model routing.
 - `src/orchestration/coordinator.ts`: `runOrchestrated`, the run setup/teardown and class dispatch. The phase flows are in `src/orchestration/run/`: `answer.ts`, `diagnose.ts` (planned explorers, convergence, proposals) and `change.ts` (backlog execution, replan, verification and fix rounds), plus `decisions.ts` (coordinator session, structured decisions with bounded repair), `context.ts` (events, time caps, spawning, outcome waits, write guard), `audit.ts` (workspace audit) and `types.ts`.
 - `src/orchestration/prompts.ts`, `events.ts`, `team.ts`, `ownership.ts`, `workspace.ts`, `result-schemas.ts`: worker protocols, the shared event contract, team settings, the ownership rules, git snapshots and RESULT data contracts.
 - `src/advisor/`: configurable multi-advisor (triggers, domains, budgets) with the OMP plan-review and verification-audit roles as presets; see [docs/advisor.md](docs/advisor.md).
-- `src/extension/`: the Pi package entry (`/orche`, `orche_run`, `orche_task`, tool replacement, spill hook), delegation modes, config discovery, the shared task/run controller and the persistent single-worker pool; see [docs/pi-package.md](docs/pi-package.md).
+- `src/extension/`: the Pi package entry (`/orche`, `orche_run`, `orche_task`, tool replacement, spill hook), delegation modes, config discovery, the shared task/run controller, the persistent single-worker pool and the run records (`records.ts`: layout, `run.json`, `events.jsonl`, retention); see [docs/pi-package.md](docs/pi-package.md).
 - `src/eval/`: visible-only problem-A workspaces, isolated hidden grading, fork-join baseline, metrics and benchmark runner. Hidden grading data never enters worker prompts or workspaces.
 - `test/`: pure tests plus deterministic real-AgentSession faux-provider lifecycle and coordinator regressions.
 

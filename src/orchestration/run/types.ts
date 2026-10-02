@@ -13,8 +13,10 @@ import type { TeamSettings } from "../team.js";
 import type { AuditSettings } from "../artifacts.js";
 import type { WorkspaceActivity } from "./activity.js";
 
+import type { SessionRecords } from "../../agent/records.js";
 import type { RunLimits } from "../limits.js";
 export { defaultRunLimits, type RunLimits } from "../limits.js";
+export type { AgentRecordEntry, RecordedActor, RecordedKind, SessionRecords, SessionTarget } from "../../agent/records.js";
 export interface RunOptions {
   problem: string;
   cwd: string;
@@ -38,7 +40,8 @@ export interface RunOptions {
   workspaceAudit?: boolean;
   /**
    * Other pi sessions were found active on this repository (or its super/sub repository) when the
-   * run started. Detection happens once, in the caller (the extension); it is never repeated. When
+   * run started. That detection is taken once, by the caller (the extension); later re-checks come from
+   * {@link RunOptions.detectConcurrentActivity}. When
    * `count > 0` the run is flagged: in change/diagnose_fix runs a file that changed while a worker
    * bash call (or another non-edit/write tool) was in flight, is outside the worker's ownership and
    * was not written by an edit/write tool is classified as external ("concurrent session active;
@@ -46,6 +49,22 @@ export interface RunOptions {
    * a violation. Writes by edit/write tools outside ownership are violations either way.
    */
   concurrentActivity?: ConcurrentActivity;
+  /**
+   * Re-detects other pi sessions on the repository. Injected by the caller (the extension) so that this layer stays independent
+   * of how sessions are found; the run calls it at each workspace audit point to learn about sessions that started after
+   * `concurrentActivity` was taken. The callback owns caching (it should answer from a cache for at least 30 seconds) and must
+   * not throw: a rejection or `undefined` means "no (new) information". A result with `count > 0` flags the run like
+   * `concurrentActivity` does, from that audit on.
+   */
+  detectConcurrentActivity?: () => Promise<ConcurrentActivity | undefined>;
+  /**
+   * Opt-in session records (default: none, every session stays in memory). `sessionTarget` is asked for the coordinator
+   * (`id: "coordinator"`), every worker including verifiers (their ids, e.g. `A1`, `V1`) and every advisor call
+   * (`advisor:<name>#<n>`), and persists the session of each it answers for; `onAgent` receives one
+   * {@link AgentRecordEntry} per agent when its session ended, including on failure and cancellation. The caller owns where
+   * the files go (the extension keeps them outside the workspace and outside pi's own sessions directory).
+   */
+  records?: SessionRecords;
 }
 /** Result of concurrent-session detection: `detail` is the human-readable description of the sessions. */
 export interface ConcurrentActivity { count: number; detail: string }
@@ -97,6 +116,8 @@ export interface RunContext {
   state: PhaseState;
   manager: AgentManager;
   coordinator?: AgentSession;
+  /** Records bookkeeping of the coordinator session (created with it); see {@link RunOptions.records}. */
+  coordinatorRecord?: { startedAt: number; requests: number; models: Record<string, number>; sessionFile?: string; model: string; thinking?: string; reported?: boolean };
   decisionValue: unknown;
   decisionSet: boolean;
   activeTasks: Map<string, TaskItem>;

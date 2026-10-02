@@ -3,9 +3,11 @@ import { execFileSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
-  concurrentActivityOf, defaultSessionsDirs, detectConcurrentSessions, formatConcurrentWarning, sessionsRootOf, type ConcurrentSession,
+  concurrentActivityOf, defaultRecordsRootDir, defaultSessionsDirs, detectConcurrentSessions, formatConcurrentWarning, sessionsRootOf, type ConcurrentSession,
 } from "../../src/extension/concurrent-sessions.js";
+import { defaultRecordsRoot } from "../../src/extension/records.js";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -290,6 +292,74 @@ describe("concurrent pi session detection", () => {
   it("derives the sessions root from a session manager's directory", () => {
     expect(sessionsRootOf("/home/u/.pi/agent/sessions/--home-u-Code-repo--")).toBe("/home/u/.pi/agent/sessions");
     expect(sessionsRootOf("/work/custom-sessions")).toBe("/work/custom-sessions");
+  });
+});
+
+/**
+ * The run records (`<agent dir>/orche/records`, see records.ts) hold transcripts that start with the same session header pi's own sessions do. They are
+ * never sessions of someone else: the detector ignores the records root explicitly, however a store reaches it.
+ */
+describe("concurrent session detection ignores the records root", () => {
+  it("skips a store inside the records root (and the root itself) given as ignorePaths, and still reports other stores", async () => {
+    const base = await tmp();
+    const project = await repo(join(base, "project"));
+    const root = join(base, "my-records");
+    const workers = join(root, "parent-1", "workers");
+    await session(workers, { cwd: project, id: "orche-worker", dir: "." });
+    const outside = join(base, "sessions");
+    await session(outside, { cwd: project, id: "someone-else" });
+
+    // Control: without the exclusion the transcript looks like a concurrent session.
+    expect((await detect(project, workers)).map(item => item.id)).toEqual(["orche-worker"]);
+    expect(await detect(project, workers, { ignorePaths: [root] })).toEqual([]);
+    expect(await detect(project, root, { ignorePaths: [root] })).toEqual([]);
+    const both = await detectConcurrentSessions({ cwd: project, sessionsDir: [workers, outside], ignorePaths: [root] });
+    expect(both.sessions.map(item => item.id)).toEqual(["someone-else"]);
+  });
+
+  it("always ignores the default records root <agent dir>/orche/records", async () => {
+    const base = await tmp();
+    const project = await repo(join(base, "project"));
+    const agentDir = join(base, "agent");
+    const runSessions = join(agentDir, "orche", "records", "parent-1", "2026-10-02T06-10-00-000Z_run-0a1b2c3d", "sessions");
+    await session(runSessions, { cwd: project, id: "coordinator", dir: "." });
+    const previous = { dir: process.env.PI_CODING_AGENT_DIR, sessions: process.env.PI_CODING_AGENT_SESSION_DIR };
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    delete process.env.PI_CODING_AGENT_SESSION_DIR;
+    try {
+      expect(defaultRecordsRootDir()).toBe(defaultRecordsRoot(getAgentDir())); // same place records.ts writes to
+      expect(defaultRecordsRootDir()).toBe(join(agentDir, "orche", "records"));
+      expect(await detect(project, runSessions)).toEqual([]);
+      // The agent dir's real sessions are still seen.
+      await session(join(agentDir, "sessions"), { cwd: project, id: "real-session" });
+      expect((await detectConcurrentSessions({ cwd: project })).sessions.map(item => item.id)).toEqual(["real-session"]);
+    } finally {
+      if (previous.dir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previous.dir;
+      if (previous.sessions !== undefined) process.env.PI_CODING_AGENT_SESSION_DIR = previous.sessions;
+    }
+  });
+
+  it("ignores the root when it is reached through a symlink", async () => {
+    const base = await tmp();
+    const project = await repo(join(base, "project"));
+    const root = join(base, "records");
+    await session(join(root, "p", "workers"), { cwd: project, id: "aliased", dir: "." });
+    const alias = join(base, "alias");
+    await symlink(root, alias);
+    expect((await detect(project, join(alias, "p", "workers"))).map(item => item.id)).toEqual(["aliased"]);
+    expect(await detect(project, join(alias, "p", "workers"), { ignorePaths: [root] })).toEqual([]);
+  });
+
+  it("skips only the records directory of a store that contains it", async () => {
+    const base = await tmp();
+    const project = await repo(join(base, "project"));
+    const store = join(base, "orche"); // a scanned store whose subdirectory `records` is the root
+    const root = join(store, "records");
+    await session(root, { cwd: project, id: "transcript", dir: "." });
+    await session(store, { cwd: project, id: "real", dir: "other" });
+    expect((await detect(project, store)).map(item => item.id).sort()).toEqual(["real", "transcript"]);
+    expect((await detect(project, store, { ignorePaths: [root] })).map(item => item.id)).toEqual(["real"]);
   });
 });
 

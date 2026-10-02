@@ -14,6 +14,8 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { createOrcheTools } from "../tools/index.js";
 import { createSpillExtension } from "../tools/spill.js";
 import { withExtendedContext, type ContextWindowInfo } from "./extended-context.js";
+import { dirname, resolve } from "node:path";
+import { ensurePrivateDir, ensurePrivateFile } from "../agent/private-files.js";
 export interface SessionOptions {
   route: { role: string; model: string; thinking?: ThinkingLevel; extendedContext?: boolean };
   cwd: string;
@@ -22,7 +24,19 @@ export interface SessionOptions {
   instructions: string;
   /** Replaces Pi's default base system prompt; role `instructions` are still appended. */
   baseSystemPrompt?: string;
+  /**
+   * Persist the session as a regular pi session JSONL inside this directory (file name chosen by the SDK:
+   * `<timestamp>_<session id>.jsonl`). Created `0700` when missing, the file `0600`. Without `sessionDir` and
+   * `sessionFile` the session lives in memory only (the default).
+   */
   sessionDir?: string;
+  /**
+   * Persist the session into exactly this file, which wins over `sessionDir`. A missing file is created (`0600`, parent
+   * directories `0700`) and gets its session header immediately; an existing session file is continued: its entries are
+   * loaded and new ones appended, so a worker that lives across assignments (or is re-created) can keep one stable file.
+   * The path of a persisted session is `session.sessionFile`.
+   */
+  sessionFile?: string;
   modelRuntime?: ModelRuntime;
   /** Called once with the effective context window of the session's model. */
   onContextWindow?: (info: ContextWindowInfo) => void;
@@ -85,28 +99,77 @@ export async function createSession(
     extendResources: () => {},
     reload: async () => {},
   };
-  return (
-    await createAgentSession({
-      cwd: options.cwd,
-      modelRuntime: runtime,
-      model,
-      thinkingLevel: options.route.thinking ?? "off",
-      tools: options.tools,
-      customTools: [...createOrcheTools({ cwd: options.cwd }), ...(options.customTools ?? [])],
-      resourceLoader: loader,
-      sessionManager: options.sessionDir
-        ? SessionManager.create(options.cwd, options.sessionDir)
-        : SessionManager.inMemory(options.cwd),
-      settingsManager: SettingsManager.inMemory({
-        compaction: { enabled: false },
-        retry: {
-          enabled: true,
-          maxRetries: 1,
-          baseDelayMs: 250,
-          maxAgentDelayMs: 1000,
-          provider: { maxRetries: 0, maxRetryDelayMs: 1000 },
-        },
-      }),
-    })
-  ).session;
+  const sessionManager = sessionManagerFor(options);
+  const { session } = await createAgentSession({
+    cwd: options.cwd,
+    modelRuntime: runtime,
+    model,
+    thinkingLevel: options.route.thinking ?? "off",
+    tools: options.tools,
+    customTools: [...createOrcheTools({ cwd: options.cwd }), ...(options.customTools ?? [])],
+    resourceLoader: loader,
+    sessionManager,
+    settingsManager: SettingsManager.inMemory({
+      compaction: { enabled: false },
+      retry: {
+        enabled: true,
+        maxRetries: 1,
+        baseDelayMs: 250,
+        maxAgentDelayMs: 1000,
+        provider: { maxRetries: 0, maxRetryDelayMs: 1000 },
+      },
+    }),
+  });
+  if (sessionManager.isPersisted()) markDisposal(session, sessionManager);
+  return session;
+}
+
+/**
+ * In-memory unless a target is given. A persisted session is opened on a file that already exists (created empty `0600`
+ * here), so its header is written at once and every later entry is appended synchronously: a session that is short, fails
+ * or is cancelled before its first reply still leaves a valid JSONL, and the SDK's own lazy flush (the file would only appear
+ * with the first user/assistant message, created with the process umask) never applies. Recording is best effort: when the
+ * target cannot be prepared (read-only disk, a non-session file at `sessionFile`) the session runs in memory instead of
+ * failing the caller's run; the missing `session.sessionFile` shows it.
+ */
+function sessionManagerFor(options: SessionOptions): SessionManager {
+  const file = options.sessionFile ? resolve(options.sessionFile) : undefined;
+  if (!file && !options.sessionDir) return SessionManager.inMemory(options.cwd);
+  try {
+    const dir = file ? dirname(file) : resolve(options.sessionDir!);
+    ensurePrivateDir(dir);
+    const target = file ?? SessionManager.create(options.cwd, dir).getSessionFile()!;
+    ensurePrivateFile(target);
+    return SessionManager.open(target, dir, options.cwd);
+  } catch {
+    return SessionManager.inMemory(options.cwd);
+  }
+}
+
+/**
+ * `dispose()` detaches the session from its agent at once, so the reply that an abort cuts short is never written. When a
+ * persisted session is disposed mid-stream, leave a marker entry (not part of the model context) with what had streamed so
+ * far, so the transcript shows where the work stopped.
+ */
+function markDisposal(session: AgentSession, manager: SessionManager): void {
+  const dispose = session.dispose.bind(session);
+  let marked = false;
+  session.dispose = () => {
+    if (!marked) {
+      marked = true;
+      try {
+        if (session.agent.state.isStreaming) manager.appendCustomEntry("orche:disposed", { whileStreaming: true, partial: partialOf(session.agent.state.streamingMessage) });
+      } catch { /* the marker is a courtesy */ }
+    }
+    dispose();
+  };
+}
+
+function partialOf(message: unknown): unknown {
+  const content = (message as { content?: unknown } | undefined)?.content;
+  if (!Array.isArray(content)) return undefined;
+  return content.map(part => {
+    const item = part as { type?: string; text?: string; name?: string };
+    return item.type === "text" ? { type: "text", text: (item.text ?? "").slice(0, 2000) } : { type: item.type, ...(item.name ? { name: item.name } : {}) };
+  }).slice(0, 20);
 }

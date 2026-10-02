@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type FauxResponseStep, type ToolCall } from "@earendil-works/pi-ai";
 import { formatTaskChanges, WorkerPool, type TaskParameters } from "../../src/extension/workers.js";
+import { WorkspaceAudit } from "../../src/orchestration/workspace.js";
 import { OrcheController, type OrcheControllerOptions, type OrcheRunArgs } from "../../src/extension/controller.js";
 import { createHarness, tool, type Harness } from "./harness.js";
 
@@ -109,6 +110,43 @@ describe("orche_task changes: attribution", () => {
     ]);
     const outcome = await execute({ files: ["allowed.txt"] });
     expect(outcome.details.changes.map(change => change.path)).toEqual(["allowed.txt"]);
+    expect(outcome.details.otherChanges.map(change => change.path)).toEqual(["late.txt"]);
+  });
+
+  /** Every workspace snapshot reads the tree only after `delayMs`, as a snapshot does under load (git add on a big or busy tree). */
+  const slowSnapshots = (delayMs: number) => {
+    const snapshot = WorkspaceAudit.prototype.snapshot;
+    vi.spyOn(WorkspaceAudit.prototype, "snapshot").mockImplementation(async function (this: WorkspaceAudit) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+      return snapshot.call(this);
+    });
+  };
+
+  /**
+   * The late write above used to depend on a race: the closing snapshot of the worker's last write-capable call was queued, not
+   * awaited, so the worker's next model step (the external write) could land before the snapshot looked at the tree and be taken
+   * for the worker's own change. A slow snapshot makes that deterministic: the write is external only if the worker is held back
+   * until the snapshot taken at the end of its last write-capable call has completed.
+   */
+  it.each([50, 400])("(ii) a late external write is not the worker's even when snapshots take %i ms", async delayMs => {
+    slowSnapshots(delayMs);
+    const { execute } = await fixture(cwd => [
+      tool("write", { path: "allowed.txt", content: "mine\n" }),
+      externally(cwd, { "late.txt": "after the last tool call\n" }, result()),
+    ]);
+    const outcome = await execute({ files: ["allowed.txt"] });
+    expect(outcome.details.changes.map(change => change.path)).toEqual(["allowed.txt"]);
+    expect(outcome.details.otherChanges.map(change => change.path)).toEqual(["late.txt"]);
+  });
+
+  it("(ii) holding the worker back for the closing snapshot does not turn what its running tool wrote into other changes", async () => {
+    slowSnapshots(100);
+    const { execute } = await fixture(cwd => [
+      tool("bash", { command: "sleep 0.2 && echo x > from-bash.txt" }),
+      externally(cwd, { "late.txt": "after the last tool call\n" }, result()),
+    ]);
+    const outcome = await execute({ files: ["from-bash.txt"] });
+    expect(outcome.details.changes.map(change => change.path)).toEqual(["from-bash.txt"]);
     expect(outcome.details.otherChanges.map(change => change.path)).toEqual(["late.txt"]);
   });
 

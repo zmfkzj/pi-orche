@@ -25,9 +25,10 @@ import { createGenerateImageTool } from "../tools/generate-image.js";
 import { loadProviderExtensions, type ProviderExtensionHost } from "../pi/provider-extensions.js";
 import { ensureBundledImageProvider } from "../pi/register-bundled-image-provider.js";
 import { describeSource, discoverOrcheConfig, NoRouteError } from "./config.js";
-import { OrcheController, withConcurrentWarning, type OrcheRunArgs } from "./controller.js";
+import { OrcheController, recordsIgnorePaths, routesSummary, withConcurrentWarning, withRecordLine, type OrcheRunArgs } from "./controller.js";
 import type { ConcurrentActivitySummary } from "./concurrent-sessions.js";
 import { errorToolResult, failureReason, type ErrorToolResult, type ToolFailure, type ToolFailureKind } from "./tool-result.js";
+import { createRunRecord, pruneRecordsOnce, resolveRecords, workerSessionFile } from "./records.js";
 
 export const orcheTaskParameters = Type.Object({
   role: Type.Union([Type.Literal("explore"), Type.Literal("answer"), Type.Literal("implement"), Type.Literal("verify"), Type.Literal("game-asset"), Type.Literal("video")]),
@@ -82,6 +83,8 @@ export interface TaskDetails {
   concurrentSessions?: ConcurrentActivitySummary;
   /** Present when the assignment carried a git grant: the commits it created and whether a push was detected. */
   git?: GitReport;
+  /** The record directory of this assignment (`<agent dir>/orche/records/<session>/<timestamp>_task-<id>`: `run.json`); the worker's transcript is the one session file it keeps across its assignments. Absent when records are off. */
+  record?: string;
 }
 /** The workspace/git part of a task's details. */
 type ChangeReport = Pick<TaskDetails, "changes" | "otherChanges" | "submodules" | "headMoved">;
@@ -578,12 +581,22 @@ export class WorkerPool {
     }
     if (worker && this.manager!.get(worker.id).status !== "idle") throw new Error(`Worker ${worker.id} is running; wait for its assignment to finish.`);
     const sessionModel = args.model ? `${args.model.provider}/${args.model.id}` : undefined;
-    const config = await discoverOrcheConfig({ cwd: args.cwd, agentDir: this.options.agentDir ?? getAgentDir(), projectTrusted: args.projectTrusted, session: { model: sessionModel, thinking: args.thinking } });
+    const agentDir = this.options.agentDir ?? getAgentDir();
+    const config = await discoverOrcheConfig({ cwd: args.cwd, agentDir, projectTrusted: args.projectTrusted, session: { model: sessionModel, thinking: args.thinking } });
     signal.throwIfAborted();
-    // Once, at the start. A task has no ownership audit that could classify the other session's writes, so the warning is
-    // all it can do: it goes first in the result, in the progress lines and in a note beside the changed files.
-    const concurrent = await this.options.controller.detectConcurrent(args, config.concurrentSessions, signal);
-    const warning = concurrent?.warning;
+    // Records (records.ts): one record per assignment, outside the workspace; the worker's transcript is one stable file per worker.
+    const resolved = resolveRecords({ agentDir, cwd: args.cwd, settings: config.records });
+    void pruneRecordsOnce(resolved);
+    // At the start, and again when the task ends, before its change note is written. A task has no ownership audit that could
+    // classify the other session's writes, so the warning is all it can do: it goes first in the result, in the progress lines and
+    // in a note beside the changed files.
+    const tracker = await this.options.controller.trackConcurrent(args, config.concurrentSessions, signal, recordsIgnorePaths(resolved));
+    let concurrent = tracker.initial;
+    let warning = concurrent?.warning;
+    const recheckConcurrent = async () => {
+      const latest = await tracker.recheck(); // never throws; served from the start's detection when that is recent
+      if (latest) { concurrent = latest; warning = latest.warning; }
+    };
     const limits = resolveRunLimits(config.routes.limits);
     const runtime = await this.options.controller.modelRuntime();
     if (this.disposed) throw new Error("Worker pool is disposed");
@@ -623,6 +636,8 @@ export class WorkerPool {
         retirementLines.push(`${oldest.id} retired: least-recently-used idle worker (pool cap 3).`);
       }
       const id = `W${this.nextId++}`;
+      // The worker's one transcript, for all of its assignments: <records>/<session>/workers/<id>-<spawn time>.jsonl.
+      const sessionFile = workerSessionFile(resolved, { ...(args.currentSession?.id ? { parentSessionId: args.currentSession.id } : {}), workerId: id, spawnedAt: Date.now() });
       worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig };
       const meta = worker;
       const routeRole = args.role === "answer" ? "analyst" : args.role === "explore" ? config.routes.workers?.explorerRoles?.[0] ?? "explorer-path" : args.role === "implement" ? "implementer" : args.role === "verify" ? "verifier" : args.role;
@@ -631,7 +646,7 @@ export class WorkerPool {
         : resolveRoute(config.routes, routeRole);
       meta.model = route.model;
       const customTools = images ? [createGenerateImageTool({ cwd: args.cwd, runtime, images })] : [];
-      await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name)], customTools, peerMessaging: false,
+      await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name)], customTools, peerMessaging: false, ...(sessionFile ? { sessionFile } : {}),
         instructions: `${taskWorkerInstructions}\nYou work alone: there are no peer workers. Reply in the language of the request.`,
         onContextWindow: info => { meta.contextWindow = info.contextWindow; },
         toolGuard: async (name, input) => {
@@ -641,7 +656,9 @@ export class WorkerPool {
           await meta.activity?.enter(meta.id, name);
           return undefined;
         },
-        // Resolved at event time: the tracker belongs to the assignment in flight, not to the worker's lifetime.
+        // Resolved at event time: the tracker belongs to the assignment in flight, not to the worker's lifetime. For a tool's `end` the
+        // returned promise is the snapshot closing its active window; the manager awaits it, so a write made after the tool ended (even
+        // by this worker's very next step) is never inside that snapshot and is seen as external, not as the worker's change.
         onToolExecution: event => meta.activity?.record(meta.id, event),
       });
       if (this.disposed) { await this.manager.dispose(id); throw new Error("Worker pool is disposed"); }
@@ -652,6 +669,19 @@ export class WorkerPool {
     meta.role = args.role;
     meta.files = files;
     meta.latestInput = 0;
+    // This assignment's record. The worker's entry is read from the manager, so `sessionFile` is there only when the transcript really is persisted.
+    const workerFile = this.manager.agentRecord(meta.id).sessionFile;
+    const record = createRunRecord(resolved, {
+      kind: "task", cwd: args.cwd,
+      parentSession: { ...(args.currentSession?.id ? { id: args.currentSession.id } : {}), ...(args.currentSession?.file ? { file: args.currentSession.file } : {}) },
+      request: args.request, ...(args.context !== undefined ? { context: args.context } : {}),
+      manifest: {
+        config: describeSource(config.source), routes: routesSummary(config.routes),
+        worker: { id: meta.id, role: args.role, ...(workerFile ? { sessionFile: workerFile } : {}) },
+        assignment: { role: args.role, reusedWorker: reusedContext, ...(files ? { files } : {}), ...(grant ? { git: grant } : {}) },
+        ...(concurrent ? { concurrentSessions: concurrent.activity } : {}),
+      },
+    });
     let requests = 0;
     let audit: WorkspaceAudit | undefined;
     let before: string | undefined;
@@ -676,6 +706,8 @@ export class WorkerPool {
     });
     /** The workspace and git part of a result, as of now: the worker is not running any more when this is called. */
     const collect = async (): Promise<{ changeReport: ChangeReport; gitReport?: GitReport }> => {
+      // Other sessions may have started since the task did: look again before the change note is written.
+      await recheckConcurrent();
       if (audit && before) {
         // Queued boundary snapshots finish first; the last window is closed with the final snapshot.
         await activity?.drain();
@@ -698,7 +730,24 @@ export class WorkerPool {
       return {
         worker: meta.id, role: args.role, status, ...(meta.model ? { model: meta.model } : {}), durationMs: Date.now() - started, requests, ...report, roster: this.roster(),
         ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}),
+        ...(record ? { record: record.dir } : {}),
       };
+    };
+    /** The final `run.json` of this assignment, with this worker's entry (the lifetime totals of its one session). */
+    const finishRecord = (status: "done" | "failed" | "cancelled", details: TaskDetails, extra: { summary?: string; failure?: string } = {}) => {
+      if (!record) return;
+      record.addAgent(this.manager!.agentRecord(meta.id));
+      record.finish({
+        status,
+        ...(extra.summary ? { summary: extra.summary } : {}),
+        ...(extra.failure ? { failure: extra.failure } : {}),
+        ...(status === "cancelled" && this.options.controller.cancelledByUser ? { cancelledByUser: true } : {}),
+        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs },
+        workspace: { changes: details.changes, otherChanges: details.otherChanges, ...(details.submodules ? { submodules: details.submodules } : {}), ...(details.headMoved ? { headMoved: details.headMoved } : {}) },
+        ...(details.git ? { git: details.git } : {}),
+        ...(retired.length ? { retired } : {}),
+        ...(concurrent ? { concurrentSessions: concurrent.activity } : {}),
+      });
     };
     signal.addEventListener("abort", abort, { once: true });
     try {
@@ -747,18 +796,34 @@ export class WorkerPool {
       const note = data.status === "blocked" ? "the worker reported blocked" : args.role === "verify" && data.passed === false ? "verification failed" : args.role === "implement" && changes.length >= 4 ? "the implementation changed four or more files" : undefined;
       const roster = this.roster();
       const gitLines = gitReport ? formatGitReport(gitReport) : [];
+      const details: TaskDetails = {
+        worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, ...(meta.model ? { model: meta.model } : {}), durationMs, requests, ...changeReport, roster,
+        ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...(record ? { record: record.dir } : {}),
+      };
+      finishRecord("done", details, { summary: meta.summary });
       const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, "", meta.summary, ...roleData, "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, `Workers: ${roster}`, ...retirementLines,
         ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: consider orche_run (multi) — ${note}`] : [])].join("\n");
-      return { text, details: { worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, ...(meta.model ? { model: meta.model } : {}), durationMs, requests, ...changeReport, roster, ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}) } };
+      return { text: withRecordLine(text, record?.dir), details };
     } catch (error) {
       const base = error instanceof Error ? error.message : String(error);
+      if (!(error instanceof WorkerFailure)) { // before the worker ran, or an unexpected error: a plain error
+        record?.finish({ status: signal.aborted ? "cancelled" : "failed", failure: failureReason(base) });
+        throw warning ? withConcurrentWarning(error, warning) : error;
+      }
+      // The worker ran: same message as ever (warning first), now with the details of what it did. The details come first: they re-check
+      // for other sessions, which the warning in the message must know about.
+      const details = await failedDetails(error.status);
       const thrown = warning ? withConcurrentWarning(error, warning) : error;
-      if (!(error instanceof WorkerFailure)) throw thrown; // before the worker ran, or an unexpected error: a plain error
-      // The worker ran: same message as ever (warning first), now with the details of what it did.
-      throw new TaskFailedError(thrown instanceof Error ? thrown.message : base, await failedDetails(error.status), { kind: error.kind, status: error.status, reason: failureReason(base) });
+      finishRecord(error.kind === "cancelled" ? "cancelled" : "failed", details, { failure: failureReason(base) });
+      throw new TaskFailedError(thrown instanceof Error ? thrown.message : base, details, { kind: error.kind, status: error.status, reason: failureReason(base) });
     } finally {
       signal.removeEventListener("abort", abort);
       await stopPromise;
+      // Whatever happened above, the record ends here (a no-op when the outcome was recorded already) and shows this worker's totals.
+      if (record) {
+        record.addAgent(this.manager.agentRecord(meta.id));
+        record.finish({ status: signal.aborted ? "cancelled" : "failed", failure: "the task ended without a recorded outcome" });
+      }
       unsubscribe();
       // Nothing may snapshot on the private index while the tracker still has jobs queued.
       meta.activity = undefined;

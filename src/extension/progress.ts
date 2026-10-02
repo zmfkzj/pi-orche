@@ -43,6 +43,8 @@ export function describeProgress(event: RunEvent): string | undefined {
       return `new unowned file ${event.file} (listed in the report)`;
     case "workspace_external_change":
       return `warning: external change (not this run): ${event.file} — ${event.reason}`;
+    case "concurrent_sessions_detected":
+      return `⚠ other pi session activity detected during the run: ${event.count} session${event.count === 1 ? "" : "s"} active in this repository (${event.detail}); changes made while a worker command ran are classified as external where the writer is ambiguous`;
     case "workspace_audit_unavailable":
       return `workspace audit off: ${event.reason}`;
     case "advisor_result":
