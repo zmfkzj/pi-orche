@@ -1,5 +1,5 @@
 import type { TimeoutDiagnostic } from "./run/deadline.js";
-import type { Phase, TaskClass } from "./phases.js";
+import type { CoordinatorDecision, Phase, TaskClass } from "./phases.js";
 import type { AdvisorTriggerKind } from "../advisor/config.js";
 import type { TaskItem, TaskStatus } from "./backlog.js";
 import type { ManagerEvent } from "../agent/agent-handle.js";
@@ -17,6 +17,7 @@ export type CoordinatorEvent =
   | { type: "coordinator_activity"; timestamp: number; phase: Phase; requestCount: number }
   /** Emitted before each decision prompt, including repairs. */
   | { type: "coordinator_deciding"; timestamp: number; phase: Phase }
+  | { type: "coordinator_decision"; timestamp: number; phase: Phase; decisionType: CoordinatorDecision["type"]; reconsidered: boolean }
   /** Advice is now being consumed, rather than merely queued as a NOTE. */
   | { type: "coordinator_reconsidering"; timestamp: number; phase: Phase }
   | { type: "root_cause_claimed"; timestamp: number; agentId: string; cause: string; via: "note" | "result" }

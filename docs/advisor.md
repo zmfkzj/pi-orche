@@ -4,6 +4,8 @@ A configurable, multi-advisor review layer. It merges what OMP does with its `or
 
 Advisors are advisory only. They never redirect, stop, gate or cancel a tool; the coordinator decides what to do with a NOTE. Everything is off unless an enabled advisor is configured, in which case behaviour (and request counts) are exactly the same as before.
 
+For the controlled advisors ON/OFF evaluation, commands and smoke-run status, see [advisor-study.md](advisor-study.md).
+
 ## Configuration
 
 `advisors` is an optional top-level array in the route config (`orche.config.json`, parsed by `parseRouteConfig`). Unknown fields are rejected with the path of the offender (`config.advisors[1].triggers[0].every: expected integer >= 1`).

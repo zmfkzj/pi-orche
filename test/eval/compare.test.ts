@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { extractOmpProviderUsage, extractOmpSessionUsage, parseJsonLines, type RunnerUsage } from '../../src/eval/omp-runner.js';
 import { extractPiRequestUsage, loadPromptVariant, summarizePayloadSystem } from '../../src/eval/pi-runner.js';
-import { aggregateComparison, recomputeComparison, selectAttempts, waitForHold, type CompareRun } from '../../src/eval/compare.js';
+import { aggregateComparison, parseBaseModel, recomputeComparison, runPromptStudy, selectAttempts, waitForHold, type CompareRun } from '../../src/eval/compare.js';
 import { loadSuite, prepareTaskWorkspace } from '../../src/eval/suite.js';
 import { mkdtemp, writeFile, readFile, mkdir, cp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -165,5 +165,40 @@ describe('prompt variants', () => {
     expect(summarizePayloadSystem({ ...base, tools: [tool('edit'), tool('read')] }).toolsSha256).toBe(a.toolsSha256);
     expect(summarizePayloadSystem({ ...base, tools: [tool('edit')] }).toolsSha256).not.toBe(a.toolsSha256);
     expect(summarizePayloadSystem({ instructions: 'ABC', input: [{ role: 'user', content: [{ type: 'input_text', text: 'x' }] }] }).system).toBe('ABC');
+    expect(summarizePayloadSystem({ messages: [{ role: 'system', content: 'CHAT RULES' }, { role: 'user', content: 'hi' }], tools: [{ type: 'function', function: { name: 'read' } }] })).toMatchObject({ system: 'CHAT RULES', inputShape: [':system', ':user'], toolNames: ['read'] });
+  });
+});
+
+
+describe('study arm manifest', () => {
+  it('parses the base-model flag shared by study and single-run modes', () => {
+    expect(parseBaseModel([])).toBe('openai/gpt-6.1-sol');
+    for (const mode of ['--study', '--systems']) expect(parseBaseModel([mode, 'pi', '--base-model', 'cliproxyapi/gpt-6.1-sol'])).toBe('cliproxyapi/gpt-6.1-sol');
+    for (const args of [['--base-model'], ['--base-model', '--out'], ['--base-model', 'gpt-6.1-sol']]) expect(() => parseBaseModel(args)).toThrow('base-model');
+  });
+  it('records the configured base model in the manifest and every arm', async () => {
+    const outDir = await mkdtemp(join(tmpdir(), 'proxy-manifest-'));
+    try {
+      await runPromptStudy({ tasks: [], variants: ['C0', 'A0', 'A1'], repeats: 1, concurrency: 1, outDir, baseModel: 'cliproxyapi/gpt-6.1-sol' });
+      const manifest = JSON.parse(await readFile(join(outDir, 'study-manifest.json'), 'utf8'));
+      expect(manifest.baseModel).toBe('cliproxyapi/gpt-6.1-sol');
+      for (const arm of manifest.arms) expect(arm).toMatchObject({ baseModel: manifest.baseModel, providerExtensions: ['npm:@router-for-me/pi-cliproxyapi-provider'], allowedModelEffortPairs: expect.arrayContaining([{ actor: 'non-advisor', model: manifest.baseModel, effort: 'high' }]) });
+    } finally { await rm(outDir, { recursive: true, force: true }); }
+  });
+  it('records advisor arms and their actual prompt independently without model calls', async () => {
+    const outDir = await mkdtemp(join(tmpdir(), 'advisor-manifest-'));
+    try {
+      const options = { tasks: [], variants: ['C0','A0','A1'], repeats: 1, concurrency: 1, outDir };
+      await runPromptStudy(options);
+      const manifest = JSON.parse(await readFile(join(outDir, 'study-manifest.json'), 'utf8'));
+      expect(manifest.baseModel).toBe('openai/gpt-6.1-sol');
+      expect(manifest.variants).toEqual(['C0','A0','A1'].map(name => ({ name, promptVariant: 'C0', file: null, sha256: null, chars: 0 })));
+      expect(manifest.arms).toHaveLength(3);
+      expect(manifest.arms[0]).toMatchObject({ name: 'C0', advisors: [], advisorRoutes: {}, providerExtensions: [], allowedModelEffortPairs: [{ actor: 'non-advisor', model: 'openai/gpt-6.1-sol', effort: 'high' }] });
+      expect(manifest.arms[2]).toMatchObject({ name: 'A1', promptVariant: 'C0', advisors: [{ name: 'plan-review' }, { name: 'verification-audit' }], advisorRoutes: { advisor: { model: 'cliproxyapi/claude-opus-5-5', thinking: 'xhigh' }, 'advisor-plan': { model: 'cliproxyapi/gpt-6-astra', thinking: 'xhigh' } }, providerExtensions: ['npm:@router-for-me/pi-cliproxyapi-provider'] });
+      expect(manifest.arms[2].allowedModelEffortPairs).toHaveLength(3);
+      await runPromptStudy({ ...options, resume: true });
+      expect(JSON.parse(await readFile(join(outDir, 'study-manifest.json'), 'utf8')).arms).toEqual(manifest.arms);
+    } finally { await rm(outDir, { recursive: true, force: true }); }
   });
 });

@@ -25,6 +25,7 @@ export async function decide(ctx: RunContext, context: unknown, expectedType?: C
 }
 async function decideOnce(ctx: RunContext, context: unknown, expectedType?: CoordinatorDecision["type"], reconsideration = ""): Promise<CoordinatorDecision> {
   let feedback = reconsideration;
+  let reconsidered = !!reconsideration;
   for (let attempt = 0; attempt <= ctx.limits.decisionRepairs; attempt++) {
     if (ctx.cancelled) throw new Error("cancelled");
     ctx.decisionSet = false;
@@ -38,6 +39,7 @@ async function decideOnce(ctx: RunContext, context: unknown, expectedType?: Coor
     ctx.lastSchema = schema;
     const prompt = `Decision phase ${ctx.state.phase}. Reply in the user's language (${ctx.state.language ?? "detect from request"}; Korean requests require Korean answers). Call coordinator_decision alone with arguments {"decision":<object matching schema>}. ${schemaText}\nContext: ${JSON.stringify(decisionContext)}\n${feedback}`;
     if (unreadNotes.some(note => note.from.startsWith("advisor:")) && !reconsideration) {
+      reconsidered = true;
       emit(ctx, { type: "coordinator_reconsidering", timestamp: Date.now(), phase: ctx.state.phase });
     }
     emit(ctx, { type: "coordinator_deciding", timestamp: Date.now(), phase: ctx.state.phase });
@@ -61,6 +63,7 @@ async function decideOnce(ctx: RunContext, context: unknown, expectedType?: Coor
       if (decision.type === "root_cause_accepted" && !ctx.workerIds.includes(decision.sourceAgentId)) {
         throw new Error("Unknown claimant");
       }
+      emit(ctx, { type: "coordinator_decision", timestamp: Date.now(), phase: ctx.state.phase, decisionType: decision.type, reconsidered });
       return decision;
     } catch (error) {
       feedback = `Repair invalid decision: ${String(error)}. Remaining repairs: ${ctx.limits.decisionRepairs - attempt}`;

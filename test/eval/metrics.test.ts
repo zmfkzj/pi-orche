@@ -23,7 +23,8 @@ describe('event-derived evaluation metrics', () => {
     const m = computeMetrics(events, truth, null);
     expect(m).toEqual({ wallClockMs: 50, requests: 6, inputTokens: 55, outputTokens: 11, cacheRead: 159, cacheWrite: 20,
       timeToFirstUsefulResultMs: 20, timeToRootCauseMs: 30, wastedWorkAfterRootCause: { requests: 1, inputTokens: 10, outputTokens: 2, cacheRead: 30, cacheWrite: 4 }, advisorUsage: { requests: 0, inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0 }, workerReuseCount: 1, peerMessageCount: 1, notesToMain: 1,
-      nudgeCount: 0, correctness: { passed: null, visible: null, hidden: null, rootCauseCorrect: true } });
+      nudgeCount: 0, advisorTriggered: 0, advisorResults: { ok: 0, concern: 0, blocker: 0 }, advisorDelivered: 0, advisorFailed: 0,
+      coordinatorReconsiderations: 0, awaitedAdvisorCalls: 0, correctness: { passed: null, visible: null, hidden: null, rootCauseCorrect: true } });
   });
   it('preserves undefined values and distinguishes wrong accepted cause from no cause', () => {
     expect(computeMetrics([], truth, null)).toMatchObject({ wallClockMs: null, timeToFirstUsefulResultMs: null, timeToRootCauseMs: null, wastedWorkAfterRootCause: null, correctness: { rootCauseCorrect: null } });
@@ -72,5 +73,23 @@ describe('event-derived evaluation metrics', () => {
     const breakdown = computeUsageByKind(events);
     expect(breakdown.advisor).toEqual(metrics.advisorUsage);
     expect(Object.values(breakdown).reduce((sum, total) => sum + total.requests, 0)).toBe(metrics.requests);
+  });
+  it('counts advisor lifecycle events, verdicts, delivery and awaited calls independently of usage', () => {
+    const events: RunEvent[] = [
+      ...[true, false, true, false].map((awaited, i): RunEvent => ({ type: 'advisor_triggered', timestamp: i, name: 'audit', target: 'main', trigger: 'before_complete', subject: 'run', await: awaited })),
+      ...(['ok', 'concern', 'blocker', 'concern'] as const).map((verdict, i): RunEvent => ({ type: 'advisor_result', timestamp: i + 4, name: 'audit', target: 'main', trigger: 'before_complete', verdict, notes: [], delivered: i < 2 })),
+      { type: 'advisor_failed', timestamp: 8, name: 'audit', target: 'main', trigger: 'before_complete', reason: 'timeout' },
+      { type: 'coordinator_reconsidering', timestamp: 9, phase: 'VERIFY' },
+      { type: 'coordinator_deciding', timestamp: 10, phase: 'VERIFY' },
+      { type: 'coordinator_reconsidering', timestamp: 11, phase: 'VERIFY' },
+      { type: 'advisor_usage', timestamp: 12, name: 'audit', model: 'test', input: 100, output: 7, cacheRead: 11, cacheWrite: 3 },
+    ];
+    const metrics = computeMetrics(events, truth, null);
+    const counters = { advisorTriggered: 4, advisorDelivered: 2, advisorFailed: 1, coordinatorReconsiderations: 2, awaitedAdvisorCalls: 2 };
+    expect(metrics).toMatchObject({ ...counters, advisorResults: { ok: 1, concern: 2, blocker: 1 }, requests: 1, advisorUsage: { requests: 1, inputTokens: 100 } });
+    const flat = numericMetrics(metrics);
+    expect(flat).toMatchObject({ ...counters, 'advisorResults.ok': 1, 'advisorResults.concern': 2, 'advisorResults.blocker': 1, 'advisorUsage.inputTokens': 100 });
+    expect(flat).not.toHaveProperty('advisorResults');
+    expect(numericMetrics(computeMetrics([], truth, null))).toMatchObject({ advisorTriggered: 0, advisorDelivered: 0, advisorFailed: 0, coordinatorReconsiderations: 0, awaitedAdvisorCalls: 0, 'advisorResults.ok': 0, 'advisorResults.concern': 0, 'advisorResults.blocker': 0 });
   });
 });

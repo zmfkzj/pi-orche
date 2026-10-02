@@ -9,6 +9,12 @@ export interface RunMetrics extends TokenTotals {
   wastedWorkAfterRootCause: TokenTotals | null;
   /** Advisor model calls; already included in the headline totals above. */
   advisorUsage: TokenTotals;
+  advisorTriggered: number;
+  advisorResults: { ok: number; concern: number; blocker: number };
+  advisorDelivered: number;
+  advisorFailed: number;
+  coordinatorReconsiderations: number;
+  awaitedAdvisorCalls: number;
   workerReuseCount: number;
   peerMessageCount: number;
   notesToMain: number;
@@ -29,7 +35,13 @@ export function computeMetrics(events: readonly RunEvent[], groundTruth: GroundT
   const kinds = new Map<string, string>();
   const assignments = new Map<string, number>();
   let peerMessageCount = 0, notesToMain = 0, nudgeCount = 0;
+  const advisorResults = { ok: 0, concern: 0, blocker: 0 };
+  let advisorTriggered = 0, advisorDelivered = 0, advisorFailed = 0, coordinatorReconsiderations = 0, awaitedAdvisorCalls = 0;
   for (const event of sorted) {
+    if (event.type === 'advisor_triggered') { advisorTriggered++; if (event.await) awaitedAdvisorCalls++; }
+    if (event.type === 'advisor_result') { advisorResults[event.verdict]++; if (event.delivered) advisorDelivered++; }
+    if (event.type === 'advisor_failed') advisorFailed++;
+    if (event.type === 'coordinator_reconsidering') coordinatorReconsiderations++;
     if (event.type === 'assignment_nudged') nudgeCount++;
     if (event.type === 'assignment_started') {
       kinds.set(event.assignment.id, event.assignment.kind);
@@ -52,6 +64,7 @@ export function computeMetrics(events: readonly RunEvent[], groundTruth: GroundT
   return { ...all, wallClockMs: elapsed(end), timeToFirstUsefulResultMs: elapsed(claim), timeToRootCauseMs: elapsed(accept),
     wastedWorkAfterRootCause: waste, advisorUsage: advisor, workerReuseCount: [...assignments.values()].reduce((sum, count) => sum + Math.max(0, count - 1), 0),
     peerMessageCount, notesToMain, nudgeCount,
+    advisorTriggered, advisorResults, advisorDelivered, advisorFailed, coordinatorReconsiderations, awaitedAdvisorCalls,
     correctness: { passed: grade?.passed ?? null, visible: grade?.visible.passed ?? null,
       hidden: grade?.hidden.passed ?? null, rootCauseCorrect: accepted.length ? !!accept : null } };
 }
@@ -81,7 +94,8 @@ export function statistics(values: readonly (number | null)[]): Statistics {
   return { count: defined.length, mean, min: Math.min(...defined), max: Math.max(...defined), stddev: Math.sqrt(defined.reduce((sum, v) => sum + (v - mean) ** 2, 0) / defined.length) };
 }
 export function numericMetrics(metrics: RunMetrics): Record<string, number | null> {
-  const { correctness: _correctness, wastedWorkAfterRootCause, advisorUsage, ...flat } = metrics;
+  const { correctness: _correctness, wastedWorkAfterRootCause, advisorUsage, advisorResults, ...flat } = metrics;
   const nested = (prefix: string, source: TokenTotals | null) => Object.keys(totals()).map(key => [`${prefix}.${key}`, source?.[key as keyof TokenTotals] ?? null]);
-  return { ...flat, ...Object.fromEntries([...nested('wastedWorkAfterRootCause', wastedWorkAfterRootCause), ...nested('advisorUsage', advisorUsage)]) };
+  return { ...flat, ...Object.fromEntries([...nested('wastedWorkAfterRootCause', wastedWorkAfterRootCause), ...nested('advisorUsage', advisorUsage),
+    ...Object.entries(advisorResults).map(([verdict, count]) => [`advisorResults.${verdict}`, count])]) };
 }

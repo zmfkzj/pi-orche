@@ -8,6 +8,8 @@ import { runOmp, runProcess, listFiles, runnerUsageSchema, extractOmpProviderUsa
 import { runPi, probePi, observedPiRuntime, extractPiRequestUsage, loadPromptVariant } from './pi-runner.js';
 import { loadSuite, prepareTaskWorkspace, gradeTask, createPiJudge, type TaskGrade, type SuiteTask } from './suite.js';
 import { statistics } from './metrics.js';
+import { buildStudyArm, studyArmMetadata, piModel, validateBaseModel } from './arms.js';
+import { loadProviderExtensions } from '../pi/provider-extensions.js';
 
 export type CompareSystem = 'omp' | 'pi';
 export type FailureClass = 'pi-orche defect' | 'harness defect' | 'omp-om-orche behavior' | 'fixture problem' | 'infrastructure';
@@ -17,7 +19,7 @@ export interface RecomputedRun { label: string; result: CompareRun; originalStat
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const runSchema = Type.Object({ taskId: Type.String(), system: Type.Union([Type.Literal('omp'),Type.Literal('pi')]), status: Type.Union([Type.Literal('done'),Type.Literal('failed'),Type.Literal('timeout')]), wallClockMs: Type.Number(), usage: runnerUsageSchema, grade: Type.Union([Type.Null(),Type.Object({ passed: Type.Boolean(), checks: Type.Record(Type.String(),Type.Object({ passed: Type.Boolean(), detail: Type.String() })) })]), error: Type.Optional(Type.String()), artifactDir: Type.String(), attempt: Type.Optional(Type.Number()), sourceRevision: Type.Optional(Type.String()), classification: Type.Optional(Type.Union((['pi-orche defect','harness defect','omp-om-orche behavior','fixture problem','infrastructure'] as const).map(value=>Type.Literal(value)))), classificationBasis: Type.Optional(Type.String()), promptVariant: Type.Optional(Type.String()) });
 const holdSchema = Type.Object({ waitedMs: Type.Number(), expired: Type.Boolean() });
-const pairSchema = Type.Object({ taskId: Type.String(), system: Type.Union([Type.Literal('omp'), Type.Literal('pi')]), artifactDir: Type.String(), attempt: Type.Number({ minimum: 1 }), holdWait: holdSchema, promptVariant: Type.Optional(Type.String()) });
+const pairSchema = Type.Object({ taskId: Type.String(), system: Type.Union([Type.Literal('omp'), Type.Literal('pi')]), artifactDir: Type.String(), attempt: Type.Number({ minimum: 1 }), holdWait: holdSchema, promptVariant: Type.Optional(Type.String()), baseModel: Type.Optional(Type.String()) });
 const savedMetaSchema = Type.Object({
   completed: Type.Boolean(), taskId: Type.String(), system: Type.Union([Type.Literal('omp'), Type.Literal('pi')]),
   sourceRevision: Type.Optional(Type.String()), attempt: Type.Optional(Type.Number()),
@@ -46,7 +48,8 @@ async function readSavedRuns(outDir: string, recompute = false, regrade: readonl
       if (!recompute && Value.Check(runnerUsageSchema, raw.result.usage)) usage = raw.result.usage;
       else {
         const trace = await readFile(join(artifactDir, 'provider-requests.jsonl'), 'utf8');
-        usage = system === 'omp' ? extractOmpProviderUsage(parseJsonLines(trace)) : extractPiRequestUsage(trace);
+        const savedArm = (raw as { overlay?: { arm?: ReturnType<typeof studyArmMetadata> }; arm?: ReturnType<typeof studyArmMetadata>; baseModel?: string });
+        usage = system === 'omp' ? extractOmpProviderUsage(parseJsonLines(trace)) : extractPiRequestUsage(trace, savedArm.overlay?.arm ?? savedArm.arm ?? studyArmMetadata(buildStudyArm(raw.result.promptVariant ?? 'C0', savedArm.baseModel)));
         if (recompute && !regrade.includes(`${entry.name}:${system}`)) {
           const destination = join(artifactDir, 'recomputed');
           await mkdir(destination, { recursive: true });
@@ -200,7 +203,7 @@ async function classifyFailure(result: CompareRun): Promise<{ classification: Fa
 }
 
 /** One fresh process per pair means post-HOLD jobs load the revised sources, not a stale module cache. */
-async function executePair(input: { taskId: string; system: CompareSystem; artifactDir: string; attempt: number; holdWait: HoldWait; promptVariant?: string }): Promise<CompareRun> {
+async function executePair(input: PairInput): Promise<CompareRun> {
   if (input.promptVariant !== undefined && input.system !== 'pi') throw new Error('Prompt variants apply to pi only');
   const task = (await loadSuite()).find(item => item.id === input.taskId);
   if (!task) throw new Error('Unknown suite task ' + input.taskId);
@@ -211,7 +214,8 @@ async function executePair(input: { taskId: string; system: CompareSystem; artif
   const piVersionRaw: unknown = JSON.parse(await readFile(join(root, 'node_modules/@earendil-works/pi-coding-agent/package.json'), 'utf8'));
   const piVersion = piVersionRaw && typeof piVersionRaw === 'object' && 'version' in piVersionRaw ? piVersionRaw.version : null;
   const startedAt = Date.now(), taskHash = await hashTree(task.dir);
-  const metadata = { system: input.system, taskId: task.id, attempt: input.attempt, holdWait: input.holdWait, ...(input.promptVariant === undefined ? {} : { promptVariant: input.promptVariant }), sourceRevision, suiteTaskHash: taskHash, versions: { omp: ompVersion.stdout.trim(), pi: piVersion }, instruction: task.instruction, timeoutSec: task.timeoutSec, completed: false, startedAt };
+  const arm = buildStudyArm(input.promptVariant ?? 'C0', input.baseModel);
+  const metadata = { system: input.system, taskId: task.id, attempt: input.attempt, holdWait: input.holdWait, baseModel: arm.baseModel, arm: studyArmMetadata(arm), ...(input.promptVariant === undefined ? {} : { promptVariant: input.promptVariant }), sourceRevision, suiteTaskHash: taskHash, versions: { omp: ompVersion.stdout.trim(), pi: piVersion }, instruction: task.instruction, timeoutSec: task.timeoutSec, completed: false, startedAt };
   await writeFile(metaPath, JSON.stringify(metadata, null, 2));
   let workspace: { dir: string; cleanup(): Promise<void> } | undefined, outcome: RunnerResult | undefined, grade: TaskGrade | null = null, error: string | undefined;
   try {
@@ -222,12 +226,16 @@ async function executePair(input: { taskId: string; system: CompareSystem; artif
       if (!name.startsWith('.git/')) manifest.push({ path: name, sha256: createHash('sha256').update(await readFile(file)).digest('hex') });
     }
     await writeFile(join(artifactDir, 'workspace-before.json'), JSON.stringify({ source: 'task.repo only', files: manifest }, null, 2));
-    outcome = await (input.system === 'omp' ? runOmp : runPi)({ cwd: workspace.dir, instruction: task.instruction, outDir: artifactDir, timeoutSec: task.timeoutSec, ...(input.promptVariant === undefined ? {} : { promptVariant: input.promptVariant }) });
+    outcome = await (input.system === 'omp' ? runOmp : runPi)({ cwd: workspace.dir, instruction: task.instruction, outDir: artifactDir, timeoutSec: task.timeoutSec, baseModel: arm.baseModel, ...(input.promptVariant === undefined ? {} : { promptVariant: input.promptVariant }) });
     await writeFile(join(artifactDir, 'final.txt'), outcome.answer);
-    const judgeCapture = await observedPiRuntime(join(artifactDir, 'judge-requests.jsonl'));
-    grade = await gradeTask(task, workspace.dir, outcome.answer, { judge: createPiJudge({ modelRuntime: judgeCapture.runtime, model: 'openai/gpt-6.1-sol', thinking: 'high' }), timeoutMs: 120_000 });
-    await judgeCapture.drain();
-    await writeFile(join(artifactDir, 'judge-usage.json'), JSON.stringify(extractPiRequestUsage(await readFile(join(artifactDir, 'judge-requests.jsonl'), 'utf8')), null, 2));
+    const judgeArm = studyArmMetadata(buildStudyArm('C0', arm.baseModel));
+    const judgeCapture = await observedPiRuntime(join(artifactDir, 'judge-requests.jsonl'), undefined, judgeArm);
+    const judgeHost = judgeArm.providerExtensions.length ? await loadProviderExtensions(judgeCapture.runtime, judgeArm.providerExtensions, { cwd: workspace.dir }) : undefined;
+    try {
+      grade = await gradeTask(task, workspace.dir, outcome.answer, { judge: createPiJudge({ modelRuntime: judgeCapture.runtime, model: arm.baseModel, thinking: 'high' }), timeoutMs: 120_000 });
+      await judgeCapture.drain();
+      await writeFile(join(artifactDir, 'judge-usage.json'), JSON.stringify(extractPiRequestUsage(await readFile(join(artifactDir, 'judge-requests.jsonl'), 'utf8'), judgeArm), null, 2));
+    } finally { judgeHost?.dispose(); }
   } catch (caught) { error = caught instanceof Error ? caught.message : String(caught); }
   const usage: RunnerUsage = outcome?.usage ?? { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, sessions: [], sessionCount: 0, models: [], thinking: [], complete: false, limitations: ['Runner did not return usage'], validModelEffort: false, knownUsageRequests: 0, unknownUsageRequests: { count: 0, requests: [] }, blockedRequests: { count: 0, requests: [] }, enforcedRequests: { count: 0, requests: [] } };
   const result: CompareRun = { taskId: task.id, system: input.system, attempt: input.attempt, sourceRevision, status: error ? 'failed' : outcome?.status ?? 'failed', wallClockMs: outcome ? outcome.finishedAt - outcome.startedAt : Date.now() - startedAt, usage, grade, artifactDir, ...(input.promptVariant === undefined ? {} : { promptVariant: input.promptVariant }), ...((error ?? outcome?.error) ? { error: error ?? outcome?.error } : {}) };
@@ -256,7 +264,7 @@ export function selectAttempts(runs: readonly CompareRun[], which: 'first' | 'la
   return [...selected.values()];
 }
 
-type PairInput = { taskId: string; system: CompareSystem; artifactDir: string; attempt: number; holdWait: HoldWait; promptVariant?: string };
+type PairInput = { taskId: string; system: CompareSystem; artifactDir: string; attempt: number; holdWait: HoldWait; promptVariant?: string; baseModel?: string };
 /** One fresh child process per pair; a synthesised harness-defect record replaces a missing terminal record. */
 async function runPairProcess(input: PairInput): Promise<CompareRun> {
   const { artifactDir } = input;
@@ -272,7 +280,7 @@ async function runPairProcess(input: PairInput): Promise<CompareRun> {
     return raw;
   } catch (error) {
     let usage: RunnerUsage = { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, sessions: [], sessionCount: 0, models: [], thinking: [], complete: false, limitations: ['Pair process did not return complete usage'], validModelEffort: false, knownUsageRequests: 0, unknownUsageRequests: { count: 0, requests: [] }, blockedRequests: { count: 0, requests: [] }, enforcedRequests: { count: 0, requests: [] } };
-    try { const trace = await readFile(join(artifactDir, 'provider-requests.jsonl'), 'utf8'); usage = input.system === 'omp' ? extractOmpProviderUsage(parseJsonLines(trace)) : extractPiRequestUsage(trace); } catch { /* Explicit partial accounting. */ }
+    try { const trace = await readFile(join(artifactDir, 'provider-requests.jsonl'), 'utf8'); usage = input.system === 'omp' ? extractOmpProviderUsage(parseJsonLines(trace)) : extractPiRequestUsage(trace, studyArmMetadata(buildStudyArm(input.promptVariant ?? 'C0', input.baseModel))); } catch { /* Explicit partial accounting. */ }
     const result: CompareRun = { taskId: input.taskId, system: input.system, artifactDir, attempt: input.attempt, status: child.timedOut ? 'timeout' : 'failed', wallClockMs: Date.now() - startedAt, usage, grade: null, error: child.stderr || (error instanceof Error ? error.message : String(error)), classification: 'harness defect', classificationBasis: 'Pair process failed before producing its terminal record', ...(input.promptVariant === undefined ? {} : { promptVariant: input.promptVariant }) };
     await writeFile(join(artifactDir, 'meta.json'), JSON.stringify({ ...input, completed: true, sourceRevision: await hashTree(join(root, 'src')), result }, null, 2));
     await writeFile(join(artifactDir, 'usage.json'), JSON.stringify(usage, null, 2));
@@ -281,7 +289,8 @@ async function runPairProcess(input: PairInput): Promise<CompareRun> {
   }
 }
 
-export async function runComparison(options: { tasks: readonly string[] | 'all'; systems?: readonly CompareSystem[]; concurrency?: number; outDir: string; resume?: boolean; rerun?: readonly string[]; promptVariant?: string }) {
+export async function runComparison(options: { tasks: readonly string[] | 'all'; systems?: readonly CompareSystem[]; concurrency?: number; outDir: string; resume?: boolean; rerun?: readonly string[]; promptVariant?: string; baseModel?: string }) {
+  const baseModel = validateBaseModel(options.baseModel ?? piModel);
   const initialConcurrency = options.concurrency ?? 2;
   if (!Number.isInteger(initialConcurrency) || initialConcurrency < 1) throw new Error('concurrency must be a positive integer');
   const systems = options.systems ?? ['omp', 'pi'];
@@ -323,7 +332,7 @@ export async function runComparison(options: { tasks: readonly string[] | 'all';
     const base = join(outDir, job.taskId, job.system);
     const artifactDir = attempt === 1 ? base : join(base, `attempt-${attempt}`);
     try { await stat(join(artifactDir, 'meta.json')); throw new Error('Attempt already exists: ' + artifactDir); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    const result = await runPairProcess({ taskId: job.taskId, system: job.system, artifactDir, attempt, holdWait, ...(options.promptVariant === undefined ? {} : { promptVariant: options.promptVariant }) });
+    const result = await runPairProcess({ taskId: job.taskId, system: job.system, artifactDir, attempt, holdWait, baseModel, ...(options.promptVariant === undefined ? {} : { promptVariant: options.promptVariant }) });
     runs.push(result);
     await appendFile(join(outDir, 'completion-events.jsonl'), JSON.stringify(result) + '\n');
     if (result.classification) {
@@ -355,11 +364,14 @@ export async function runComparison(options: { tasks: readonly string[] | 'all';
   return writeSummary(outDir, runs);
 }
 
-/** Prompt study: each (task, variant, repeat) is one fresh pi run at outDir/<variant>/<task>/pi[/attempt-<repeat>], so every variant directory is itself a readable comparison directory. Variants are interleaved per task and rotated so no arm always runs first. */
-export async function runPromptStudy(options: { tasks: readonly string[]; variants: readonly string[]; repeats: number; concurrency: number; outDir: string; resume?: boolean }) {
+/** Study arms (--variants C0,C1,C2,A0,A1): each (task, arm, repeat) is one fresh pi run at outDir/<arm>/<task>/pi[/attempt-<repeat>]. Arms are interleaved per task and rotated so no arm always runs first. */
+export async function runPromptStudy(options: { tasks: readonly string[]; variants: readonly string[]; repeats: number; concurrency: number; outDir: string; resume?: boolean; baseModel?: string }) {
+  const baseModel = validateBaseModel(options.baseModel ?? piModel);
   if (!Number.isInteger(options.concurrency) || options.concurrency < 1) throw new Error('concurrency must be a positive integer');
   if (!Number.isInteger(options.repeats) || options.repeats < 1) throw new Error('repeats must be a positive integer');
-  const variants = await Promise.all(options.variants.map(name => loadPromptVariant(name)));
+  const arms = options.variants.map(name => buildStudyArm(name, baseModel));
+  const variants = await Promise.all(arms.map(async arm => ({ ...await loadPromptVariant(arm.promptVariant), name: arm.name, promptVariant: arm.promptVariant })));
+  if (!variants.length || new Set(options.variants).size !== variants.length) throw new Error('variants must be nonempty and unique');
   const suite = await loadSuite(), outDir = resolve(options.outDir);
   const tasks = options.tasks.map(id => {
     const task = suite.find(item => item.id === id); if (!task) throw new Error('Unknown suite task ' + id); return task;
@@ -377,25 +389,30 @@ export async function runPromptStudy(options: { tasks: readonly string[]; varian
     if (!completed) jobs.push({ taskId: task.id, variant, repeat, artifactDir });
   }
   await mkdir(outDir, { recursive: true });
-  await writeFile(join(outDir, 'study-manifest.json'), JSON.stringify({ startedAt: Date.now(), tasks: tasks.map(task => task.id), repeats: options.repeats, concurrency: options.concurrency, variants: variants.map(({ name, file, sha256, chars }) => ({ name, file, sha256, chars })), jobOrder: jobs.map(job => `${job.variant}/${job.taskId}/r${job.repeat}`) }, null, 2));
+  await writeFile(join(outDir, 'study-manifest.json'), JSON.stringify({ startedAt: Date.now(), baseModel, tasks: tasks.map(task => task.id), repeats: options.repeats, concurrency: options.concurrency, variants: variants.map(({ name, promptVariant, file, sha256, chars }) => ({ name, promptVariant, file, sha256, chars })), arms: arms.map(studyArmMetadata), jobOrder: jobs.map(job => `${job.variant}/${job.taskId}/r${job.repeat}`) }, null, 2));
   let next = 0;
   const worker = async () => {
     for (let job = jobs[next++]; job; job = jobs[next++]) {
       const holdWait = { waitedMs: 0, expired: false };
-      const result = await runPairProcess({ taskId: job.taskId, system: 'pi', artifactDir: job.artifactDir, attempt: job.repeat, holdWait, promptVariant: job.variant });
+      const result = await runPairProcess({ taskId: job.taskId, system: 'pi', artifactDir: job.artifactDir, attempt: job.repeat, holdWait, promptVariant: job.variant, baseModel });
       await appendFile(join(outDir, 'completion-events.jsonl'), JSON.stringify(result) + '\n');
       console.log(`${job.variant}/${job.taskId}/r${job.repeat}: ${result.status}; grade=${result.grade?.passed ?? 'null'}; sent=${result.usage.requests}; wall=${result.wallClockMs}`);
     }
   };
   console.log(`STUDY_STARTED out=${outDir} runs=${jobs.length} concurrency=${options.concurrency}`);
   await Promise.all(Array.from({ length: Math.min(options.concurrency, jobs.length) }, worker));
-  for (const { name } of variants) await writeSummary(join(outDir, name), await readSavedRuns(join(outDir, name)));
+  for (const { name } of variants) { await mkdir(join(outDir, name), { recursive: true }); await writeSummary(join(outDir, name), await readSavedRuns(join(outDir, name))); }
 }
 export async function runProbes(outDir: string) {
   const task=(await loadSuite()).find(t=>t.id==='a6-typo-message');if(!task)throw new Error('Probe visible workspace task missing');
   const results=[];
   for(const system of ['omp','pi']as const){const workspace=await prepareTaskWorkspace(task);const dir=join(outDir,'probes',system);try{const options={cwd:workspace.dir,instruction:'Reply exactly COMPARISON_PROBE_OK.',outDir:dir,timeoutSec:120};const result=system==='omp'?await runOmp(options):await probePi(options);await writeFile(join(dir,'result.json'),JSON.stringify(result,null,2));results.push(result);console.log(`Probe ${system}: ${result.status}, models=${result.usage.models}, thinking=${result.usage.thinking}, complete=${result.usage.complete}`);}finally{await workspace.cleanup();}}
   return results;
+}
+/** Shared by study and single-comparison CLI modes; reject missing flag values early. */
+export function parseBaseModel(argv: readonly string[]): string {
+  const index = argv.indexOf('--base-model');
+  return validateBaseModel(index < 0 ? piModel : argv[index + 1] ?? '');
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href){
   const argv=process.argv.slice(2);const value=(flag:string,fallback:string)=>{const index=argv.indexOf(flag);return index<0?fallback:argv[index+1]??'';};const outDir=value('--out',join('results','compare',new Date().toISOString().replaceAll(':','-')));
@@ -408,7 +425,8 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).hr
   else if(argv.includes('--recompute'))await recomputeComparison(value('--recompute',''), argv.includes('--regrade') ? value('--regrade','').split(',') : [], argv.includes('--fixture-regrade') ? value('--fixture-regrade','').split(',') : []);
   else {
     if(!argv.includes('--tasks'))throw new Error('Required: --tasks <ids|all>; use --probe for the minimal probes');
-    if(argv.includes('--study'))await runPromptStudy({tasks:value('--tasks','').split(',').filter(Boolean),variants:value('--variants','C0,C1,C2').split(','),repeats:Number(value('--repeats','2')),concurrency:Number(value('--concurrency','4')),outDir,resume:argv.includes('--resume')});
-    else await runComparison({tasks:value('--tasks','all')==='all'?'all':value('--tasks','all').split(','),systems:value('--systems','omp,pi').split(',')as CompareSystem[],concurrency:Number(value('--concurrency','2')),outDir,resume:argv.includes('--resume'),rerun:argv.includes('--rerun')?value('--rerun','').split(','):undefined,...(argv.includes('--prompt-variant')?{promptVariant:value('--prompt-variant','')}:{})});
+    const baseModel = parseBaseModel(argv);
+    if(argv.includes('--study'))await runPromptStudy({tasks:value('--tasks','').split(',').filter(Boolean),variants:value('--variants','C0,C1,C2').split(','),repeats:Number(value('--repeats','2')),concurrency:Number(value('--concurrency','4')),outDir,resume:argv.includes('--resume'),baseModel});
+    else await runComparison({tasks:value('--tasks','all')==='all'?'all':value('--tasks','all').split(','),systems:value('--systems','omp,pi').split(',')as CompareSystem[],concurrency:Number(value('--concurrency','2')),outDir,resume:argv.includes('--resume'),baseModel,rerun:argv.includes('--rerun')?value('--rerun','').split(','):undefined,...(argv.includes('--prompt-variant')?{promptVariant:value('--prompt-variant','')}:{})});
   }
 }
