@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fauxAssistantMessage as reply, fauxProvider, type FauxResponseStep, type ToolCall } from "@earendil-works/pi-ai";
 import { AgentManager } from "../../src/agent/agent-manager.js";
 import { WorkerPool, type TaskParameters } from "../../src/extension/workers.js";
-import { OrcheController } from "../../src/extension/controller.js";
+import { OrcheController, type OrcheControllerOptions, type OrcheRunArgs } from "../../src/extension/controller.js";
+import type { ConcurrentSession, ConcurrentSessionsResult, DetectConcurrentSessionsOptions } from "../../src/extension/concurrent-sessions.js";
 import { ORCHE_USAGE } from "../../src/extension/index.js";
 import { createHarness, tool, type Harness } from "./harness.js";
 import { deferred } from "../helpers/faux.js";
@@ -32,12 +33,12 @@ function capturePool() {
     return execute.call(this, args);
   });
 }
-async function fixture(steps: FauxResponseStep[], idleTtlMs?: number) {
+async function fixture(steps: FauxResponseStep[], idleTtlMs?: number, controllerOptions: Partial<OrcheControllerOptions> = {}) {
   const h = await harness({ mainSteps: [], orcheSteps: steps });
-  const controller = new OrcheController({ agentDir: h.agentDir, createRuntime: async () => h.runtime });
+  const controller = new OrcheController({ agentDir: h.agentDir, createRuntime: async () => h.runtime, ...controllerOptions });
   const pool = new WorkerPool({ controller, agentDir: h.agentDir, idleTtlMs });
   pools.add(pool);
-  const execute = (args: Partial<TaskParameters> = {}, signal?: AbortSignal) => pool.execute({ role: "explore", request: "Find the evidence", cwd: h.cwd, projectTrusted: false, ...args, signal });
+  const execute = (args: Partial<TaskParameters & Pick<OrcheRunArgs, "onProgress" | "currentSession">> = {}, signal?: AbortSignal) => pool.execute({ role: "explore", request: "Find the evidence", cwd: h.cwd, projectTrusted: false, ...args, signal });
   return { h, pool, controller, execute };
 }
 const blocked = (entered: { resolve(): void }): FauxResponseStep => async (_context, options) => {
@@ -356,4 +357,100 @@ describe("orche_task persistent session workers", () => {
     await pool.dispose();
     expect(dispose).toHaveBeenCalledOnce();
   });
+
+  describe("concurrent pi sessions", () => {
+    const other = (cwd: string, secondsAgo = 20): ConcurrentSession => ({ id: "other", cwd, file: "/sessions/other.jsonl", lastWriteMs: Date.now() - secondsAgo * 1000 });
+    const stub = (sessions: ConcurrentSession[]) => vi.fn(async (_options: DetectConcurrentSessionsOptions): Promise<ConcurrentSessionsResult> => ({ sessions }));
+    const warningPattern = /^⚠ 1 other pi session active in this repository \(cwd [^)]*, last write (19|20|21)s ago\); their changes are classified as external where possible$/;
+
+    it("puts the warning first in the result, in the progress lines and beside the changed files", async () => {
+      const detect = stub([other("/work/repo")]);
+      const { h, execute } = await fixture([
+        tool("write", { path: "allowed.txt", content: "allowed" }),
+        result("implement", "Scoped change", { status: "done" }),
+      ], undefined, { detectConcurrentSessions: detect });
+      const updates: string[][] = [];
+      const outcome = await execute({ role: "implement", files: ["allowed.txt"], onProgress: lines => updates.push([...lines]), currentSession: { file: "/s/me.jsonl", id: "me" } });
+
+      expect(detect).toHaveBeenCalledTimes(1);
+      expect(detect.mock.calls[0]![0]).toMatchObject({ cwd: h.cwd, windowMs: 10 * 60_000, currentSessionFile: "/s/me.jsonl", currentSessionId: "me", sessionsDir: [join(h.agentDir, "sessions")] });
+      const [warning, blank, head] = outcome.text.split("\n");
+      expect(warning).toMatch(warningPattern);
+      expect([blank, head!.startsWith("orche task W1 (implement")]).toEqual(["", true]);
+      expect(outcome.text).toContain("Changed files: allowed.txt (may include changes made by the other pi session(s)");
+      expect(outcome.details.concurrentSessions).toMatchObject({ count: 1 });
+      const shown = updates.filter(lines => lines.length);
+      expect(shown.length).toBeGreaterThan(0);
+      for (const lines of shown) {
+        expect(lines).toHaveLength(2);
+        expect(lines[0]).toBe(warning);
+        expect(lines[1]).toMatch(/^W1 implement · \d+ requests/);
+      }
+      expect(updates.at(-1)).toEqual([]);
+    });
+
+    it("adds nothing when no session is detected, or when detection is disabled or fails", async () => {
+      const none = stub([]);
+      const quiet = await fixture([result(), result()], undefined, { detectConcurrentSessions: none });
+      const updates: string[][] = [];
+      const outcome = await quiet.execute({ onProgress: lines => updates.push([...lines]) });
+      expect(none).toHaveBeenCalledTimes(1);
+      expect(outcome.text).not.toContain("other pi session");
+      expect(outcome.details.concurrentSessions).toBeUndefined();
+      expect(updates.flat().filter(line => line.includes("pi session"))).toEqual([]);
+
+      const off = stub([other("/work/repo")]);
+      const disabled = await fixture([result()], undefined, { detectConcurrentSessions: off });
+      await writeFile(join(disabled.h.agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: disabled.h.orche.route.model }, concurrentSessions: { enabled: false } }));
+      expect((await disabled.execute()).text).not.toContain("other pi session");
+      expect(off).not.toHaveBeenCalled();
+
+      const broken = await fixture([result()], undefined, { detectConcurrentSessions: async () => { throw new Error("detector exploded"); } });
+      const survived = await broken.execute();
+      expect(survived.text).toContain("Evidence found");
+      expect(survived.text).not.toContain("other pi session");
+    });
+
+    it("prefixes a failed task's error with the warning", async () => {
+      const { execute } = await fixture([reply("I will not report")], undefined, { detectConcurrentSessions: stub([other("/work/repo")]) });
+      const error = await execute().catch((caught: unknown) => caught as Error);
+      expect(error).toBeInstanceOf(Error);
+      const lines = (error as Error).message.split("\n");
+      expect(lines[0]).toMatch(warningPattern);
+      expect(lines[1]).toBe("");
+      expect(lines.slice(2).join("\n").length).toBeGreaterThan(0);
+    });
+
+    it("shows the warning in the orche_task tool result of a real session and passes its own session to the detector", async () => {
+      const detect = stub([other("/work/repo")]);
+      const h = await harness({
+        mainSteps: [tool("orche_task", { role: "explore", request: "Inspect greeting.txt" }), reply("supervised")],
+        orcheSteps: [result()],
+        extension: { detectConcurrentSessions: detect },
+      });
+      await h.session.prompt("investigate");
+      const [text] = (taskResults(h)[0] as { content: { text: string }[] }).content.map(part => part.text);
+      expect(text).toMatch(/^⚠ 1 other pi session active in this repository \(cwd \/work\/repo, last write (19|20|21)s ago\); their changes are classified as external where possible\n\norche task W1 \(explore/);
+      expect(detect).toHaveBeenCalledTimes(1);
+      expect(detect.mock.calls[0]![0]).toMatchObject({ cwd: h.cwd, currentSessionId: h.session.sessionManager.getSessionId() });
+      expect(detect.mock.calls[0]![0]).not.toHaveProperty("currentSessionFile"); // in-memory session: no file yet
+    });
+
+    it("detects a real concurrent session in the same git repository through the default detector", async () => {
+      const h = await harness({
+        mainSteps: [tool("orche_task", { role: "explore", request: "first" }), reply("ok"), tool("orche_task", { role: "explore", request: "second", worker: "W1" }), reply("ok")],
+        orcheSteps: [result(), result()],
+      });
+      await h.session.prompt("first");
+      expect(JSON.stringify(taskResults(h))).not.toContain("other pi session");
+      const dir = join(h.agentDir, "sessions", "--project--");
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, "2026-10-02T06-10-00-000Z_other.jsonl"), `${JSON.stringify({ type: "session", version: 3, id: "other", timestamp: "2026-10-02T06:10:00.000Z", cwd: join(h.cwd, "packages") })}\n`);
+      await h.session.prompt("second");
+      const second = JSON.stringify(taskResults(h)[1]);
+      expect(second).toContain("⚠ 1 other pi session active in this repository");
+      expect(second).toContain(join(h.cwd, "packages"));
+    });
+  });
+
 });

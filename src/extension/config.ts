@@ -1,7 +1,8 @@
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { loadRouteConfig, type RouteConfig } from "../orchestration/routing.js";
+import { parseRouteConfig, RouteConfigError, type RouteConfig } from "../orchestration/routing.js";
+import { DEFAULT_WINDOW_MS } from "./concurrent-sessions.js";
 
 export const CONFIG_FILE = "orche.config.json";
 
@@ -16,9 +17,64 @@ export type ConfigSource =
   | { kind: "session"; model: string; thinking?: ThinkingLevel };
 export interface DiscoveredConfig {
   routes: RouteConfig;
+  /** `concurrentSessions` of the selected file with defaults applied (enabled, 10 minutes). */
+  concurrentSessions: ConcurrentSessionsSettings;
   source: ConfigSource;
   /** Config files that exist but were not used, with the reason. */
   ignored: string[];
+}
+
+/** `concurrentSessions` in orche.config.json: warn about other pi sessions active on the same repository. */
+export interface ConcurrentSessionsConfig {
+  /** Default true. */
+  enabled?: boolean;
+  /** A session counts as active when its file was written within this many minutes. Default 10. */
+  windowMinutes?: number;
+}
+export interface ConcurrentSessionsSettings {
+  enabled: boolean;
+  windowMinutes: number;
+}
+export const DEFAULT_CONCURRENT_SESSIONS: Readonly<ConcurrentSessionsSettings> = { enabled: true, windowMinutes: DEFAULT_WINDOW_MS / 60_000 };
+export const MAX_CONCURRENT_WINDOW_MINUTES = 24 * 60;
+
+export function parseConcurrentSessionsConfig(value: unknown): ConcurrentSessionsConfig {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.concurrentSessions: expected object");
+  const settings = value as Record<string, unknown>;
+  if (Object.keys(settings).some(key => key !== "enabled" && key !== "windowMinutes")) throw new RouteConfigError("config.concurrentSessions: unknown field");
+  if (settings.enabled !== undefined && typeof settings.enabled !== "boolean") throw new RouteConfigError("config.concurrentSessions.enabled: expected boolean");
+  const minutes = settings.windowMinutes;
+  if (minutes !== undefined && (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0 || minutes > MAX_CONCURRENT_WINDOW_MINUTES))
+    throw new RouteConfigError(`config.concurrentSessions.windowMinutes: expected a number greater than 0 and at most ${MAX_CONCURRENT_WINDOW_MINUTES}`);
+  return {
+    ...(settings.enabled !== undefined ? { enabled: settings.enabled } : {}),
+    ...(minutes !== undefined ? { windowMinutes: minutes as number } : {}),
+  };
+}
+
+export function resolveConcurrentSessions(config?: ConcurrentSessionsConfig): ConcurrentSessionsSettings {
+  return {
+    enabled: config?.enabled ?? DEFAULT_CONCURRENT_SESSIONS.enabled,
+    windowMinutes: config?.windowMinutes ?? DEFAULT_CONCURRENT_SESSIONS.windowMinutes,
+  };
+}
+
+/**
+ * Load one orche config file: the route settings (validated by `parseRouteConfig`) plus the extension-only
+ * `concurrentSessions` setting, which is validated here and removed before the route parser sees the file.
+ */
+export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings }> {
+  let value: unknown;
+  try { value = JSON.parse(await readFile(path, "utf8")); }
+  catch (error) { throw new RouteConfigError(`Cannot load route config ${path}: ${error instanceof Error ? error.message : String(error)}`); }
+  let routeValue = value;
+  let concurrent: ConcurrentSessionsConfig | undefined;
+  if (value && typeof value === "object" && !Array.isArray(value) && Object.hasOwn(value, "concurrentSessions")) {
+    const { concurrentSessions, ...rest } = value as Record<string, unknown>;
+    concurrent = parseConcurrentSessionsConfig(concurrentSessions);
+    routeValue = rest;
+  }
+  return { routes: parseRouteConfig(routeValue), concurrentSessions: resolveConcurrentSessions(concurrent) };
 }
 export class NoRouteError extends Error {
   override readonly name = "NoRouteError";
@@ -50,13 +106,13 @@ export async function discoverOrcheConfig(options: {
   const projectPath = join(options.cwd, ".pi", CONFIG_FILE);
   if (await exists(projectPath)) {
     if (options.projectTrusted) {
-      return { routes: await loadRouteConfig(projectPath), source: { kind: "project", path: projectPath }, ignored };
+      return { ...(await loadOrcheConfigFile(projectPath)), source: { kind: "project", path: projectPath }, ignored };
     }
     ignored.push(`${projectPath} (project is not trusted by Pi)`);
   }
   const userPath = join(options.agentDir, CONFIG_FILE);
   if (await exists(userPath)) {
-    return { routes: await loadRouteConfig(userPath), source: { kind: "user", path: userPath }, ignored };
+    return { ...(await loadOrcheConfigFile(userPath)), source: { kind: "user", path: userPath }, ignored };
   }
   const { model, thinking } = options.session;
   if (!model) {
@@ -66,6 +122,7 @@ export async function discoverOrcheConfig(options: {
   }
   return {
     routes: { routes: {}, default: { model, ...(thinking ? { thinking } : {}) } },
+    concurrentSessions: resolveConcurrentSessions(),
     source: { kind: "session", model, ...(thinking ? { thinking } : {}) },
     ignored,
   };

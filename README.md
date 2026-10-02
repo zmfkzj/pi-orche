@@ -81,6 +81,26 @@ Every normal `pi` session then has anchored `read`/`edit` (replacing Pi's), `fin
 
 In `auto`/`single`/`multi`, PowerShell is unsupported until it has a dedicated parser. Bash rejects bare globs, variables and substitutions; quote literal patterns (for example `find . -name '*.ts'`). `npx`/`bunx` runners require `--no-install` (for example `npx --no-install vitest run`); this is not a containment or executable-provenance guarantee. Permitted tests/linters can execute project configuration and create generated files, caches or reports. Policy acceptance does not guarantee a successful CLI invocation.
 
+### Concurrent pi sessions
+
+It is common to have several `pi` sessions open on one repository, or on its superproject (this repository is a submodule of its parent) or one of its submodules. Their edits and commits can land while an `orche_run` or `orche_task` is working. When a run or task **starts**, orche looks for other pi sessions that were written recently and whose working directory is inside the run's git toplevel, inside its superproject chain (`git rev-parse --show-superproject-working-tree`), or inside a submodule of those. If it finds any it does not block anything: the tool result starts with a warning such as
+
+```
+⚠ 2 other pi sessions active in this repository (cwd /work/repo, /work/repo/packages/a, last write 12s ago); their changes are classified as external where possible
+```
+
+and an `orche_run` is flagged as having concurrent activity. In `change`/`diagnose_fix` runs of a flagged run, a file that changed while a worker's bash command was in flight, that is not in that worker's ownership and that no worker `edit`/`write` call wrote is reported as `external` (reason `concurrent session active; ambiguous`) instead of as an ownership violation. Writes through worker `edit`/`write` outside ownership remain violations either way, and without concurrent sessions the audit is as strict as before. Detection runs once at the start and is never re-run.
+
+Detection reads pi's session store only: it stats `<sessions dir>/<encoded cwd>/*.jsonl` (at most 2000 files, newest names first), reads just the first line of files written inside the window, ignores the current session, and spawns git for the run's own directory and for a few candidates whose path it cannot place. The sessions directory is `PI_CODING_AGENT_SESSION_DIR` when set, otherwise `<agent dir>/sessions` (`PI_CODING_AGENT_DIR`, default `~/.pi/agent`). Any error (missing or unreadable directory, malformed files, no git repository, a timeout of 5 seconds) means "no concurrent sessions" and no warning. A session that was closed within the window still counts, and sessions in another worktree of the same repository do not.
+
+Configure it with the top-level `concurrentSessions` object of the Pi agent or trusted project `orche.config.json` (not in a file passed to the CLI's `--config`):
+
+```json
+"concurrentSessions": { "enabled": true, "windowMinutes": 10 }
+```
+
+`enabled` (default `true`) switches detection and the warning off with `false`; `windowMinutes` (default `10`, a number greater than 0 and at most 1440) is how recently a session file must have been written to count as active. Unknown fields and values of the wrong type are rejected like the other settings.
+
 ## Architecture
 
 - `src/pi/`: Pi session factory and runtime adapter; persistent contexts, lifecycle events, abort and context-only messages.

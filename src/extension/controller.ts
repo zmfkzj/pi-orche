@@ -1,8 +1,13 @@
+import { join } from "node:path";
 import { getAgentDir, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { externalChangesWarning, runOrchestrated, type RunReport } from "../orchestration/coordinator.js";
 import type { RunEvent } from "../orchestration/events.js";
-import { describeSource, discoverOrcheConfig, NoRouteError, type ConfigSource } from "./config.js";
+import {
+  concurrentActivityOf, defaultSessionsDirs, detectConcurrentSessions, formatConcurrentWarning, sessionsRootOf,
+  type ConcurrentActivitySummary, type ConcurrentSessionsResult, type DetectConcurrentSessionsOptions,
+} from "./concurrent-sessions.js";
+import { describeSource, discoverOrcheConfig, NoRouteError, type ConcurrentSessionsSettings, type ConfigSource } from "./config.js";
 import { describeProgress } from "./progress.js";
 import { describeWorkspaceChanges } from "../orchestration/workspace.js";
 
@@ -26,6 +31,32 @@ export interface OrcheRunArgs {
   signal?: AbortSignal;
   /** Receives the latest progress lines (newest last) whenever one is added. */
   onProgress?: (lines: readonly string[]) => void;
+  /**
+   * The calling Pi session (`ctx.sessionManager`): its file and id are never reported as another session, and its
+   * directory locates the session store scanned for other sessions.
+   */
+  currentSession?: { file?: string; id?: string; dir?: string };
+}
+/** Other pi sessions found active on the repository when an activity started. */
+export interface ConcurrentNotice {
+  count: number;
+  /** One-line warning for tool results and progress. */
+  warning: string;
+  /** `RunOptions.concurrentActivity`. */
+  activity: ConcurrentActivitySummary;
+}
+/**
+ * Prefix an error's message with the concurrent-session warning so a thrown result carries it too. The error object is kept
+ * (class, cause) when its message is writable; otherwise (DOMException) it is wrapped.
+ */
+export function withConcurrentWarning(error: unknown, warning: string): unknown {
+  if (!(error instanceof Error)) return new Error(`${warning}\n\n${String(error)}`);
+  const message = `${warning}\n\n${error.message}`;
+  try {
+    error.message = message;
+    if (error.message === message) return error;
+  } catch { /* read-only message */ }
+  return new Error(message, { cause: error });
 }
 export interface OrcheRunDetails {
   status: RunReport["status"];
@@ -48,6 +79,8 @@ export interface OrcheRunDetails {
   timeouts?: RunReport["timeouts"];
   cancellation?: RunReport["cancellation"];
   cleanup?: RunReport["cleanup"];
+  /** Other pi sessions that were active on the repository when the run started (the run was flagged with `concurrentActivity`). */
+  concurrentSessions?: ConcurrentActivitySummary;
 }
 export interface OrcheOutcome {
   report: RunReport;
@@ -60,6 +93,8 @@ export interface OrcheOutcome {
   /** The cancellation came from `/orche cancel`. */
   cancelledByUser: boolean;
   source: ConfigSource;
+  /** Warning line for other pi sessions active at the start; {@link formatOutcome} puts it first. */
+  concurrentWarning?: string;
 }
 export interface OrcheControllerOptions {
   /** Defaults to Pi's agent dir (`~/.pi/agent`, or `PI_CODING_AGENT_DIR`). */
@@ -68,6 +103,8 @@ export interface OrcheControllerOptions {
   createRuntime?: () => Promise<ModelRuntime>;
   /** Test seam for the run itself. */
   run?: typeof runOrchestrated;
+  /** Test seam for concurrent-session detection (default: the real detector). It may be disabled by `concurrentSessions.enabled` in the config. */
+  detectConcurrentSessions?: (options: DetectConcurrentSessionsOptions) => Promise<ConcurrentSessionsResult>;
 }
 const PROGRESS_LINES = 8;
 const ACTIVITY_INTERVAL_MS = 5000;
@@ -103,6 +140,33 @@ export class OrcheController {
       if (this.runtime === created) this.runtime = undefined;
     });
     return created;
+  }
+
+  /**
+   * Look for other pi sessions active on the run's repository, once, at the start of a run or task. Never throws and never
+   * blocks for long: disabled by config, an aborted signal, an empty result and any failure all mean "no notice".
+   */
+  async detectConcurrent(args: Pick<OrcheRunArgs, "cwd" | "currentSession">, settings: ConcurrentSessionsSettings, signal?: AbortSignal): Promise<ConcurrentNotice | undefined> {
+    if (!settings.enabled || signal?.aborted) return undefined;
+    try {
+      const detect = this.options.detectConcurrentSessions ?? detectConcurrentSessions;
+      const stores = [
+        ...(args.currentSession?.dir ? [sessionsRootOf(args.currentSession.dir)] : []),
+        ...(this.options.agentDir ? [join(this.options.agentDir, "sessions")] : defaultSessionsDirs()),
+      ];
+      const { sessions } = await detect({
+        cwd: args.cwd,
+        sessionsDir: stores,
+        windowMs: settings.windowMinutes * 60_000,
+        ...(args.currentSession?.file ? { currentSessionFile: args.currentSession.file } : {}),
+        ...(args.currentSession?.id ? { currentSessionId: args.currentSession.id } : {}),
+      });
+      if (!Array.isArray(sessions) || !sessions.length) return undefined;
+      const now = Date.now();
+      return { count: sessions.length, warning: formatConcurrentWarning(sessions, now), activity: concurrentActivityOf(sessions, now) };
+    } catch {
+      return undefined;
+    }
   }
 
   get taskActive(): boolean { return this.active?.kind === "task"; }
@@ -150,6 +214,8 @@ export class OrcheController {
       projectTrusted: args.projectTrusted,
       session: { model: sessionModel, thinking: args.thinking },
     });
+    // Once, at the start: other pi sessions on this repository make ambiguous changes ambiguous, not violations.
+    const concurrent = await this.detectConcurrent(args, config.concurrentSessions, signal);
     const createRuntime = async () => {
       const runtime = await this.modelRuntime();
       signal.throwIfAborted();
@@ -164,7 +230,8 @@ export class OrcheController {
     let activity: string | undefined;
     let activityActor: string | undefined;
     const lastActivity = new Map<string, { timestamp: number; tool?: string }>();
-    const progressLines = () => [...milestones, ...(activity ? [activity] : [])];
+    // The warning stays first while milestones scroll; activity (the status line) stays last.
+    const progressLines = () => [...(concurrent ? [concurrent.warning] : []), ...milestones, ...(activity ? [activity] : [])];
     const totals = { requests: 0, inputTokens: 0, outputTokens: 0, advisorRequests: 0 };
     const models: Record<string, Record<string, number>> = {};
     const contextWindows: Record<string, OrcheRunDetails["contextWindows"][string]> = {};
@@ -205,15 +272,22 @@ export class OrcheController {
       }
       args.onProgress?.(progressLines());
     };
-    const report = await (this.options.run ?? runOrchestrated)({
-      problem: args.context?.trim() ? `${args.request}\n\n## Context from the requesting session\n${args.context.trim()}` : args.request,
-      cwd: args.cwd,
-      // Keep explicit config caps on routes; the run resolver merges API overrides before derivation.
-      routes: config.routes,
-      createRuntime,
-      signal,
-      sink,
-    });
+    if (concurrent) args.onProgress?.(progressLines());
+    let report: RunReport;
+    try {
+      report = await (this.options.run ?? runOrchestrated)({
+        problem: args.context?.trim() ? `${args.request}\n\n## Context from the requesting session\n${args.context.trim()}` : args.request,
+        cwd: args.cwd,
+        // Keep explicit config caps on routes; the run resolver merges API overrides before derivation.
+        routes: config.routes,
+        createRuntime,
+        signal,
+        sink,
+        ...(concurrent ? { concurrentActivity: concurrent.activity } : {}),
+      });
+    } catch (error) {
+      throw concurrent ? withConcurrentWarning(error, concurrent.warning) : error;
+    }
     // An uncooperative provider startup may still mutate its runtime after return. Do not reuse it.
     if (report.cleanup?.pending.some(item => item === "providers" || item === "execution/SDK creation")) this.runtime = undefined;
     const text = report.status === "done" ? report.answer : report.summary;
@@ -222,6 +296,7 @@ export class OrcheController {
       text,
       source: config.source,
       cancelledByUser: false,
+      ...(concurrent ? { concurrentWarning: concurrent.warning } : {}),
       details: {
         status: report.status,
         taskClass: report.taskClass,
@@ -237,6 +312,7 @@ export class OrcheController {
         ...(report.timeouts ? { timeouts: report.timeouts } : {}),
         ...(report.cancellation ? { cancellation: report.cancellation } : {}),
         ...(report.cleanup ? { cleanup: report.cleanup } : {}),
+        ...(concurrent ? { concurrentSessions: concurrent.activity } : {}),
       },
     };
   }
@@ -272,5 +348,7 @@ export function formatOutcome(outcome: OrcheOutcome): string {
     const tool = worker.lastToolName ? `, last tool ${worker.lastToolName}${worker.lastToolAt !== undefined ? ` ${Math.max(0, Math.round((diagnostic.timestamp - worker.lastToolAt) / 1000))}s ago` : ""}` : "";
     return `${worker.id} ${worker.kind} (${worker.requestCount ?? 0} requests${tool})`;
   }).join(", ") || "none"}`;
-  return `${head}\n\n${outcome.text}${preserved}${cancellation}${workspace}${cleanup}`;
+  // Other pi sessions seen at the start come first, for finished, failed and cancelled runs alike.
+  const concurrent = outcome.concurrentWarning ? `${outcome.concurrentWarning}\n\n` : "";
+  return `${concurrent}${head}\n\n${outcome.text}${preserved}${cancellation}${workspace}${cleanup}`;
 }

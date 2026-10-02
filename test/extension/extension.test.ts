@@ -5,6 +5,10 @@ import { WORKER_TOOL_NAMES } from "../../src/tools/index.js";
 import { ORCHE_USAGE, parseOrcheCommand, RESULT_MESSAGE_TYPE } from "../../src/extension/index.js";
 import { answerScript, createHarness, decision, tool, type Harness } from "./harness.js";
 import { deferred, fauxRuntime } from "../helpers/faux.js";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import type { ConcurrentSession, ConcurrentSessionsResult, DetectConcurrentSessionsOptions } from "../../src/extension/concurrent-sessions.js";
+import { runOrchestrated, type RunOptions } from "../../src/orchestration/coordinator.js";
 
 const open: Harness[] = [];
 afterEach(async () => {
@@ -260,6 +264,108 @@ describe("pi-orche as a Pi extension (real AgentSession, faux providers)", () =>
     expect(text).toContain("Result from failed run (may be incomplete)");
     expect(text).toContain("PRESERVED_ANALYSIS: greeting.txt says hello world.");
   });
+
+  describe("concurrent pi sessions", () => {
+    const sibling = (cwd: string): ConcurrentSession => ({ id: "sibling", cwd, file: "/sessions/sibling.jsonl", lastWriteMs: Date.now() - 30_000 });
+    const stub = (sessions: ConcurrentSession[]) => vi.fn(async (_options: DetectConcurrentSessionsOptions): Promise<ConcurrentSessionsResult> => ({ sessions }));
+    const WARNING = /⚠ 1 other pi session active in this repository \(cwd \/work\/repo, last write (29|30|31)s ago\); their changes are classified as external where possible/;
+    /** The run options the extension handed to the orchestrator. */
+    const recordingRun = () => {
+      const seen: RunOptions[] = [];
+      return { seen, run: (options: RunOptions) => { seen.push(options); return runOrchestrated(options); } };
+    };
+    const toolText = (message: unknown) => (message as { content: { text: string }[] }).content.map(part => part.text).join("\n");
+
+    it("orche_run flags the run and returns the warning first in the tool result and in the progress updates", async () => {
+      const detect = stub([sibling("/work/repo")]);
+      const recorder = recordingRun();
+      let toolResult: unknown;
+      const updates: string[] = [];
+      const h = await harness({
+        mainSteps: [tool("orche_run", { request: "explain greeting.txt" }), context => { toolResult = context.messages.findLast(message => message.role === "toolResult"); return reply("relayed"); }],
+        orcheSteps: answerScript("TOOL_RESULT_ANSWER"),
+        extension: { detectConcurrentSessions: detect, run: recorder.run },
+      });
+      h.session.subscribe(event => {
+        if (event.type === "tool_execution_update" && event.toolName === "orche_run") updates.push(JSON.stringify(event.partialResult));
+      });
+      await h.session.prompt("please delegate");
+
+      expect(toolResult).not.toMatchObject({ isError: true });
+      const text = toolText(toolResult);
+      expect(text).toMatch(WARNING);
+      expect(text.indexOf("⚠")).toBe(0);
+      expect(text).toContain("TOOL_RESULT_ANSWER");
+      // Detection happened once, for this cwd, identifying this very session.
+      expect(detect).toHaveBeenCalledTimes(1);
+      expect(detect.mock.calls[0]![0]).toMatchObject({ cwd: h.cwd, currentSessionId: h.session.sessionManager.getSessionId(), windowMs: 600_000 });
+      // ... and the run received the flag (RunOptions.concurrentActivity).
+      expect(recorder.seen).toHaveLength(1);
+      expect(recorder.seen[0]!.concurrentActivity).toEqual({ count: 1, detail: expect.stringContaining("/work/repo (last write 30s ago)") });
+      // The warning is the first progress line from the start.
+      expect(updates.length).toBeGreaterThan(1);
+      for (const update of updates) expect(update).toMatch(/^\{"content":\[\{"type":"text","text":"⚠ 1 other pi session/);
+      expect(updates.join("\n")).toContain("classified as answer");
+    });
+
+    it("a failed orche_run error carries the warning first", async () => {
+      let toolResult: unknown;
+      const h = await harness({
+        mainSteps: [tool("orche_run", { request: "do the impossible" }), context => { toolResult = context.messages.findLast(message => message.role === "toolResult"); return reply("noted"); }],
+        orcheSteps: [decision({ type: "fail", reason: "cannot be done" })],
+        extension: { detectConcurrentSessions: stub([sibling("/work/repo")]) },
+      });
+      await h.session.prompt("go");
+      expect(toolResult).toMatchObject({ isError: true });
+      const text = toolText(toolResult);
+      expect(text).toMatch(WARNING);
+      expect(text.indexOf("⚠")).toBe(0);
+      expect(text).toMatch(/\n\norche FAILED \(/);
+      expect(text).toContain("cannot be done");
+    });
+
+    it("/orche multi posts the warning with its result and shows it in the widget", async () => {
+      const h = await harness({
+        mainSteps: [reply("acknowledged")],
+        orcheSteps: answerScript("ORCHE_FINAL_ANSWER"),
+        extension: { detectConcurrentSessions: stub([sibling("/work/repo")]) },
+      });
+      await h.session.prompt("/orche multi explain greeting.txt");
+      const posted = resultMessages(h);
+      expect(posted).toHaveLength(1);
+      expect(String(posted[0]!.content)).toMatch(WARNING);
+      expect(String(posted[0]!.content).startsWith("⚠ 1 other pi session")).toBe(true);
+      expect(String(posted[0]!.content)).toContain("ORCHE_FINAL_ANSWER");
+      expect(posted[0]!.details).toMatchObject({ status: "done", concurrentSessions: { count: 1 } });
+      const shown = h.widgets.filter(widget => widget.key === "orche" && widget.lines?.length);
+      expect(shown.length).toBeGreaterThan(0);
+      for (const widget of shown) expect(widget.lines![0]).toMatch(/^orche · ⚠ 1 other pi session/);
+    });
+
+    it.each([
+      ["nothing is detected", undefined],
+      ["detection is disabled in the config", { enabled: false }],
+    ])("adds no warning and no flag when %s", async (_name, settings) => {
+      const detect = stub(settings ? [sibling("/work/repo")] : []);
+      const recorder = recordingRun();
+      let toolResult: unknown;
+      const h = await harness({
+        mainSteps: [tool("orche_run", { request: "explain greeting.txt" }), context => { toolResult = context.messages.findLast(message => message.role === "toolResult"); return reply("relayed"); }],
+        orcheSteps: answerScript("TOOL_RESULT_ANSWER"),
+        extension: { detectConcurrentSessions: detect, run: recorder.run },
+      });
+      if (settings) await writeFile(join(h.agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: h.orche.route.model }, mainMode: "auto", concurrentSessions: settings }));
+      await h.session.prompt("please delegate");
+      const text = toolText(toolResult);
+      expect(text).toContain("TOOL_RESULT_ANSWER");
+      expect(text).not.toContain("other pi session");
+      expect(text.startsWith("orche finished (")).toBe(true);
+      expect(recorder.seen).toHaveLength(1);
+      expect("concurrentActivity" in recorder.seen[0]!).toBe(false);
+      expect(detect).toHaveBeenCalledTimes(settings ? 0 : 1);
+    });
+  });
+
 
   it("aborting the main turn cancels a running orche_run and disposes the orchestration sessions", async () => {
     const entered = deferred();

@@ -27,6 +27,9 @@ export interface Harness {
   orche: Awaited<ReturnType<typeof fauxRuntime>>;
   /** `ctx.ui.notify` calls made by the extension. */
   notifications: { message: string; type?: string }[];
+  /** `ctx.ui.setStatus` / `ctx.ui.setWidget` calls made by the extension (newest last; `undefined` clears). */
+  statuses: { key: string; text?: string }[];
+  widgets: { key: string; lines?: readonly string[] }[];
   dispose(): Promise<void>;
 }
 /**
@@ -68,15 +71,17 @@ export async function createHarness(options: {
     resourceLoader, settingsManager, sessionManager: SessionManager.inMemory(cwd),
   });
   const notifications: Harness["notifications"] = [];
-  // Only the UI methods the extension uses; notify is recorded.
+  const statuses: Harness["statuses"] = [];
+  const widgets: Harness["widgets"] = [];
+  // Only the UI methods the extension uses; notify, setStatus and setWidget are recorded.
   const uiContext = {
     notify: (message: string, type?: string) => { notifications.push({ message, type }); },
-    setStatus: () => undefined,
-    setWidget: () => undefined,
+    setStatus: (key: string, text?: string) => { statuses.push({ key, ...(text === undefined ? {} : { text }) }); },
+    setWidget: (key: string, lines?: readonly string[]) => { widgets.push({ key, ...(lines === undefined ? {} : { lines }) }); },
   } as unknown as ExtensionUIContext;
   await session.bindExtensions({ uiContext, ...(options.mode ? { mode: options.mode } : {}) });
   return {
-    session, runtime: main.runtime, cwd, agentDir, main, orche, notifications,
+    session, runtime: main.runtime, cwd, agentDir, main, orche, notifications, statuses, widgets,
     async dispose() {
       session.dispose();
       await rm(root, { recursive: true, force: true });

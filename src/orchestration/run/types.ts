@@ -36,7 +36,19 @@ export interface RunOptions {
    * reported as violations, and the report lists every changed file. No effect outside git.
    */
   workspaceAudit?: boolean;
+  /**
+   * Other pi sessions were found active on this repository (or its super/sub repository) when the
+   * run started. Detection happens once, in the caller (the extension); it is never repeated. When
+   * `count > 0` the run is flagged: in change/diagnose_fix runs a file that changed while a worker
+   * bash call (or another non-edit/write tool) was in flight, is outside the worker's ownership and
+   * was not written by an edit/write tool is classified as external ("concurrent session active;
+   * ambiguous"), not as an ownership violation. Without the flag, or with `count` 0, such a file stays
+   * a violation. Writes by edit/write tools outside ownership are violations either way.
+   */
+  concurrentActivity?: ConcurrentActivity;
 }
+/** Result of concurrent-session detection: `detail` is the human-readable description of the sessions. */
+export interface ConcurrentActivity { count: number; detail: string }
 export interface RunReport {
   status: "done" | "failed";
   summary: string;

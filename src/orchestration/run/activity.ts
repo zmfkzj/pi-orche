@@ -17,7 +17,11 @@ import type { WorkspaceChange } from "../workspace.js";
  * snapshots are recorded as `quietTouched` or `activeTouched`:
  *  - changed only in quiet windows: no tool of this run can have written them → external;
  *  - changed in an active window: possibly ours, possibly not → ambiguous, treated as the run's;
- *  - written by a successful edit/write call: always the run's (`isWritten`).
+ *  - written by a successful edit/write call: always the run's (`isWritten`);
+ *  - changed in an active window in which a non-edit/write tool (bash, ast_rewrite, generate_image, …)
+ *    was in flight: such a tool can write any file, so the writer of a file outside the worker's
+ *    ownership is unknowable when another process may also write (`touchedDuringShell`). The audit
+ *    decides what to do with it (see auditWorkspace: external when concurrent sessions were detected).
  *
  * Cost and correctness trade-off.
  *  - quiet→active: the snapshot must complete BEFORE the tool runs, otherwise the tool's own output
@@ -79,9 +83,12 @@ export class WorkspaceActivity {
   private readonly writtenPaths = sets();
   private readonly quietTouched = sets();
   private readonly activeTouched = sets();
+  private readonly shellTouched = sets();
   private tree: string;
   /** The open window (since `tree`) saw a write-capable tool execute. */
   private windowActive = false;
+  /** The open active window saw a non-edit/write write-capable tool (bash, …) execute. */
+  private windowShell = false;
   private chain: Promise<unknown> = Promise.resolve();
   private spentMs = 0;
   private broken = false;
@@ -139,12 +146,14 @@ export class WorkspaceActivity {
       for (const execution of this.executions.values()) {
         if (!execution.gated && execution.agentId === agentId && execution.toolName === toolName) { execution.gated = true; break; }
       }
-      if (this.windowActive) return; // joins the running burst: no snapshot
+      const shell = !PATH_WRITERS.has(toolName);
+      if (this.windowActive) { if (shell) this.windowShell = true; return; } // joins the running burst: no snapshot
       if (this.canSnapshot()) {
         try { await this.close(true); } catch { this.broken = true; }
       }
       // Without a boundary the preceding quiet period merges into this active window.
       this.windowActive = true;
+      if (shell) this.windowShell = true;
     });
   }
 
@@ -158,7 +167,7 @@ export class WorkspaceActivity {
 
   /** Start a new audit phase: phase-scoped sets are cleared, run-scoped ones are kept. */
   startPhase(): void {
-    for (const group of [this.writtenPaths, this.quietTouched, this.activeTouched]) group.phase.clear();
+    for (const group of [this.writtenPaths, this.quietTouched, this.activeTouched, this.shellTouched]) group.phase.clear();
   }
 
   /** Wait for all queued snapshot work (including jobs queued meanwhile). */
@@ -171,6 +180,12 @@ export class WorkspaceActivity {
   isWritten(path: string, scope: ActivityScope = "run"): boolean { return this.writtenPaths[scope].has(path); }
   /** Changed in at least one active window (a write-capable tool was executing). */
   touchedActive(path: string, scope: ActivityScope = "run"): boolean { return this.activeTouched[scope].has(path); }
+  /**
+   * Changed in an active window in which a non-edit/write tool (bash, ast_rewrite, …) was in flight:
+   * that tool may have written the file, but so may anyone else. Edit/write calls only ever write
+   * their own `path`, so a window holding nothing but those never counts.
+   */
+  touchedDuringShell(path: string, scope: ActivityScope = "run"): boolean { return this.shellTouched[scope].has(path); }
   /** Changed in quiet windows only: no tool of this run can have written it. */
   touchedOnlyQuiet(path: string, scope: ActivityScope = "run"): boolean {
     return this.quietTouched[scope].has(path) && !this.activeTouched[scope].has(path) && !this.writtenPaths[scope].has(path);
@@ -182,8 +197,9 @@ export class WorkspaceActivity {
     return result;
   }
 
-  private hasGated(): boolean {
-    for (const execution of this.executions.values()) if (execution.gated) return true;
+  /** A gated execution exists; with `shellOnly`, one of a tool other than edit/write. */
+  private hasGated(shellOnly = false): boolean {
+    for (const execution of this.executions.values()) if (execution.gated && (!shellOnly || !PATH_WRITERS.has(execution.toolName))) return true;
     return false;
   }
 
@@ -216,9 +232,14 @@ export class WorkspaceActivity {
       if (boundary) { this.spentMs += this.now() - started; this.boundaries++; }
     }
     if (boundary && this.options.cancelled?.()) return undefined;
-    for (const change of changes) { kind.run.add(change.path); kind.phase.add(change.path); }
+    const shell = this.windowActive && this.windowShell;
+    for (const change of changes) {
+      kind.run.add(change.path); kind.phase.add(change.path);
+      if (shell) { this.shellTouched.run.add(change.path); this.shellTouched.phase.add(change.path); }
+    }
     this.tree = tree;
     this.windowActive = this.hasGated();
+    this.windowShell = this.hasGated(true);
     return tree;
   }
 

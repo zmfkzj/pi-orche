@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { discoverOrcheConfig, NoRouteError } from "../../src/extension/config.js";
+import { DEFAULT_CONCURRENT_SESSIONS, discoverOrcheConfig, loadOrcheConfigFile, NoRouteError, parseConcurrentSessionsConfig, resolveConcurrentSessions } from "../../src/extension/config.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -73,5 +73,63 @@ describe("orche config discovery", () => {
     const withAdvisors = await layout({ user: { ...cfg("u/user"), advisors: [{ preset: "plan-review", enabled: true }] } });
     const result = await discoverOrcheConfig({ ...withAdvisors, projectTrusted: true, session });
     expect(result.routes.advisors?.map(advisor => advisor.name)).toEqual(["plan-review"]);
+  });
+
+  it("defaults concurrentSessions to enabled with a 10 minute window, from every config source", async () => {
+    expect(DEFAULT_CONCURRENT_SESSIONS).toEqual({ enabled: true, windowMinutes: 10 });
+    expect(resolveConcurrentSessions()).toEqual({ enabled: true, windowMinutes: 10 });
+    const noSetting = await layout({ user: cfg("u/user") });
+    expect((await discoverOrcheConfig({ ...noSetting, projectTrusted: true, session })).concurrentSessions).toEqual({ enabled: true, windowMinutes: 10 });
+    const none = await layout({});
+    expect((await discoverOrcheConfig({ ...none, projectTrusted: true, session })).concurrentSessions).toEqual({ enabled: true, windowMinutes: 10 });
+  });
+
+  it("reads concurrentSessions from the selected file and keeps it out of the route config", async () => {
+    const files = await layout({
+      project: { ...cfg("p/project"), concurrentSessions: { windowMinutes: 3 } },
+      user: { ...cfg("u/user"), concurrentSessions: { enabled: false } },
+    });
+    const project = await discoverOrcheConfig({ ...files, projectTrusted: true, session });
+    expect(project.concurrentSessions).toEqual({ enabled: true, windowMinutes: 3 });
+    expect(project.routes).toEqual(cfg("p/project"));
+    // An untrusted project file is ignored entirely, including its concurrentSessions.
+    const user = await discoverOrcheConfig({ ...files, projectTrusted: false, session });
+    expect(user.concurrentSessions).toEqual({ enabled: false, windowMinutes: 10 });
+    const both = await layout({ user: { ...cfg("u/user"), concurrentSessions: { enabled: true, windowMinutes: 0.5 } } });
+    expect((await discoverOrcheConfig({ ...both, projectTrusted: true, session })).concurrentSessions).toEqual({ enabled: true, windowMinutes: 0.5 });
+    const empty = await layout({ user: { ...cfg("u/user"), concurrentSessions: {} } });
+    expect((await discoverOrcheConfig({ ...empty, projectTrusted: true, session })).concurrentSessions).toEqual({ enabled: true, windowMinutes: 10 });
+  });
+
+  it("validates concurrentSessions like the other settings", async () => {
+    expect(parseConcurrentSessionsConfig({ enabled: false, windowMinutes: 30 })).toEqual({ enabled: false, windowMinutes: 30 });
+    expect(parseConcurrentSessionsConfig({})).toEqual({});
+    const invalid: [unknown, string][] = [
+      [null, "config.concurrentSessions: expected object"],
+      [[], "config.concurrentSessions: expected object"],
+      [true, "config.concurrentSessions: expected object"],
+      [{ enable: false }, "config.concurrentSessions: unknown field"],
+      [{ enabled: "no" }, "config.concurrentSessions.enabled"],
+      [{ enabled: 0 }, "config.concurrentSessions.enabled"],
+      [{ windowMinutes: 0 }, "config.concurrentSessions.windowMinutes"],
+      [{ windowMinutes: -5 }, "config.concurrentSessions.windowMinutes"],
+      [{ windowMinutes: "10" }, "config.concurrentSessions.windowMinutes"],
+      [{ windowMinutes: Number.NaN }, "config.concurrentSessions.windowMinutes"],
+      [{ windowMinutes: Number.POSITIVE_INFINITY }, "config.concurrentSessions.windowMinutes"],
+      [{ windowMinutes: 24 * 60 + 1 }, "config.concurrentSessions.windowMinutes"],
+    ];
+    for (const [value, message] of invalid) expect(() => parseConcurrentSessionsConfig(value), JSON.stringify(value)).toThrow(message);
+    for (const [value, message] of [[{ windowMinutes: 0 }, "windowMinutes"], [{ bogus: 1 }, "unknown field"], ["x", "expected object"]] as const) {
+      const files = await layout({ user: { ...cfg("u/user"), concurrentSessions: value } });
+      await expect(discoverOrcheConfig({ ...files, projectTrusted: true, session }), JSON.stringify(value)).rejects.toThrow(message);
+    }
+  });
+
+  it("still rejects unknown top-level fields and unreadable files when loading a config file", async () => {
+    const typo = await layout({ user: { ...cfg("u/user"), concurrentSession: { enabled: false } } });
+    await expect(loadOrcheConfigFile(join(typo.agentDir, "orche.config.json"))).rejects.toThrow("config: unknown field");
+    await expect(loadOrcheConfigFile(join(typo.agentDir, "missing.json"))).rejects.toThrow("Cannot load route config");
+    const array = await layout({ user: [] });
+    await expect(loadOrcheConfigFile(join(array.agentDir, "orche.config.json"))).rejects.toThrow("config: expected object");
   });
 });

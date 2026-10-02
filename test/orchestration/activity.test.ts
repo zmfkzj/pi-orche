@@ -181,6 +181,49 @@ describe("workspace activity windows", () => {
     expect(w.activity.isWritten("a.ts")).toBe(true);
   });
 
+  it("marks changes of windows with a bash (non-edit/write) call in flight, never those of edit/write-only windows", async () => {
+    const w = fakeWorkspace();
+    w.files.set("quiet.txt", "x");
+    await w.call("A1", "c1", "edit", () => { w.files.set("a.ts", "1"); w.files.set("edit-window-other.txt", "1"); }, { path: "a.ts" });
+    await w.activity.drain();
+    await w.call("A1", "c2", "bash", () => w.files.set("by-bash.txt", "1"));
+    await w.activity.drain();
+    w.files.set("quiet-after.txt", "x");
+    await w.activity.checkpoint();
+    expect(w.activity.touchedDuringShell("by-bash.txt")).toBe(true);
+    expect(w.activity.touchedDuringShell("a.ts")).toBe(false);
+    expect(w.activity.touchedDuringShell("edit-window-other.txt")).toBe(false);
+    expect(w.activity.touchedActive("edit-window-other.txt")).toBe(true);
+    expect(w.activity.touchedDuringShell("quiet.txt")).toBe(false);
+    expect(w.activity.touchedDuringShell("quiet-after.txt")).toBe(false);
+  });
+
+  it("counts every non-edit/write write-capable tool as shell, and a bash joining an edit burst marks the whole burst", async () => {
+    const w = fakeWorkspace();
+    await w.call("A1", "c1", "ast_rewrite", () => w.files.set("rewritten.ts", "1"), { path: "src/" });
+    await w.activity.drain();
+    w.start("A1", "c2", "write", { path: "w.ts" });
+    w.start("A2", "c3", "bash");
+    await Promise.all([w.activity.enter("A1", "write"), w.activity.enter("A2", "bash")]);
+    w.files.set("burst.txt", "1");
+    w.end("A1", "c2", "write");
+    w.end("A2", "c3", "bash");
+    await w.activity.drain();
+    await w.activity.checkpoint();
+    expect(w.activity.touchedDuringShell("rewritten.ts")).toBe(true);
+    expect(w.activity.touchedDuringShell("burst.txt")).toBe(true);
+  });
+
+  it("scopes the shell marks to the run or to the current phase", async () => {
+    const w = fakeWorkspace();
+    await w.call("A1", "c1", "bash", () => w.files.set("phase1.txt", "1"));
+    await w.activity.drain();
+    await w.activity.checkpoint();
+    w.activity.startPhase();
+    expect(w.activity.touchedDuringShell("phase1.txt", "phase")).toBe(false);
+    expect(w.activity.touchedDuringShell("phase1.txt")).toBe(true);
+  });
+
   it("merges windows as active once blocking snapshot time exceeds the cap", async () => {
     const w = fakeWorkspace();
     w.state.snapshotCost = 6000; // one boundary spends more than max(5s, 10% of the run)

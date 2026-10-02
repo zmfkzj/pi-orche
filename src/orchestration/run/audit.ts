@@ -11,8 +11,27 @@ import type { RunContext, RunReport } from "./types.js";
 export const COMMITTED_ELSEWHERE = "committed outside this run";
 export const CHANGED_WHILE_QUIET = "changed while no worker tool was running";
 export const NOT_TRACEABLE = "not traceable to a worker tool call";
+/**
+ * A worker bash call (or another non-edit/write tool) was running, the file is outside the worker's
+ * ownership, no edit/write call wrote it, and other pi sessions are active on the repository: the
+ * writer cannot be told apart. Reported as external instead of an ownership violation.
+ */
+export const CONCURRENT_SESSION_AMBIGUOUS = "concurrent session active; ambiguous";
 
-interface Attribution { run: WorkspaceChange[]; external: ExternalWorkspaceChange[] }
+interface Attribution {
+  run: WorkspaceChange[];
+  external: ExternalWorkspaceChange[];
+  /**
+   * Paths of `run` changed while a non-edit/write tool was in flight and not written by an edit/write
+   * call: still the run's (conservative), but their writer is unknowable. See {@link auditWorkspace}.
+   */
+  shellAmbiguous: Set<string>;
+}
+
+/** Concurrent pi sessions were detected when the run started (once; never re-detected). */
+export function concurrentSessionsFlagged(ctx: RunContext): boolean {
+  return (ctx.options.concurrentActivity?.count ?? 0) > 0;
+}
 
 /**
  * Files in `changes` that someone else committed during the run: HEAD moved since the baseline,
@@ -45,7 +64,7 @@ async function committedElsewhere(ctx: RunContext, tree: string, changes: readon
 async function attribute(ctx: RunContext, tree: string, changes: readonly WorkspaceChange[], scope: ActivityScope, readOnly: boolean): Promise<Attribution> {
   const activity = ctx.activity;
   const committed = await committedElsewhere(ctx, tree, changes);
-  const result: Attribution = { run: [], external: [] };
+  const result: Attribution = { run: [], external: [], shellAmbiguous: new Set() };
   for (const change of changes) {
     const path = change.path;
     const reason = activity?.isWritten(path, scope) ? undefined
@@ -53,7 +72,9 @@ async function attribute(ctx: RunContext, tree: string, changes: readonly Worksp
       : activity?.touchedOnlyQuiet(path, scope) ? CHANGED_WHILE_QUIET
       : readOnly && activity && !activity.touchedActive(path, scope) ? NOT_TRACEABLE
       : undefined;
-    if (reason) result.external.push({ ...change, reason }); else result.run.push(change);
+    if (reason) { result.external.push({ ...change, reason }); continue; }
+    result.run.push(change);
+    if (activity && !activity.isWritten(path, scope) && activity.touchedDuringShell(path, scope)) result.shellAmbiguous.add(path);
   }
   return result;
 }
@@ -77,6 +98,12 @@ function reportExternal(ctx: RunContext, external: readonly ExternalWorkspaceCha
  * user, a commit elsewhere) are never violations: they are reported through
  * `workspace_external_change`; `agentId` on that event lists the audited workers, who are NOT blamed.
  * `readOnly` marks phases whose workers cannot write at all (answer analysts).
+ *
+ * Concurrent sessions. A file the run's bash (or another non-edit/write tool) may have written, that
+ * `allowed` rejects and no edit/write call wrote, is normally a violation. When the run is flagged
+ * ({@link concurrentSessionsFlagged}: other pi sessions were detected active at start) its writer is
+ * unknowable, so it is external with {@link CONCURRENT_SESSION_AMBIGUOUS}, never a violation. Edit/write
+ * calls outside ownership remain violations, flagged or not.
  */
 export async function auditWorkspace(ctx: RunContext, actors: readonly string[], allowed: (file: string) => boolean, options: { readOnly?: boolean } = {}): Promise<void> {
   if (!ctx.audit || !ctx.auditTree) return;
@@ -89,14 +116,21 @@ export async function auditWorkspace(ctx: RunContext, actors: readonly string[],
     if (ctx.cancelled) return;
     ctx.auditTree = tree;
     const agentId = actors.join(",");
-    const { run, external } = await attribute(ctx, tree, changes, "phase", options.readOnly ?? false);
+    const { run, external, shellAmbiguous } = await attribute(ctx, tree, changes, "phase", options.readOnly ?? false);
+    // The phase facts live in the tracker: they were read above, before the new phase clears them.
     ctx.activity?.startPhase();
     reportExternal(ctx, external, agentId);
+    const flagged = !options.readOnly && concurrentSessionsFlagged(ctx);
+    const concurrent: ExternalWorkspaceChange[] = [];
     for (const change of run) {
       if (allowed(change.path)) continue;
       // Only new generated output is exempt; existing artifacts retain normal write semantics.
       if (change.status === "added" && classifyNewFile(change.path, ctx.auditSettings?.artifacts) === "artifact") {
         emit(ctx, { type: "workspace_unowned_file", timestamp: Date.now(), agentId, file: change.path });
+        continue;
+      }
+      if (flagged && shellAmbiguous.has(change.path)) {
+        concurrent.push({ ...change, reason: CONCURRENT_SESSION_AMBIGUOUS });
         continue;
       }
       const created = change.status === "added" ? { created: true as const } : {};
@@ -107,6 +141,8 @@ export async function auditWorkspace(ctx: RunContext, actors: readonly string[],
         ownerTaskIds: coveringTasks(ctx.state.tasks, change.path).map(task => task.id),
       });
     }
+    // After the loop: a file reported here is announced once, even if a later phase meets it again.
+    reportExternal(ctx, concurrent, agentId);
   } catch (error) {
     disableAudit(ctx, error);
   }
@@ -151,7 +187,9 @@ export async function openWorkspaceAudit(ctx: RunContext): Promise<void> {
  * Final change list: `changes` are the run-attributed ones only; `external` (omitted when empty)
  * lists what was changed outside the run, with the reason. A file the run changed after an
  * earlier external change appears in both lists: it is the run's change, but it also carries
- * somebody else's work, so it must not be restored automatically.
+ * somebody else's work, so it must not be restored automatically. The exception is a file the audit
+ * could not attribute (concurrent session active; ambiguous): unless an edit/write call of the run
+ * wrote it, it is listed as external only, like the other changes made outside the run.
  */
 export async function finalWorkspace(ctx: RunContext): Promise<RunReport["workspace"]> {
   if (!ctx.audit) return undefined;
@@ -164,7 +202,10 @@ export async function finalWorkspace(ctx: RunContext): Promise<RunReport["worksp
     await ctx.activity?.drain();
     const tree = ctx.activity ? await ctx.activity.checkpoint() : await ctx.audit.snapshot();
     const changes = await ctx.audit.diff(ctx.baseline.tree, tree);
-    const { run, external } = await attribute(ctx, tree, changes, "run", ctx.state.taskClass === "answer");
+    const attributed = await attribute(ctx, tree, changes, "run", ctx.state.taskClass === "answer");
+    const { external } = attributed;
+    const run = attributed.run.filter(change =>
+      ctx.externalChanges?.get(change.path)?.reason !== CONCURRENT_SESSION_AMBIGUOUS || ctx.activity?.isWritten(change.path, "run"));
     const listed = new Set(external.map(change => change.path));
     for (const change of changes) {
       const earlier = ctx.externalChanges?.get(change.path);

@@ -55,6 +55,12 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     const controller = new OrcheController(options);
     let workers: WorkerPool | undefined;
     const pool = () => workers ??= new WorkerPool({ controller, ...(options.agentDir ? { agentDir: options.agentDir } : {}), ...(options.workerIdleTtlMs !== undefined ? { idleTtlMs: options.workerIdleTtlMs } : {}) });
+    /** The calling session's own file/id/directory: never reported as another session, and where the session store is. */
+    const currentSession = (ctx: Pick<ExtensionContext, "sessionManager">) => ({
+      file: ctx.sessionManager.getSessionFile() || undefined,
+      id: ctx.sessionManager.getSessionId() || undefined,
+      dir: ctx.sessionManager.getSessionDir() || undefined,
+    });
     const state = new MainModeState(pi);
     const showMode = (ctx: Pick<ExtensionContext, "ui">) =>
       ctx.ui.setStatus("orche-mode", `orche: ${state.session}${state.overriding ? ` (one-turn ${state.effective})` : ""}`);
@@ -201,6 +207,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
               thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(),
               projectTrusted: ctx.isProjectTrusted(),
               signal: ctx.signal,
+              currentSession: currentSession(ctx),
               onProgress: show,
             });
             pi.sendMessage(
@@ -244,6 +251,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(),
           projectTrusted: ctx.isProjectTrusted(),
           signal,
+          currentSession: currentSession(ctx),
           onProgress: lines => onUpdate?.({ content: [{ type: "text", text: lines.join("\n") }], details: { progress: lines } }),
         });
         if (outcome.cancelledByUser) throw new Error(`cancelled by user\n\n${formatOutcome(outcome)}`);
@@ -266,6 +274,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(),
           projectTrusted: ctx.isProjectTrusted(),
           signal,
+          currentSession: currentSession(ctx),
           onProgress: lines => {
             ctx.ui.setStatus("orche", lines.at(-1));
             onUpdate?.({ content: [{ type: "text", text: lines.join("\n") }], details: { progress: lines } });

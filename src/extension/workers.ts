@@ -19,7 +19,8 @@ import { createGenerateImageTool } from "../tools/generate-image.js";
 import { loadProviderExtensions, type ProviderExtensionHost } from "../pi/provider-extensions.js";
 import { ensureBundledImageProvider } from "../pi/register-bundled-image-provider.js";
 import { describeSource, discoverOrcheConfig, NoRouteError } from "./config.js";
-import { OrcheController, type OrcheRunArgs } from "./controller.js";
+import { OrcheController, withConcurrentWarning, type OrcheRunArgs } from "./controller.js";
+import type { ConcurrentActivitySummary } from "./concurrent-sessions.js";
 
 export const orcheTaskParameters = Type.Object({
   role: Type.Union([Type.Literal("explore"), Type.Literal("answer"), Type.Literal("implement"), Type.Literal("verify"), Type.Literal("game-asset"), Type.Literal("video")]),
@@ -39,6 +40,8 @@ export interface TaskDetails {
   changes: WorkspaceChange[];
   roster: string;
   retired?: string[];
+  /** Other pi sessions that were active on the repository when the task started. */
+  concurrentSessions?: ConcurrentActivitySummary;
 }
 interface Worker {
   id: string;
@@ -177,6 +180,10 @@ export class WorkerPool {
     const sessionModel = args.model ? `${args.model.provider}/${args.model.id}` : undefined;
     const config = await discoverOrcheConfig({ cwd: args.cwd, agentDir: this.options.agentDir ?? getAgentDir(), projectTrusted: args.projectTrusted, session: { model: sessionModel, thinking: args.thinking } });
     signal.throwIfAborted();
+    // Once, at the start. A task has no ownership audit that could classify the other session's writes, so the warning is
+    // all it can do: it goes first in the result, in the progress lines and in a note beside the changed files.
+    const concurrent = await this.options.controller.detectConcurrent(args, config.concurrentSessions, signal);
+    const warning = concurrent?.warning;
     const limits = resolveRunLimits(config.routes.limits);
     const runtime = await this.options.controller.modelRuntime();
     if (this.disposed) throw new Error("Worker pool is disposed");
@@ -245,7 +252,7 @@ export class WorkerPool {
     const abort = () => { if (assigned) stopPromise ??= this.manager!.stop(meta.id); };
     const progress = () => {
       const snapshot = this.manager!.get(meta.id);
-      args.onProgress?.([`${meta.id} ${args.role} · ${requests} requests${snapshot.lastToolName ? ` · last tool: ${snapshot.lastToolName}` : ""}`]);
+      args.onProgress?.([...(warning ? [warning] : []), `${meta.id} ${args.role} · ${requests} requests${snapshot.lastToolName ? ` · last tool: ${snapshot.lastToolName}` : ""}`]);
     };
     const unsubscribe = this.manager.subscribe(event => {
       if (!("agentId" in event) || event.agentId !== meta.id) return;
@@ -288,9 +295,12 @@ export class WorkerPool {
       if (Array.isArray(data.outputs)) roleData.push(`outputs: ${data.outputs.length}`);
       const note = data.status === "blocked" ? "the worker reported blocked" : args.role === "verify" && data.passed === false ? "verification failed" : args.role === "implement" && changes.length >= 4 ? "the implementation changed four or more files" : undefined;
       const roster = this.roster();
-      const text = [`orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, "", meta.summary, ...roleData, "", audit ? changes.length ? `Changed files: ${changes.map(change => change.path).join(", ")}` : "No files changed" : "Workspace audit unavailable (not a git work tree)", `Workers: ${roster}`, ...retirementLines,
+      const changed = changes.length ? `Changed files: ${changes.map(change => change.path).join(", ")}${warning ? " (may include changes made by the other pi session(s); check before attributing them to this task)" : ""}` : "No files changed";
+      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, "", meta.summary, ...roleData, "", audit ? changed : "Workspace audit unavailable (not a git work tree)", `Workers: ${roster}`, ...retirementLines,
         ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: consider orche_run (multi) — ${note}`] : [])].join("\n");
-      return { text, details: { worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, durationMs, requests, changes, roster, ...(retired.length ? { retired } : {}) } };
+      return { text, details: { worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, durationMs, requests, changes, roster, ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}) } };
+    } catch (error) {
+      throw warning ? withConcurrentWarning(error, warning) : error;
     } finally {
       signal.removeEventListener("abort", abort);
       await stopPromise;

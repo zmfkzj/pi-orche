@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
 import { OrcheBusyError, OrcheController, formatOutcome } from "../../src/extension/controller.js";
+import { NoRouteError } from "../../src/extension/config.js";
+import type { ConcurrentSession, ConcurrentSessionsResult, DetectConcurrentSessionsOptions } from "../../src/extension/concurrent-sessions.js";
 import { runOrchestrated, type RunOptions, type RunReport } from "../../src/orchestration/coordinator.js";
 import { deferred, fauxRuntime } from "../helpers/faux.js";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -220,3 +223,157 @@ describe("OrcheController", () => {
     expect(c.controller.busy).toBe(false);
   });
 });
+
+const roots: string[] = [];
+afterEach(async () => {
+  vi.restoreAllMocks();
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
+const found = (cwd: string, secondsAgo = 12, id = "other"): ConcurrentSession => ({ id, cwd, file: `/sessions/${id}.jsonl`, lastWriteMs: Date.now() - secondsAgo * 1000 });
+
+/** A controller whose user config may carry `concurrentSessions`, with an injected detector and a recording run. */
+async function withDetector(detect: (options: DetectConcurrentSessionsOptions) => Promise<ConcurrentSessionsResult>, settings?: unknown) {
+  const root = await mkdtemp(join(tmpdir(), "orche-controller-concurrent-"));
+  roots.push(root);
+  const agentDir = join(root, "agent");
+  await mkdir(agentDir, { recursive: true });
+  const f = await fauxRuntime();
+  await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: f.route.model }, ...(settings === undefined ? {} : { concurrentSessions: settings }) }));
+  const [provider, id] = f.route.model.split("/");
+  const seen: RunOptions[] = [];
+  let behavior: (options: RunOptions) => Promise<RunReport> = async () => report();
+  const ctl = new OrcheController({ agentDir, createRuntime: async () => f.runtime, detectConcurrentSessions: detect, run: async options => { seen.push(options); return behavior(options); } });
+  return { root, agentDir, seen, ctl, model: { provider: provider!, id: id! }, onRun: (fn: (options: RunOptions) => Promise<RunReport>) => { behavior = fn; } };
+}
+
+describe("OrcheController concurrent pi sessions", () => {
+  it("flags the run, puts the warning first in the result and pins it in the progress", async () => {
+    const detect = vi.fn(async (_options: DetectConcurrentSessionsOptions) => ({ sessions: [found("/work/repo/packages/a", 12), found("/work/repo", 40, "third")] }));
+    const c = await withDetector(detect);
+    c.onRun(async options => {
+      options.sink?.({ type: "request_classified", timestamp: 3, taskClass: "change", workerCount: 2, language: "en", reason: "r" });
+      return report();
+    });
+    const updates: string[][] = [];
+    const outcome = await c.ctl.run({
+      request: "do it", cwd: "/work/repo", model: c.model, projectTrusted: true,
+      currentSession: { file: "/home/u/.pi/agent/sessions/--work-repo--/me.jsonl", id: "me", dir: "/home/u/.pi/agent/sessions/--work-repo--" },
+      onProgress: lines => updates.push([...lines]),
+    });
+
+    // Detection ran once, with the run cwd, the configured window and the calling session identified.
+    expect(detect).toHaveBeenCalledTimes(1);
+    expect(detect.mock.calls[0]![0]).toMatchObject({
+      cwd: "/work/repo", windowMs: 10 * 60_000,
+      currentSessionFile: "/home/u/.pi/agent/sessions/--work-repo--/me.jsonl", currentSessionId: "me",
+    });
+    expect(detect.mock.calls[0]![0].sessionsDir).toEqual(["/home/u/.pi/agent/sessions", join(c.agentDir, "sessions")]);
+    // The run is flagged (T1 contract).
+    expect(c.seen[0]!.concurrentActivity).toEqual({ count: 2, detail: expect.stringContaining("/work/repo/packages/a (last write 12s ago)") });
+    // The result starts with the warning; the answer text itself is untouched.
+    const warning = outcome.concurrentWarning!;
+    expect(warning).toMatch(/^⚠ 2 other pi sessions active in this repository \(cwd \/work\/repo\/packages\/a, \/work\/repo, last write 1[12]s ago\); their changes are classified as external where possible$/);
+    expect(outcome.text).toBe("final answer");
+    expect(formatOutcome(outcome).startsWith(`${warning}\n\norche finished (`)).toBe(true);
+    expect(outcome.details.concurrentSessions).toMatchObject({ count: 2 });
+    // Progress: shown immediately, and first once milestones arrive.
+    expect(updates[0]).toEqual([warning]);
+    expect(updates.at(-1)).toEqual([warning, "classified as change with 2 workers"]);
+    expect(outcome.details.progress).toEqual([warning, "classified as change with 2 workers"]);
+  });
+
+  it("puts the warning first in failed results too, and keeps the error class of a thrown one", async () => {
+    const c = await withDetector(async () => ({ sessions: [found("/work/repo")] }));
+    c.onRun(async () => report({ status: "failed", summary: "Verification kept failing" }));
+    const failed = formatOutcome(await c.ctl.run({ request: "x", cwd: "/work/repo", model: c.model, projectTrusted: true }));
+    expect(failed).toMatch(/^⚠ 1 other pi session active in this repository[^\n]*\n\norche FAILED \(change, 3s;/);
+    expect(failed).toContain("Verification kept failing");
+
+    c.onRun(async () => { throw new NoRouteError("no route for coordinator"); });
+    const thrown = await c.ctl.run({ request: "x", cwd: "/work/repo", model: c.model, projectTrusted: true }).catch((error: unknown) => error);
+    expect(thrown).toBeInstanceOf(NoRouteError);
+    expect((thrown as Error).message).toMatch(/^⚠ 1 other pi session active[^\n]*\n\nno route for coordinator$/);
+
+    c.onRun(async () => { throw new DOMException("aborted", "AbortError"); }); // read-only message: wrapped, cause kept
+    const wrapped = await c.ctl.run({ request: "x", cwd: "/work/repo", model: c.model, projectTrusted: true }).catch((error: unknown) => error) as Error;
+    expect(wrapped.message).toMatch(/^⚠ 1 other pi session active[^\n]*\n\naborted$/);
+    expect(wrapped.cause).toBeInstanceOf(DOMException);
+    expect(c.ctl.busy).toBe(false);
+  });
+
+  it("adds nothing when no session is detected, and leaves thrown errors alone", async () => {
+    const c = await withDetector(async () => ({ sessions: [] }));
+    const updates: string[][] = [];
+    const outcome = await c.ctl.run({ request: "x", cwd: "/work/repo", model: c.model, projectTrusted: true, onProgress: lines => updates.push([...lines]) });
+    expect("concurrentActivity" in c.seen[0]!).toBe(false);
+    expect(outcome.concurrentWarning).toBeUndefined();
+    expect(outcome.details.concurrentSessions).toBeUndefined();
+    expect(formatOutcome(outcome)).not.toContain("other pi session");
+    expect(updates).toEqual([]);
+    c.onRun(async () => { throw new Error("boom"); });
+    await expect(c.ctl.run({ request: "x", cwd: "/work/repo", model: c.model, projectTrusted: true })).rejects.toThrow(/^boom$/);
+  });
+
+  it("is silent when detection is disabled in the config, and uses the configured window", async () => {
+    const off = vi.fn(async (_options: DetectConcurrentSessionsOptions) => ({ sessions: [found("/work/repo")] }));
+    const disabled = await withDetector(off, { enabled: false });
+    const outcome = await disabled.ctl.run({ request: "x", cwd: "/work/repo", model: disabled.model, projectTrusted: true });
+    expect(off).not.toHaveBeenCalled();
+    expect("concurrentActivity" in disabled.seen[0]!).toBe(false);
+    expect(formatOutcome(outcome)).not.toContain("other pi session");
+
+    const on = vi.fn(async (_options: DetectConcurrentSessionsOptions) => ({ sessions: [] }));
+    const windowed = await withDetector(on, { windowMinutes: 3 });
+    await windowed.ctl.run({ request: "x", cwd: "/work/repo", model: windowed.model, projectTrusted: true });
+    expect(on.mock.calls[0]![0].windowMs).toBe(3 * 60_000);
+    // Without a session manager the default store of the configured agent dir is scanned.
+    expect(on.mock.calls[0]![0]).not.toHaveProperty("currentSessionFile");
+    expect(on.mock.calls[0]![0].sessionsDir).toEqual([join(windowed.agentDir, "sessions")]);
+  });
+
+  it("never blocks or fails the run when detection fails", async () => {
+    for (const detect of [
+      async () => { throw new Error("detector exploded"); },
+      async () => undefined as unknown as ConcurrentSessionsResult,
+      async () => ({ sessions: "nope" }) as unknown as ConcurrentSessionsResult,
+    ]) {
+      const c = await withDetector(detect);
+      const outcome = await c.ctl.run({ request: "x", cwd: "/work/repo", model: c.model, projectTrusted: true });
+      expect(outcome.report.status).toBe("done");
+      expect("concurrentActivity" in c.seen[0]!).toBe(false);
+      expect(formatOutcome(outcome)).not.toContain("other pi session");
+    }
+  });
+
+  it("detects a real session of the same repository through the default detector, excluding the calling session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "orche-controller-real-"));
+    roots.push(root);
+    const agentDir = join(root, "agent");
+    const repo = join(root, "repo");
+    await mkdir(repo, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    const sessionDir = join(agentDir, "sessions", "--repo--");
+    await mkdir(sessionDir, { recursive: true });
+    const header = (id: string, cwd: string) => `${JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-10-02T06:10:00.000Z", cwd })}\n`;
+    await writeFile(join(sessionDir, "2026-10-02T06-10-00-000Z_me.jsonl"), header("me", repo));
+    await writeFile(join(sessionDir, "2026-10-02T06-10-01-000Z_other.jsonl"), header("other", join(repo, "sub")));
+    await writeFile(join(sessionDir, "2026-10-02T06-10-02-000Z_elsewhere.jsonl"), header("elsewhere", root));
+    const f = await fauxRuntime();
+    await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: f.route.model } }));
+    const [provider, id] = f.route.model.split("/");
+    const seen: RunOptions[] = [];
+    const ctl = new OrcheController({ agentDir, createRuntime: async () => f.runtime, run: async options => { seen.push(options); return report(); } });
+    const input = { request: "x", cwd: repo, model: { provider: provider!, id: id! }, projectTrusted: true };
+
+    const outcome = await ctl.run({ ...input, currentSession: { file: join(sessionDir, "2026-10-02T06-10-00-000Z_me.jsonl"), id: "me", dir: sessionDir } });
+    expect(seen[0]!.concurrentActivity?.count).toBe(1);
+    expect(seen[0]!.concurrentActivity?.detail).toContain(join(repo, "sub"));
+    expect(formatOutcome(outcome)).toMatch(/^⚠ 1 other pi session active in this repository/);
+
+    // Alone in the repository: nothing to report.
+    await rm(join(sessionDir, "2026-10-02T06-10-01-000Z_other.jsonl"));
+    await ctl.run({ ...input, currentSession: { id: "me", dir: sessionDir } });
+    expect("concurrentActivity" in seen[1]!).toBe(false);
+  });
+});
+

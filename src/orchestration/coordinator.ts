@@ -9,7 +9,7 @@ import { resolveTeam } from "./team.js";
 import { orchestrationResultSchemas } from "./result-schemas.js";
 import { apply, emit, forwardManagerEvent } from "./run/context.js";
 import { classifyRequest, createCoordinator } from "./run/decisions.js";
-import { finalWorkspace, openWorkspaceAudit } from "./run/audit.js";
+import { CONCURRENT_SESSION_AMBIGUOUS, finalWorkspace, openWorkspaceAudit } from "./run/audit.js";
 import { runAnswer } from "./run/answer.js";
 import { exploreUntilAccepted, collectProposals, planAndSpawnExplorers } from "./run/diagnose.js";
 import { mergeExecuteAndVerify, spawnChangeWorkers } from "./run/change.js";
@@ -18,7 +18,8 @@ import type { WorkspaceChange } from "./workspace.js";
 import { resolveRunLimits } from "./limits.js";
 import { CREATED_FILE_ADVICE } from "./artifacts.js";
 
-export { defaultRunLimits, type OwnershipViolation, type RunLimits, type RunOptions, type RunReport } from "./run/types.js";
+export { defaultRunLimits, type ConcurrentActivity, type OwnershipViolation, type RunLimits, type RunOptions, type RunReport } from "./run/types.js";
+export { CONCURRENT_SESSION_AMBIGUOUS } from "./run/audit.js";
 export { explorationPlanProblem } from "./run/decisions.js";
 
 /**
@@ -191,10 +192,18 @@ export async function runOrchestrated(options: RunOptions): Promise<RunReport> {
   };
 }
 
-/** One-line warning for files changed by somebody else during the run. Never a failure. */
-export function externalChangesWarning(external: readonly WorkspaceChange[]): string {
+/**
+ * Warning for files changed by somebody else during the run. Never a failure. One line; files whose
+ * writer could not be told apart because another pi session was active get a second line.
+ */
+export function externalChangesWarning(external: readonly (WorkspaceChange & { reason?: string })[]): string {
+  const line = (files: readonly string[]) => files.slice(0, 5).join(", ") + (files.length > 5 ? `, … (+${files.length - 5} more)` : "");
   const files = external.map(change => change.path);
-  return `Warning: ${files.length} file${files.length === 1 ? "" : "s"} changed outside this run; not restored: ${files.slice(0, 5).join(", ")}${files.length > 5 ? `, … (+${files.length - 5} more)` : ""}`;
+  const ambiguous = external.filter(change => change.reason === CONCURRENT_SESSION_AMBIGUOUS).map(change => change.path);
+  const warning = `Warning: ${files.length} file${files.length === 1 ? "" : "s"} changed outside this run; not restored: ${line(files)}`;
+  return ambiguous.length
+    ? `${warning}\nWarning: ${ambiguous.length} of them changed while a worker command ran and another pi session was active, so the writer is ambiguous (not counted as an ownership violation; review before keeping): ${line(ambiguous)}`
+    : warning;
 }
 
 interface WorkerResult { agentId: string; kind: string; summary: string }
