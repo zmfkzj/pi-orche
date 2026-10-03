@@ -50,6 +50,7 @@ export async function createHarness(options: {
    * `maxBytes`) to switch records on; they then live under `<agentDir>/orche/records` of the harness, which `dispose` removes.
    */
   records?: boolean | { enabled?: boolean; dir?: string; retentionDays?: number; maxBytes?: number };
+  taskContext?: { clearBetweenAssignments?: boolean; minClearTokens?: number };
   /** `ctx.mode` the extension sees (default: the SDK default, i.e. not "tui"). */
   mode?: "tui" | "rpc" | "print" | "json";
 }): Promise<Harness> {
@@ -64,7 +65,7 @@ export async function createHarness(options: {
   main.runtime.registerNativeProvider(orche.faux.provider);
   if (options.writeUserConfig !== false) {
     const records = options.records === true ? {} : options.records === undefined || options.records === false ? { enabled: false } : options.records;
-    await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: orche.route.model }, records, ...(options.mainMode === "unset" ? {} : { mainMode: options.mainMode ?? "auto" }) }));
+    await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: orche.route.model }, records, ...(options.taskContext ? { taskContext: options.taskContext } : {}), ...(options.mainMode === "unset" ? {} : { mainMode: options.mainMode ?? "auto" }) }));
   }
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
   const resourceLoader = new DefaultResourceLoader({

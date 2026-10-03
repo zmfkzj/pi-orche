@@ -16,6 +16,8 @@ import { createSpillExtension } from "../tools/spill.js";
 import { withExtendedContext, type ContextWindowInfo } from "./extended-context.js";
 import { dirname, resolve } from "node:path";
 import { ensurePrivateDir, ensurePrivateFile } from "../agent/private-files.js";
+import type { createAssignmentProjector } from "./context-projection.js";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 export interface SessionOptions {
   route: { role: string; model: string; thinking?: ThinkingLevel; extendedContext?: boolean };
   cwd: string;
@@ -51,6 +53,8 @@ export interface SessionOptions {
    * a tool partial update every `intervalMs` (default 15 s). Sessions without `bash` in `tools` are unaffected.
    */
   bashHeartbeat?: { intervalMs?: number };
+  /** Opt-in request-only projection; the owner records each assignment boundary before prompting. */
+  contextProjection?: ReturnType<typeof createAssignmentProjector>;
 }
 export type ToolGuard = (toolName: string, input: Record<string, unknown>) => string | undefined | Promise<string | undefined>;
 /** Session extension applying a {@link ToolGuard} through Pi's public, blocking `tool_call` hook. */
@@ -74,6 +78,18 @@ function createGuardExtension(guard: ToolGuard): Extension {
     shortcuts: new Map(),
   };
 }
+/** Never persisted: raw results remain in the agent state and session JSONL. */
+function createContextProjectionExtension(projector: NonNullable<SessionOptions["contextProjection"]>): Extension {
+  const path = "<orche:task-context>";
+  return {
+    path, resolvedPath: path, hidden: true,
+    sourceInfo: createSyntheticSourceInfo(path, { source: "orche" }),
+    handlers: new Map([["context", [((event: { messages: AgentMessage[] }) => ({ messages: projector.project(event.messages) })) as never]]]),
+    tools: new Map(), messageRenderers: new Map(), entryRenderers: new Map(),
+    commands: new Map(), flags: new Map(), shortcuts: new Map(),
+  };
+}
+
 let defaultRuntime: Promise<ModelRuntime> | undefined;
 export async function createSession(
   options: SessionOptions,
@@ -89,7 +105,7 @@ export async function createSession(
   options.onContextWindow?.(info);
   const loader: ResourceLoader = {
     getExtensions: () => ({
-      extensions: [createSpillExtension(options.cwd), ...(options.toolGuard ? [createGuardExtension(options.toolGuard)] : [])],
+      extensions: [createSpillExtension(options.cwd), ...(options.toolGuard ? [createGuardExtension(options.toolGuard)] : []), ...(options.contextProjection ? [createContextProjectionExtension(options.contextProjection)] : [])],
       errors: [],
       runtime: createExtensionRuntime(),
     }),

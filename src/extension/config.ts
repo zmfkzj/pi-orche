@@ -21,6 +21,8 @@ export interface DiscoveredConfig {
   concurrentSessions: ConcurrentSessionsSettings;
   /** `records` of the selected file with defaults applied (enabled, 30 days retention, default directory). */
   records: RecordsSettings;
+  /** Request-only earlier-output projection for reused task workers, with defaults applied. */
+  taskContext: TaskContextSettings;
   source: ConfigSource;
   /** Config files that exist but were not used, with the reason. */
   ignored: string[];
@@ -114,24 +116,45 @@ export function resolveRecordsSettings(config?: RecordsConfig): RecordsSettings 
   };
 }
 
+/** Shared config validation; projection is task-only and settings are reread at each task call. */
+export interface TaskContextSettings {
+  /** false stops new clears, never revokes a worker's existing projection. */
+  clearBetweenAssignments: boolean;
+  minClearTokens: number;
+}
+export const DEFAULT_TASK_CONTEXT: Readonly<TaskContextSettings> = { clearBetweenAssignments: true, minClearTokens: 10000 };
+export function parseTaskContextConfig(value: unknown): TaskContextSettings {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.taskContext: expected object");
+  const settings = value as Record<string, unknown>;
+  if (Object.keys(settings).some(key => key !== "clearBetweenAssignments" && key !== "minClearTokens")) throw new RouteConfigError("config.taskContext: unknown field");
+  if (settings.clearBetweenAssignments !== undefined && typeof settings.clearBetweenAssignments !== "boolean") throw new RouteConfigError("config.taskContext.clearBetweenAssignments: expected boolean");
+  if (settings.minClearTokens !== undefined && (typeof settings.minClearTokens !== "number" || !Number.isSafeInteger(settings.minClearTokens) || settings.minClearTokens < 0)) throw new RouteConfigError("config.taskContext.minClearTokens: expected a nonnegative integer");
+  return {
+    clearBetweenAssignments: (settings.clearBetweenAssignments as boolean | undefined) ?? DEFAULT_TASK_CONTEXT.clearBetweenAssignments,
+    minClearTokens: (settings.minClearTokens as number | undefined) ?? DEFAULT_TASK_CONTEXT.minClearTokens,
+  };
+}
+
 /**
  * Load one orche config file: the route settings (validated by `parseRouteConfig`) plus the extension-only
- * `concurrentSessions` and `records` settings, which are validated here and removed before the route parser sees the file.
+ * `concurrentSessions`, `records` and `taskContext` settings, validated here and removed before the route parser sees the file.
  */
-export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings }> {
+export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings }> {
   let value: unknown;
   try { value = JSON.parse(await readFile(path, "utf8")); }
   catch (error) { throw new RouteConfigError(`Cannot load route config ${path}: ${error instanceof Error ? error.message : String(error)}`); }
   let routeValue = value;
   let concurrent: ConcurrentSessionsConfig | undefined;
   let records: RecordsConfig | undefined;
-  if (value && typeof value === "object" && !Array.isArray(value) && (Object.hasOwn(value, "concurrentSessions") || Object.hasOwn(value, "records"))) {
-    const { concurrentSessions, records: recordsValue, ...rest } = value as Record<string, unknown>;
+  let taskContext = { ...DEFAULT_TASK_CONTEXT };
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, ...rest } = value as Record<string, unknown>;
     if (Object.hasOwn(value, "concurrentSessions")) concurrent = parseConcurrentSessionsConfig(concurrentSessions);
     if (Object.hasOwn(value, "records")) records = parseRecordsConfig(recordsValue);
+    if (Object.hasOwn(value, "taskContext")) taskContext = parseTaskContextConfig(taskContextValue);
     routeValue = rest;
   }
-  return { routes: parseRouteConfig(routeValue), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records) };
+  return { routes: parseRouteConfig(routeValue), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext };
 }
 export class NoRouteError extends Error {
   override readonly name = "NoRouteError";
@@ -181,6 +204,7 @@ export async function discoverOrcheConfig(options: {
     routes: { routes: {}, default: { model, ...(thinking ? { thinking } : {}) } },
     concurrentSessions: resolveConcurrentSessions(),
     records: resolveRecordsSettings(),
+    taskContext: { ...DEFAULT_TASK_CONTEXT },
     source: { kind: "session", model, ...(thinking ? { thinking } : {}) },
     ignored,
   };

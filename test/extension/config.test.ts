@@ -7,6 +7,7 @@ import {
   resolveConcurrentSessions, resolveRecordsSettings,
 } from "../../src/extension/config.js";
 import { resolveRunLimits } from "../../src/orchestration/limits.js";
+import { DEFAULT_TASK_CONTEXT, parseTaskContextConfig } from "../../src/extension/config.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -234,4 +235,23 @@ describe("orche config discovery", () => {
     const typo = await layout({ user: { ...cfg("u/user"), record: { enabled: false } } });
     await expect(loadOrcheConfigFile(join(typo.agentDir, "orche.config.json"))).rejects.toThrow("config: unknown field");
   });
+  it("defaults taskContext from every source and uses the trusted file as a whole", async () => {
+    expect(parseTaskContextConfig({})).toEqual(DEFAULT_TASK_CONTEXT);
+    const none = await layout({});
+    expect((await discoverOrcheConfig({ ...none, projectTrusted: true, session })).taskContext).toEqual({ clearBetweenAssignments: true, minClearTokens: 10000 });
+    const files = await layout({ project: { ...cfg("p/project"), taskContext: { minClearTokens: 0 } }, user: { ...cfg("u/user"), taskContext: { clearBetweenAssignments: false, minClearTokens: 42 } } });
+    const project = await discoverOrcheConfig({ ...files, projectTrusted: true, session });
+    expect(project.taskContext).toEqual({ clearBetweenAssignments: true, minClearTokens: 0 });
+    expect(project.routes).toEqual(cfg("p/project"));
+    expect((await discoverOrcheConfig({ ...files, projectTrusted: false, session })).taskContext).toEqual({ clearBetweenAssignments: false, minClearTokens: 42 });
+    await writeFile(join(files.cwd, ".pi", "orche.config.json"), JSON.stringify(cfg("p/project")));
+    expect((await discoverOrcheConfig({ ...files, projectTrusted: true, session })).taskContext).toEqual(DEFAULT_TASK_CONTEXT);
+  });
+
+  it.each([null, [], true, { unknown: true }, { clearBetweenAssignments: "true" }, { clearBetweenAssignments: 0 }, { clearBetweenAssignments: null }, { minClearTokens: -1 }, { minClearTokens: 0.5 }, { minClearTokens: "10000" }, { minClearTokens: null }, { minClearTokens: Number.NaN }, { minClearTokens: Infinity }])("rejects invalid taskContext %j without fallback", async value => {
+    expect(() => parseTaskContextConfig(value)).toThrow("config.taskContext");
+    const files = await layout({ user: { ...cfg("u/user"), taskContext: value } });
+    await expect(discoverOrcheConfig({ ...files, projectTrusted: false, session })).rejects.toThrow("config.taskContext");
+  });
+
 });

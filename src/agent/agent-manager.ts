@@ -54,6 +54,9 @@ interface Worker {
   stats: WorkerStats;
   /** Liveness of this worker's session (see liveness.ts), fed from the session subscription; never read by the lifecycle itself. */
   liveness: LivenessTracker;
+  contextProjection?: SpawnOptions["contextProjection"];
+  projectionOptions?: { enabled?: boolean; minClearTokens?: number };
+  projectionAssignment?: Assignment;
 }
 interface WorkerStats {
   startedAt: number;
@@ -257,6 +260,7 @@ export class AgentManager {
         completedAssignments: 0,
       },
       adapter,
+      contextProjection: options.contextProjection,
       epoch: 0,
       nudges: 0,
       rejections: 0,
@@ -366,12 +370,13 @@ export class AgentManager {
       get: () => this.get(options.id),
     };
   }
-  assign(agentId: string, kind: string, prompt: string): Assignment {
+  assign(agentId: string, kind: string, prompt: string, projectionOptions?: { enabled?: boolean; minClearTokens?: number }): Assignment {
     this.assertOpen();
     const w = this.require(agentId);
     if (w.snapshot.status !== "idle")
       throw new Error(`Agent ${agentId} is ${w.snapshot.status}`);
     const assignment = { id: randomUUID(), kind, prompt, epoch: ++w.epoch };
+    w.projectionOptions = projectionOptions;
     w.snapshot.currentAssignment = assignment;
     w.runAssignment = assignment;
     w.snapshot.status = "running";
@@ -407,6 +412,13 @@ export class AgentManager {
         return;
       w.runAssignment = assignment;
       try {
+        if (w.contextProjection && w.projectionAssignment !== assignment) {
+          // Exact append position of the impending first user prompt; context excludes only system messages.
+          const messages = w.adapter.session.agent.state.messages.filter(message => message.role !== "system");
+          const plan = w.contextProjection.beginAssignment(messages, messages.length, w.projectionOptions);
+          w.projectionAssignment = assignment;
+          if (plan.stats.results) this.emit({ type: "context_cleared", timestamp: Date.now(), agentId: w.snapshot.id, assignmentId: assignment.id, contextCleared: plan.stats });
+        }
         await w.adapter.run(prompt);
       } catch (error) {
         if (w.snapshot.currentAssignment === assignment) {

@@ -32,6 +32,7 @@ import { errorToolResult, failureReason, type ErrorToolResult, type ToolFailure,
 import { deadlineInfoOf, initialDeadline, type DeadlineInfo, type RunTiming } from "./progress.js";
 import { createRunRecord, pruneRecordsOnce, resolveRecords, workerSessionFile } from "./records.js";
 import { ExtendableDeadline, extensionEvent, formatExtensionProgress, formatExtensionSummary, waitExtendable, withNotExtended, type DeadlineExtension } from "../orchestration/run/extension.js";
+import { createAssignmentProjector, type ContextClearedStats } from "../pi/context-projection.js";
 
 export const orcheTaskParameters = Type.Object({
   role: Type.Union([Type.Literal("explore"), Type.Literal("answer"), Type.Literal("implement"), Type.Literal("verify"), Type.Literal("game-asset"), Type.Literal("video")]),
@@ -97,6 +98,8 @@ export interface TaskDetails {
   record?: string;
   /** Present when the assignment's deadline was extended because the worker was still active (see src/orchestration/run/extension.ts): every extension granted, in order. */
   extensions?: DeadlineExtension[];
+  /** Newly cleared original results/reasoning at this assignment's start. */
+  contextCleared?: ContextClearedStats;
   /** Present when the assignment timed out with extensions enabled: why the expired deadline was not extended (`idle`: no activity in the activity window; `budget`: all extensions used). */
   notExtended?: { reason: "idle" | "budget"; message: string };
 }
@@ -680,6 +683,7 @@ export class WorkerPool {
       // generate_image has its own timeout (images.timeoutMs, 180 s by default): liveness bounds a silent call by it, not by the generic tool bound.
       await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name)], customTools, peerMessaging: false, ...(sessionFile ? { sessionFile } : {}),
         ...(images ? { toolTimeoutsMs: { generate_image: images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } } : {}),
+        contextProjection: createAssignmentProjector(),
         instructions: `${taskWorkerInstructions}\nYou work alone: there are no peer workers. Reply in the language of the request.`,
         onContextWindow: info => { meta.contextWindow = info.contextWindow; },
         toolGuard: async (name, input) => {
@@ -716,6 +720,9 @@ export class WorkerPool {
       },
     });
     let requests = 0;
+    let contextCleared: ContextClearedStats | undefined;
+    const contextDetails = () => contextCleared ? { contextCleared } : {};
+    const contextLine = () => contextCleared ? [`Context: cleared ${contextCleared.results} earlier tool results (~${Math.round(contextCleared.estTokens)} tokens est.) and ${contextCleared.thinkingBlocks} thinking blocks at assignment start; repeat a call to restore its output.`] : [];
     /** The extensions this assignment's deadline was granted (progress lines, details, record), and why the last expiry was not extended. */
     const extensions: DeadlineExtension[] = [];
     let notExtended: TaskDetails["notExtended"];
@@ -743,6 +750,10 @@ export class WorkerPool {
     const unsubscribe = this.manager.subscribe(event => {
       if (!("agentId" in event) || event.agentId !== meta.id) return;
       if (event.type === "liveness") return; // a state sample for the records, not progress
+      if (event.type === "context_cleared") {
+        contextCleared = { ...event.contextCleared };
+        record?.appendEvent(event);
+      }
       if (event.type === "usage") { requests++; meta.latestInput = event.input + event.cacheRead; }
       progress();
     });
@@ -774,6 +785,7 @@ export class WorkerPool {
         worker: meta.id, role: args.role, status, ...(meta.model ? { model: meta.model } : {}), durationMs: finishedAt - started, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...report, roster: this.roster(),
         ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(),
         ...(record ? { record: record.dir } : {}),
+        ...contextDetails(),
       };
     };
     /** The final `run.json` of this assignment, with this worker's entry (the lifetime totals of its one session). */
@@ -816,7 +828,7 @@ export class WorkerPool {
         meta.activity = activity;
       }
       signal.throwIfAborted();
-      this.manager.assign(meta.id, args.role, prefix + assignmentPrompt({ ...args, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant));
+      this.manager.assign(meta.id, args.role, prefix + assignmentPrompt({ ...args, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant), { enabled: reusedContext && config.taskContext.clearBetweenAssignments, minClearTokens: config.taskContext.minClearTokens });
       assigned = true;
       if (signal.aborted) abort();
       progress();
@@ -868,9 +880,10 @@ export class WorkerPool {
       const details: TaskDetails = {
         worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, ...(meta.model ? { model: meta.model } : {}), durationMs, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...changeReport, roster,
         ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(), ...(record ? { record: record.dir } : {}),
+        ...contextDetails(),
       };
       finishRecord("done", details, { summary: meta.summary });
-      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, "", meta.summary, ...roleData, "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
+      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, ...contextLine(), "", meta.summary, ...roleData, "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
         ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: consider orche_run (multi) — ${note}`] : [])].join("\n");
       return { text: withRecordLine(text, record?.dir), details };
     } catch (error) {
@@ -884,7 +897,7 @@ export class WorkerPool {
       const details = await failedDetails(error.status);
       const thrown = warning ? withConcurrentWarning(error, warning) : error;
       finishRecord(error.kind === "cancelled" ? "cancelled" : "failed", details, { failure: failureReason(base) });
-      throw new TaskFailedError(thrown instanceof Error ? thrown.message : base, details, { kind: error.kind, status: error.status, reason: failureReason(base) });
+      throw new TaskFailedError([thrown instanceof Error ? thrown.message : base, ...contextLine()].join("\n"), details, { kind: error.kind, status: error.status, reason: failureReason(base) });
     } finally {
       signal.removeEventListener("abort", abort);
       await stopPromise;

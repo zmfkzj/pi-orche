@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Reused `orche_task` workers now bound earlier tool output with a cache-stable, restorable assignment-boundary projection that changes only with new clears. Affected earlier reasoning is cumulatively omitted for signature safety, and its paired Responses item IDs are dropped without breaking call/result pairing; raw session records stay complete. Added validated `taskContext` settings and clearing counts in task results/record events. `clearBetweenAssignments: false` means no new clears: existing projections stay applied unchanged, never-cleared workers stay unprojected, and dropping an existing projection requires a new worker. Other sessions do not project context, but shared validation means an invalid `taskContext` also fails `orche_run`.
 - Reduced read anchors to four hex characters, omitted blank-line tags, and kept 4–16-hex backward compatibility; earlier-read anchors rebase across the tool's own edits, rejecting ambiguous surviving targets. Current read/symbol anchors always win, so re-reading resolves ambiguity.
 - Compacted edit echoes to one-line context / 40 lines with long-operation collapse, and added non-blocking JS/TS parse-error feedback.
 - Added JS/TS/Markdown read outlines and named-symbol reads with normal edit anchors; `outline: false` is unset and blank symbols are rejected.

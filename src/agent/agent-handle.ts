@@ -2,6 +2,7 @@ import type { TSchema } from "@sinclair/typebox";
 import type { SessionOptions } from "../pi/session-factory.js";
 import type { SessionRecords } from "./records.js";
 import type { LivenessEvent } from "./liveness.js";
+import type { ContextClearedStats } from "../pi/context-projection.js";
 import type {
   NoteMessage,
   DeliveryReceipt,
@@ -107,6 +108,7 @@ export interface AgentManagerOptions {
 }
 export type ManagerEvent = { timestamp: number } & (
   | { type: "assignment_started"; agentId: string; assignment: Assignment }
+  | { type: "context_cleared"; agentId: string; assignmentId: string; contextCleared: ContextClearedStats }
   | { type: "assignment_nudged"; agentId: string; assignmentId: string; attempt: number }
   | { type: "result_rejected"; agentId: string; assignmentId: string; kind: string; attempt: number; errors: string }
   | { type: "request_budget"; agentId: string; assignmentId: string; requests: number; budget: number; action: "notice" | "stop" | "abort" }
