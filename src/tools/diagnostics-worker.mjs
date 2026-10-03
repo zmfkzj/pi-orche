@@ -3,7 +3,7 @@
 import { workerData, parentPort } from "node:worker_threads";
 import { createRequire } from "node:module";
 import { existsSync, readdirSync } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const { tsPath, cwd, files, maxFiles, deadline, maxItems } = workerData;
 const ts = createRequire(import.meta.url)(tsPath);
@@ -100,9 +100,17 @@ try {
   let total = items.length;
   let checked = 0;
   let timedOut = false;
+  let fileCount = roots.length;
   if (roots.length > 0) {
     const program = ts.createProgram({ rootNames: roots, options });
-    const targets = roots.map((f) => program.getSourceFile(f)).filter((sf) => sf && !program.isSourceFileFromExternalLibrary(sf));
+    const targets = files.length > 0
+      ? program.getSourceFiles().filter((sf) => {
+        const path = relative(cwd, sf.fileName);
+        return !sf.isDeclarationFile && !program.isSourceFileDefaultLibrary(sf) && !program.isSourceFileFromExternalLibrary(sf)
+          && !isAbsolute(path) && path !== ".." && !path.startsWith(`..${sep}`) && !path.split(sep).includes("node_modules");
+      })
+      : roots.map((f) => program.getSourceFile(f)).filter((sf) => sf && !program.isSourceFileFromExternalLibrary(sf));
+    if (files.length > 0) fileCount = targets.length;
     for (const sf of targets) {
       try {
         let found = program.getSyntacticDiagnostics(sf, token);
@@ -121,7 +129,7 @@ try {
       }
     }
   }
-  parentPort.postMessage({ ok: true, items, total, checked, files: roots.length, configured: totalConfigured, config, timedOut });
+  parentPort.postMessage({ ok: true, items, total, checked, files: fileCount, configured: totalConfigured, config, timedOut });
 } catch (error) {
   parentPort.postMessage({ ok: false, error: error instanceof Error ? error.message : String(error) });
 }
