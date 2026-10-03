@@ -111,7 +111,7 @@ describe("mainMode: external paths", () => {
       tool("read", { path }),
       context => {
         const result = context.messages.findLast(message => message.role === "toolResult");
-        const at = JSON.stringify(result).match(/1#[0-9a-f]{16}/)?.[0];
+        const at = JSON.stringify(result).match(/1#[0-9a-f]{4}/)?.[0];
         if (!at) throw new Error("external read did not return an anchor");
         return tool("edit", { path, edits: [{ op: "replace", at, text: "edited" }] });
       },

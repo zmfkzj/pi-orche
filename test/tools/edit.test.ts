@@ -55,7 +55,7 @@ describe("anchored read/edit on a real session", () => {
       }),
     ]);
     expect(results.map((r) => r.isError)).toEqual([false, false, false]);
-    expect(results[0]!.text).toMatch(/^1#[0-9a-f]{16}\|one\n2#[0-9a-f]{16}\|two/);
+    expect(results[0]!.text).toMatch(/^1#[0-9a-f]{4}\|one\n2#[0-9a-f]{4}\|two/);
     expect(await readFile(file, "utf8")).toBe("one\nTWO\n2.5\nbetween\nthree\nfive\n");
   });
 
@@ -155,6 +155,6 @@ describe("anchored read/edit on a real session", () => {
     const results = await runToolScript(cwd, ["read"], [
       () => ({ name: "read", args: { path: "n.txt", offset: 3, limit: 2 } }),
     ]);
-    expect(results[0]!.text).toMatch(/^3#[0-9a-f]{16}\|l3\n4#[0-9a-f]{16}\|l4\n\n\[Showing lines 3-4 of 10\. Use offset=5 to continue\.\]$/);
+    expect(results[0]!.text).toMatch(/^3#[0-9a-f]{4}\|l3\n4#[0-9a-f]{4}\|l4\n\n\[Showing lines 3-4 of 10\. Use offset=5 to continue\.\]$/);
   });
 });

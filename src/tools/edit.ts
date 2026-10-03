@@ -1,19 +1,17 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { extname } from "node:path";
+import { Lang, parseAsync } from "@ast-grep/napi";
 import { Type, type Static } from "@sinclair/typebox";
 import { withFileMutationQueue, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
-  formatTaggedLine,
-  lineTag,
-  parseAnchor,
-  parseFileText,
-  resolveWorkspacePath,
-  serializeFile,
-  type Anchor,
+  anchorMatches, formatTaggedLine, parseAnchor, parseFileText,
+  resolveWorkspacePath, serializeFile, type Anchor,
 } from "./anchors.js";
+import { AnchorRegistry } from "./anchor-registry.js";
 
 const MAX_EDITS = 100;
-const CONTEXT = 2;
-const MAX_SHOWN_LINES = 80;
+const CONTEXT = 1;
+const MAX_SHOWN_LINES = 40;
 
 const editSchema = Type.Object({
   path: Type.String({ description: "File to edit (must already exist; use write to create files)" }),
@@ -24,56 +22,19 @@ const editSchema = Type.Object({
         { description: "replace/delete the lines at..to; insert text after/before the line at" },
       ),
       at: Type.String({
-        description: "Anchor LINE#TAG exactly as printed by read (a line number, #, 16 hex chars; e.g. 12#0123456789abcdef). Inserts also accept BOF / EOF.",
+        description: "Anchor from read: LINE#TAG (4–16 hex), or LINE for blank lines. Pasted lines accepted. Inserts also accept BOF / EOF.",
       }),
-      to: Type.Optional(
-        Type.String({ description: "Last LINE#TAG of the range for replace/delete (default: same as at)" }),
-      ),
-      text: Type.Optional(
-        Type.String({ description: "New content (without LINE#TAG prefixes); newlines separate lines. Required for replace and insert." }),
-      ),
+      to: Type.Optional(Type.String({ description: "Last anchor of the range for replace/delete (default: same as at)" })),
+      text: Type.Optional(Type.String({ description: "New content (without anchor prefixes); newlines separate lines. Required for replace and insert." })),
     }),
-    { description: "Edits against ONE snapshot of the file; line numbers refer to the last read, not to earlier edits in the list" },
+    { description: "Edits against ONE snapshot; earlier-read anchors are mapped across your own edits when possible" },
   ),
 });
 type EditInput = Static<typeof editSchema>["edits"][number];
+interface Change { start: number; end: number; lines: string[]; index: number }
+type Resolver = (label: string, value: string | undefined) => number | undefined;
 
-interface Change {
-  start: number;
-  end: number;
-  lines: string[];
-  index: number;
-}
-
-function resolveAnchor(label: string, value: string | undefined, lines: string[], problems: string[]): number | undefined {
-  if (value === undefined) return undefined;
-  const parsed = parseAnchor(value);
-  if (!parsed) {
-    problems.push(`${label} "${value}" is not a LINE#TAG anchor (copy it from read output)`);
-    return undefined;
-  }
-  return checkAnchor(label, parsed, lines, problems);
-}
-
-function checkAnchor(label: string, anchor: Anchor, lines: string[], problems: string[]): number | undefined {
-  const current = lines[anchor.line - 1];
-  if (current === undefined) {
-    problems.push(`${label} ${anchor.line}#${anchor.tag}: file has only ${lines.length} lines`);
-    return undefined;
-  }
-  if (lineTag(current) !== anchor.tag) {
-    const near = [-1, 0, 1]
-      .map((d) => anchor.line + d)
-      .filter((n) => n >= 1 && n <= lines.length)
-      .map((n) => `    ${formatTaggedLine(n, lines[n - 1]!, 200)}`)
-      .join("\n");
-    problems.push(`${label} ${anchor.line}#${anchor.tag} is stale; the file now has:\n${near}`);
-    return undefined;
-  }
-  return anchor.line;
-}
-
-function toChange(edit: EditInput, index: number, lines: string[], problems: string[]): Change | undefined {
+function toChange(edit: EditInput, index: number, lines: string[], problems: string[], resolve: Resolver): Change | undefined {
   const where = `edit[${index}]`;
   const body = edit.text === undefined ? undefined : edit.text.split(/\r?\n/);
   if ((edit.op === "replace" || edit.op.startsWith("insert")) && body === undefined) {
@@ -87,13 +48,13 @@ function toChange(edit: EditInput, index: number, lines: string[], problems: str
       const position = edge === "BOF" ? 0 : lines.length;
       return { start: position, end: position, lines: body!, index };
     }
-    const line = resolveAnchor(`${where}.at`, edit.at, lines, problems);
+    const line = resolve(`${where}.at`, edit.at);
     if (line === undefined) return undefined;
     const position = edit.op === "insert_after" ? line : line - 1;
     return { start: position, end: position, lines: body!, index };
   }
-  const first = resolveAnchor(`${where}.at`, edit.at, lines, problems);
-  const last = edit.to === undefined ? first : resolveAnchor(`${where}.to`, edit.to, lines, problems);
+  const first = resolve(`${where}.at`, edit.at);
+  const last = edit.to === undefined ? first : resolve(`${where}.to`, edit.to);
   if (first === undefined || last === undefined) return undefined;
   if (last < first) {
     problems.push(`${where}: "to" (line ${last}) is before "at" (line ${first})`);
@@ -102,16 +63,16 @@ function toChange(edit: EditInput, index: number, lines: string[], problems: str
   return { start: first - 1, end: last, lines: edit.op === "delete" ? [] : body!, index };
 }
 
-export function createEditTool(cwd: string): ToolDefinition {
+export function createEditTool(cwd: string, registry = new AnchorRegistry()): ToolDefinition {
   return {
     name: "edit",
     label: "edit",
     description:
-      "Edit an existing file by line anchors. Anchors are LINE#TAG exactly as printed by read; a tag no longer matching the file is rejected and nothing is changed (re-read, then retry). All edits in one call address the file as last read and are applied atomically. ops: replace (lines at..to become text), delete (remove lines at..to), insert_after / insert_before (add text next to the line at; BOF/EOF allowed). To replace one line only, give at; for a block give at and to. The result shows the changed region with fresh anchors, so chained edits need no re-read.",
-    promptSnippet: "Edit a file by LINE#TAG anchors from read (stale anchors are rejected)",
+      "Edit an existing file by read anchors (LINE#TAG, or LINE for blank lines). Earlier-read anchors are mapped across your own edits when possible; otherwise re-read. Stale anchors reject the whole call. All edits address one snapshot and apply atomically. ops: replace/delete at..to, insert_after/insert_before at (BOF/EOF allowed). The result shows compact changed regions with fresh anchors and advisory syntax feedback.",
+    promptSnippet: "Edit a file by read anchors (own-edit rebasing; stale anchors rejected)",
     promptGuidelines: [
       "Always read a file before editing it; copy anchors verbatim from read output.",
-      "Edit anchors in one call refer to the last read snapshot; after a successful edit use the anchors the result prints.",
+      "All edits in one call address one snapshot. Earlier-read anchors map across your own edits when possible; otherwise re-read.",
     ],
     parameters: editSchema,
     async execute(_id, params: Static<typeof editSchema>, _signal, _onUpdate, ctx) {
@@ -122,13 +83,46 @@ export function createEditTool(cwd: string): ToolDefinition {
         const raw = await readFile(absolute, "utf8");
         const file = parseFileText(raw);
         const problems: string[] = [];
-        const changes = params.edits
-          .map((edit, i) => toChange(edit, i, file.lines, problems))
+        const excerpts = new Set<number>();
+        const rebased = new Set<string>();
+        const historyResolve = registry.resolver(absolute, raw);
+        const near = (n: number): string => [-1, 0, 1]
+          .map(d => n + d).filter(n => n >= 1 && n <= file.lines.length)
+          .map(n => { excerpts.add(n); return `    ${formatTaggedLine(n, file.lines[n - 1]!, 200)}`; }).join("\n");
+        const resolve: Resolver = (label, value) => {
+          if (value === undefined) return undefined;
+          const parsed = parseAnchor(value);
+          if (!parsed) {
+            problems.push(`${label} "${value}" is not a LINE#TAG anchor (copy it from read output; blank lines accept LINE)`);
+            return undefined;
+          }
+          const mapped = historyResolve(parsed);
+          if (mapped.changed) {
+            problems.push(`${label}: line ${parsed.line} was changed by your earlier edit; use the anchors printed after it. Current excerpt:\n${near(parsed.line)}`);
+            return undefined;
+          }
+          const anchor: Anchor = { ...parsed, line: mapped.line };
+          const current = file.lines[anchor.line - 1];
+          const name = anchor.tag === undefined ? `${anchor.line}` : `${anchor.line}#${anchor.tag}`;
+          if (current === undefined) {
+            problems.push(`${label} ${name}: file has only ${file.lines.length} lines`);
+            return undefined;
+          }
+          if (!anchorMatches(anchor, current)) {
+            problems.push(anchor.tag === undefined
+              ? `${label} ${name}: non-blank lines need LINE#TAG from read; the file now has:\n${near(anchor.line)}`
+              : `${label} ${name} is stale; the file now has:\n${near(anchor.line)}`);
+            return undefined;
+          }
+          if (anchor.line !== parsed.line) rebased.add(`${parsed.line}->${anchor.line}`);
+          return anchor.line;
+        };
+        const changes = params.edits.map((edit, i) => toChange(edit, i, file.lines, problems, resolve))
           .filter((c): c is Change => c !== undefined);
-        if (problems.length > 0)
-          throw new Error(
-            `Edit rejected, no changes made:\n- ${problems.join("\n- ")}\nRe-read the file and retry with current anchors.`,
-          );
+        if (problems.length > 0) {
+          if (excerpts.size) registry.recordShown(absolute, raw, file.lines, excerpts);
+          throw new Error(`Edit rejected, no changes made:\n- ${problems.join("\n- ")}\nRe-read the file and retry with current anchors.`);
+        }
         changes.sort((a, b) => a.start - b.start || a.end - a.start - (b.end - b.start) || a.index - b.index);
         const out: string[] = [];
         const regions: Array<[number, number]> = [];
@@ -146,30 +140,68 @@ export function createEditTool(cwd: string): ToolDefinition {
         const nextText = serializeFile(next);
         if (nextText === raw) throw new Error("Edit rejected: it would not change the file");
         await writeFile(absolute, nextText);
-        return {
-          content: [{ type: "text", text: summarize(params.path, file.lines.length, out, regions) }],
-          details: undefined,
-        };
+        registry.recordEdit(absolute, raw, nextText, changes);
+        const summary = summarize(params.path, file.lines.length, out, regions);
+        registry.recordShown(absolute, nextText, out, summary.shown);
+        const syntax = await syntaxNote(absolute, raw, nextText, regions);
+        const rebase = rebased.size ? `\nRebased anchors from before your earlier edit: ${[...rebased].join(", ")}.` : "";
+        return { content: [{ type: "text", text: summary.text + rebase + syntax }], details: undefined };
       });
     },
   };
 }
 
-function summarize(path: string, before: number, lines: string[], regions: Array<[number, number]>): string {
-  const shown: number[] = [];
-  let remaining = MAX_SHOWN_LINES;
-  const spans: Array<[number, number]> = [];
+function summarize(path: string, before: number, lines: string[], regions: Array<[number, number]>): { text: string; shown: number[] } {
+  const wanted = new Set<number>();
+  const omitted = new Map<number, { end: number; count: number }>();
   for (const [a, b] of regions) {
     const lo = Math.max(0, a - CONTEXT);
     const hi = Math.min(lines.length, b + CONTEXT);
-    const prev = spans.at(-1);
-    if (prev && lo <= prev[1]) prev[1] = Math.max(prev[1], hi);
-    else spans.push([lo, hi]);
+    if (b - a > 8) {
+      for (let i = lo; i < a + 2; i++) wanted.add(i);
+      wanted.add(a + 2);
+      omitted.set(a + 2, { end: b - 2, count: b - a - 4 });
+      for (let i = b - 2; i < hi; i++) wanted.add(i);
+    } else {
+      for (let i = lo; i < hi; i++) wanted.add(i);
+    }
   }
-  for (const [lo, hi] of spans) {
-    if (shown.length > 0) shown.push(-1);
-    for (let i = lo; i < hi && remaining > 0; i++, remaining--) shown.push(i);
+  const shown: number[] = [];
+  const body: string[] = [];
+  let previous = -1;
+  for (const i of [...wanted].sort((a, b) => a - b)) {
+    if (body.length >= MAX_SHOWN_LINES) break;
+    const skip = omitted.get(i);
+    if (skip) {
+      body.push(`… [${skip.count} new lines not shown; read offset=${i + 1} limit=${skip.count} for their anchors] …`);
+      previous = skip.end - 1;
+      continue;
+    }
+    if (previous >= 0 && i > previous + 1) {
+      body.push("...");
+      if (body.length >= MAX_SHOWN_LINES) break;
+    }
+    body.push(formatTaggedLine(i + 1, lines[i]!, 300));
+    shown.push(i + 1);
+    previous = i;
   }
-  const body = shown.map((i) => (i < 0 ? "..." : formatTaggedLine(i + 1, lines[i]!, 300))).join("\n");
-  return `Edited ${path}: ${before} -> ${lines.length} lines. Current region (anchors are fresh):\n${body}`;
+  return { text: `Edited ${path}: ${before} -> ${lines.length} lines. Current region (anchors are fresh):\n${body.join("\n")}`, shown };
+}
+
+async function syntaxNote(path: string, before: string, after: string, regions: Array<[number, number]>): Promise<string> {
+  const extension = extname(path).toLowerCase();
+  if (!/\.(?:[cm]?[tj]s|[tj]sx)$/.test(extension) || Math.max(Buffer.byteLength(before), Buffer.byteLength(after)) > 1024 * 1024) return "";
+  try {
+    const lang = extension === ".tsx" ? Lang.Tsx : /\.[cm]?ts$/.test(extension) ? Lang.TypeScript : Lang.JavaScript;
+    const roots = await Promise.all([parseAsync(lang, before), parseAsync(lang, after)]);
+    // Tree-sitter missing tokens appear as zero-width leaves; napi has no isMissing API.
+    const errors = roots.map(root => root.root().findAll({ rule: { any: [{ kind: "ERROR" }, { regex: "^$" }] } })
+      .filter(node => node.kind() === "ERROR" || (node.isLeaf() && node.kind() !== "program")));
+    const count = errors[1]!.length - errors[0]!.length;
+    if (count <= 0) return "";
+    const locations = [...new Set(errors[1]!.map(n => n.range().start.line + 1))];
+    const nearby = (n: number) => regions.some(([a, b]) => n >= a + 1 - 3 && n <= Math.max(a + 1, b) + 3);
+    locations.sort((a, b) => Number(nearby(b)) - Number(nearby(a)) || a - b);
+    return `\nSyntax check: ${count} new parse error(s) near line(s) ${locations.slice(0, 3).join(", ")}; the edit was applied, fix it if unintended.`;
+  } catch { return ""; }
 }

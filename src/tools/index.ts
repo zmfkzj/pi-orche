@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { AnchorRegistry } from "./anchor-registry.js";
 import { createAstRewriteTool, createAstSearchTool } from "./ast.js";
 import { createBashHeartbeatTool, type BashHeartbeatConfig } from "./bash.js";
 import { createDiagnosticsTool } from "./diagnostics.js";
@@ -32,9 +33,10 @@ export const READ_ONLY_TOOL_NAMES: readonly string[] = [
 
 /** Custom tools pi-orche adds on top of Pi built-ins (some replace built-ins by name). */
 export function createOrcheTools(options: { cwd: string; bashHeartbeat?: BashHeartbeatConfig }): ToolDefinition[] {
+  const anchors = new AnchorRegistry();
   return [
-    createReadTool(options.cwd),
-    createEditTool(options.cwd),
+    createReadTool(options.cwd, anchors),
+    createEditTool(options.cwd, anchors),
     createFindTool(options.cwd),
     createAstSearchTool(options.cwd),
     createAstRewriteTool(options.cwd),
