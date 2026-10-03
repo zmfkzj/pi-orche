@@ -63,16 +63,30 @@ Runs the workspace's own `typescript` when resolvable from `<cwd>/package.json`,
 - Ignored as environment noise: `Cannot find module` for bare package specifiers and missing node typings (`require`, `process`, ...). Relative-import errors are kept.
 - Cost: about 1.5s per call (typescript load + default libs).
 
-## Artifact spill
+## Output filters and artifact spill
 
-An extension (`src/tools/spill.ts`, registered by `createSession`) hooks `tool_result` for every tool. A result over 12,000 chars or 300 lines is replaced by the first 40 + last 80 lines (capped by chars) with an omission marker and `[Output truncated (...). Full output saved to .orche/artifacts/<tool>-<id>.txt; use read with offset/limit or grep to inspect it.]`. The artifact lives under the session cwd and has `.gitignore` and `.ignore` (`*`) so it stays out of `git status` and out of grep/find. Details:
+The `tool_result` hook (`src/tools/spill.ts`) reduces model-side text while saving the full original under `<cwd>/.orche/artifacts/<tool>-<id>.txt`. Artifact-directory `.gitignore` and `.ignore` files contain `*`, keeping artifacts out of git status and searches. Every reduction ends with one notice naming the omitted/collapsed content and artifact path; use `read` with offset/limit or grep to recover it.
 
-- `read` is exempt: it caps itself with offset continuation, and exempting it lets artifacts be paged without being re-spilled.
-- Pi's bash already keeps only the last 2000 lines/50KB and writes the real full output to a temp file; for that case the artifact is a copy of Pi's temp file (up to 32MB are used for the inline preview, bigger files keep Pi's tail as preview) and Pi's trailing `Command exited with code N` / abort / timeout status line is carried over. `isError` is preserved.
-- If saving the artifact fails the result is still truncated and says so.
-- The exported thresholds are `SPILL_MAX_CHARS` and `SPILL_MAX_LINES`.
-- Reusable entry point: `spillToolResult(event: { toolName, content, details? }, cwd): Promise<{ content, details? } | undefined>` (`undefined` = leave the result unchanged); `createSpillExtension(cwd)` is a thin `tool_result` wrapper over it, so Pi extensions can call it with the event they receive.
+**Specialized filters apply only to `bash` and Pi's built-in `grep`.** Bash classification uses both `input.command` and content. Test/compiler/linter filters require **at least 2,000 characters or 60 lines**, and keep the original if savings are less than **20%**:
+
+Analysis clips each line to **2,000 characters** with a `…[+N chars]` suffix before classification/regex work and strips ANSI once; the artifact remains complete. Long lines also receive a linear whole-line diagnostic-word scan (no unclipped regexes), so diagnostics in clipped tails are kept or counted and prioritized. The notice counts long lines clipped at 2,000 characters. Content classification samples the first/last 400 lines. Outputs above **2 MB** skip specialized filters. A specialized summary still over the spill trigger falls back to the generic preview of the original output, preserving artifact line numbers, diagnostic priority and omitted-diagnostic counts; the notice says the summary was too large.
+
+- **Tests:** vitest, jest, mocha, `node --test`, pytest, `go test`, `cargo test`. Passing/progress lines are omitted; failure headers, assertion/error messages, expected/received diffs, code frames, attached console output and final summaries remain, with up to ten stack-frame lines per failure. Pass-only output keeps the summary and an omitted-line count.
+- **TypeScript:** plain `file(l,c): error TSnnnn` and pretty `file:l:c - error TSnnnn`. Keeps errors and indented message continuations, removes pretty source/underline frames, and collapses identical code/message errors into a count with up to five locations. Keeps `Found N errors`.
+- **ESLint/Biome-style linters:** retains error entries and file headers; warnings collapse per rule into a count with up to three locations. Summaries remain.
+- **Grep:** only when every line is a Pi match/context line (`path:N: text` / `path-N- text`) or a trailing notice. Groups repeated file paths under a file header with indented `N: text` / `N- text`. Paths may contain dashes/colons. Applies only when it saves **at least 15%** of characters; no 2,000-character/60-line minimum.
+
+The generic spill trigger remains **over 12,000 characters or 300 lines**. For oversized bash/grep output (including when a specialized filter declines), fallback previews always keep a bounded head of **30 lines / 3,000 characters**, middle diagnostic lines matching `error|fail|warn|exception|panic|traceback|✗|×` (up to **40 lines / 3,000 characters**), and a tail of **60 lines / 4,000 characters**, each with original `[L123]` line numbers. Lines clip at 1,000 characters. The middle budget prioritizes errors/failures over warnings, then displays selected lines in original order. The notice counts matching diagnostic lines omitted and directs the model to grep the full artifact. Specialized filters never silently drop diagnostics; generic previews do not apply below the spill trigger.
+
+`read` is exempt (it pages itself). Other tools, including delegation and browser tools, receive only generic head/tail spill at the unchanged trigger, without specialized filtering or numbered diagnostic-middle selection.
+
+- Pi bash's full-output temp file is recovered before filtering; the artifact copies that file. Up to 32 MB is read for inline reduction; larger files use Pi's existing tail for the preview and retain the full copied artifact. If no reduction applies, only Pi's existing truncated text is inlined, never the recovered full output.
+- Pi's trailing `Command exited with code N` / abort / timeout line and `isError` are preserved. Replacement results omit `structuredContent`: Pi drops the original when `content` alone is replaced, avoiding text that could violate a tool's output schema.
+- If artifact saving fails, the result says so. `SPILL_MAX_CHARS` / `SPILL_MAX_LINES` remain exported.
+- Reusable entry points: `spillToolResult(event, cwd)` (event includes `toolName`, `input`, `content`, `details`, `isError`, optional `structuredContent`) and `createSpillExtension(cwd)`. An undefined return leaves the original result unchanged.
 
 ## Base prompt switch
 
 `SessionOptions.baseSystemPrompt` becomes the resource loader's system prompt, replacing Pi's default base prompt. Note Pi's structured prompt builder then omits its own tool/guideline sections entirely (only the custom preamble, the appended role instructions and cwd remain); the model still gets tool schemas and each tool's description through the API, but not the `promptSnippet`/`promptGuidelines` lines.
+
+Run worker instructions are static per role/loadout for prompt-cache reuse. A run-context-tracked first-assignment briefing supplies identity and reply language, plus the user request if the assignment does not already contain it; later assignments do not repeat the briefing. Coordinator, advisor and `orche_task` system instructions are unchanged. Worker summaries start with a one-to-three-sentence conclusion, then `path:line` evidence and command outcomes, without pasted code/diffs/logs the reader can open. Answer summaries remain complete and cite source locations.

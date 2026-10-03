@@ -7,42 +7,17 @@ import {
   type Extension,
   type ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
+import { filterOutput, genericPreview } from "./output-filter.js";
 
-export const SPILL_MAX_CHARS = 12_000;
-export const SPILL_MAX_LINES = 300;
-const HEAD_LINES = 40;
-const TAIL_LINES = 80;
-const HEAD_CHARS = 4_000;
-const TAIL_CHARS = 6_000;
-const LINE_CHARS = 1_000;
+export { SPILL_MAX_CHARS, SPILL_MAX_LINES } from "./output-filter.js";
 const MAX_SOURCE_BYTES = 32 * 1024 * 1024;
 export const ARTIFACT_DIR = ".orche/artifacts";
 /** `read` already caps itself and must stay able to page through artifacts. */
 const EXEMPT_TOOLS = ["read"];
 
-const clip = (line: string) => (line.length > LINE_CHARS ? `${line.slice(0, LINE_CHARS)}…[+${line.length - LINE_CHARS} chars]` : line);
-
-function takeLines(lines: string[], fromEnd: boolean, maxLines: number, maxChars: number): string[] {
-  const taken: string[] = [];
-  let chars = 0;
-  for (let i = 0; i < lines.length && taken.length < maxLines; i++) {
-    const line = clip(lines[fromEnd ? lines.length - 1 - i : i]!);
-    if (chars + line.length > maxChars && taken.length > 0) break;
-    chars += line.length + 1;
-    taken.push(line);
-  }
-  return fromEnd ? taken.reverse() : taken;
-}
-
-/** Head + tail of `text` with an omission marker, or undefined when it fits inline. */
+/** Generic head/tail preview for tools other than bash; read is exempt. */
 export function previewText(text: string): string | undefined {
-  const lines = text.split("\n");
-  if (text.length <= SPILL_MAX_CHARS && lines.length <= SPILL_MAX_LINES) return undefined;
-  const head = takeLines(lines, false, HEAD_LINES, HEAD_CHARS);
-  const tail = takeLines(lines.slice(head.length), true, TAIL_LINES, TAIL_CHARS);
-  const omitted = lines.length - head.length - tail.length;
-  const marker = `… [${omitted} lines omitted from the middle] …`;
-  return [...head, marker, ...tail].join("\n");
+  return genericPreview(text, false)?.text;
 }
 
 async function saveArtifact(cwd: string, toolName: string, text: string, sourceFile: string | undefined): Promise<string> {
@@ -65,15 +40,20 @@ async function fullBashOutput(details: unknown): Promise<{ file: string; text: s
   return { file, text: info.size <= MAX_SOURCE_BYTES ? await readFile(file, "utf8") : undefined };
 }
 
-/** Spill an over-threshold tool result: keep head+tail inline, store the full text under .orche/artifacts. */
+/** Filter bash/grep results and spill oversized results, preserving full originals. */
 export interface SpillEvent {
   toolName: string;
+  input?: Record<string, unknown>;
   content: (TextContent | ImageContent)[];
   details?: unknown;
+  isError?: boolean;
+  structuredContent?: ToolResultEvent["structuredContent"];
 }
 export interface SpillResult {
   content: (TextContent | ImageContent)[];
   details?: unknown;
+  isError?: boolean;
+  structuredContent?: ToolResultEvent["structuredContent"];
 }
 
 export async function spillToolResult(event: SpillEvent, cwd: string): Promise<SpillResult | undefined> {
@@ -84,19 +64,33 @@ export async function spillToolResult(event: SpillEvent, cwd: string): Promise<S
   const full = event.toolName === "bash" ? await fullBashOutput(event.details).catch(() => undefined) : undefined;
   const piText = texts.join("\n");
   const text = full?.text ?? piText;
-  // The full output file lacks Pi's trailing exit/abort status line; carry it over.
-  const status = full ? /\n\n(Command [^\n]*)$/.exec(piText)?.[1] : undefined;
-  const preview = previewText(text);
-  if (preview === undefined && !full) return undefined;
-  const inline = preview ?? text;
+  // The full output file lacks Pi's trailing exit/abort/timeout status line.
+  const statusEnd = piText.endsWith("\n") ? piText.length - 1 : piText.length;
+  const statusStart = piText.lastIndexOf("\n", statusEnd - 1) + 1;
+  const lastLine = piText.slice(statusStart, Math.min(statusEnd, statusStart + 100));
+  const status = full && lastLine.startsWith("Command ")
+    ? `${lastLine}${statusEnd - statusStart > 100 ? `…[+${statusEnd - statusStart - 100} chars]` : ""}` : undefined;
+  const filtered = filterOutput(event.toolName, text, event.input);
+  const preview = filtered ?? genericPreview(text, event.toolName === "bash" || event.toolName === "grep");
+  if (!preview && !full) return undefined;
+  // Never inline the recovered full file when no reduction applies.
+  const inline = preview?.text ?? genericPreview(piText, event.toolName === "bash" || event.toolName === "grep")?.text ?? piText;
   let notice: string;
   try {
     const path = await saveArtifact(cwd, event.toolName, text, full?.file);
-    notice = `[Output truncated (${text.split("\n").length} lines, ${text.length} chars). Full output saved to ${path}; use read with offset/limit or grep to inspect it.]`;
+    const reason = preview?.reason ?? "Pi output truncation";
+    notice = `[Output ${filtered ? "filtered" : "truncated"}: ${reason}${preview?.omittedLines ? ` (${preview.omittedLines} lines omitted)` : ""}. Full output saved to ${path}; use read with offset/limit or grep to inspect it.]`;
   } catch (error) {
-    notice = `[Output truncated; saving the full output failed: ${error instanceof Error ? error.message : String(error)}]`;
+    notice = `[Output ${filtered ? "filtered" : "truncated"}; saving the full output failed: ${error instanceof Error ? error.message : String(error)}]`;
   }
-  return { content: [{ type: "text", text: `${inline}\n\n${notice}${status ? `\n${status}` : ""}` }, ...rest] };
+  // Keep the status in the output, but end with one artifact notice.
+  const resultText = `${inline}${status && !inline.endsWith(status) ? `\n${status}` : ""}\n\n${notice}`;
+  return {
+    content: [{ type: "text", text: resultText }, ...rest],
+    ...(event.isError === undefined ? {} : { isError: event.isError }),
+    // Pi's docs/extensions.md: replacing content alone drops structuredContent.
+    // Omit it rather than returning text that could violate the tool's outputSchema.
+  };
 }
 
 /** Session extension applying {@link spillToolResult} to every tool result (public `tool_result` hook). */
