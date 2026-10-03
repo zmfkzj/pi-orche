@@ -1,0 +1,16 @@
+{
+  "id": "d5-streaming-ingest-ko",
+  "title": "청크 경계와 손상된 로그를 견디는 스트리밍 수집",
+  "category": "robustness",
+  "language": "ko",
+  "instruction": "운영 NDJSON 로그 수집 경로를 개선하세요. 현재 구현은 청크 경계에서 JSON/UTF-8 문자가 잘리면 정상 이벤트를 잃고 큰 duration 값도 반올림합니다. decoder/parser/validator/aggregation/CLI를 함께 수정하고 테스트를 추가하세요. 외부 의존성은 사용하지 않습니다.\n\n공개 API:\n- readEvents(chunks,{strict=false,onError,maxLineBytes=65536}={})는 Uint8Array 바이트 청크의 async iterable을 받아 이벤트를 순서대로 내보내는 async generator입니다. UTF-8 문자는 청크 사이에 분할될 수 있습니다. LF/CRLF, 마지막 개행 없는 행을 지원하고 공백뿐인 행은 무시하되 실제 물리적 행 번호는 유지합니다.\n- 유효 이벤트는 {tenant,kind,duration,at}: tenant/kind는 빈 문자열이 아닌 문자열, duration은 음수가 아닌 십진 정수 문자열, at은 0 이상의 안전정수입니다. 그 네 필드만 결과에 남깁니다. duration을 Number로 변환하지 마세요.\n- JSON 오류는 INVALID_JSON, 필드 오류는 INVALID_EVENT, 행 제한 초과는 LINE_TOO_LONG 코드입니다. maxLineBytes는 양의 안전정수이며 UTF-8 바이트 단위(개행과 CRLF의 CR 제외)입니다. 초과 행은 다음 개행까지 버리고 한 번만 오류로 보고한 후 다음 정상 행부터 복구합니다. onError({line,code})는 잘못된 물리적 행당 한 번 호출되며 콜백 예외는 수집을 중단하지 않습니다. strict=true이면 첫 오류에서 같은 code,line 속성을 가진 Error를 던집니다.\n- aggregate(events)는 tenant+kind 조합별 {tenant,kind,count,sumDuration,maxDuration,firstAt,lastAt} 배열을 반환합니다. sumDuration/maxDuration은 정확한 정수 문자열, firstAt/lastAt은 최소/최대 at입니다. 결과는 tenant, 그 다음 kind의 JS 문자열 오름차순(비교 연산자 기준)으로 정렬하며 콜론 포함 키도 충돌하지 않습니다.\n- node src/cli.mjs [--strict] [--max-line-bytes N] 은 stdin을 읽고 결과 배열 JSON 한 줄을 stdout에 출력합니다. 오류 진단은 stderr에 {line,code} JSON 한 줄씩입니다. tolerant 모드는 오류가 있어도 종료 0, strict는 종료 1이며 부분 stdout 출력이 없어야 합니다. 잘못된 옵션은 종료 2입니다.\n엄격 모드와 관대 모드를 동일한 파서로 구현하고 대규모 입력 전체를 하나의 문자열로 먼저 모으지 마세요. node --test 를 유지하세요.",
+  "expectsChanges": true,
+  "timeoutSec": 1200,
+  "grading": {
+    "visibleTests": true,
+    "hiddenTests": true,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": false
+  }
+}

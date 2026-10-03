@@ -1,0 +1,1 @@
+import {createEngine} from './engine.mjs';export function createBuildService(options){const engine=createEngine(options);return {build:targets=>engine.build(targets),changed:id=>engine.invalidate(id)};}

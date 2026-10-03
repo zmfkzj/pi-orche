@@ -9,7 +9,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "validate:suite": "tsx scripts/validate-suite.ts"
   },
   "dependencies": {
     "@ast-grep/napi": "^0.45.3",

@@ -1,0 +1,7 @@
+08:01 tenant=alpha profile=17 load began
+08:02 admin invalidated alpha/17 after update
+08:02 profile 17 loaded with new name
+08:03 old request completed; following request returned old name
+08:04 one network retry failed during a concurrent reload
+08:05 slow request appears expired immediately after completing
+08:06 tenants 'a:b'/'a' and ids 'c'/'b:c' disagree on names

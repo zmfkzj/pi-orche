@@ -1,0 +1,2 @@
+import {validateInvoice} from './validation.mjs';import {calculateLine} from './line.mjs';import {addMoney,parseMoney} from './money.mjs';
+export function calculateInvoice(input){validateInvoice(input);const {currency}=input;const lines=input.lines.map(line=>calculateLine(line,currency,input.discountBps??0,input.taxBps??0));const result={currency,lines};for(const key of ['subtotal','discount','tax','total'])result[key]=lines.reduce((sum,line)=>addMoney(sum,line[key]),parseMoney('0',currency));return result;}

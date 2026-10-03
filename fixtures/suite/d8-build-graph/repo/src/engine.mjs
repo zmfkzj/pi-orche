@@ -1,0 +1,6 @@
+import {prepareGraph,affected} from './graph.mjs';import {fingerprint} from './fingerprint.mjs';import {fail} from './values.mjs';
+export function createEngine({graph:input,read,compile}){
+ const graph=prepareGraph(input),cache=new Map(),pending=new Map(),dirty=new Set(Object.keys(graph));
+ async function node(id){if(pending.has(id))return pending.get(id);if(!dirty.has(id)&&cache.has(id))return cache.get(id);const work=(async()=>{const deps=await Promise.all(graph[id].deps.map(node));const source=await read(graph[id].source),hash=fingerprint(source,deps.map(d=>d.hash));const previous=cache.get(id);if(previous?.hash===hash){dirty.delete(id);return previous;}const dependencies=Object.fromEntries(graph[id].deps.map((dep,i)=>[dep,deps[i].value]));const value=await compile({id,source,dependencies});const entry={hash,value};cache.set(id,entry);dirty.delete(id);pending.delete(id);return entry;})();pending.set(id,work);return work;}
+ return {invalidate:id=>{for(const node of affected(graph,id))dirty.add(node);},build:async targets=>{const result=[];await Promise.all(targets.map(async id=>{if(!Object.hasOwn(graph,id))fail('UNKNOWN_NODE');const artifact=await node(id);result.push({id,value:artifact.value});}));return result;}};
+}

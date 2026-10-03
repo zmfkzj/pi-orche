@@ -1,0 +1,16 @@
+{
+  "id": "d3-money-migration-ko",
+  "title": "통화별 정밀 금액 모델 마이그레이션",
+  "category": "migration",
+  "language": "ko",
+  "instruction": "현재 청구 시스템의 Number 기반 센트 계산을 통화별 bigint 금액 모델로 전환하세요. money, invoice, report, codec, CLI 등 모든 호출 경로를 함께 수정하고 회귀 테스트를 추가하세요. 외부 의존성 없이 node --test 를 사용합니다. 공개 진입점은 src/index.mjs 입니다.\n\n새 계약:\n- Money 는 {minor: bigint, currency: string} 입니다. 지원 통화는 USD(소수 2자리), JPY(0자리), KWD(3자리)뿐입니다. parseMoney(decimal,currency)는 부호가 선택적인 십진 문자열만 허용하고 통화 자릿수 초과, 공백, 지수 표기, 미지원 통화는 거부합니다. 매우 큰 금액도 정확해야 합니다. formatMoney는 해당 통화 자릿수를 항상 출력하며 음수 0은 만들지 않습니다.\n- addMoney는 같은 통화끼리만 더합니다. multiplyRatio(money,numerator,denominator)는 bigint 비율을 적용하고 가장 가까운 minor 단위로 반올림합니다. 정확히 절반이면 짝수 쪽(half-even)을 선택합니다. 음수에도 대칭으로 적용하고 denominator <= 0 은 거부합니다.\n- encodeMoney/decodeMoney는 JSON용 {minor: 십진 정수 문자열,currency}와 Money 사이를 엄격히 변환합니다. Number minor 나 다른 자료형을 묵시적으로 받아들이지 않습니다.\n- calculateInvoice({currency,lines:[{sku,price:십진문자열,quantity:양의 안전정수}],discountBps,taxBps})는 {currency,lines,subtotal,discount,tax,total}를 반환합니다. 각 lines 원소는 {sku,subtotal,discount,tax,total}이고 금액 필드는 모두 Money입니다. 할인(0..10000 정수 bps)은 각 행 subtotal 에 적용해 half-even 반올림, 세금(0..10000)은 할인 후 각 행 금액에 적용해 같은 방식으로 반올림합니다. 마지막으로 각 행을 합산합니다. 할인/세금은 생략하면 0입니다. 빈 행 목록, 음수 가격, 잘못된 quantity/bps 는 거부합니다.\n- buildReport(invoice)는 invoice의 모든 Money 필드를 formatMoney 문자열로 바꾸고 나머지 구조는 보존합니다. summarize(invoices)는 통화별 {currency,count,total:포맷문자열} 배열을 통화 코드 순으로 반환하며 다른 통화를 합치지 않습니다.\n- node src/cli.mjs 는 표준입력의 invoice 요청 JSON을 받아 buildReport(calculateInvoice(request)) JSON 한 줄을 출력합니다. 잘못된 입력은 종료 코드 1, stdout 공백이어야 합니다.\n기존 Number 센트 내부 구현과 모든 소비자를 함께 교체하고 정밀도 손실/통화 혼합을 방지하세요.",
+  "expectsChanges": true,
+  "timeoutSec": 1200,
+  "grading": {
+    "visibleTests": true,
+    "hiddenTests": true,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": false
+  }
+}

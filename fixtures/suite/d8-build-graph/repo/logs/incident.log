@@ -1,0 +1,6 @@
+09:00 common helper and bundle sources unchanged; cache hit
+09:01 helper changed 'old' to 'new' (same byte length), bundle returned old output
+09:02 two bundles requested simultaneously, shared helper compiled twice
+09:03 compiler temporarily failed; every later request returned that same error
+09:04 watcher invalidated helper while previous compile remained active
+09:05 independent target completed first and reordered API response

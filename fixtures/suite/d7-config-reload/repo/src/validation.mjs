@@ -1,0 +1,1 @@
+export function invalid(){throw Object.assign(Error('invalid config'),{code:'CONFIG_INVALID'});}export function validate(config){if(!config||typeof config!=='object'||Array.isArray(config))invalid();return config;}

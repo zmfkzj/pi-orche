@@ -1,0 +1,1 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {EventStore,listEvents} from '../src/index.mjs';test('one event page',()=>{const store=new EventStore();store.append({tenant:'a',id:'1',kind:'x',at:1,payload:{}});assert.equal(listEvents(store,{tenant:'a',secret:'s'}).items.length,1);});

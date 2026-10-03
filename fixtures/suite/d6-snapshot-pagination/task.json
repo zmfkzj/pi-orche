@@ -1,0 +1,16 @@
+{
+  "id": "d6-snapshot-pagination",
+  "title": "Signed snapshot pagination across event modules",
+  "category": "feature",
+  "language": "en",
+  "instruction": "Implement append-only tenant event pagination across storage, querying, cursor encoding, validation and HTTP adapter. Preserve the exports from src/index.mjs, use only Node built-ins, and add tests.\n\nEventStore.append({tenant,id,at,kind,payload}) synchronously validates nonempty string tenant/id/kind and nonnegative safe-integer at, rejects duplicate tenant+id (code DUPLICATE_EVENT), assigns an increasing global seq and detaches input/returned records. EventStore.rows() returns detached records; EventStore.sequence() returns the largest assigned sequence (0 initially). Do not mutate or remove stored events.\n\nlistEvents(store,{tenant,kind,limit=20,cursor,secret}) returns {items,nextCursor}. Validate tenant, optional nonempty string kind, integer limit 1..100 and nonempty string secret. Events are filtered by tenant/optional kind and sorted by at ascending then id ascending using JS string comparison, not locale collation. The first page captures store.sequence(); subsequent pages include ONLY seq <= that snapshot, even if new events have earlier at. Page boundaries are the full (at,id) tuple, so equal timestamps neither skip nor duplicate ids. A cursor is returned only if matching snapshot records remain. Changing limit between pages is allowed.\n\nCursor tokens use base64url(JSON payload) + '.' + base64url(HMAC-SHA256(payload segment,secret)). Payload is {version:1,tenant,kind:null|string,snapshot,last:{at,id}}. Reject tampering, wrong secret, wrong tenant/kind, malformed fields, unsafe/negative/future snapshot, invalid version or boundary with code INVALID_CURSOR. Validate decoded structure even when signature is valid. Do not trust unsigned offset/base64 tokens. createHandler(store,secret) accepts a request {tenant,query:{kind,limit,cursor}} and returns {status:200,body:page}; invalid query/cursor returns status 400 with {error:code}, without leaking secret/internal stack. HTTP query limit is a decimal string and must parse strictly (no '2x', 1.5, or 0). Contract validation errors use code INVALID_QUERY. The repository starts with offset pagination and placeholder token helpers; finish the new behavior throughout.",
+  "expectsChanges": true,
+  "timeoutSec": 1200,
+  "grading": {
+    "visibleTests": true,
+    "hiddenTests": true,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": false
+  }
+}

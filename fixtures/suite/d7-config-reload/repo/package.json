@@ -1,0 +1,1 @@
+{"name": "d7-config-reload", "private": true, "type": "module", "scripts": {"test": "node --test"}}

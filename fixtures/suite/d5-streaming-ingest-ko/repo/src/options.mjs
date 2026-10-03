@@ -1,0 +1,1 @@
+export function parseOptions(args){let strict=false,maxLineBytes=65536;for(let i=0;i<args.length;i++){if(args[i]==='--strict')strict=true;else if(args[i]==='--max-line-bytes'){maxLineBytes=Number(args[++i]);if(!Number.isSafeInteger(maxLineBytes)||maxLineBytes<=0)throw Error('bad limit');}else throw Error('unknown option');}return {strict,maxLineBytes};}

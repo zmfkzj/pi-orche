@@ -1,0 +1,2 @@
+import {validString,fail} from './validation.mjs';
+export class EventStore{constructor(){this.events=[];this.seq=0;}append(event){if(!validString(event.tenant)||!validString(event.id)||!validString(event.kind)||!Number.isSafeInteger(event.at)||event.at<0)fail('INVALID_QUERY');if(this.events.some(row=>row.tenant===event.tenant&&row.id===event.id))fail('DUPLICATE_EVENT');const row=structuredClone({...event,seq:this.seq+1});this.seq++;this.events.push(row);return structuredClone(row);}rows(){return structuredClone(this.events);}sequence(){return this.seq;}}

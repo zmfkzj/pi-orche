@@ -1,0 +1,2 @@
+import {DEFAULTS} from './defaults.mjs';import {validate} from './validation.mjs';import {freeze} from './merge.mjs';
+export function createConfigManager({load,initial=DEFAULTS,onError}){let current=freeze(validate({...initial}));const listeners=new Set();return {get:()=>current,subscribe:listener=>{listeners.add(listener);return ()=>listeners.delete(listener);},reload:async path=>{const next=freeze(validate(await load(path)));const previous=current;current=next;for(const listener of listeners)listener(next,previous);return {applied:true,config:current};}};}

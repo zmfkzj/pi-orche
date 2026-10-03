@@ -1,0 +1,4 @@
+import {formatMoney,addMoney,parseMoney} from './money.mjs';
+export function buildReport(invoice){const result={...invoice,lines:invoice.lines.map(buildLine)};for(const key of ['subtotal','discount','tax','total'])result[key]=formatMoney(invoice[key]);return result;}
+function buildLine(line){const out={sku:line.sku};for(const key of ['subtotal','discount','tax','total'])out[key]=formatMoney(line[key]);return out;}
+export function summarize(invoices){const groups=new Map();for(const invoice of invoices){const group=groups.get(invoice.currency)||{currency:invoice.currency,count:0,total:parseMoney('0',invoice.currency)};group.count++;group.total=addMoney(group.total,invoice.total);groups.set(invoice.currency,group);}return [...groups.values()].sort((a,b)=>a.currency.localeCompare(b.currency)).map(g=>({...g,total:formatMoney(g.total)}));}

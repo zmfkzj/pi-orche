@@ -1,0 +1,1 @@
+{"name": "d6-snapshot-pagination", "private": true, "type": "module", "scripts": {"test": "node --test"}}

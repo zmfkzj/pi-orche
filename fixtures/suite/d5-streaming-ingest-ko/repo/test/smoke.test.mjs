@@ -1,0 +1,1 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {readEvents,aggregate} from '../src/index.mjs';test('one complete event',async()=>{const result=await aggregate(readEvents([Buffer.from(JSON.stringify({tenant:'a',kind:'x',duration:'2',at:1}))]));assert.equal(result[0].sumDuration,'2');});

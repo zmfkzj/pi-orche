@@ -1,0 +1,1 @@
+import {listEvents} from './query.mjs';export function createHandler(store,secret){return request=>{try{return {status:200,body:listEvents(store,{tenant:request.tenant,...request.query,limit:request.query?.limit===undefined?20:parseInt(request.query.limit,10),secret})};}catch(error){return {status:400,body:{error:error.code||'INVALID_QUERY'}};}};}

@@ -1,0 +1,1 @@
+export function validateEvent(value){if(!value||typeof value.tenant!=='string'||!value.tenant||typeof value.kind!=='string'||!value.kind||typeof value.duration!=='string'||!/^\d+$/.test(value.duration)||!Number.isSafeInteger(value.at)||value.at<0)throw Error('INVALID_EVENT');return {tenant:value.tenant,kind:value.kind,duration:value.duration,at:value.at};}

@@ -1,0 +1,16 @@
+{
+  "id": "d4-cache-fencing",
+  "title": "Stale cache poisoning after tenant invalidation",
+  "category": "bugfix",
+  "language": "en",
+  "instruction": "Investigate stale and cross-tenant profile responses described in logs/incident.log. The HTTP retry policy, TTL clock, profile normalization and cache are all possible causes. Fix the actual defects, retain the adapters, and add deterministic regressions. Do not globally serialize fetches or disable caching/coalescing.\n\nPublic createCache({clock,ttl}) exposes get(tenant,id,load), invalidate(tenant,id), clearTenant(tenant), stats(). tenant/id are strings. ttl is positive and clock is injected (no Date.now in core). Cache keys are tenant+id tuples, not delimiter-ambiguous concatenation. Equal-key requests coalesce while loading; different keys proceed independently. Successful values are cached for ttl time units measured from LOAD COMPLETION, and expire at clock() >= expires. Rejected loads propagate, are never cached and can be retried. Cached and in-flight responses must be detached for each caller, so caller mutations cannot contaminate another response.\n\ninvalidate fences both cached and in-flight generations: existing readers may finish with their original value, but a reader starting after invalidation must use a new load. A stale success or failure must neither repopulate the cache nor erase a newer in-flight/value entry. clearTenant fences every known key for that tenant without affecting others. stats() returns {hits,misses,coalesced}: cached reuse counts hit, a new load counts miss, joining an active current-generation load counts coalesced. Adapter createProfileService(client,cache).get(tenant,id) must pass tenant through to client.fetchProfile(tenant,id). Maintain native Node tests and no dependencies.",
+  "expectsChanges": true,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": true,
+    "hiddenTests": true,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": false
+  }
+}

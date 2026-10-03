@@ -1,0 +1,16 @@
+{
+  "id": "d2-keyed-queue",
+  "title": "Intermittent keyed queue reordering",
+  "category": "bugfix",
+  "language": "en",
+  "instruction": "Jobs occasionally overtake earlier jobs for the same account, and shutdown sometimes returns before accepted work has finished. Inspect src/, logs/incident.log and the native tests; find and fix the underlying causes and add deterministic regressions. The timer, retry helper and job normalizer are plausible suspects, but do not replace the queue with a single global serial executor or add arbitrary sleeps.\n\nThe public createQueue({onEvent}) API returns submit(key,fn), drain(), close(), and stats(). A key is a nonempty string, fn is a function; invalid submissions reject without events or counter changes. Accepted work starts in FIFO submission order per key, with at most one running function for that key; different keys progress independently. A thrown/rejected job rejects only its own submission, never poisons later work. drain() is a fence for ALL jobs accepted before that call (including queued ones); work accepted later must not delay that particular fence. close() stops acceptance immediately, rejects new submissions with code QUEUE_CLOSED, and resolves only once accepted jobs finish; repeated close() calls have the same effect.\n\nstats() returns {accepted,completed,failed,running,pending}, where pending means accepted but not yet started. Event callback receives {type:'start'|'finish',key}; callback failures are ignored, job failures still count as completed and failed. Preserve the existing service/client adapters and genuine per-key parallelism. No external dependencies.",
+  "expectsChanges": true,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": true,
+    "hiddenTests": true,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": false
+  }
+}

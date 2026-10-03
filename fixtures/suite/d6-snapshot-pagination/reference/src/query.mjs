@@ -1,0 +1,4 @@
+import {validateQuery,fail} from './validation.mjs';import {compareEvents,after} from './order.mjs';import {encodeCursor,decodeCursor} from './cursor.mjs';
+export function listEvents(store,{tenant,kind,limit=20,cursor,secret}){validateQuery({tenant,kind,limit,secret});let snapshot=store.sequence(),last;
+ if(cursor!==undefined&&cursor!==null){const p=decodeCursor(cursor,secret);if(p.tenant!==tenant||p.kind!==(kind??null)||p.snapshot>snapshot)fail('INVALID_CURSOR');snapshot=p.snapshot;last=p.last;}
+ const rows=store.rows().filter(e=>e.tenant===tenant&&(kind===undefined||e.kind===kind)&&e.seq<=snapshot&&(!last||after(e,last))).sort(compareEvents);const items=rows.slice(0,limit);const tail=items.at(-1);return {items,nextCursor:rows.length>limit?encodeCursor({version:1,tenant,kind:kind??null,snapshot,last:{at:tail.at,id:tail.id}},secret):null};}

@@ -1,0 +1,16 @@
+{
+  "id": "d1-transactional-outbox",
+  "title": "Tenant-scoped transactional outbox",
+  "category": "feature",
+  "language": "en",
+  "instruction": "Implement reliable order placement and outbox delivery across the existing service, storage, repository and worker modules. Keep zero dependencies and the exported interfaces in src/index.mjs. node --test must remain green; add regression coverage.\n\nContracts:\n- placeOrder(db,{tenant,idempotencyKey,items}) returns a detached order {id,tenant,items,total}. Validate a nonempty tenant/key and nonempty items with positive integer quantity and nonnegative safe-integer price; totals must be safe integers. Validation failures leave all tables unchanged.\n- A tenant/key is idempotent across concurrent requests. Reusing it with the same items returns the original order (no extra event); different items rejects with code IDEMPOTENCY_CONFLICT. Different tenants may reuse keys. Caller mutations must not affect storage.\n- Each newly placed order atomically creates one event {id,tenant,type:'order.placed',orderId,payload:{total}}; a failure at any transaction stage rolls back orders, keys AND events. db.failNext(stage) supports stages 'order', 'key', 'event' as a test/fault-injection hook.\n- db.transaction(fn) awaits fn(tx), serializes transactions, and isolates mutable state until commit. Rejections must not poison later transactions. Public db.rows(table) returns detached rows.\n- dispatch(db,send,{now,leaseMs,limit}) claims at most limit pending/expired events in insertion order, atomically before calling send. send calls may run concurrently. Concurrent dispatchers never send an unexpired claimed event twice. send receives a detached event. Success marks delivered; rejection releases for retry and increments attempts once per claim. Dispatch resolves {delivered,failed}. Claims have ownership: a late completion after its lease was reclaimed cannot modify the new owner's state. now is a supplied integer clock, leaseMs/limit positive integers. Delivered events are never re-sent.\nDo not change these contracts to avoid races, remove fault injection, or serialize delivery globally. The starter contains the unconnected building blocks; finish the complete feature.",
+  "expectsChanges": true,
+  "timeoutSec": 1200,
+  "grading": {
+    "visibleTests": true,
+    "hiddenTests": true,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": false
+  }
+}

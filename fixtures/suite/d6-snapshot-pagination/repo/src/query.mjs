@@ -1,0 +1,2 @@
+import {validateQuery} from './validation.mjs';import {compareEvents} from './order.mjs';import {encodeCursor,decodeCursor} from './cursor.mjs';
+export function listEvents(store,{tenant,kind,limit=20,cursor,secret}){validateQuery({tenant,kind,limit,secret});const offset=cursor?decodeCursor(cursor,secret).offset:0;const rows=store.rows().filter(e=>e.tenant===tenant&&(!kind||e.kind===kind)).sort(compareEvents);return {items:rows.slice(offset,offset+limit),nextCursor:offset+limit<rows.length?encodeCursor({offset:offset+limit},secret):null};}

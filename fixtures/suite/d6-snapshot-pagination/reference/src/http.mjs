@@ -1,0 +1,2 @@
+import {listEvents} from './query.mjs';import {fail} from './validation.mjs';
+export function createHandler(store,secret){return request=>{try{const query=request.query??{};if(query.limit!==undefined&&(typeof query.limit!=='string'||!/^\d+$/.test(query.limit)))fail('INVALID_QUERY');return {status:200,body:listEvents(store,{tenant:request.tenant,kind:query.kind,cursor:query.cursor,limit:query.limit===undefined?20:Number(query.limit),secret})};}catch(error){return {status:400,body:{error:error.code==='INVALID_CURSOR'?'INVALID_CURSOR':'INVALID_QUERY'}};}};}

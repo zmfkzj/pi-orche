@@ -1,0 +1,1 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {DEFAULTS,createConfigManager,createServer} from '../src/index.mjs';test('default server',()=>{const manager=createConfigManager({load:async()=>DEFAULTS});assert.deepEqual(createServer(manager).handle(),{host:'127.0.0.1',port:8080,audit:false});});

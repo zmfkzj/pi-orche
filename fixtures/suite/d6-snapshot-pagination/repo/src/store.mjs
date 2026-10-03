@@ -1,0 +1,2 @@
+import {validString,fail} from './validation.mjs';
+export class EventStore{constructor(){this.events=[];this.seq=0;}append(event){if(!validString(event.tenant)||!validString(event.id)||!validString(event.kind)||!Number.isSafeInteger(event.at)||event.at<0)fail('INVALID_QUERY');const row={...event,seq:++this.seq};this.events.push(row);return row;}rows(){return [...this.events];}sequence(){return this.seq;}}

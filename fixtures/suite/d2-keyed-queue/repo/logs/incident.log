@@ -1,0 +1,6 @@
+12:00:00 account=a submitted J1,J2
+12:00:01 J1 finished; account=a submitted J3
+12:00:01 J3 start while J2 is still running
+12:00:02 observer 'finish' handler threw once
+12:00:03 failed request from account=b; subsequent writes never started
+12:00:04 shutdown asked to flush; one account failed with network timeout

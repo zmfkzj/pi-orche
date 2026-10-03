@@ -1,0 +1,3 @@
+import {DEFAULTS} from './defaults.mjs';import {validate} from './validation.mjs';import {freeze,safe} from './merge.mjs';
+const snapshot=value=>freeze(validate(safe(structuredClone(value))));
+export function createConfigManager({load,initial=DEFAULTS,onError}){let current=snapshot(initial),issued=0;const listeners=new Set();return {get:()=>current,subscribe:listener=>{listeners.add(listener);return ()=>listeners.delete(listener);},reload:async path=>{const ticket=++issued;const next=snapshot(await load(path));if(ticket!==issued)return {applied:false,config:current};const previous=current;current=next;for(const listener of [...listeners]){try{listener(next,previous);}catch(error){try{onError?.(error);}catch{}}}return {applied:true,config:current};}};}

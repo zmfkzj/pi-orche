@@ -1,0 +1,2 @@
+import {parseMoney,multiplyRatio,addMoney} from './money.mjs';
+export function calculateLine(line,currency,discountBps,taxBps){const subtotal=multiplyRatio(parseMoney(line.price,currency),BigInt(line.quantity),1n),discount=multiplyRatio(subtotal,BigInt(discountBps),10000n),net=addMoney(subtotal,{minor:-discount.minor,currency}),tax=multiplyRatio(net,BigInt(taxBps),10000n);return {sku:line.sku,subtotal,discount,tax,total:addMoney(net,tax)};}

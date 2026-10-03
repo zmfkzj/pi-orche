@@ -1,0 +1,16 @@
+{
+  "id": "d8-build-graph",
+  "title": "Incremental build graph stale artifact incident",
+  "category": "performance",
+  "language": "en",
+  "instruction": "The incremental build service sometimes serves stale bundles, repeats compilation of shared dependencies, and never recovers after a compiler failure. Investigate src/ and logs/incident.log, reproduce without sleeps, fix the underlying problems across modules and add regression tests. Do not disable incremental caching, serialize all compilation, or change the compiler interface. Use Node ESM/built-ins only.\n\ncreateEngine({graph,read,compile}) accepts graph {id:{source:string,deps:string[]}}. Validate the WHOLE graph immediately: source must be nonempty string; dependencies must exist and be unique; cycles anywhere (even disconnected from a requested target) reject with code GRAPH_CYCLE before read/compile. Other invalid graphs reject GRAPH_INVALID. Detach graph input. read(sourcePath) asynchronously returns a source string. compile({id,source,dependencies}) returns an arbitrary cloneable artifact; dependencies is an object mapping each dependency id to its artifact.\n\nengine.build(targets) resolves [{id,value}] in requested target order; duplicate targets are removed keeping first occurrence. Unknown targets reject code UNKNOWN_NODE before any I/O. Dependencies compile before parents, independent branches progress concurrently. Every node is read/compiled at most once per generation across overlapping builds; shared diamond dependencies coalesce. Rejected reads/compiles reject affected builds but do not poison future builds. Returned artifacts and dependency arguments are detached from the cache.\n\nengine.invalidate(id) marks that node AND all transitive reverse dependents dirty, not unrelated nodes; unknown id rejects UNKNOWN_NODE. On the next build, dirty nodes re-read source. Recompile only when a content fingerprint changes: full source text + ordered dependency content fingerprints, NOT mtime or source length. If invalidation finds unchanged content, reuse the previous artifact and do not recompile parents. Unaffected clean nodes must not be re-read. First build compiles every needed node.\n\nInvalidation can occur while a read/compile is in flight. A build that was already accepted may finish its original generation, but a subsequent build must start a fresh generation for affected nodes and must not join the stale work. A stale completion cannot replace a newer cache entry. Do not expose partially updated global artifacts. Native tests should use injected readers/compilers and promise barriers; verify incremental work by call counts rather than timing thresholds.",
+  "expectsChanges": true,
+  "timeoutSec": 1200,
+  "grading": {
+    "visibleTests": true,
+    "hiddenTests": true,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": false
+  }
+}

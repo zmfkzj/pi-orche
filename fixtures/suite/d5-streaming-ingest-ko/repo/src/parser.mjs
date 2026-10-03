@@ -1,0 +1,2 @@
+import {lines} from './decoder.mjs';import {validateEvent} from './validation.mjs';import {rowError} from './errors.mjs';
+export async function* readEvents(chunks,{strict=false,onError,maxLineBytes=65536}={}){let line=0;for await(const text of lines(chunks)){line++;if(!text.trim())continue;try{yield validateEvent(JSON.parse(text));}catch(error){const code=error.message==='INVALID_EVENT'?'INVALID_EVENT':'INVALID_JSON';onError?.({line,code});if(strict)throw rowError(code,line);}}}

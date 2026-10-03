@@ -1,0 +1,2 @@
+import {parseMoney} from './money.mjs';
+export function validateInvoice(input){if(!Array.isArray(input.lines)||!input.lines.length)throw new TypeError('empty lines');for(const line of input.lines){if(!Number.isSafeInteger(line.quantity)||line.quantity<=0||parseMoney(line.price,input.currency).minor<0n)throw new TypeError('line');}for(const name of ['discountBps','taxBps']){const bps=input[name]??0;if(!Number.isSafeInteger(bps)||bps<0||bps>10000)throw new TypeError('bps');}}

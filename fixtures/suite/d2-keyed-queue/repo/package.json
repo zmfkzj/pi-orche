@@ -1,0 +1,1 @@
+{"name": "d2-keyed-queue", "private": true, "type": "module", "scripts": {"test": "node --test"}}

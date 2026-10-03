@@ -1,0 +1,1 @@
+{"name": "d4-cache-fencing", "private": true, "type": "module", "scripts": {"test": "node --test"}}

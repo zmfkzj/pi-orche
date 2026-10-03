@@ -1,0 +1,16 @@
+{
+  "id": "d7-config-reload",
+  "title": "Atomic config reload across server and worker consumers",
+  "category": "robustness",
+  "language": "en",
+  "instruction": "Finish the shared configuration loading/reload feature. Includes, validation, immutable snapshots and live consumers must work together. The public exports are in src/index.mjs. Add regressions with injected asynchronous reads/loaders rather than sleeps. Keep Node ESM and zero dependencies.\n\nloadConfig(path,{read,defaults=DEFAULTS}) resolves path to an absolute normalized filesystem path; read(absolutePath) asynchronously returns a JSON string. A file can contain include:string[] (relative to that file). Recursively merge includes left-to-right, then that file's own fields, with defaults as the bottom layer. Merge objects recursively; arrays and scalar values replace (do not concatenate); never mutate defaults/loaded objects. Strip include from the result. Detect include cycles by active path, with code CONFIG_CYCLE, but allow shared includes in a DAG. Reject non-object JSON roots, invalid include types, and dangerous keys '__proto__', 'constructor', 'prototype' at any depth with code CONFIG_INVALID. Errors from read must propagate unchanged.\n\nThe resolved snapshot requires server.host nonempty string, server.port integer 1..65535, limits.workers integer 1..32, features an object of boolean values. Unknown ordinary fields are preserved. DEFAULTS is {server:{host:'127.0.0.1',port:8080},limits:{workers:2},features:{audit:false}}. Return a recursively frozen detached snapshot, including nested arrays/metadata.\n\ncreateConfigManager({load,initial=DEFAULTS,onError}) exposes get(), reload(path), subscribe(listener). Validate/freeze initial too. reload awaits load(path), validates and freezes the candidate, and atomically publishes only if it is the LATEST ISSUED reload. An older slow success must never overwrite a newer request, even if that newer request FAILED. Failed loads/validation reject their reload and leave the current snapshot unchanged. Success returns {applied:boolean,config:currentSnapshot}. Subscribers run only on applied commits, in registration order, with (next,previous), exactly once each. A subscriber exception cannot stop publication or later listeners; report it to onError and ignore onError exceptions. subscribe returns an unsubscribe function. Listeners are synchronous.\n\ncreateServer(manager).handle() returns {host,port,audit} from the current snapshot each time. createWorker(manager).settings() returns {workers,audit} from the current snapshot each time. Consumers must not retain the construction-time config. No partial configuration may become visible during a reload.",
+  "expectsChanges": true,
+  "timeoutSec": 1200,
+  "grading": {
+    "visibleTests": true,
+    "hiddenTests": true,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": false
+  }
+}
