@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { appendFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
+import { finished } from 'node:stream/promises';
 import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -54,22 +55,29 @@ const empty = (): UsageTotals => ({ requests: 0, input: 0, output: 0, cacheRead:
 /** Bounded process group, streaming full artifacts while keeping only small diagnostic tails in memory. */
 export async function runProcess(command: string, args: string[], options: { cwd: string; timeoutMs: number; stdoutFile?: string; stderrFile?: string; env?: NodeJS.ProcessEnv }): Promise<ProcessResult> {
   const child = spawn(command, args, { cwd: options.cwd, env: options.env ?? process.env, detached: true, stdio: ['ignore','pipe','pipe'] });
-  const stdoutFile = options.stdoutFile ? createWriteStream(options.stdoutFile) : undefined;
-  const stderrFile = options.stderrFile ? createWriteStream(options.stderrFile) : undefined;
+  let outputError: Error | undefined;
+  const openOutput = (path?: string) => {
+    if (!path) return undefined;
+    const stream = createWriteStream(path);
+    stream.on('error', error => { outputError ??= error; });
+    return stream;
+  };
+  const stdoutFile = openOutput(options.stdoutFile), stderrFile = openOutput(options.stderrFile);
   let stdout = '', stderr = '', timedOut = false;
   const timer = setTimeout(() => { timedOut = true; try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { /* Already exited. */ } }, options.timeoutMs);
-  child.stdout.on('data', chunk => { stdoutFile?.write(chunk); stdout = (stdout + String(chunk)).slice(-256_000); });
-  child.stderr.on('data', chunk => { stderrFile?.write(chunk); stderr = (stderr + String(chunk)).slice(-256_000); });
+  child.stdout.on('data', chunk => { if (stdoutFile && !outputError && !stdoutFile.destroyed) stdoutFile.write(chunk); stdout = (stdout + String(chunk)).slice(-256_000); });
+  child.stderr.on('data', chunk => { if (stderrFile && !outputError && !stderrFile.destroyed) stderrFile.write(chunk); stderr = (stderr + String(chunk)).slice(-256_000); });
   const { promise, resolve: finish } = Promise.withResolvers<ProcessResult>();
   child.once('error', error => finish({ exitCode: null, signal: null, timedOut, stdout, stderr: error.message }));
   child.once('close', (exitCode, signal) => finish({ exitCode, signal, timedOut, stdout, stderr }));
   const result = await promise;
   clearTimeout(timer);
-  await Promise.all([stdoutFile, stderrFile].filter(Boolean).map(stream => {
-    const { promise, resolve: done, reject } = Promise.withResolvers<void>();
-    stream!.once('error', reject); stream!.end(done);
-    return promise;
+  await Promise.all([stdoutFile, stderrFile].map(async stream => {
+    if (!stream) return;
+    stream.end();
+    await finished(stream).catch(error => { outputError ??= error; });
   }));
+  if (outputError) throw outputError;
   return result;
 }
 export async function listFiles(dir: string): Promise<string[]> {

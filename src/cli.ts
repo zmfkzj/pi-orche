@@ -10,8 +10,14 @@ if (!values.cwd || Boolean(values.problem) === Boolean(values["problem-file"])) 
 const problem = values.problem ?? await readFile(values["problem-file"]!, "utf8");
 const routes = applyRouteOverrides(await loadRouteConfig(values.config), values.route ?? []);
 const stream = values.events ? createWriteStream(values.events) : undefined;
+let streamError: Error | undefined;
+stream?.on("error", error => { streamError ??= error; });
 try {
-  const report = await runOrchestrated({ cwd: resolve(values.cwd), problem, routes, sink: event => { stream?.write(JSON.stringify(event) + "\n"); } });
+  const report = await runOrchestrated({ cwd: resolve(values.cwd), problem, routes, sink: event => { if (stream && !streamError && !stream.destroyed) stream.write(JSON.stringify(event) + "\n"); } });
   console.log(JSON.stringify(report, null, 2));
   if (report.status !== "done") process.exitCode = 1;
-} finally { stream?.end(); if (stream) await finished(stream); }
+} finally {
+  stream?.end();
+  if (stream) await finished(stream).catch(error => { streamError ??= error; });
+  if (streamError) { console.error(`Events output failed: ${streamError.message}`); process.exitCode = 1; }
+}

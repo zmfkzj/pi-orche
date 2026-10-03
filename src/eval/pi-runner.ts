@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { appendFileSync, writeFileSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
@@ -211,6 +211,7 @@ export async function runPi(options: PiRunnerOptions): Promise<RunnerResult> {
   const arm = buildStudyArm(options.arm ?? options.promptVariant ?? 'C0', options.baseModel), armMetadata = studyArmMetadata(arm);
   await mkdir(outDir, { recursive: true });
   const input = join(outDir, 'runner-input.json'), output = join(outDir, 'runner-result.json');
+  await rm(output, { force: true });
   await writeFile(input, JSON.stringify({ ...options, outDir }));
   const root = fileURLToPath(new URL('../../', import.meta.url));
   const args = ['tsx', fileURLToPath(import.meta.url), '--child', input, '--result', output];
@@ -219,6 +220,7 @@ export async function runPi(options: PiRunnerOptions): Promise<RunnerResult> {
   const limits = evalRunLimits(options.timeoutSec);
   const processResult = await runProcess('npx', args, { cwd: root, timeoutMs: (options.timeoutSec + 30) * 1000, stdoutFile: join(outDir, 'stdout.txt'), stderrFile: join(outDir, 'stderr.txt') });
   try {
+    if (processResult.timedOut || processResult.exitCode !== 0 || processResult.signal !== null) throw new Error(processResult.timedOut ? 'Pi child timed out' : `Pi child exited ${processResult.exitCode}${processResult.signal ? ` (${processResult.signal})` : ''}`);
     const raw: unknown = JSON.parse(await readFile(output, 'utf8'));
     if (!Value.Check(runnerResultSchema, raw)) throw new Error('Malformed Pi child result');
     return { ...raw, startedAt, finishedAt: Date.now(), command: ['npx', ...args, JSON.stringify({ arm: armMetadata, limits })] };
