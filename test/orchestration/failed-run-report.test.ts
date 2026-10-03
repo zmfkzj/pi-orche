@@ -47,7 +47,7 @@ describe("a failed run keeps what it produced", () => {
   it("change run with a real ownership violation: the approved result stays next to the failure summary", async () => {
     const dir = await repo();
     const outcome = await run(dir, [
-      decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "small change" }),
+      decision({ type: "classify", taskClass: "change", workerCount: 2, language: "en", reason: "explicit ownership" }),
       decision({ type: "assign", tasks: [task] }),
       tool("write", { path: "core.mjs", content: "export const value = 1;\n" }),
       tool("bash", { command: "echo stray > stray.txt && echo changed > other.mjs" }),
@@ -112,7 +112,7 @@ describe("a failed run keeps what it produced", () => {
   it("without any result the answer stays the failure summary and nothing is marked", async () => {
     const dir = await repo();
     const outcome = await run(dir, [
-      decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "small change" }),
+      decision({ type: "classify", taskClass: "change", workerCount: 2, language: "en", reason: "explicit ownership" }),
       decision({ type: "fail", reason: "cannot plan this" }),
     ]);
     expect(outcome.report).toMatchObject({ status: "failed", summary: "cannot plan this", answer: "cannot plan this" });
@@ -137,7 +137,7 @@ describe("changes made outside the run", () => {
   it("never decide the status: a finished run names them as a warning in its summary and its text", async () => {
     const dir = await repo();
     const outcome = await run(dir, [
-      decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "small change" }),
+      decision({ type: "classify", taskClass: "change", workerCount: 2, language: "en", reason: "explicit ownership" }),
       decision({ type: "assign", tasks: [task] }),
       // Another process writes while the worker is only thinking: no worker tool is running.
       () => { sh(dir, "echo from-elsewhere > elsewhere.txt"); return tool("write", { path: "core.mjs", content: "export const value = 1;\n" }); },
@@ -160,7 +160,7 @@ describe("changes made outside the run", () => {
   it("a failed run restores only its own files and lists the external one as do-not-restore", async () => {
     const dir = await repo();
     const outcome = await run(dir, [
-      decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "small change" }),
+      decision({ type: "classify", taskClass: "change", workerCount: 2, language: "en", reason: "explicit ownership" }),
       decision({ type: "assign", tasks: [task] }),
       () => { sh(dir, "echo from-elsewhere > elsewhere.txt"); return tool("bash", { command: "echo stray > stray.txt" }); },
       tool("report_result", { kind: "implement", summary: "done", data: { status: "done" } }),

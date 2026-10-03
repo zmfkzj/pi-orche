@@ -14,6 +14,7 @@ import { describeWorkspaceChanges, inspectSubmodules, type SubmoduleState } from
 import type { RouteConfig } from "../orchestration/routing.js";
 import { createRunRecord, pruneRecordsOnce, resolveRecords, type ResolvedRecords, type RunRecord } from "./records.js";
 import { formatExtensionSummary } from "../orchestration/run/extension.js";
+import type { FailedHandover, RunHandoverWorker } from "../orchestration/run/types.js";
 
 export class OrcheBusyError extends Error {
   override readonly name = "OrcheBusyError";
@@ -43,6 +44,9 @@ export interface OrcheRunArgs {
    * concurrent-session warning, if any). With a warning the first {@link OrcheRunArgs.onProgress} call carries the timing instead.
    */
   onTiming?: (timing: RunTiming, lines: readonly string[]) => void;
+  /** Extension-only recovery; omitted when orche_task is unavailable. */
+  onFailedHandover?: (handover: FailedHandover, assignmentRequests: number, signal: AbortSignal) => readonly RunHandoverWorker[] | Promise<readonly RunHandoverWorker[]>;
+  handoverSkipped?: string;
   /**
    * The calling Pi session (`ctx.sessionManager`): its file and id are never reported as another session, and its
    * directory locates the session store scanned for other sessions.
@@ -100,6 +104,9 @@ export interface OrcheRunDetails {
   extensions?: RunReport["extensions"];
   cancellation?: RunReport["cancellation"];
   cleanup?: RunReport["cleanup"];
+  handover?: RunReport["handover"];
+  remainingIssues?: RunReport["remainingIssues"];
+  handoverSkipped?: string;
   /** Other pi sessions that were active on the repository when the run started (the run was flagged with `concurrentActivity`). */
   concurrentSessions?: ConcurrentActivitySummary;
   /** The record directory of this run (`<agent dir>/orche/records/<session>/<timestamp>_run-<id>`): manifest, events and sub-session transcripts. Absent when records are off or could not be written. */
@@ -192,12 +199,25 @@ export class OrcheController {
     await this.active?.done.catch(() => undefined);
   }
 
-  modelRuntime(): Promise<ModelRuntime> {
+  async modelRuntime(signal?: AbortSignal): Promise<ModelRuntime> {
+    signal?.throwIfAborted();
     const created = (this.runtime ??= (this.options.createRuntime ?? (() => ModelRuntime.create()))());
     created.catch(() => {
       if (this.runtime === created) this.runtime = undefined;
     });
-    return created;
+    if (!signal) return created;
+    let onAbort: () => void = () => {};
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      onAbort = () => {
+        // An uncooperative startup must not poison the next task's cached runtime.
+        if (this.runtime === created) this.runtime = undefined;
+        reject(signal.reason ?? new Error("cancelled"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+    try { return await Promise.race([created, cancelled]); }
+    finally { signal.removeEventListener("abort", onAbort); }
   }
 
   /**
@@ -424,6 +444,7 @@ export class OrcheController {
         ...(concurrent ? { concurrentActivity: concurrent.activity } : {}),
         ...(config.concurrentSessions.enabled ? { detectConcurrentActivity: async () => (await tracker.recheck())?.activity } : {}),
         ...(record ? { records: record.records } : {}),
+        ...(args.onFailedHandover ? { onFailedHandover: (handover: FailedHandover) => args.onFailedHandover!(handover, resolveRunLimits(config.routes.limits).assignmentRequests, signal) } : {}),
       });
     } catch (error) {
       record?.finish({ status: signal.aborted ? "cancelled" : "failed", failure: error instanceof Error ? error.message : String(error) });
@@ -454,6 +475,8 @@ export class OrcheController {
       ...(report.extensions ? { extensions: report.extensions } : {}),
       ...(report.cancellation ? { cancellation: report.cancellation } : {}),
       usage: { ...totals, models, contextWindows },
+      ...(report.handover ? { handover: report.handover } : {}),
+      ...(report.remainingIssues ? { remainingIssues: report.remainingIssues } : {}),
       ...(latest ? { concurrentSessions: latest.activity } : {}),
     });
     // The extensions the report lists are authoritative for the final deadline (a run that emitted no events still shows what it was granted).
@@ -484,6 +507,9 @@ export class OrcheController {
         ...(report.extensions ? { extensions: report.extensions } : {}),
         ...(report.cancellation ? { cancellation: report.cancellation } : {}),
         ...(report.cleanup ? { cleanup: report.cleanup } : {}),
+        ...(report.handover ? { handover: report.handover } : {}),
+        ...(report.remainingIssues ? { remainingIssues: report.remainingIssues } : {}),
+        ...(!cancelled && report.status === "failed" && args.handoverSkipped ? { handoverSkipped: args.handoverSkipped } : {}),
         ...(latest ? { concurrentSessions: latest.activity } : {}),
         ...(record ? { record: record.dir } : {}),
       },
@@ -514,6 +540,11 @@ export function formatOutcome(outcome: OrcheOutcome): string {
   const preserved = !finished && report.answerFromFailedRun && report.answer.trim()
     ? `\n\nResult from failed run (may be incomplete):\n${report.answer}`
     : "";
+  const handover = finished || details.cancelled ? "" : report.handover
+    ? `\n\nHandover (orche_task worker ids):\n${report.handover.workers.map(worker => `${worker.id} (${worker.role}) — last task: ${worker.lastTask ? `${worker.lastTask.id}: ${worker.lastTask.description.replace(/\s+/g, " ").slice(0, 200)}` : "none"}`).join("\n") || "No live workers available."}\nRemaining issues: ${report.handover.issues.join("; ") || report.summary}`
+    : details.handoverSkipped
+      ? `\n\nHandover skipped: ${details.handoverSkipped}.\nRemaining issues: ${(report.remainingIssues ?? [report.summary]).join("; ")}`
+      : "";
   const cleanup = report.cleanup?.incomplete ? `\n\nCleanup incomplete; pending: ${report.cleanup.pending.join(", ")}. Uncooperative in-process SDK/tool work cannot be forcibly stopped.` : "";
   const diagnostic = report.cancellation;
   const cancellation = !diagnostic ? "" : `\n\nCancelled at ${diagnostic.phase} after ${Math.round(diagnostic.elapsedMs / 1000)}s; active: ${diagnostic.workers.map(worker => {
@@ -527,7 +558,7 @@ export function formatOutcome(outcome: OrcheOutcome): string {
   // Other pi sessions seen at the start come first, for finished, failed and cancelled runs alike.
   const concurrent = outcome.concurrentWarning ? `${outcome.concurrentWarning}\n\n` : "";
   // Other pi sessions seen during the run come first; where the transcripts and the manifest are (records.ts) comes last.
-  return withRecordLine(`${concurrent}${head}\n\n${outcome.text}${preserved}${cancellation}${extensions}${workspace}${cleanup}`, details.record);
+  return withRecordLine(`${concurrent}${head}\n\n${outcome.text}${handover}${preserved}${cancellation}${extensions}${workspace}${cleanup}`, details.record);
 }
 
 /** `text` followed by the `Record: <dir>` line of a result that has a record (finished, failed or cancelled alike); `text` itself when it has none. */

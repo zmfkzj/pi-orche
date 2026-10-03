@@ -69,7 +69,7 @@ describe("orche_run failures keep their structured details", () => {
     const h = await harness({
       mainSteps: [tool("orche_run", { request: "set the value" }), reply("noted")],
       orcheSteps: [
-        decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "small change" }),
+        decision({ type: "classify", taskClass: "change", workerCount: 2, language: "en", reason: "explicit ownership" }),
         decision({ type: "assign", tasks: [{ id: "change", description: "set value", owner: "A1", files: ["core.mjs"], status: "pending" }] }),
         tool("write", { path: "core.mjs", content: "export const value = 1;\n" }),
         tool("bash", { command: "echo stray > stray.txt && echo changed > other.mjs" }),

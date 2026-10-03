@@ -45,11 +45,11 @@ const implemented = () => tool("report_result", { kind: "implement", summary: "d
 const writeCore = () => tool("write", { path: "core.mjs", content: "export const value = 1;\n" });
 const externalEvents = (events: RunEvent[]) => events.filter(event => event.type === "workspace_external_change");
 
-/** A one-worker change run: `steps` are the implementer's model responses before it reports. */
+/** Explicitly planned change run: `steps` are A1's model responses before it reports. */
 async function changeRun(dir: string, steps: FauxResponseStep[], concurrentActivity?: ConcurrentActivity) {
   const events: RunEvent[] = [];
   const f = await fauxRuntime([
-    decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "small change" }),
+    decision({ type: "classify", taskClass: "change", workerCount: 2, language: "en", reason: "explicit ownership" }),
     decision({ type: "assign", tasks: [task] }),
     ...steps,
     tool("report_result", { kind: "verify", summary: "checked", data: { passed: true } }),

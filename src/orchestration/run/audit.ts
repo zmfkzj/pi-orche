@@ -1,6 +1,6 @@
 import { abortable } from "./deadline.js";
 import { classifyNewFile } from "../artifacts.js";
-import { coveringTasks } from "../ownership.js";
+import { coveringTasks } from "./root-ownership.js";
 import { WorkspaceAudit, type ExternalWorkspaceChange, type WorkspaceChange } from "../workspace.js";
 import { WorkspaceActivity, type ActivityScope } from "./activity.js";
 import { emit } from "./context.js";
@@ -41,6 +41,15 @@ interface ConcurrentWatch {
   warned: boolean;
 }
 const watches = new WeakMap<RunContext, ConcurrentWatch>();
+const startingHeads = new WeakMap<RunContext, NonNullable<Awaited<ReturnType<WorkspaceAudit["headSnapshot"]>>>>();
+
+/** Keep gitlink moves visible to attribution, ownership checks and recovery, without treating them as files in the audit API. */
+async function workspaceChanges(audit: WorkspaceAudit, from: string, to: string): Promise<WorkspaceChange[]> {
+  const { changes, gitlinks } = await audit.compare(from, to);
+  return [...changes, ...gitlinks.map(link => ({
+    path: link.path, status: !link.from ? "added" as const : !link.to ? "deleted" as const : "modified" as const,
+  }))].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
 
 /**
  * Concurrent pi sessions were detected: when the run started (`concurrentActivity`), or later, at an audit point
@@ -73,21 +82,30 @@ async function refreshConcurrentSessions(ctx: RunContext): Promise<void> {
 }
 
 /**
- * Files in `changes` that someone else committed during the run: HEAD moved since the baseline,
- * the file's current content equals its content in the new HEAD, and it differs from the baseline.
- * Workers are told never to commit, so a commit that moved HEAD was made elsewhere. Reads refs and
- * trees only (private index): the user's index, HEAD and stash are untouched.
+ * Files in `changes` that someone else committed during the run: their repository's HEAD moved
+ * since the baseline, their current content equals that HEAD, and it differs from the baseline.
+ * Workers are told never to commit, so matching file content is external. A submodule HEAD move
+ * is different: it changes the owning repository's gitlink and still needs activity/ownership checks.
+ * Reads refs and trees only: the user's index, HEAD and stash are untouched.
  */
 async function committedElsewhere(ctx: RunContext, tree: string, changes: readonly WorkspaceChange[]): Promise<Set<string>> {
   const found = new Set<string>();
   const { audit, baseline } = ctx;
   // Without a recorded starting HEAD (unreadable at start) "moved" is unknowable: never guess.
-  if (!audit || !baseline?.headRead || !changes.length) return found;
-  const head = await audit.head();
-  if (!head || head === baseline.head) return found;
-  const differsFromHead = new Set((await audit.diff(await audit.treeOf(head), tree)).map(change => change.path));
-  const differsFromBaseline = new Set((await audit.diff(baseline.tree, tree)).map(change => change.path));
-  for (const change of changes) if (!differsFromHead.has(change.path) && differsFromBaseline.has(change.path)) found.add(change.path);
+  const initial = startingHeads.get(ctx);
+  if (!audit || !baseline?.headRead || !initial || !changes.length) return found;
+  const current = await audit.headSnapshot();
+  if (!current) return found;
+  const differsFromHead = new Set((await audit.diff(current.tree, tree)).map(change => change.path));
+  const compared = await audit.compare(baseline.tree, tree);
+  const differsFromBaseline = new Set(compared.changes.map(change => change.path));
+  for (const change of changes) {
+    const repo = [...new Set([...initial.heads.keys(), ...current.heads.keys()])].filter(path => !path || change.path === path || change.path.startsWith(`${path}/`))
+      .sort((a, b) => b.length - a.length)[0]!;
+    if (!initial.heads.has(repo) || !current.heads.has(repo) || current.heads.get(repo) === initial.heads.get(repo)) continue;
+    if (repo && change.path === repo) continue; // gitlinks remain subject to activity-based ownership attribution
+    if (!differsFromHead.has(change.path) && differsFromBaseline.has(change.path)) found.add(change.path);
+  }
   return found;
 }
 
@@ -152,7 +170,7 @@ export async function auditWorkspace(ctx: RunContext, actors: readonly string[],
     // The tracker closes the open quiet/active window with this snapshot, so the phase diff is
     // fully covered by classified windows.
     const tree = ctx.activity ? await ctx.activity.checkpoint() : await ctx.audit.snapshot();
-    const changes = await ctx.audit.diff(ctx.auditTree, tree);
+    const changes = await workspaceChanges(ctx.audit, ctx.auditTree, tree);
     if (ctx.cancelled) return;
     // The window just closed may hold writes of a session that started after the run did: look again (the caller caches).
     await refreshConcurrentSessions(ctx);
@@ -199,7 +217,7 @@ export function disableAudit(ctx: RunContext, error: unknown): void {
 /** Snapshot the pre-run workspace and keep it restorable; outside git the audit stays off. */
 export async function openWorkspaceAudit(ctx: RunContext): Promise<void> {
   try {
-    const audit = await WorkspaceAudit.open(ctx.options.cwd, ctx.signal);
+    const audit = await WorkspaceAudit.open(ctx.options.cwd, ctx.signal, { submodules: true });
     if (!audit) return;
     if (ctx.cancelled) { void audit.close().catch(() => undefined); return; }
     ctx.audit = audit;
@@ -209,7 +227,11 @@ export async function openWorkspaceAudit(ctx: RunContext): Promise<void> {
     // except for cancellation, which must still propagate.
     let head: string | undefined;
     let headRead = false;
-    try { head = await audit.head(); headRead = true; } catch { ctx.signal?.throwIfAborted(); }
+    try {
+      const heads = await audit.headSnapshot();
+      if (heads) { startingHeads.set(ctx, heads); head = heads.heads.get(""); }
+      headRead = true;
+    } catch { ctx.signal?.throwIfAborted(); }
     const tree = await audit.snapshot();
     const commit = await audit.checkpoint(tree);
     if (ctx.cancelled) return;
@@ -218,7 +240,7 @@ export async function openWorkspaceAudit(ctx: RunContext): Promise<void> {
     ctx.activity = new WorkspaceActivity({
       cwd: ctx.options.cwd, tree, startedAt: ctx.startedAt,
       snapshot: () => audit.snapshot(),
-      diff: (from, to) => audit.diff(from, to),
+      diff: (from, to) => workspaceChanges(audit, from, to),
       cancelled: () => ctx.cancelled,
     });
     emit(ctx, { type: "workspace_baseline", timestamp: Date.now(), commit });
@@ -244,7 +266,7 @@ export async function finalWorkspace(ctx: RunContext): Promise<RunReport["worksp
     // Queued boundary snapshots finish first, then the last window is closed and classified.
     await ctx.activity?.drain();
     const tree = ctx.activity ? await ctx.activity.checkpoint() : await ctx.audit.snapshot();
-    const changes = await ctx.audit.diff(ctx.baseline.tree, tree);
+    const changes = await workspaceChanges(ctx.audit, ctx.baseline.tree, tree);
     // Last look for other sessions, so the report (and its warning) knows about sessions that appeared at the very end.
     await refreshConcurrentSessions(ctx);
     const attributed = await attribute(ctx, tree, changes, "run", ctx.state.taskClass === "answer");

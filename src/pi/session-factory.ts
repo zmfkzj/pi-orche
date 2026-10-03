@@ -12,6 +12,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { createOrcheTools } from "../tools/index.js";
+import type { AstRewriteFileGuard } from "../tools/ast.js";
 import { createSpillExtension } from "../tools/spill.js";
 import { withExtendedContext, type ContextWindowInfo } from "./extended-context.js";
 import { dirname, resolve } from "node:path";
@@ -48,6 +49,13 @@ export interface SessionOptions {
    * error result.
    */
   toolGuard?: ToolGuard;
+  /**
+   * PURE per-file ownership check for directory ast_rewrite writes (workspace-relative POSIX paths).
+   * Unlike toolGuard, this must have no activity gating or event side effects. A reason blocks only
+   * that file; undefined allows it. Not called for single-file rewrites or dry runs.
+   * Guarded sessions without this check refuse directory writes, but still allow dry runs.
+   */
+  writeFileGuard?: AstRewriteFileGuard;
   /**
    * Every session gets Pi's `bash` with a heartbeat (see `src/tools/bash.ts`): while a command runs, a sample is sent as
    * a tool partial update every `intervalMs` (default 15 s). Sessions without `bash` in `tools` are unaffected.
@@ -127,7 +135,7 @@ export async function createSession(
     model,
     thinkingLevel: options.route.thinking ?? "off",
     tools: options.tools,
-    customTools: [...createOrcheTools({ cwd: options.cwd, bashHeartbeat: { ...options.bashHeartbeat } }), ...(options.customTools ?? [])],
+    customTools: [...createOrcheTools({ cwd: options.cwd, bashHeartbeat: { ...options.bashHeartbeat }, astRewriteFileGuard: options.writeFileGuard ?? (options.toolGuard ? () => "Blocked: directory ast_rewrite requires a per-file write guard in guarded sessions" : undefined) }), ...(options.customTools ?? [])],
     resourceLoader: loader,
     sessionManager,
     settingsManager: SettingsManager.inMemory({

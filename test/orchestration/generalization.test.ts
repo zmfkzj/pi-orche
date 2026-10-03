@@ -28,6 +28,12 @@ describe("proportional request classification with real Pi sessions", () => {
       const events: RunEvent[] = [];
       const dispose = vi.spyOn(AgentSession.prototype, "dispose");
       const spawned = vi.spyOn(AgentManager.prototype, "spawn");
+      let activeTools: string[] = [];
+      const disposeWithin = AgentManager.prototype.disposeWithin;
+      vi.spyOn(AgentManager.prototype, "disposeWithin").mockImplementation(function (this: AgentManager, timeoutMs) {
+        activeTools = this.session("A1").getActiveToolNames();
+        return disposeWithin.call(this, timeoutMs);
+      });
       let evidenceContext = "";
       let decisionContext = "";
       const f = await fauxRuntime([
@@ -53,7 +59,7 @@ describe("proportional request classification with real Pi sessions", () => {
         expect(events.find(event => event.type === "request_classified")).toMatchObject({ taskClass: "answer", workerCount: 1, language });
         const manager = spawned.mock.contexts[0];
         if (!(manager instanceof AgentManager)) throw new Error("Worker manager not observed");
-        const activeTools = manager.session("A1").getActiveToolNames();
+        expect(manager.get("A1").status).toBe("disposed");
         expect(activeTools).toEqual(expect.arrayContaining(["read", "grep", "find", "ls", "report_result"]));
         expect(activeTools).not.toEqual(expect.arrayContaining(["edit"]));
         expect(activeTools).not.toEqual(expect.arrayContaining(["write"]));
@@ -73,18 +79,22 @@ describe("proportional request classification with real Pi sessions", () => {
     const events: RunEvent[] = [];
     const spawned = vi.spyOn(AgentManager.prototype, "spawn");
     const dispose = vi.spyOn(AgentSession.prototype, "dispose");
+    let verificationMessages: AgentSession["messages"] = [];
+    const disposeWithin = AgentManager.prototype.disposeWithin;
+    vi.spyOn(AgentManager.prototype, "disposeWithin").mockImplementation(function (this: AgentManager, timeoutMs) {
+      verificationMessages = [...this.session("V1").messages];
+      return disposeWithin.call(this, timeoutMs);
+    });
     const f = await fauxRuntime([
       decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "One-line literal edit" }),
-      decision({ type: "assign", tasks: [task] }),
       tool("write", { path: "core.mjs", content: "export const value = 1;\n" }),
       tool("report_result", { kind: "implement", summary: "Changed the requested constant", data: { status: "done" } }),
       tool("bash", { command: "node --test", timeout: 10 }),
       tool("report_result", { kind: "verify", summary: "node --test passed", data: { passed: true } }),
-      decision({ type: "complete", summary: "Changed value from 0 to 1 and verified with node --test." }),
     ]);
     try {
       const report = await runOrchestrated({ problem: "One-line change: set value to 1.", cwd: dir, routes: { routes: {}, default: { model: f.route.model } }, modelRuntime: f.runtime, sink: event => events.push(event) });
-      expect(report).toMatchObject({ status: "done", taskClass: "change", answer: "Changed value from 0 to 1 and verified with node --test." });
+      expect(report).toMatchObject({ status: "done", taskClass: "change", answer: "Changed the requested constant\n\nnode --test passed" });
       expect(spawned.mock.calls.map(([options]) => options.role)).toEqual(["implementer", "verifier"]);
       expect(events.filter(event => event.type === "assignment_started").map(event => event.assignment.kind)).toEqual(["implement", "verify"]);
       expect(events.some(event => event.type === "root_cause_claimed" || event.type === "root_cause_accepted" || event.type === "preempted")).toBe(false);
@@ -94,8 +104,8 @@ describe("proportional request classification with real Pi sessions", () => {
       expect(verified.status).toBe(0);
       const manager = spawned.mock.contexts[0];
       if (!(manager instanceof AgentManager)) throw new Error("Worker manager not observed");
-      const verificationSession = manager.session("V1");
-      expect(verificationSession.messages.some(message => message.role === "toolResult" && message.toolName === "bash" && !message.isError)).toBe(true);
+      expect(manager.get("V1").status).toBe("disposed");
+      expect(verificationMessages.some(message => message.role === "toolResult" && message.toolName === "bash" && !message.isError)).toBe(true);
       expect(dispose).toHaveBeenCalledTimes(3);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -179,24 +189,22 @@ describe("proportional request classification with real Pi sessions", () => {
       vi.useRealTimers();
     }
   });
-  it("recognizes recursive directory ownership for all four writes of a one-worker tax refactor", async () => {
+  it("uses repo-wide ownership for all four writes of a one-worker tax refactor", async () => {
     const dir = await mkdtemp(join(tmpdir(), "orche-tax-ownership-"));
     const files = ["src/estimate.js", "src/invoice.js", "src/tax.js", "test/tax.test.js"];
     const events: RunEvent[] = [];
     const refactor = { id: "tax-consolidation", description: "Consolidate tax calculation and add regression coverage", owner: "A1", files: ["src/**", "test/**", "tests/**"], status: "pending" };
     const f = await fauxRuntime([
       decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "Focused shared-module refactor" }),
-      decision({ type: "assign", tasks: [refactor] }),
       ...files.map(path => tool("write", { path, content: "// tax refactor ownership fixture\n" })),
       tool("report_result", { kind: "implement", summary: "Consolidated tax module and callers", data: { status: "done" } }),
       tool("report_result", { kind: "verify", summary: "Verified", data: { passed: true } }),
-      decision({ type: "complete", summary: "Refactor verified." }),
     ]);
     try {
       const report = await runOrchestrated({ problem: "Consolidate duplicated tax calculation into one source module", cwd: dir, routes: { routes: {}, default: { model: f.route.model } }, modelRuntime: f.runtime, sink: event => events.push(event) });
       for (const path of files) expect(await readFile(join(dir, path), "utf8")).toBe("// tax refactor ownership fixture\n");
       expect(report.status).toBe("done");
-      expect(report.tasks[0]?.files).toEqual(["src/", "test/", "tests/"]);
+      expect(report.tasks[0]?.files).toEqual(["/"]);
       expect(events.filter(event => event.type === "ownership_violation")).toEqual([]);
       expect(report.ownershipViolations).toEqual([]);
     } finally {

@@ -31,6 +31,8 @@ export type BacklogIssue =
 
 /** Repository-relative paths; retain directory intent while normalizing spelling. */
 export function normalizeOwnedPath(path: string): string {
+  // Root is a deterministic single-worker ownership sentinel, never an absolute host path.
+  if (path === "/" || path === "./") return "/";
   const directory = /[\\/]$/.test(path);
   const parts: string[] = [];
   for (const part of path.replaceAll("\\", "/").split("/")) {
@@ -65,6 +67,7 @@ export function dedupeProposals(proposals: readonly BacklogProposal[]): readonly
 function overlaps(a: string, b: string): boolean {
   const left = normalizeOwnedPath(a);
   const right = normalizeOwnedPath(b);
+  if (left === "/" || right === "/") return true;
   return left.replace(/\/$/, "") === right.replace(/\/$/, "") ||
     (left.endsWith("/") && right.startsWith(left)) ||
     (right.endsWith("/") && left.startsWith(right));

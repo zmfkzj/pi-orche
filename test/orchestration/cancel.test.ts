@@ -37,7 +37,6 @@ describe("RunOptions.signal", () => {
     const events: RunEvent[] = [];
     const running = run([
       decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "edit" }),
-      decision({ type: "assign", tasks: [task] }),
       tool("read", { path: "nonexistent.txt" }),
       blockedWorker,
     ], controller, events);
@@ -49,7 +48,7 @@ describe("RunOptions.signal", () => {
       scope: "cancelled", phase: "EXECUTE", stage: "implement backlog", elapsedMs: expect.any(Number), timestamp: expect.any(Number),
       configuredCapMs: 1800000, effectiveCapMs: expect.any(Number),
       workers: expect.arrayContaining([
-        expect.objectContaining({ id: "A1", status: "running", kind: "implement", taskId: "change", assignmentId: expect.any(String), requestCount: 1, lastToolName: "read", lastToolAt: expect.any(Number), lastActivityAt: expect.any(Number) }),
+        expect.objectContaining({ id: "A1", status: "running", kind: "implement", taskId: "T1", assignmentId: expect.any(String), requestCount: 1, lastToolName: "read", lastToolAt: expect.any(Number), lastActivityAt: expect.any(Number) }),
         expect.objectContaining({ id: "V1", status: "idle" }),
       ]),
     });
@@ -68,12 +67,11 @@ describe("RunOptions.signal", () => {
     };
     const report = await run([
       decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "edit" }),
-      decision({ type: "assign", tasks: [task] }),
       tool("read", { path: "nonexistent.txt" }), blocked,
     ], new AbortController(), events, { overallMs: 250, assignmentMs: 1000, decisionMs: 1000, maxExtensions: 0 });
     expect(report.summary).toContain("overall timeout at implement backlog");
     expect(report.timeouts?.[0]).toMatchObject({ scope: "overall", workers: expect.arrayContaining([expect.objectContaining({
-      id: "A1", taskId: "change", kind: "implement", assignmentId: expect.any(String), requestCount: 1,
+      id: "A1", taskId: "T1", kind: "implement", assignmentId: expect.any(String), requestCount: 1,
       lastToolName: "read", lastToolAt: expect.any(Number), lastActivityAt: expect.any(Number),
     })]) });
     expect(events.filter(e => e.type === "run_finished")).toHaveLength(1);

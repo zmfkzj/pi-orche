@@ -7,6 +7,8 @@ export const WRITE_TOOLS: ReadonlySet<string> = new Set(["edit", "write", "ast_r
 /** Assignment kinds that may write at all, and then only to the worker's owned files. */
 export const WRITING_KINDS: ReadonlySet<string> = new Set(["implement", "fix", "game-asset", "video"]);
 
+const WRITE_BLOCK_ADVICE = 'If the task really needs it, stop and report_result with data.status "blocked" and the reason.';
+
 /** Whether `file` (repository-relative, normalized) lies inside one owned path. */
 export function ownsPath(owned: string, file: string): boolean {
   const path = normalizeOwnedPath(owned);
@@ -48,7 +50,7 @@ export function checkWrite(check: WriteCheck, real?: RealWritePaths): BlockedWri
   const raw = check.input.path;
   const owned = [...new Set(check.tasks.filter(task => task.owner === check.agentId).flatMap(task => task.files))];
   const ownedText = owned.length ? owned.join(", ") : "none";
-  const advice = "If the task really needs it, stop and report_result with data.status \"blocked\" and the reason.";
+  const advice = WRITE_BLOCK_ADVICE;
   if (typeof raw !== "string" || !raw.trim()) {
     return { file: "(workspace)", reason: `Blocked: ${check.toolName} needs an explicit path inside your owned files (${ownedText}). ${advice}` };
   }
@@ -64,6 +66,9 @@ export function checkWrite(check: WriteCheck, real?: RealWritePaths): BlockedWri
   if (!owned.some(path => ownsPath(path, file))) {
     return { file, reason: `Blocked: ${file} is outside your owned files (${ownedText}); other workers own their files. ${advice}` };
   }
+  if (coveringTasks(check.tasks, file).some(task => task.owner && task.owner !== check.agentId)) {
+    return { file, reason: `Blocked: ${file} is owned by another worker. ${advice}` };
+  }
   if (!real) return undefined;
   if ("error" in real) {
     return { file, reason: `Blocked: cannot resolve ${file} (possible dangling symlink or symlink loop): ${real.error}. ${advice}` };
@@ -76,6 +81,9 @@ export function checkWrite(check: WriteCheck, real?: RealWritePaths): BlockedWri
   // Never canonicalize owned entries into wider authority: allowed.txt -> other.txt is unowned.
   if (!owned.some(path => ownsPath(path, realFile))) {
     return { file, reason: `Blocked: ${file} is outside your owned files (${ownedText}); path is a symlink to ${realFile}. ${advice}` };
+  }
+  if (coveringTasks(check.tasks, realFile).some(task => task.owner && task.owner !== check.agentId)) {
+    return { file, reason: `Blocked: ${file} is a symlink to ${realFile}, owned by another worker. ${advice}` };
   }
   return undefined;
 }
@@ -105,8 +113,8 @@ async function realWriteTarget(target: string): Promise<string> {
 
 /**
  * Execution guard: Pi awaits Promise-returning tool_call handlers, so filesystem I/O need
- * not block the event loop. Directory ast_rewrite checks only its target, not its tree.
- * Like any pre-execution check, this does not prevent a concurrent symlink swap afterward.
+ * not block the event loop. Directory ast_rewrite checks only the target here; its pure
+ * per-file guard checks ownership at write time, skipping and reporting blocked files.
  */
 export async function checkWriteRealPath(check: WriteCheck): Promise<BlockedWrite | undefined> {
   const lexical = checkWrite(check);

@@ -308,7 +308,7 @@ describe("workspace audit in a run", () => {
     const dir = await repo({ "core.mjs": "export const value = 0;\n", "other.mjs": "export const other = 0;\n" });
     const events: RunEvent[] = [];
     const f = await fauxRuntime([
-      decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "small change" }),
+      decision({ type: "classify", taskClass: "change", workerCount: 2, language: "en", reason: "explicit ownership" }),
       decision({ type: "assign", tasks: [task] }),
       tool("write", { path: "core.mjs", content: "export const value = 1;\n" }),
       tool("ast_rewrite", { pattern: "value", replacement: "other" }),
@@ -349,7 +349,7 @@ describe("workspace audit in a run", () => {
     const dir = await repo();
     const events: RunEvent[] = [];
     const f = await fauxRuntime([
-      decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "small change" }),
+      decision({ type: "classify", taskClass: "change", workerCount: 2, language: "en", reason: "explicit ownership" }),
       decision({ type: "assign", tasks: [{ ...task, files }] }),
       tool("bash", { command: `mkdir -p ${file.includes("/") ? file.slice(0, file.lastIndexOf("/")) : "."} && echo created > ${file}` }),
       tool("report_result", { kind: "implement", summary: "done", data: { status: "done" } }),
@@ -403,11 +403,9 @@ describe("workspace audit in a run", () => {
       const dir = await repo();
       const f = await fauxRuntime([
         decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "small change" }),
-        decision({ type: "assign", tasks: [task] }),
         tool("write", { path: "core.mjs", content: "export const value = 1;\n" }),
         tool("report_result", { kind: "implement", summary: "done", data: { status: "done" } }),
         tool("report_result", { kind: "verify", summary: "checked", data: { passed: true } }),
-        decision({ type: "complete", summary: "changed" }),
       ]);
       const report = await runOrchestrated({ problem: "Set value to 1.", cwd: dir, routes: { routes: {}, default: { model: f.route.model } }, modelRuntime: f.runtime, workspaceAudit });
       expect(report.status).toBe("done");

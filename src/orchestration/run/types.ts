@@ -67,9 +67,29 @@ export interface RunOptions {
    * the files go (the extension keeps them outside the workspace and outside pi's own sessions directory).
    */
   records?: SessionRecords;
+  /** Opt-in failed-run recovery. Transfer accepted idle workers with manager.detach / poolManager.adopt. Never called on cancellation. */
+  onFailedHandover?: (handover: FailedHandover) => readonly RunHandoverWorker[] | Promise<readonly RunHandoverWorker[]>;
 }
 /** Result of concurrent-session detection: `detail` is the human-readable description of the sessions. */
 export interface ConcurrentActivity { count: number; detail: string }
+export interface FailedHandoverWorker {
+  id: string;
+  role: "implementer" | "verifier" | "explorer";
+  lastTask?: TaskItem;
+}
+export interface FailedHandover {
+  manager: AgentManager;
+  workers: readonly FailedHandoverWorker[];
+  issues: readonly string[];
+}
+export interface RunHandoverWorker {
+  id: string;
+  sourceId: string;
+  role: string;
+  lastTask?: TaskItem;
+}
+export interface RunHandover { workers: readonly RunHandoverWorker[]; issues: readonly string[] }
+
 export interface RunReport {
   status: "done" | "failed";
   summary: string;
@@ -106,6 +126,8 @@ export interface RunReport {
   /** Signal cancellation diagnostics captured before sessions are stopped; summary stays "cancelled". */
   cancellation?: CancellationDiagnostic;
   cleanup?: { incomplete: boolean; pending: readonly string[] };
+  handover?: RunHandover;
+  remainingIssues?: readonly string[];
 }
 /**
  * A write outside the writer's ownership that actually reached the workspace. `via: "workspace"`
@@ -172,6 +194,10 @@ export interface RunContext {
   /** Workers whose first assignment in this run already carried the identity/request/language briefing. */
   briefedWorkers?: Set<string>;
   workerAnswers: Map<string, string>;
+  /** Latest reports used by deterministic completion and failed-run handover. */
+  implementationSummaries?: Map<string, string>;
+  verificationResult?: import("../../agent/agent-handle.js").ResultPayload;
+  remainingIssues?: string[];
   advisors?: AdvisorEngine;
   providerHost?: Promise<ProviderExtensionHost>;
   cancelled: boolean;

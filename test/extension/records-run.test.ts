@@ -202,11 +202,9 @@ describe("an orche_run that finishes", () => {
       mainSteps: [tool("orche_run", { request: "set the value" }), reply("noted")],
       orcheSteps: [
         decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "small change" }),
-        decision({ type: "assign", tasks: [{ id: "change", description: "set value", owner: "A1", files: ["core.mjs"], status: "pending" }] }),
         tool("write", { path: "core.mjs", content: "export const value = 1;\n" }),
         tool("report_result", { kind: "implement", summary: "set value to 1", data: { status: "done" } }),
         tool("report_result", { kind: "verify", summary: "checked", data: { passed: true } }),
-        decision({ type: "complete", summary: "Value changed from 0 to 1 and verified." }),
       ],
     });
     await writeFile(join(h.cwd, "core.mjs"), "export const value = 0;\n");
@@ -462,7 +460,7 @@ describe("a failed run's recovery advice is submodule-aware", () => {
     const h = await harness({
       mainSteps: [tool("orche_run", { request: "set the value" }), reply("noted")],
       orcheSteps: [
-        decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "small change" }),
+        decision({ type: "classify", taskClass: "change", workerCount: 2, language: "en", reason: "explicit ownership" }),
         decision({ type: "assign", tasks: [{ id: "change", description: "set value", owner: "A1", files: ["core.mjs"], status: "pending" }] }),
         tool("write", { path: "core.mjs", content: "export const value = 1;\n" }),
         // The submodule's HEAD moves: a gitlink change in the superproject, outside the worker's ownership.

@@ -62,6 +62,11 @@ describe("mainMode: tool sets", () => {
     expect(seen[1]).toContain("two or more independent write sets");
     expect(seen[1]).toContain("REQUIRED");
     expect(seen[1]).toContain("parallel hypotheses");
+    expect(seen[1]).toContain("After a failed orche_run, do not start another orche_run for the same request");
+    expect(seen[1]).toContain("implement for fixes, verify for re-checks");
+    expect(seen[1]).toContain("reported id in `worker`");
+    expect(seen[1]).toContain("an orche_task worker reported blocked");
+    for (const system of [seen[0], seen[2]]) expect(system).not.toContain("After a failed orche_run");
     expect(seen[2]).toContain("orche_run is disabled in mode single");
     expect(seen[2]).toContain("/orche mode auto or multi");
     for (const system of seen.slice(1)) {

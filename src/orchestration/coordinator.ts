@@ -12,13 +12,13 @@ import { classifyRequest, createCoordinator, reportCoordinator } from "./run/dec
 import { CONCURRENT_SESSION_AMBIGUOUS, finalWorkspace, openWorkspaceAudit } from "./run/audit.js";
 import { runAnswer } from "./run/answer.js";
 import { exploreUntilAccepted, collectProposals, planAndSpawnExplorers } from "./run/diagnose.js";
-import { mergeExecuteAndVerify, spawnChangeWorkers } from "./run/change.js";
+import { mergeExecuteAndVerify, runSingleChange, spawnChangeWorkers } from "./run/change.js";
 import { type RunContext, type RunOptions, type RunReport } from "./run/types.js";
 import type { WorkspaceChange } from "./workspace.js";
 import { resolveRunLimits } from "./limits.js";
 import { CREATED_FILE_ADVICE } from "./artifacts.js";
 
-export { defaultRunLimits, type AgentRecordEntry, type ConcurrentActivity, type OwnershipViolation, type RecordedActor, type RunLimits, type RunOptions, type RunReport, type SessionRecords, type SessionTarget } from "./run/types.js";
+export { defaultRunLimits, type FailedHandover, type FailedHandoverWorker, type RunHandover, type RunHandoverWorker, type AgentRecordEntry, type ConcurrentActivity, type OwnershipViolation, type RecordedActor, type RunLimits, type RunOptions, type RunReport, type SessionRecords, type SessionTarget } from "./run/types.js";
 export { CONCURRENT_SESSION_AMBIGUOUS } from "./run/audit.js";
 export { explorationPlanProblem } from "./run/decisions.js";
 
@@ -94,6 +94,7 @@ export async function runOrchestrated(options: RunOptions): Promise<RunReport> {
   const pending: string[] = [];
   const cleanupBudget = () => ctx.signal?.aborted ? 0 : ctx.deadline.overallRemainingMs();
   let workspace: RunReport["workspace"];
+  let handover: RunReport["handover"];
   let providerDisposed = false;
   const disposeProvider = (host: Awaited<NonNullable<RunContext["providerHost"]>>) => { if (!providerDisposed) { providerDisposed = true; host.dispose(); } };
   const execute = async () => {
@@ -133,7 +134,8 @@ export async function runOrchestrated(options: RunOptions): Promise<RunReport> {
       await runAnswer(ctx, runtime);
     } else if (ctx.state.taskClass === "change") {
       await spawnChangeWorkers(ctx, runtime);
-      await mergeExecuteAndVerify(ctx, runtime);
+      if (ctx.state.workerCount === 1) await runSingleChange(ctx, runtime);
+      else await mergeExecuteAndVerify(ctx, runtime);
     } else if (ctx.state.taskClass === "diagnose_fix") {
       await planAndSpawnExplorers(ctx, runtime);
       await exploreUntilAccepted(ctx);
@@ -150,6 +152,29 @@ export async function runOrchestrated(options: RunOptions): Promise<RunReport> {
       apply(ctx, { type: "fail", reason: failure });
     }
   } finally {
+    if ((ctx.state.phase === "FAILED" || ctx.violations.length > 0 || failure) && !ctx.cancelled && !ctx.signal?.aborted && options.onFailedHandover) {
+      // A failed decision may leave explorers mid-turn: stop assignments, not sessions.
+      // Transfer only after their abort/tool settled; uncooperative workers are disposed below.
+      await cleanupWait(Promise.all(ctx.manager.list().filter(worker => worker.status !== "disposed")
+        .map(worker => ctx.manager.stop(worker.id))), cleanupBudget());
+      const workers = ctx.manager.list().filter(worker => worker.status === "idle" &&
+        (worker.role === "implementer" || worker.role === "verifier" || worker.role.startsWith("explorer")))
+        .map(worker => ({ id: worker.id,
+          role: (worker.role.startsWith("explorer") ? "explorer" : worker.role) as "implementer" | "verifier" | "explorer",
+          lastTask: ctx.state.tasks.findLast(task => task.owner === worker.id),
+        }));
+      const issues = [...new Set([...(ctx.remainingIssues ?? []),
+        ...(ctx.state.failure && ctx.state.failure !== ctx.remainingIssues?.join("; ") ? [ctx.state.failure] : []),
+        ...ctx.violations.map(violation => `Ownership violation: ${violation.file}`),
+      ])];
+      try {
+        if (!ctx.signal?.aborted) {
+          const accepted = await options.onFailedHandover({ manager: ctx.manager, workers, issues });
+          // Only sessions actually detached from this manager can be advertised as handed over.
+          handover = { workers: accepted.filter(worker => !ctx.manager.list().some(live => live.id === worker.sourceId)), issues };
+        }
+      } catch { pending.push("worker-handover"); }
+    }
     ctx.cancelled = true;
     ctx.manager.close();
     ctx.stage = "cleanup/sessions";
@@ -202,6 +227,8 @@ export async function runOrchestrated(options: RunOptions): Promise<RunReport> {
     ...(ctx.deadline.used ? { extensions: ctx.deadline.extensions } : {}),
     ...(ctx.cancellation ? { cancellation: ctx.cancellation } : {}),
     cleanup: { incomplete: pending.length > 0, pending },
+    ...(handover ? { handover } : {}),
+    ...(status === "failed" && ctx.remainingIssues?.length ? { remainingIssues: ctx.remainingIssues } : {}),
     taskClass: ctx.state.taskClass ?? "unclassified",
     answer: status === "done" ? ctx.state.answer ?? summary : preserved ?? summary,
     ...(preserved ? { answerFromFailedRun: true } : {}),

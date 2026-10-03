@@ -3,13 +3,14 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ResultPayload } from "../../agent/agent-handle.js";
 import { READ_ONLY_TOOL_NAMES, WORKER_TOOL_NAMES } from "../../tools/index.js";
 import { dedupeProposals, isBacklogDone, readyTasks, updateTaskStatus, type BacklogProposal } from "../backlog.js";
-import { coveringTasks } from "../ownership.js";
+import { coveringTasks } from "./root-ownership.js";
 import { resolveRoute } from "../routing.js";
 import { implementationPrompt, verificationPrompt, workerInstructions } from "../prompts.js";
 import { apply, assignWorker, bounded, bufferMainNote, emit, spawnWorker, waitOutcomes } from "./context.js";
 import { decide } from "./decisions.js";
 import { auditWorkspace } from "./audit.js";
 import type { RunContext } from "./types.js";
+import { singleChangeAssignment } from "../phases.js";
 
 /** Backlog execution shared by `change` and `diagnose_fix`: dispatch, replan, verify and fix rounds. */
 export async function spawnChangeWorkers(ctx: RunContext, runtime: ModelRuntime): Promise<void> {
@@ -77,13 +78,15 @@ async function executeBacklog(ctx: RunContext): Promise<string[]> {
         ? data.reason
         : event.outcome.result?.summary ?? event.outcome.error ?? event.outcome.status;
       blockedReasons.push(`${task.id} (${event.outcome.agentId}): ${reason}`);
+      ctx.remainingIssues = [...blockedReasons];
     }
+    if (event.outcome.result?.summary) (ctx.implementationSummaries ??= new Map()).set(`${task.id}:${kind}`, event.outcome.result.summary);
     ctx.state = { ...ctx.state, tasks: updateTaskStatus(ctx.state.tasks, task.id, status) };
     emit(ctx, { type: "task_finished", timestamp: Date.now(), taskId: task.id, agentId: event.outcome.agentId, status });
   }
   return blockedReasons;
 }
-async function verifyRound(ctx: RunContext): Promise<ResultPayload | undefined> {
+async function verifyRound(ctx: RunContext, deterministic = false): Promise<ResultPayload | undefined> {
   apply(ctx, { type: "verify" });
   assignWorker(ctx, "V1", "verify", verificationPrompt(ctx.options.problem, ctx.state.tasks, ctx.options.routes.verifyCommands), true);
   const [verification] = await waitOutcomes(ctx, "verify", new Set(["V1"]));
@@ -93,6 +96,14 @@ async function verifyRound(ctx: RunContext): Promise<ResultPayload | undefined> 
   const passed = Boolean(verificationData && typeof verificationData === "object" && "passed" in verificationData && verificationData.passed === true);
   const summary = verification!.result?.summary ?? "Verification missing result";
   emit(ctx, { type: "verification", timestamp: Date.now(), passed, round: ctx.state.fixRounds, summary });
+  ctx.verificationResult = verification!.result;
+  ctx.remainingIssues = passed ? [] : verificationIssues(verification!.result);
+  if (deterministic) {
+    apply(ctx, passed
+      ? { type: "complete", summary: singleChangeSummary(ctx, verification!.result!) }
+      : { type: "verification_failed", reason: ctx.remainingIssues.join("; ") });
+    return verification!.result;
+  }
   const decision = await decide(ctx, {
     verification: verification!.result,
     requirement: passed ? "Complete only if evidence supports success. Your complete.summary is the final user-facing answer: concisely describe what changed and how it was verified, with relevant caveats, in the user's language." : "Verification failed: use verification_failed or fail, never complete.",
@@ -140,5 +151,44 @@ export async function mergeExecuteAndVerify(ctx: RunContext, runtime: ModelRunti
       requirement: "Create minimal fix tasks assigned to the original owning workers. Pending status and disjoint ownership. Preserve unaffected implementation.",
     };
   }
+}
+
+/** One classified worker needs no planning/approval calls; keep normal dispatch, audits and transitions. */
+export async function runSingleChange(ctx: RunContext, runtime: ModelRuntime): Promise<void> {
+  await spawnWorker(ctx, {
+    id: "V1", role: "verifier", cwd: ctx.options.cwd,
+    route: resolveRoute(ctx.options.routes, "verifier"), modelRuntime: runtime,
+    instructions: workerInstructions, tools: [...READ_ONLY_TOOL_NAMES, "bash"], baseSystemPrompt: ctx.options.baseSystemPrompt,
+  });
+  let verification: ResultPayload | undefined;
+  while (ctx.state.phase === "BACKLOG") {
+    apply(ctx, singleChangeAssignment(ctx.state, ctx.options.problem, ctx.workerIds[0]!, verification));
+    emit(ctx, { type: "backlog_created", timestamp: Date.now(), tasks: ctx.state.tasks });
+    const blocked = await executeBacklog(ctx);
+    await auditWorkspace(ctx, ctx.workerIds, file => coveringTasks(ctx.state.tasks, file).length > 0);
+    if (blocked.length) {
+      apply(ctx, { type: "fail", reason: `Backlog blocked: ${blocked.join("; ")}` });
+      return;
+    }
+    verification = await verifyRound(ctx, true);
+  }
+}
+
+function verificationIssues(result: ResultPayload | undefined): string[] {
+  const data = result?.data as { issues?: unknown; evidence?: unknown } | undefined;
+  const issues = data?.issues;
+  return [result?.summary ?? "Verification missing result",
+    ...(issues === undefined ? [] : [typeof issues === "string" ? issues : JSON.stringify(issues)]),
+    ...(data?.evidence === undefined ? [] : [JSON.stringify(data.evidence)])];
+}
+
+function singleChangeSummary(ctx: RunContext, verification: ResultPayload): string {
+  // Worker reports already use the classified user's language; do not translate their findings with another model call.
+  const changes = [...(ctx.implementationSummaries?.values() ?? [])].join("\n");
+  const data = verification.data as { evidence?: unknown; issues?: unknown } | undefined;
+  return [changes, verification.summary,
+    ...(data?.evidence === undefined ? [] : [typeof data.evidence === "string" ? data.evidence : JSON.stringify(data.evidence)]),
+    ...(data?.issues === undefined ? [] : [typeof data.issues === "string" ? data.issues : JSON.stringify(data.issues)])]
+    .filter(Boolean).join("\n\n");
 }
 

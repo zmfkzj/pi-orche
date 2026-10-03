@@ -9,7 +9,8 @@ import { getAgentDir, type AgentToolResult } from "@earendil-works/pi-coding-age
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { AgentManager } from "../agent/agent-manager.js";
+import { AgentManager, type WorkerAdoptOptions } from "../agent/agent-manager.js";
+import type { FailedHandover, RunHandoverWorker } from "../orchestration/run/types.js";
 import type { AgentSnapshot } from "../agent/agent-handle.js";
 import { normalizeOwnedPath, type TaskItem } from "../orchestration/backlog.js";
 import { checkWriteRealPath, WRITE_TOOLS, WRITING_KINDS } from "../orchestration/ownership.js";
@@ -153,6 +154,8 @@ export interface WorkerPoolOptions {
   controller: OrcheController;
   agentDir?: string;
   idleTtlMs?: number;
+  /** Upper bound for a cooperative SDK abort (test seam). */
+  stopTimeoutMs?: number;
 }
 
 /** The ownership canonicalizer in phases.ts is private; mirror its syntax here,
@@ -482,6 +485,41 @@ export class WorkerPool {
   constructor(private readonly options: WorkerPoolOptions) {
     if (!Number.isFinite(options.idleTtlMs ?? 1) || (options.idleTtlMs ?? 1) < 0) throw new Error("idleTtlMs must be finite and nonnegative");
   }
+  /** Keep failed-run sessions intact; new W ids share the pool's collision-free sequence. */
+  async adoptFailedRun(handover: FailedHandover, cwd: string, assignmentRequests: number, signal?: AbortSignal): Promise<RunHandoverWorker[]> {
+    if (this.disposed || signal?.aborted) return [];
+    const runtime = await this.options.controller.modelRuntime(signal).catch(error => { if (signal?.aborted) return undefined; throw error; });
+    if (!runtime || this.disposed || signal?.aborted) return [];
+    this.manager ??= new AgentManager(runtime, { resultSchemas: orchestrationResultSchemas, stopTimeoutMs: this.options.stopTimeoutMs });
+    this.manager.setRequestBudget(assignmentRequests);
+    const roles = { implementer: "implement", verifier: "verify", explorer: "explore" } as const;
+    // Recovery may exceed the new-worker cap (3) to retain every offered session; idle TTL still applies.
+    return handover.workers.map(source => {
+      const id = `W${this.nextId++}`;
+      const session = handover.manager.session(source.id);
+      const worker: Worker = { id, role: roles[source.role], cwd,
+        ...(session.model ? { model: `${session.model.provider}/${session.model.id}` } : {}),
+        summary: source.lastTask?.description ?? "", lastUsed: Date.now(), latestInput: 0 };
+      this.manager!.adopt(handover.manager.detach(source.id), { id, role: worker.role, ...this.callbacks(worker) });
+      this.workers.set(id, worker);
+      this.idle(worker);
+      return { id, sourceId: source.id, role: worker.role, ...(source.lastTask ? { lastTask: source.lastTask } : {}) };
+    });
+  }
+  private callbacks(worker: Worker): Pick<WorkerAdoptOptions, "toolGuard" | "writeFileGuard" | "onToolExecution" | "onContextWindow"> {
+    return {
+      onContextWindow: info => { worker.contextWindow = info.contextWindow; },
+      toolGuard: async (name, input) => {
+        const blocked = await this.guard(worker, name, input);
+        if (blocked) return blocked;
+        await worker.activity?.enter(worker.id, name);
+        return undefined;
+      },
+      writeFileGuard: (file, signal) => signal?.aborted ? "cancelled" : this.guard(worker, "ast_rewrite", { path: file }),
+      // Resolve the current assignment's tracker at event time, including its closing snapshot.
+      onToolExecution: event => worker.activity?.record(worker.id, event),
+    };
+  }
   list(): AgentSnapshot[] {
     return [...this.workers.values()].map(worker => ({ ...this.manager!.get(worker.id), role: worker.role }));
   }
@@ -609,6 +647,12 @@ export class WorkerPool {
       throw new Error(`Unknown worker ${args.worker}; live workers: ${live}. Omit worker to start a new one.`);
     }
     if (worker && this.manager!.get(worker.id).status !== "idle") throw new Error(`Worker ${worker.id} is running; wait for its assignment to finish.`);
+    let assigned = false;
+    let stopPromise: Promise<void> | undefined;
+    let startupTimer: ReturnType<typeof setTimeout> | undefined;
+    const abort = () => { if (assigned && worker) stopPromise ??= this.manager!.stop(worker.id).catch(() => undefined); };
+    signal.addEventListener("abort", abort, { once: true });
+    try {
     const sessionModel = args.model ? `${args.model.provider}/${args.model.id}` : undefined;
     const agentDir = this.options.agentDir ?? getAgentDir();
     const config = await discoverOrcheConfig({ cwd: args.cwd, agentDir, projectTrusted: args.projectTrusted, session: { model: sessionModel, thinking: args.thinking } });
@@ -632,7 +676,10 @@ export class WorkerPool {
     let deadlineInfo: DeadlineInfo = initialDeadline(limits.assignmentMs, limits, started);
     const timingNow = (): RunTiming => ({ startedAt: started, deadline: deadlineInfo });
     args.onTiming?.(timingNow(), warning ? [warning] : []);
-    const runtime = await this.options.controller.modelRuntime();
+    const startup = new AbortController();
+    startupTimer = setTimeout(() => startup.abort(new Error(`Worker startup timed out after ${limits.assignmentMs}ms`)), Math.max(0, limits.assignmentMs - (Date.now() - started)));
+    const startupSignal = AbortSignal.any([signal, startup.signal]);
+    const runtime = await this.options.controller.modelRuntime(startupSignal);
     if (this.disposed) throw new Error("Worker pool is disposed");
     signal.throwIfAborted();
     if (config.source.kind === "session" && args.model && !runtime.getModel(args.model.provider, args.model.id)) throw new NoRouteError(
@@ -641,7 +688,7 @@ export class WorkerPool {
     if (config.routes.providerExtensions?.length) {
       const key = JSON.stringify(config.routes.providerExtensions);
       if (!this.providers.has(key)) {
-        const host = await loadProviderExtensions(runtime, config.routes.providerExtensions, { cwd: args.cwd, agentDir: this.options.agentDir, signal });
+        const host = await loadProviderExtensions(runtime, config.routes.providerExtensions, { cwd: args.cwd, agentDir: this.options.agentDir, signal: startupSignal });
         if (this.disposed) { host.dispose(); throw new Error("Worker pool is disposed"); }
         this.providers.set(key, host);
       }
@@ -660,7 +707,8 @@ export class WorkerPool {
       worker = undefined;
     }
     const reusedContext = !!worker;
-    this.manager ??= new AgentManager(runtime, { resultSchemas: orchestrationResultSchemas, requestBudget: limits.assignmentRequests });
+    this.manager ??= new AgentManager(runtime, { resultSchemas: orchestrationResultSchemas, stopTimeoutMs: this.options.stopTimeoutMs });
+    this.manager.setRequestBudget(limits.assignmentRequests);
     if (!worker) {
       if (this.workers.size >= 3) {
         const oldest = [...this.workers.values()].filter(item => this.manager!.get(item.id).status === "idle").sort((a, b) => a.lastUsed - b.lastUsed)[0];
@@ -681,26 +729,16 @@ export class WorkerPool {
       meta.model = route.model;
       const customTools = images ? [createGenerateImageTool({ cwd: args.cwd, runtime, images })] : [];
       // generate_image has its own timeout (images.timeoutMs, 180 s by default): liveness bounds a silent call by it, not by the generic tool bound.
-      await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name)], customTools, peerMessaging: false, ...(sessionFile ? { sessionFile } : {}),
+      await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, signal: startupSignal, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name)], customTools, peerMessaging: false, ...(sessionFile ? { sessionFile } : {}),
         ...(images ? { toolTimeoutsMs: { generate_image: images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } } : {}),
         contextProjection: createAssignmentProjector(),
         instructions: `${taskWorkerInstructions}\nYou work alone: there are no peer workers. Reply in the language of the request.`,
-        onContextWindow: info => { meta.contextWindow = info.contextWindow; },
-        toolGuard: async (name, input) => {
-          const blocked = await this.guard(meta, name, input);
-          if (blocked) return blocked;
-          // A write-capable call that may start: the tracker snapshots the quiet period it ends (see WorkspaceActivity.enter).
-          await meta.activity?.enter(meta.id, name);
-          return undefined;
-        },
-        // Resolved at event time: the tracker belongs to the assignment in flight, not to the worker's lifetime. For a tool's `end` the
-        // returned promise is the snapshot closing its active window; the manager awaits it, so a write made after the tool ended (even
-        // by this worker's very next step) is never inside that snapshot and is seen as external, not as the worker's change.
-        onToolExecution: event => meta.activity?.record(meta.id, event),
+        ...this.callbacks(meta),
       });
       if (this.disposed) { await this.manager.dispose(id); throw new Error("Worker pool is disposed"); }
       this.workers.set(id, worker);
     }
+    clearTimeout(startupTimer);
     const meta = worker;
     clearTimeout(meta.timer);
     meta.role = args.role;
@@ -739,9 +777,6 @@ export class WorkerPool {
     let activity: WorkspaceActivity | undefined;
     let gitBaseline: GitBaseline | undefined;
     const readOnly = !WRITING_KINDS.has(args.role);
-    let assigned = false;
-    let stopPromise: Promise<void> | undefined;
-    const abort = () => { if (assigned) stopPromise ??= this.manager!.stop(meta.id); };
     const progress = () => {
       const snapshot = this.manager!.get(meta.id);
       // The extension lines stay (they are part of how the task is going), ahead of the live status line, which stays last: the UI status shows the last line.
@@ -805,7 +840,6 @@ export class WorkerPool {
         ...(concurrent ? { concurrentSessions: concurrent.activity } : {}),
       });
     };
-    signal.addEventListener("abort", abort, { once: true });
     try {
       signal.throwIfAborted();
       // Use an uncancelled audit so cancellation still records changes made before stop. Submodules are part of the
@@ -918,6 +952,15 @@ export class WorkerPool {
       await audit?.close();
       if (this.workers.has(meta.id)) this.idle(meta);
       args.onProgress?.([], timingNow());
+    }
+    } finally {
+      clearTimeout(startupTimer);
+      signal.removeEventListener("abort", abort);
+      await stopPromise;
+      if (worker && this.manager?.list().some(item => item.id === worker?.id && item.status === "disposed")) {
+        clearTimeout(worker.timer);
+        this.workers.delete(worker.id);
+      }
     }
   }
 }

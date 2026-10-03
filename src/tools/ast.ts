@@ -1,5 +1,5 @@
-import { readFile, writeFile } from "node:fs/promises";
-import { extname, join } from "node:path";
+import { lstat, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { extname, isAbsolute, join, relative, sep } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import { Lang, parse, type SgNode } from "@ast-grep/napi";
 import { withFileMutationQueue, type ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -175,7 +175,10 @@ function expand(template: string, node: SgNode, source: string): string {
   return out + template.slice(last).replaceAll("\n", `\n${indent}`);
 }
 
-export function createAstRewriteTool(cwd: string): ToolDefinition {
+/** Pure ownership check for a workspace-relative, POSIX-style file path; undefined allows the write. */
+export type AstRewriteFileGuard = (path: string, signal?: AbortSignal) => string | undefined | Promise<string | undefined>;
+
+export function createAstRewriteTool(cwd: string, options: { fileGuard?: AstRewriteFileGuard } = {}): ToolDefinition {
   return {
     name: "ast_rewrite",
     label: "ast_rewrite",
@@ -183,9 +186,13 @@ export function createAstRewriteTool(cwd: string): ToolDefinition {
       "Structural rewrite with ast-grep (JS/TS/TSX/HTML/CSS): every match of `pattern` is replaced by `replacement`, where $X / $$$X reuse captured code (formatting of the rest is untouched). Writes files in place unless dryRun is true; nested matches are skipped (run again). Use for renames, call-signature changes and API migrations across many files; check with ast_search first.",
     promptSnippet: "Structural (AST) rewrite across files with metavariable patterns",
     parameters: rewriteSchema,
-    async execute(_id, params: Static<typeof rewriteSchema>, _signal, _onUpdate, ctx) {
+    async execute(_id, params: Static<typeof rewriteSchema>, signal, _onUpdate, ctx) {
       const root = ctx?.cwd || cwd;
+      const base = resolveWorkspacePath(root, params.path ?? ".");
+      const directory = (await stat(base)).isDirectory();
+      const realDirectory = directory ? await realpath(base) : undefined;
       const targets = await collectTargets(root, params.path, params.language);
+      const skipped: string[] = [];
       const shown: string[] = [];
       let rewrites = 0;
       let files = 0;
@@ -193,6 +200,22 @@ export function createAstRewriteTool(cwd: string): ToolDefinition {
       for (const target of targets) {
         if (rewrites >= MAX_REWRITES) break;
         const applied = await withFileMutationQueue(target.file, async () => {
+          if (directory) {
+            try {
+              if ((await lstat(target.file)).isSymbolicLink()) {
+                skipped.push(`${target.display}: symlink (directory rewrites do not follow links)`);
+                return 0;
+              }
+              const rel = relative(realDirectory!, await realpath(target.file));
+              if (!rel || rel.split(sep)[0] === ".." || isAbsolute(rel)) {
+                skipped.push(`${target.display}: outside the target directory`);
+                return 0;
+              }
+            } catch (error) {
+              skipped.push(`${target.display}: ${error instanceof Error ? error.message : String(error)}`);
+              return 0;
+            }
+          }
           const parsed = await parseTarget(target).catch(() => undefined);
           if (!parsed) return 0;
           let found: SgNode[];
@@ -200,6 +223,19 @@ export function createAstRewriteTool(cwd: string): ToolDefinition {
             found = parsed.root.findAll(matcher(params.pattern, params.selector));
           } catch (error) {
             throw new Error(`Invalid pattern for ${target.lang}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          if (found.length === 0) return 0;
+          if (directory && !params.dryRun && options.fileGuard) {
+            try {
+              const reason = await options.fileGuard(relative(root, target.file).split(sep).join("/"), signal);
+              if (reason !== undefined) {
+                skipped.push(`${target.display}: ${reason}`);
+                return 0;
+              }
+            } catch (error) {
+              skipped.push(`${target.display}: ${error instanceof Error ? error.message : String(error)}`);
+              return 0;
+            }
           }
           const ordered = found.sort((a, b) => a.range().start.index - b.range().start.index);
           const edits: Array<{ start: number; end: number; text: string; before: string }> = [];
@@ -232,7 +268,8 @@ export function createAstRewriteTool(cwd: string): ToolDefinition {
         rewrites === 0
           ? `No matches in ${targets.length} files; nothing changed`
           : `${verb} ${rewrites} matches in ${files} files${nested > 0 ? ` (${nested} nested matches skipped; rerun to rewrite them)` : ""}${rewrites >= MAX_REWRITES ? " (rewrite limit reached; rerun for the rest)" : ""}\n${shown.join("\n")}`;
-      return { content: [{ type: "text", text }], details: undefined };
+      const note = skipped.length > 0 ? `\nSkipped files:\n${skipped.join("\n")}` : "";
+      return { content: [{ type: "text", text: text + note }], details: undefined };
     },
   };
 }

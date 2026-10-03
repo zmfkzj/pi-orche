@@ -4,7 +4,7 @@ import { Type } from "@sinclair/typebox";
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createOrcheTools } from "../tools/index.js";
 import { spillToolResult } from "../tools/spill.js";
-import { formatOutcome, OrcheBusyError, OrcheController, type OrcheControllerOptions } from "./controller.js";
+import { formatOutcome, OrcheBusyError, OrcheController, type OrcheControllerOptions, type OrcheRunArgs } from "./controller.js";
 import type { MainMode } from "../orchestration/routing.js";
 import { delegationRules, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
 import { CONFIG_FILE, loadOrcheConfigFile } from "./config.js";
@@ -107,6 +107,10 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     const state = new MainModeState(pi);
     const showMode = (ctx: Pick<ExtensionContext, "ui">) =>
       ctx.ui.setStatus("orche-mode", `orche: ${state.session}${state.overriding ? ` (one-turn ${state.effective})` : ""}`);
+    const recovery = (cwd: string): Pick<OrcheRunArgs, "onFailedHandover" | "handoverSkipped"> =>
+      state.effective === "auto" && pi.getActiveTools().includes("orche_task")
+        ? { onFailedHandover: (handover, assignmentRequests, signal) => pool().adoptFailedRun(handover, cwd, assignmentRequests, signal) }
+        : { handoverSkipped: state.effective === "multi" ? "orche_task is disabled in multi mode" : "orche_task is unavailable" };
 
     // (1) Our tools replace Pi's read/edit by name; they are bound to the cwd of the call, not of the process.
     const byCwd = new Map<string, Map<string, ToolDefinition>>();
@@ -263,6 +267,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
               projectTrusted: ctx.isProjectTrusted(),
               signal: ctx.signal,
               currentSession: currentSession(ctx),
+              ...recovery(ctx.cwd),
               onProgress: show,
             });
             pi.sendMessage(
@@ -308,6 +313,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           projectTrusted: ctx.isProjectTrusted(),
           signal,
           currentSession: currentSession(ctx),
+          ...recovery(ctx.cwd),
           // Every update carries the start time and the deadline (details.startedAt / details.deadline) for the TUI's elapsed timer (render.ts); the text stays the progress lines.
           onTiming: (timing, lines) => onUpdate?.(partialUpdate(lines, timing)),
           onProgress: (lines, timing) => onUpdate?.(partialUpdate(lines, timing)),

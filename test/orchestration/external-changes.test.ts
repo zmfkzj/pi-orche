@@ -55,11 +55,11 @@ async function answerRun(dir: string, analyst: FauxResponseStep, extra: { events
 }
 const analystAnswer = () => tool("report_result", { kind: "answer", summary: "explained", data: { evidence: ["core.mjs"] } });
 
-/** A one-worker change run: `steps` are the implementer's model responses before it reports. */
+/** Explicitly planned change run: `steps` are A1's model responses before it reports. */
 async function changeRun(dir: string, steps: FauxResponseStep[]) {
   const events: RunEvent[] = [];
   const f = await fauxRuntime([
-    decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "small change" }),
+    decision({ type: "classify", taskClass: "change", workerCount: 2, language: "en", reason: "explicit ownership" }),
     decision({ type: "assign", tasks: [task] }),
     ...steps,
     tool("report_result", { kind: "verify", summary: "checked", data: { passed: true } }),

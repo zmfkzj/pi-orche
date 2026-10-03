@@ -56,10 +56,10 @@ const meanwhile = (effect: () => void, next: FauxResponseStep): FauxResponseStep
 };
 const ofType = <T extends RunEvent["type"]>(events: RunEvent[], type: T) => events.filter((event): event is Extract<RunEvent, { type: T }> => event.type === type);
 
-/** A one-worker change run; `steps` are the implementer's responses before it reports. */
+/** Explicitly planned change run; `steps` are A1's responses before it reports. */
 function changeScript(steps: FauxResponseStep[]): FauxResponseStep[] {
   return [
-    decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "small change" }),
+    decision({ type: "classify", taskClass: "change", workerCount: 2, language: "en", reason: "explicit ownership" }),
     decision({ type: "assign", tasks: [task] }),
     ...steps,
     tool("report_result", { kind: "verify", summary: "checked", data: { passed: true } }),

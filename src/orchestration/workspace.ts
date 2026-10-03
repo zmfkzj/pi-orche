@@ -178,8 +178,8 @@ export class WorkspaceAudit {
     return this.submodules ? encodeSnapshot(root, await this.snapshotSubmodules()) : root;
   }
 
-  /** Breadth-first over the registered, initialized submodules under `cwd`; failures skip that submodule. */
-  private async snapshotSubmodules(): Promise<SubmoduleTree[]> {
+  /** Breadth-first over initialized submodules under `cwd`; optionally read HEAD trees instead of work trees. */
+  private async snapshotSubmodules(heads?: Map<string, string>): Promise<SubmoduleTree[]> {
     const found: SubmoduleTree[] = [];
     try {
       this.top ??= (await git(this.cwd, ["rev-parse", "--show-toplevel"], {}, this.signal)).trim();
@@ -199,7 +199,12 @@ export class WorkspaceAudit {
         if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) continue; // outside the audited directory
         if (!await exists(join(abs, ".git"))) continue; // not initialized
         try {
-          found.push({ path: posix(rel), tree: await this.snapshotRepo(abs) });
+          if (heads) {
+            const head = (await git(abs, ["rev-parse", "--verify", "-q", "HEAD"], {}, this.signal)).trim();
+            const tree = (await git(abs, ["rev-parse", "--verify", "-q", `${head}^{tree}`], {}, this.signal)).trim();
+            heads.set(posix(rel), head);
+            found.push({ path: posix(rel), tree });
+          } else found.push({ path: posix(rel), tree: await this.snapshotRepo(abs) });
           if (depth + 1 < MAX_SUBMODULE_DEPTH) queue.push({ dir: abs, depth: depth + 1 });
         } catch {
           this.signal?.throwIfAborted(); // cancellation is not "this submodule failed"
@@ -305,10 +310,20 @@ export class WorkspaceAudit {
     }
   }
 
+  /** Current HEAD content and commit per repository, comparable with recursive work-tree snapshots. Reads only. */
+  async headSnapshot(): Promise<{ tree: string; heads: Map<string, string> } | undefined> {
+    const head = await this.head();
+    if (!head) return undefined;
+    const heads = new Map([["", head]]);
+    const root = await this.treeOf(head);
+    const subs = this.submodules ? await this.snapshotSubmodules(heads) : [];
+    return { tree: encodeSnapshot(root, subs), heads };
+  }
+
   /**
-   * Tree id of a commit, comparable with {@link snapshot} trees through {@link diff}: with the
-   * baseline tree, the tree of the new HEAD and the current snapshot, a file whose snapshot
-   * content equals the new HEAD but differs from the baseline was committed by someone else.
+   * Tree id of a commit in the audited repository (submodule contents are not included). Comparable
+   * with plain snapshots through {@link diff}; use {@link headSnapshot} to compare current HEAD
+   * content with recursive work-tree snapshots.
    */
   async treeOf(commit: string): Promise<string> {
     return (await git(this.cwd, ["rev-parse", "--verify", "-q", `${commit}^{tree}`], {}, this.signal)).trim();

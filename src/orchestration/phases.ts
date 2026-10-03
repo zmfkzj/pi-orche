@@ -156,6 +156,17 @@ export function transition(state: PhaseState, decision: CoordinatorDecision, exp
   }
 }
 
+/** Deterministic single-change assignment, using the same validated BACKLOG → EXECUTE transition. */
+export function singleChangeAssignment(state: PhaseState, problem: string, owner: string, verification?: unknown): CoordinatorDecision {
+  if (state.taskClass !== "change" || state.workerCount !== 1 || state.phase !== "BACKLOG") {
+    throw new Error("Single-change assignment requires a classified one-worker change backlog");
+  }
+  return { type: "assign", tasks: [{
+    id: "T1", owner, files: ["/"], status: "pending",
+    description: verification === undefined ? problem : `${problem}\n\nFix the remaining verification issues; preserve unaffected work:\n${JSON.stringify(verification)}`,
+  }] };
+}
+
 const stringSchema = { type: "string", minLength: 1 };
 const stringsSchema = { type: "array", items: stringSchema };
 const taskSchema = { type: "object", additionalProperties: false, required: ["id", "description", "files", "status"], properties: {

@@ -28,7 +28,7 @@ export function blockedTools(mode: MainMode): readonly string[] {
 
 const REFERENCE_RULE = "Pass references, not copies: repository paths with line ranges or symbol names, reproduction commands, artifact and run-record paths. Paste only short decisive snippets a worker cannot reproduce (an exact error line or user-provided text); never whole files, diffs or long logs.";
 const REQUEST_RULES = `orche runs do not see this conversation. Make \`request\` self-contained: the goal, the decisions made so far, the relevant files and findings from this conversation, constraints, and acceptance criteria (what must be true and how to check it). Put background that is not the instruction itself in \`context\`. ${REFERENCE_RULE} When orche_run returns, report its result to the user; do not redo its work.`;
-const MULTI_CRITERIA = "the change spans two or more independent write sets or units with separate acceptance; the cause of a defect is unknown and needs parallel hypotheses; the change needs independent verification (user-visible behaviour, risky or wide changes, anything the user wants verified); the user asks for orchestration; a single worker reported blocked or a failed verification twice on the same unit.";
+const MULTI_CRITERIA = "the change spans two or more independent write sets or units with separate acceptance; the cause of a defect is unknown and needs parallel hypotheses; the change needs independent verification (user-visible behaviour, risky or wide changes, anything the user wants verified); the user asks for orchestration; an orche_task worker reported blocked or a failed verification twice on the same unit.";
 /** Stable per effective mode: never include session state or a worker roster here. */
 export function delegationRules(mode: MainMode): string {
   switch (mode) {
@@ -50,7 +50,7 @@ export function delegationRules(mode: MainMode): string {
         "Reuse: follow-ups of the same work go to the worker that did it; state what changed since; start a new worker when the premises changed materially; never claim a reuse that did not happen (unknown ids are errors; workers are gone after a reload).",
         "Supervision: a worker's report is not acceptance. Read the key evidence it cites, run the trusted project checks yourself or dispatch a verify worker, and report unverified items as unverified.",
         `Workers do not see this conversation. Write \`request\` as: Goal; Scope and non-goals; Decided and open; Inputs and dependencies; Acceptance and verification; Return. Put background in \`context\`. ${REFERENCE_RULE}`,
-        ...(multi ? [REQUEST_RULES] : []),
+        ...(multi ? ["After a failed orche_run, do not start another orche_run for the same request (even if multi criteria hold). Send remaining issues to handed-over workers via orche_task: implement for fixes, verify for re-checks; pass the reported id in `worker` to reuse context.", REQUEST_RULES] : []),
       ].join("\n");
     }
   }

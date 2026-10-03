@@ -16,6 +16,12 @@ Implemented natively on Pi 0.99.1's public API (`ToolDefinition` custom tools + 
 
 The model sees exactly one `read` and one `edit`: custom tools registered under a built-in name replace it in Pi's registry (`customTools` are applied after built-ins), and the allowlist only names `read`/`edit` once.
 
+## Delegation recovery and small changes
+
+In extension `auto` mode, a failed `orche_run` (not a user/signal cancellation) transfers live implementer/verifier/explorer sessions to the `orche_task` pool as implement/verify/explore. Its **Handover** section lists usable `worker` ids, last tasks and remaining issues. Reuse those ids with `orche_task` for fixes and re-checks; do not repeat `orche_run` for the same failed request. `/orche workers`, idle expiry and `/orche stop` apply normally. Context stays intact, without task-output projection on transferred run sessions. Multi mode skips handover and says so; successful/cancelled runs and SDK calls without `RunOptions.onFailedHandover` keep normal disposal.
+
+A `change` classified with `workerCount: 1` makes only that classification coordinator request. It deterministically assigns repository-wide ownership, executes and uses the usual independent V1 verification/audits. Pass summaries combine implementation and verification evidence. Failed verification reuses the implementer for fixes within `maxFixRounds` (default 1); exhausted issues or a blocked implementer fail immediately. Other task classes and worker counts keep their existing planning.
+
 ## Anchored read/edit
 
 `read` prints non-blank lines as `12#abcd|text`: four lowercase hex characters from the SHA-256 of the exact line content, without its EOL. Empty or whitespace-only lines print `12|<original whitespace>` with no tag. The line number and tag together detect stale content; identical lines share a tag.

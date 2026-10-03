@@ -6,7 +6,7 @@ import type { LivenessEvent } from "../../agent/liveness.js";
 import type { NoteMessage } from "../../messaging/message.js";
 import { transition, type CoordinatorDecision, type CoordinatorEffect, type Explorer } from "../phases.js";
 import type { CoordinatorEvent } from "../events.js";
-import { checkWriteRealPath, coveringTasks } from "../ownership.js";
+import { checkRootWrite, coveringTasks } from "./root-ownership.js";
 import type { RunContext } from "./types.js";
 
 /** Shared run plumbing: events, time budgets, worker spawning, phase transitions and outcome waits. */
@@ -28,6 +28,7 @@ export async function spawnWorker(ctx: RunContext, options: Parameters<AgentMana
     signal: ctx.signal,
     onContextWindow: info => emit(ctx, { type: "context_window", timestamp: Date.now(), actor: options.id, ...info }),
     toolGuard: (toolName, input) => guardWrite(ctx, options.id, toolName, input),
+    writeFileGuard: (file, signal) => guardWriteFile(ctx, options.id, file, signal),
     // Resolved against ctx.activity at event time: it exists whenever the workspace audit is on.
     onToolExecution: event => ctx.activity?.record(options.id, event),
   });
@@ -175,7 +176,7 @@ export function forwardManagerEvent(ctx: RunContext, event: ManagerEvent): void 
 export function guardWrite(ctx: RunContext, agentId: string, toolName: string, input: Record<string, unknown>): string | undefined | Promise<string | undefined> {
   if (ctx.cancelled || ctx.signal?.aborted) return "Run cancelled: no further tool writes are accepted";
   const assignmentKind = ctx.manager.list().find(worker => worker.id === agentId)?.currentAssignment?.kind;
-  return checkWriteRealPath({ toolName, input, cwd: ctx.options.cwd, agentId, assignmentKind, tasks: ctx.state.tasks }).then(blocked => {
+  return checkRootWrite({ toolName, input, cwd: ctx.options.cwd, agentId, assignmentKind, tasks: ctx.state.tasks }).then(blocked => {
     // Cancellation may have arrived while filesystem resolution was pending.
     if (ctx.cancelled || ctx.signal?.aborted) return "Run cancelled: no further tool writes are accepted";
     if (!blocked) {
@@ -188,4 +189,13 @@ export function guardWrite(ctx: RunContext, agentId: string, toolName: string, i
     });
     return blocked.reason;
   });
+}
+
+/** Pure write-time ownership check: no activity snapshots or ownership_blocked events per file. */
+export async function guardWriteFile(ctx: RunContext, agentId: string, file: string, signal?: AbortSignal): Promise<string | undefined> {
+  const cancelled = () => ctx.cancelled || ctx.signal?.aborted || signal?.aborted;
+  if (cancelled()) return "Run cancelled: no further tool writes are accepted";
+  const assignmentKind = ctx.manager.list().find(worker => worker.id === agentId)?.currentAssignment?.kind;
+  const blocked = await checkRootWrite({ toolName: "ast_rewrite", input: { path: file }, cwd: ctx.options.cwd, agentId, assignmentKind, tasks: ctx.state.tasks });
+  return cancelled() ? "Run cancelled: no further tool writes are accepted" : blocked?.reason;
 }

@@ -32,6 +32,13 @@ import { reportAgent, targetOf, type AgentRecordEntry, type SessionRecords } fro
 import { DEFAULT_LIVENESS_WINDOW_MS, LivenessTracker, isIdleHeartbeat, mergeLiveness, type Liveness, type SessionLiveness } from "./liveness.js";
 /** Requests a forced final report may take after a budget stop before the assignment fails. */
 export const BUDGET_GRACE_REQUESTS = 5;
+/** SDK abort is cooperative; never hold a session's activity slot indefinitely. */
+export const WORKER_STOP_TIMEOUT_MS = 1000;
+interface RetiredWorker {
+  snapshot: AgentSnapshot;
+  record: AgentRecordEntry;
+  liveness: SessionLiveness;
+}
 interface Worker {
   snapshot: AgentSnapshot;
   adapter: SessionAdapter;
@@ -46,6 +53,7 @@ interface Worker {
   resultFailure?: string;
   /** Model requests of the current assignment, for the soft request budget. */
   requests: number;
+  requestBudget: number;
   /** Budget ladder: none → noticed (wrap-up notice sent) → stopping (turn aborted) → final (forced report prompt). */
   budget: "none" | "noticed" | "stopping" | "final";
   abort?: Promise<void>;
@@ -57,6 +65,7 @@ interface Worker {
   contextProjection?: SpawnOptions["contextProjection"];
   projectionOptions?: { enabled?: boolean; minClearTokens?: number };
   projectionAssignment?: Assignment;
+  rebind(manager: AgentManager, overrides?: WorkerAdoptOptions): void;
 }
 interface WorkerStats {
   startedAt: number;
@@ -71,21 +80,29 @@ interface WorkerStats {
   sessionFile?: string;
   reported: boolean;
 }
+/** Opaque, one-use ownership handle; detaching never disposes the session. */
+export interface WorkerTransfer { readonly snapshot: AgentSnapshot }
+export type WorkerAdoptOptions = Pick<Partial<SpawnOptions>, "id" | "role" | "toolGuard" | "writeFileGuard" | "onToolExecution" | "onContextWindow" | "contextProjection">;
+const detachedWorkers = new WeakMap<WorkerTransfer, Worker>();
+
 export class AgentManager {
   private readonly workers = new Map<string, Worker>();
+  private readonly retired = new Map<string, RetiredWorker>();
+  private readonly workerIds = new Set<string>();
   private readonly listeners = new Set<(event: ManagerEvent) => void>();
   private readonly wake = new Set<() => void>();
   private readonly outcomes: Outcome[] = [];
   private readonly inbox: NoteMessage[] = [];
   private readonly router = new MessageRouter(
-    (id) => id === "main" || this.workers.has(id),
+    (id) => id === "main" || this.workerIds.has(id),
     (message) => this.deliver(message),
   );
   private modelRuntime: Promise<ModelRuntime> | undefined;
   private readonly resultNudges: number;
   private readonly resultSchemas: Readonly<Record<string, ResultDataSchema>>;
   private readonly resultSchemaRetries: number;
-  private readonly requestBudget: number;
+  private requestBudget: number;
+  private readonly stopTimeoutMs: number;
   private readonly records: SessionRecords | undefined;
   private readonly closed = new AbortController();
   private readonly pendingSpawns = new Set<string>();
@@ -101,7 +118,7 @@ export class AgentManager {
       throw error;
     }
   }
-  constructor(modelRuntime?: ModelRuntime, options: AgentManagerOptions = {}) {
+  constructor(modelRuntime?: ModelRuntime, options: AgentManagerOptions & { stopTimeoutMs?: number } = {}) {
     this.resultNudges = options.resultNudges ?? 1;
     if (!Number.isSafeInteger(this.resultNudges) || this.resultNudges < 0)
       throw new Error("resultNudges must be a nonnegative safe integer");
@@ -112,12 +129,23 @@ export class AgentManager {
     this.requestBudget = options.requestBudget ?? 0;
     if (!Number.isSafeInteger(this.requestBudget) || this.requestBudget < 0)
       throw new Error("requestBudget must be a nonnegative safe integer");
+    this.stopTimeoutMs = options.stopTimeoutMs ?? WORKER_STOP_TIMEOUT_MS;
+    if (!Number.isFinite(this.stopTimeoutMs) || this.stopTimeoutMs < 0)
+      throw new Error("stopTimeoutMs must be finite and nonnegative");
     this.records = options.records;
     this.modelRuntime = modelRuntime ? Promise.resolve(modelRuntime) : undefined;
   }
+  /** Refresh the next assignment's quota when session limits are reloaded. */
+  setRequestBudget(budget: number): void {
+    if (!Number.isSafeInteger(budget) || budget < 0)
+      throw new Error("requestBudget must be a nonnegative safe integer");
+    this.requestBudget = budget;
+  }
   async spawn(options: SpawnOptions): Promise<AgentHandle> {
+    let owner: AgentManager = this;
+    options = { ...options };
     this.assertOpen(options.signal);
-    if (options.id === "main" || this.workers.has(options.id) || this.pendingSpawns.has(options.id))
+    if (options.id === "main" || this.workerIds.has(options.id) || this.pendingSpawns.has(options.id))
       throw new Error(`Reserved or duplicate agent id: ${options.id}`);
     let worker: Worker;
     const report: ToolDefinition = {
@@ -132,7 +160,7 @@ export class AgentManager {
       }),
       execute: async (_id, args) => {
         if (
-          this.closed.signal.aborted || options.signal?.aborted ||
+          owner.closed.signal.aborted || options.signal?.aborted ||
           !worker.snapshot.currentAssignment ||
           worker.snapshot.status !== "running" ||
           worker.result ||
@@ -150,11 +178,11 @@ export class AgentManager {
             terminate: true,
           };
         const payload = args as ResultPayload;
-        const contract = this.resultSchemas[worker.snapshot.currentAssignment.kind];
+        const contract = owner.resultSchemas[worker.snapshot.currentAssignment.kind];
         if (payload.kind !== worker.snapshot.currentAssignment.kind)
-          return this.rejectResult(worker, `Expected RESULT kind "${worker.snapshot.currentAssignment.kind}"; received "${payload.kind}"`, contract);
+          return owner.rejectResult(worker, `Expected RESULT kind "${worker.snapshot.currentAssignment.kind}"; received "${payload.kind}"`, contract);
         const errors = contract ? resultDataErrors(contract, payload.data) : undefined;
-        if (errors) return this.rejectResult(worker, errors, contract!);
+        if (errors) return owner.rejectResult(worker, errors, contract!);
         worker.result = payload;
         return {
           content: [
@@ -184,7 +212,7 @@ export class AgentManager {
         ),
       }),
       execute: async (_id, args) => {
-        if (this.closed.signal.aborted || options.signal?.aborted) return {
+        if (owner.closed.signal.aborted || options.signal?.aborted) return {
           content: [{ type: "text", text: "NOTE rejected: manager or worker creation cancelled" }],
           details: { accepted: false }, isError: true,
         };
@@ -193,7 +221,7 @@ export class AgentManager {
           content: string;
           signal?: NoteMessage["signal"];
         };
-        const receipt = await this.send({
+        const receipt = await owner.send({
           id: randomUUID(),
           from: options.id,
           type: "note",
@@ -221,6 +249,11 @@ export class AgentManager {
       this.assertOpen(signal);
       const session = await createSession({
         ...options, ...target, modelRuntime, tools,
+        toolGuard: (name, input) => options.toolGuard?.(name, input),
+        writeFileGuard: (file, signal) => options.writeFileGuard
+          ? options.writeFileGuard(file, signal)
+          : options.toolGuard ? "Directory ast_rewrite requires a per-file write guard in a guarded session" : undefined,
+        onContextWindow: info => options.onContextWindow?.(info),
         customTools: [...(options.customTools ?? []), report, ...(options.peerMessaging === false ? [] : [send])],
         instructions: `${options.instructions}\nComplete assignments with report_result.${options.peerMessaging === false ? "" : " Send peers information using send_message."} NOTES are informational, not new assignments.`,
       });
@@ -250,6 +283,8 @@ export class AgentManager {
       // Keep ids reserved while an uncooperative creation is still in flight.
       void creation.then(() => this.pendingSpawns.delete(options.id), () => this.pendingSpawns.delete(options.id));
     }
+    // The spawn signal governs creation only; pooled sessions outlive their first task.
+    options.signal = undefined;
     const adapter = new SessionAdapter(session);
     worker = {
       snapshot: {
@@ -265,14 +300,24 @@ export class AgentManager {
       nudges: 0,
       rejections: 0,
       requests: 0,
+      requestBudget: this.requestBudget,
       budget: "none",
       unsubscribe: () => {},
       stats: { startedAt: Date.now(), requests: 0, models: {}, busyMs: 0, sessionFile: session.sessionFile, reported: false },
       // The state changes go into the manager's event stream, but not once the manager is closed or the worker disposed.
       liveness: new LivenessTracker({
         id: options.id, role: options.role, ...(options.toolTimeoutsMs ? { toolTimeoutsMs: options.toolTimeoutsMs } : {}),
-        onChange: event => { if (!this.closed.signal.aborted && worker.snapshot.status !== "disposed") this.emit(event); },
+        onChange: event => { if (!owner.closed.signal.aborted && worker.snapshot.status !== "disposed") owner.emit(event); },
       }),
+      rebind: (manager, overrides = {}) => {
+        owner = manager;
+        options = { ...options, signal: undefined, toolGuard: undefined, writeFileGuard: undefined, onToolExecution: undefined, onContextWindow: undefined, contextProjection: undefined, ...overrides };
+        options.id = overrides.id ?? worker.snapshot.id;
+        worker.snapshot.id = options.id;
+        worker.snapshot.role = overrides.role ?? worker.snapshot.role;
+        worker.contextProjection = overrides.contextProjection;
+        worker.liveness = new LivenessTracker({ id: options.id, role: worker.snapshot.role, onChange: event => { if (!owner.closed.signal.aborted) owner.emit(event); } });
+      },
     };
     // The end of a tool is observed through the Agent's own listener, not the session listener below: the Agent awaits its listeners,
     // in order, before it goes on (tool-result message, next model request), so an observer that returns a promise (the workspace
@@ -282,7 +327,7 @@ export class AgentManager {
     const unsubscribeEnds = options.onToolExecution && session.agent
       ? session.agent.subscribe(async (event, runSignal) => {
           if (event.type !== "tool_execution_end") return;
-          await until(notifyTool(options, { phase: "end", toolCallId: event.toolCallId, toolName: event.toolName, isError: event.isError }), runSignal, this.closed.signal);
+          await until(notifyTool(options, { phase: "end", toolCallId: event.toolCallId, toolName: event.toolName, isError: event.isError }), runSignal, owner.closed.signal);
         })
       : undefined;
     const unsubscribeSession = adapter.subscribe((event) => {
@@ -304,13 +349,13 @@ export class AgentManager {
       // changes are published through `onChange` above (silenced once the manager is closed). A heartbeat of a process that is alive
       // but idle is not activity: it must not refresh `lastActivityAt` below.
       worker.liveness.observe(event);
-      if (this.closed.signal.aborted || worker.snapshot.status === "disposed") return;
+      if (owner.closed.signal.aborted || worker.snapshot.status === "disposed") return;
       if (!isIdleHeartbeat(event)) worker.snapshot.lastActivityAt = Date.now();
       if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
         worker.snapshot.lastToolName = event.toolName;
         worker.snapshot.lastToolAt = Date.now();
         if (event.type === "tool_execution_start" && worker.runAssignment) {
-          this.emit({ type: "tool_started", timestamp: Date.now(), agentId: options.id, assignmentId: worker.runAssignment.id, toolName: event.toolName });
+          owner.emit({ type: "tool_started", timestamp: Date.now(), agentId: options.id, assignmentId: worker.runAssignment.id, toolName: event.toolName });
         }
       }
       if (event.type === "message_end" && event.message.role === "assistant") {
@@ -325,8 +370,8 @@ export class AgentManager {
               ? (event.message.errorMessage ?? "Model error")
               : undefined;
           const reporting = event.message.content.some(part => part.type === "toolCall" && part.name === "report_result");
-          if (!budgetAborted) this.trackBudget(worker, assignment, reporting);
-          this.emit({
+          if (!budgetAborted) owner.trackBudget(worker, assignment, reporting);
+          owner.emit({
             type: "usage", timestamp: Date.now(), agentId: options.id, assignmentId: assignment.id,
             model: `${event.message.provider}/${event.message.model}`,
             input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite,
@@ -338,7 +383,7 @@ export class AgentManager {
         event.message.customType === "pi-orche.note"
       ) {
         const message = event.message.details as NoteMessage;
-        this.emit({
+        owner.emit({
           type: "message_delivered",
           timestamp: Date.now(),
           message,
@@ -351,18 +396,19 @@ export class AgentManager {
         const reportable = assignment && worker.snapshot.status === "running" && !worker.result && !failed;
         if (reportable && worker.budget === "stopping") {
           worker.budget = "final";
-          this.runAssignment(worker, assignment, `Your request budget for assignment ${assignment.kind} is exhausted and your turn was stopped. Call report_result alone now with what you have: partial findings are fine; for implement/fix use data.status "blocked" with the reason if the work is unfinished.`);
-        } else if (reportable && worker.nudges < this.resultNudges) {
+          owner.runAssignment(worker, assignment, `Your request budget for assignment ${assignment.kind} is exhausted and your turn was stopped. Call report_result alone now with what you have: partial findings are fine; for implement/fix use data.status "blocked" with the reason if the work is unfinished.`);
+        } else if (reportable && worker.nudges < owner.resultNudges) {
           worker.nudges++;
-          this.emit({ type: "assignment_nudged", timestamp: Date.now(), agentId: options.id, assignmentId: assignment.id, attempt: worker.nudges });
-          this.runAssignment(worker, assignment, `You ended without calling report_result for assignment ${assignment.kind}. Call report_result alone now with your result.`);
+          owner.emit({ type: "assignment_nudged", timestamp: Date.now(), agentId: options.id, assignmentId: assignment.id, attempt: worker.nudges });
+          owner.runAssignment(worker, assignment, `You ended without calling report_result for assignment ${assignment.kind}. Call report_result alone now with your result.`);
         } else {
-          this.finalize(worker, failed ? "failed" : worker.result ? "completed" : "no_result");
+          owner.finalize(worker, failed ? "failed" : worker.result ? "completed" : "no_result");
         }
       }
     });
     worker.unsubscribe = () => { unsubscribeEnds?.(); unsubscribeSession(); };
     this.workers.set(options.id, worker);
+    this.workerIds.add(options.id);
     return {
       id: options.id,
       assign: (kind, prompt) => this.assign(options.id, kind, prompt),
@@ -386,6 +432,7 @@ export class AgentManager {
     w.rejections = 0;
     w.resultFailure = undefined;
     w.requests = 0;
+    w.requestBudget = this.requestBudget;
     w.budget = "none";
     w.snapshot.requestCount = 0;
     w.snapshot.lastActivityAt = Date.now();
@@ -440,8 +487,8 @@ export class AgentManager {
    */
   private trackBudget(w: Worker, assignment: Assignment, reporting: boolean): void {
     w.snapshot.requestCount = ++w.requests;
-    if (!this.requestBudget) return;
-    const budget = this.requestBudget;
+    if (!w.requestBudget) return;
+    const budget = w.requestBudget;
     const stopAt = Math.ceil(budget * 1.5);
     const emit = (action: "notice" | "stop" | "abort") => this.emit({
       type: "request_budget", timestamp: Date.now(), agentId: w.snapshot.id,
@@ -464,6 +511,7 @@ export class AgentManager {
   }
   /** Resolves once an in-flight interruption of `agentId` (stop/redirect abort) has settled. */
   async settle(agentId: string): Promise<void> {
+    if (this.retired.has(agentId)) return;
     await this.require(agentId).abort?.catch(() => undefined);
   }
   send(message: OrcheMessage): Promise<DeliveryReceipt> {
@@ -489,6 +537,7 @@ export class AgentManager {
         });
         return receipt;
       }
+      if (this.retired.has(message.to)) return { id: message.id, status: "rejected", mode: "context", reason: "Agent disposed" };
       const w = this.require(message.to);
       if (w.snapshot.status === "disposed")
         return {
@@ -500,6 +549,7 @@ export class AgentManager {
       await w.adapter.note(message);
       return { id: message.id, status: "delivered", mode: "context" };
     }
+    if (this.retired.has(message.to)) return { id: message.id, status: "rejected", mode: message.type === "stop" ? "abort" : "abort-prompt", reason: "Agent disposed" };
     const w = this.require(message.to);
     const mode = message.type === "stop" ? "abort" : "abort-prompt";
     if (w.snapshot.status === "disposed")
@@ -526,6 +576,7 @@ export class AgentManager {
     return receipt;
   }
   async stop(agentId: string): Promise<void> {
+    if (this.retired.has(agentId)) return;
     await this.interrupt(this.require(agentId), "stopped");
   }
   private async interrupt(
@@ -541,11 +592,17 @@ export class AgentManager {
     w.snapshot.status = "stopping";
     ++w.epoch;
     this.finalize(w, w.result ? "completed" : status, false);
-    const pending = w.adapter.abort();
-    w.abort = pending;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const pending = Promise.resolve().then(() => w.adapter.abort());
+    const bounded = Promise.race([
+      pending,
+      new Promise<void>(resolve => { timer = setTimeout(() => { this.retireWorker(w); resolve(); }, this.stopTimeoutMs); }),
+    ]);
+    w.abort = bounded;
     try {
-      await pending;
+      await bounded;
     } finally {
+      clearTimeout(timer);
       w.abort = undefined;
       w.runAssignment = undefined;
       if (this.get(w.snapshot.id).status !== "disposed") w.snapshot.status = "idle";
@@ -652,7 +709,7 @@ export class AgentManager {
     return promise;
   }
   get(id: string): AgentSnapshot {
-    const s = this.require(id).snapshot;
+    const s = (this.retired.get(id) ?? this.require(id)).snapshot;
     return {
       ...s,
       route: { ...s.route },
@@ -662,7 +719,7 @@ export class AgentManager {
     };
   }
   list(): AgentSnapshot[] {
-    return [...this.workers.keys()].map((id) => this.get(id));
+    return [...this.workerIds].map((id) => this.get(id));
   }
   subscribe(listener: (event: ManagerEvent) => void): () => void {
     this.listeners.add(listener);
@@ -688,12 +745,41 @@ export class AgentManager {
   session(id: string): AgentSession {
     return this.require(id).adapter.session;
   }
+  /** Transfer only settled, idle workers; the caller becomes responsible for adopting them. */
+  detach(id: string): WorkerTransfer {
+    const worker = this.require(id);
+    if (worker.snapshot.status !== "idle" || worker.abort) throw new Error(`Agent ${id} is not idle`);
+    this.reportOnce(worker);
+    this.workers.delete(id);
+    this.workerIds.delete(id);
+    const transfer = { snapshot: this.snapshotOf(worker) };
+    detachedWorkers.set(transfer, worker);
+    return transfer;
+  }
+  adopt(transfer: WorkerTransfer, options: WorkerAdoptOptions = {}): AgentSnapshot {
+    this.assertOpen();
+    const worker = detachedWorkers.get(transfer);
+    if (!worker) throw new Error("Worker transfer already adopted or invalid");
+    const id = options.id ?? worker.snapshot.id;
+    if (id === "main" || this.workerIds.has(id) || this.pendingSpawns.has(id)) throw new Error(`Reserved or duplicate agent id: ${id}`);
+    worker.rebind(this, { ...options, id });
+    worker.stats.reported = false;
+    this.workers.set(id, worker);
+    this.workerIds.add(id);
+    detachedWorkers.delete(transfer);
+    return this.get(id);
+  }
+  private snapshotOf(worker: Worker): AgentSnapshot {
+    return { ...worker.snapshot, route: { ...worker.snapshot.route } };
+  }
   /**
    * Manifest entry of one worker (never throws for a known id): who it is, which model it was routed to and which models actually
    * answered, how many requests it made over its whole life, how long it worked and how its last assignment ended. Available
    * whether or not records are enabled; `sessionFile` is set only for a persisted session.
    */
   agentRecord(id: string): AgentRecordEntry {
+    const retired = this.retired.get(id);
+    if (retired) return { ...retired.record, models: { ...retired.record.models } };
     const w = this.require(id);
     const { stats, snapshot } = w;
     const running = snapshot.status === "running" || snapshot.status === "stopping";
@@ -718,6 +804,8 @@ export class AgentManager {
    * and never active, whatever its last events said. Throws for an unknown id, like {@link get}.
    */
   workerLiveness(id: string, now: number = Date.now(), windowMs: number = DEFAULT_LIVENESS_WINDOW_MS): SessionLiveness {
+    const retired = this.retired.get(id);
+    if (retired) return { ...retired.liveness };
     const w = this.require(id);
     return w.liveness.session(now, windowMs, { idle: !w.snapshot.currentAssignment || w.snapshot.status === "disposed" });
   }
@@ -736,13 +824,24 @@ export class AgentManager {
   }
   /** {@link agentRecord} of every worker ever spawned here (disposed ones included), in spawn order. */
   agentRecords(): AgentRecordEntry[] {
-    return [...this.workers.keys()].map(id => this.agentRecord(id));
+    return [...this.workerIds].map(id => this.agentRecord(id));
   }
   /** Hand a worker's entry to `records.onAgent` once, after its session is disposed. */
   private reportOnce(w: Worker): void {
     if (w.stats.reported) return;
     w.stats.reported = true;
     if (this.records?.onAgent) reportAgent(this.records, this.agentRecord(w.snapshot.id));
+  }
+  /** Only small status/record data survives disposal; no adapter, session or callback closures. */
+  private retireWorker(w: Worker): void {
+    if (this.retired.has(w.snapshot.id)) return;
+    w.unsubscribe();
+    this.finalize(w, w.result ? "completed" : "stopped", false);
+    w.adapter.dispose();
+    w.snapshot.status = "disposed";
+    this.reportOnce(w);
+    this.retired.set(w.snapshot.id, { snapshot: this.snapshotOf(w), record: this.agentRecord(w.snapshot.id), liveness: w.liveness.session(Date.now(), DEFAULT_LIVENESS_WINDOW_MS, { idle: true }) });
+    this.workers.delete(w.snapshot.id);
   }
   /**
    * Fence the manager and dispose every registered session immediately. Wait at most timeoutMs
@@ -758,13 +857,9 @@ export class AgentManager {
       if (w.snapshot.status === "disposed") continue;
       const id = w.snapshot.id;
       pending.add(id);
-      const abort = w.abort ?? Promise.resolve().then(() => w.adapter.abort());
-      w.unsubscribe();
-      // Invalidate promptly, even when abort never settles.
-      this.finalize(w, w.result ? "completed" : "stopped", false);
-      w.adapter.dispose();
-      w.snapshot.status = "disposed";
-      this.reportOnce(w);
+      const adapter = w.adapter;
+      const abort = w.abort ?? Promise.resolve().then(() => adapter.abort());
+      this.retireWorker(w);
       waits.push(abort.then(() => { pending.delete(id); }, () => { pending.delete(id); }));
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -777,12 +872,10 @@ export class AgentManager {
     return { pendingWorkerIds: [...new Set([...pending, ...this.pendingSpawns])] };
   }
   async dispose(agentId?: string): Promise<void> {
-    for (const w of agentId ? [this.require(agentId)] : this.workers.values()) {
+    if (agentId && this.retired.has(agentId)) return;
+    for (const w of agentId ? [this.require(agentId)] : [...this.workers.values()]) {
       await this.stop(w.snapshot.id);
-      w.unsubscribe();
-      w.adapter.dispose();
-      w.snapshot.status = "disposed";
-      this.reportOnce(w);
+      this.retireWorker(w);
     }
   }
 }

@@ -13,7 +13,7 @@ afterEach(() => vi.restoreAllMocks());
 const tool = (name: string, args: ToolCall["arguments"]) => reply([call(name, args)], { stopReason: "toolUse" });
 const decision = (value: ToolCall["arguments"]) => tool("coordinator_decision", { decision: value });
 const task = { id: "change", description: "Fix the typo", owner: "A1", files: ["greeting.txt"], status: "pending" };
-const classify = decision({ type: "classify", taskClass: "change", workerCount: 1, language: "en", reason: "One-line edit" });
+const classify = decision({ type: "classify", taskClass: "change", workerCount: 2, language: "en", reason: "Explicit plan review" });
 const assign = decision({ type: "assign", tasks: [task] });
 const complete = decision({ type: "complete", summary: "Fixed the typo." });
 const implemented = tool("report_result", { kind: "implement", summary: "typo fixed", data: { status: "done" } });
@@ -125,7 +125,7 @@ describe("advisors inside runOrchestrated", () => {
       const report = await runOrchestrated({ problem: "Fix", cwd: dir, routes: { ...shipped, default: { model: main.route.model } }, modelRuntime: main.runtime, sink: event => events.push(event) });
       expect(report.status).toBe("done");
       expect(events.filter(event => event.type.startsWith("advisor_"))).toEqual([]);
-      expect(dispose).toHaveBeenCalledTimes(3); // coordinator, A1, V1 only
+      expect(dispose).toHaveBeenCalledTimes(4); // coordinator, A1, unused A2, V1 only
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
