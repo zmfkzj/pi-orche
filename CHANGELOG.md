@@ -4,5 +4,10 @@
 
 ### Changed
 
+- Reduced read anchors to four hex characters, omitted blank-line tags, and kept 4–16-hex backward compatibility; earlier-read anchors rebase across the tool's own edits, rejecting ambiguous surviving targets. Current read/symbol anchors always win, so re-reading resolves ambiguity.
+- Compacted edit echoes to one-line context / 40 lines with long-operation collapse, and added non-blocking JS/TS parse-error feedback.
+- Added JS/TS/Markdown read outlines and named-symbol reads with normal edit anchors; `outline: false` is unset and blank symbols are rejected.
+- Filtered bash test/compiler/linter noise and grouped repeated grep paths, preserving diagnostics and recoverable full-output artifacts; analysis clips lines at 2,000 characters, scans their full tails for diagnostic words and reports the clip count, and skips specialized filters above 2 MB. Over-threshold specialized summaries fall back to bounded original-output previews, prioritizing middle errors over warnings and counting omitted diagnostics.
+- Delegation now passes references rather than copied files/logs, and worker reports are conclusion-first with location evidence. Run worker instructions are static per role/loadout, with identity/request/language briefed in the first assignment for cache reuse.
 - Rebuilt eval summaries now record the artifact directory actually read, so relocated study directories remain analysable.
 
