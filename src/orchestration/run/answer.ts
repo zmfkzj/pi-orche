@@ -3,7 +3,7 @@ import { READ_ONLY_TOOL_NAMES } from "../../tools/index.js";
 import { resolveRoute } from "../routing.js";
 import { cycled } from "../team.js";
 import { answerPrompt, workerInstructions } from "../prompts.js";
-import { apply, spawnWorker, waitOutcomes } from "./context.js";
+import { apply, assignWorker, spawnWorker, waitOutcomes } from "./context.js";
 import { decide } from "./decisions.js";
 import { auditWorkspace } from "./audit.js";
 import type { RunContext } from "./types.js";
@@ -15,11 +15,11 @@ export async function runAnswer(ctx: RunContext, runtime: ModelRuntime): Promise
       id, role: "analyst", cwd: ctx.options.cwd,
       route: resolveRoute(ctx.options.routes, "analyst"), modelRuntime: runtime,
       tools: [...READ_ONLY_TOOL_NAMES], baseSystemPrompt: ctx.options.baseSystemPrompt,
-      instructions: `${workerInstructions}\nYour id is ${id}. This is a strictly read-only request. Never modify or create files, including scratch files. Reply in the user's language (${ctx.state.language}; Korean requests require Korean answers).`,
+      instructions: `${workerInstructions}\nThis is a strictly read-only request. Never modify or create files, including scratch files.`,
     });
   }
   for (const [index, id] of ctx.workerIds.entries()) {
-    ctx.manager.assign(id, "answer", answerPrompt(ctx.options.problem, cycled(ctx.team.answerAngles, index), ctx.workerIds.filter(peer => peer !== id), ctx.state.language!));
+    assignWorker(ctx, id, "answer", answerPrompt(ctx.options.problem, cycled(ctx.team.answerAngles, index), ctx.workerIds.filter(peer => peer !== id)), true);
   }
   const outcomes = await waitOutcomes(ctx, "answer", new Set(ctx.workerIds));
   // Analysts hold read-only tools only: a change not traceable to a worker tool call is external

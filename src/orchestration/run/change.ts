@@ -6,7 +6,7 @@ import { dedupeProposals, isBacklogDone, readyTasks, updateTaskStatus, type Back
 import { coveringTasks } from "../ownership.js";
 import { resolveRoute } from "../routing.js";
 import { implementationPrompt, verificationPrompt, workerInstructions } from "../prompts.js";
-import { apply, bounded, bufferMainNote, emit, spawnWorker, waitOutcomes } from "./context.js";
+import { apply, assignWorker, bounded, bufferMainNote, emit, spawnWorker, waitOutcomes } from "./context.js";
 import { decide } from "./decisions.js";
 import { auditWorkspace } from "./audit.js";
 import type { RunContext } from "./types.js";
@@ -17,7 +17,7 @@ export async function spawnChangeWorkers(ctx: RunContext, runtime: ModelRuntime)
     await spawnWorker(ctx, {
       id, role: "implementer", cwd: ctx.options.cwd, baseSystemPrompt: ctx.options.baseSystemPrompt, tools: [...WORKER_TOOL_NAMES],
       route: resolveRoute(ctx.options.routes, "implementer"), modelRuntime: runtime,
-      instructions: `${workerInstructions}\nYour id is ${id}. User request: ${ctx.options.problem}\nReply in the user's language (${ctx.state.language}).`,
+      instructions: workerInstructions,
     });
   }
 }
@@ -37,7 +37,7 @@ async function executeBacklog(ctx: RunContext): Promise<string[]> {
       if (ctx.manager.get(task.owner!).status !== "idle") continue;
       ctx.activeTasks.set(task.owner!, task);
       ctx.state = { ...ctx.state, tasks: updateTaskStatus(ctx.state.tasks, task.id, "running") };
-      ctx.manager.assign(task.owner!, kind, implementationPrompt(task, ctx.state.tasks, kind === "fix"));
+      assignWorker(ctx, task.owner!, kind, implementationPrompt(task, ctx.state.tasks, kind === "fix"));
       emit(ctx, { type: "task_dispatched", timestamp: Date.now(), taskId: task.id, agentId: task.owner! });
     }
     if (!ctx.state.tasks.some(task => task.status === "running")) {
@@ -85,7 +85,7 @@ async function executeBacklog(ctx: RunContext): Promise<string[]> {
 }
 async function verifyRound(ctx: RunContext): Promise<ResultPayload | undefined> {
   apply(ctx, { type: "verify" });
-  ctx.manager.assign("V1", "verify", verificationPrompt(ctx.options.problem, ctx.state.tasks, ctx.options.routes.verifyCommands));
+  assignWorker(ctx, "V1", "verify", verificationPrompt(ctx.options.problem, ctx.state.tasks, ctx.options.routes.verifyCommands), true);
   const [verification] = await waitOutcomes(ctx, "verify", new Set(["V1"]));
   // The verifier is read-only: anything it changed (beyond ignored build output) is a violation.
   await auditWorkspace(ctx, ["V1"], () => false);
@@ -109,7 +109,7 @@ export async function mergeExecuteAndVerify(ctx: RunContext, runtime: ModelRunti
   await spawnWorker(ctx, {
     id: "V1", role: "verifier", cwd: ctx.options.cwd,
     route: resolveRoute(ctx.options.routes, "verifier"), modelRuntime: runtime,
-    instructions: `${workerInstructions}\nReply in the user's language (${ctx.state.language}).`, tools: [...READ_ONLY_TOOL_NAMES, "bash"], baseSystemPrompt: ctx.options.baseSystemPrompt,
+    instructions: workerInstructions, tools: [...READ_ONLY_TOOL_NAMES, "bash"], baseSystemPrompt: ctx.options.baseSystemPrompt,
   });
   while (ctx.state.phase !== "DONE" && ctx.state.phase !== "FAILED") {
     const merged = await decide(ctx, mergeContext);

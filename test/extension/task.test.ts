@@ -66,6 +66,9 @@ describe("orche_task persistent session workers", () => {
     expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "edit", "write", "ast_rewrite", "report_result"]));
     expect(session.getActiveToolNames()).not.toContain("send_message");
     expect(JSON.stringify(session.messages)).toContain("Context from the requesting session");
+    expect(JSON.stringify(session.messages)).toContain("Start summary with the conclusion (1–3 sentences)");
+    expect(JSON.stringify(session.messages)).toContain("path:line references and command outcomes");
+    expect(JSON.stringify(session.messages)).toContain("Do not paste code, diffs or logs");
   });
 
   it("reuses the same session across roles and identifies stale workspace context", async () => {

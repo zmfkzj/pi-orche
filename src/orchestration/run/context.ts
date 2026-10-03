@@ -34,6 +34,19 @@ export async function spawnWorker(ctx: RunContext, options: Parameters<AgentMana
   // AgentManager disposes any late creation itself; never await unbounded teardown here.
   if (ctx.cancelled) throw new Error("cancelled");
 }
+/** Brief each worker once, at dispatch rather than in its cacheable system instructions. */
+export function workerAssignment(ctx: RunContext, id: string, prompt: string, includesRequest = false): string {
+  const briefed = ctx.briefedWorkers ??= new Set<string>();
+  if (briefed.has(id)) return prompt;
+  briefed.add(id);
+  const request = includesRequest || prompt.includes(ctx.options.problem) ? "" : `\nUser request: ${ctx.options.problem}`;
+  return `Your id is ${id}. Reply in the user's language (${ctx.state.language}).${request}\n\n${prompt}`;
+}
+
+export function assignWorker(ctx: RunContext, id: string, kind: string, prompt: string, includesRequest = false): void {
+  ctx.manager.assign(id, kind, workerAssignment(ctx, id, prompt, includesRequest));
+}
+
 export { runLiveness };
 /** Give the context its public `ctx.liveness()`; called when the first session of the run is created. */
 export function ensureLiveness(ctx: RunContext): void {

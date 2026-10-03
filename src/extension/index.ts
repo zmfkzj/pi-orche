@@ -57,11 +57,11 @@ const SINGLE_START_TIMEOUT_MS = 10_000;
 const orcheRunParameters = Type.Object({
   request: Type.String({
     minLength: 1,
-    description: "The instruction for the orchestrator, SELF-CONTAINED: the goal, decisions made so far in the conversation, the relevant files and findings, constraints, and acceptance criteria (what must be true and how to check it). The orchestrator does not see the conversation.",
+    description: "Self-contained goal, decisions, constraints and acceptance checks; the orchestrator does not see the conversation. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs.",
   }),
   context: Type.Optional(Type.String({
     maxLength: 30_000,
-    description: "Background from the conversation that supports the request (findings, earlier decisions, file excerpts). Appended to the request.",
+    description: "Background findings and decisions, appended to request. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs.",
   })),
 });
 export const ORCHE_USAGE = "Usage: /orche single|multi|direct <PROMPT> | /orche mode [auto|single|multi|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche cancel";
@@ -293,7 +293,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       name: "orche_run",
       label: "orche",
       description:
-        `Delegate a coding request to the pi-orche orchestrator: a coordinator plans, parallel workers explore/implement in this workspace, and an independent verifier checks the result. Returns the final report. The orchestrator does NOT see this conversation, so the request must be self-contained: goal, decisions so far, relevant files and findings, constraints, acceptance criteria. Only one run can be active; it can take several minutes and edits files in the current directory. Time budget: ${timeBudget("run")} an idle run times out at the base deadline, and the report says why a timeout was not extended.`,
+        `Delegate a coding request to the pi-orche orchestrator: a coordinator plans, parallel workers explore/implement in this workspace, and an independent verifier checks the result. Returns the final report. The orchestrator does NOT see this conversation, so the request must be self-contained: goal, decisions so far, relevant files and findings, constraints, acceptance criteria. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs. Only one run can be active; it can take several minutes and edits files in the current directory. Time budget: ${timeBudget("run")} an idle run times out at the base deadline, and the report says why a timeout was not extended.`,
       promptSnippet: "orche_run: delegate a substantial change/investigation to the multi-agent orchestrator and get its verified report",
       parameters: orcheRunParameters,
       executionMode: "sequential",
@@ -321,7 +321,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.registerTool({
       name: "orche_task",
       label: "orche task",
-      description: `Delegate one self-contained request to one persistent worker. Choose explore, answer, implement, verify, game-asset (create/modify game art, audio and model assets) or video (produce/edit video); pass worker to reuse a live worker with its retained context and original model. Implement, game-asset and video may write within files (or the workspace when omitted); other roles are read-only. Workers never git commit or push unless this assignment carries \`git\` ({commit, push, remote, branch}; implement, game-asset and video only): set it only when the user explicitly asked in this conversation to commit or push, and scope the commit to the task's files where possible. Only one task or multi run can be active. Time budget: ${timeBudget("assignment")} an idle worker times out at the base deadline, and the result says why a timeout was not extended.`,
+      description: `Delegate one self-contained request to one persistent worker. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs. Choose explore, answer, implement, verify, game-asset (create/modify game art, audio and model assets) or video (produce/edit video); pass worker to reuse a live worker with its retained context and original model. Implement, game-asset and video may write within files (or the workspace when omitted); other roles are read-only. Workers never git commit or push unless this assignment carries \`git\` ({commit, push, remote, branch}; implement, game-asset and video only): set it only when the user explicitly asked in this conversation to commit or push, and scope the commit to the task's files where possible. Only one task or multi run can be active. Time budget: ${timeBudget("assignment")} an idle worker times out at the base deadline, and the result says why a timeout was not extended.`,
       promptSnippet: "orche_task: one reusable worker for explore, answer, implement, verify, game-asset (game art/audio/model assets) or video (production/editing)",
       promptGuidelines: [
         "orche_task workers never git commit or push on their own. Pass `git` ({commit:true} or {push:true, remote?, branch?}) only when the user explicitly asked in this conversation to commit or push; never on your own initiative. Only implement, game-asset and video accept it; explore, answer and verify reject it.",

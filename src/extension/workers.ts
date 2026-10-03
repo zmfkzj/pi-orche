@@ -35,8 +35,8 @@ import { ExtendableDeadline, extensionEvent, formatExtensionProgress, formatExte
 
 export const orcheTaskParameters = Type.Object({
   role: Type.Union([Type.Literal("explore"), Type.Literal("answer"), Type.Literal("implement"), Type.Literal("verify"), Type.Literal("game-asset"), Type.Literal("video")]),
-  request: Type.String({ minLength: 1 }),
-  context: Type.Optional(Type.String({ maxLength: 30_000 })),
+  request: Type.String({ minLength: 1, description: "Self-contained goal, decisions, constraints and acceptance checks; the worker does not see the conversation. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs." }),
+  context: Type.Optional(Type.String({ maxLength: 30_000, description: "Background findings and decisions, appended to request. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs." })),
   worker: Type.Optional(Type.String()),
   files: Type.Optional(Type.Array(Type.String())),
   git: Type.Optional(Type.Object({
@@ -466,7 +466,7 @@ function assignmentPrompt(args: TaskParameters, commands: readonly string[], ima
     verify: `Independent read-only review. DO NOT EDIT. ${commands.length ? `Run configured checks via bash: ${commands.map(command => JSON.stringify(command)).join(", ")}` : "Discover and run the project's own checks via bash (package.json, Makefile, pyproject.toml, Cargo.toml, go.mod or CI config)"}, plus focused checks; inspect source and git diff. report_result {kind:"verify",summary,data:{passed:boolean,evidence:[commands and outcomes],issues:[{file,description}]}}. passed:true requires actual passing checks; unexecuted checks never count as passed.`,
   };
   const rasterInstructions = imagesAvailable ? '\nUse generate_image for raster art (sprites, textures, icons, concept art, thumbnails). Request background "transparent" for sprites/icons. Always pass width/height for the exact target size: the gateway ignores size and returns roughly 1254x1254. Use kernel "nearest" for pixel art. Inspect results with read. Keep procedural/SVG generation for vector or pixel-exact assets. Record the generation prompt in outputs[].spec.' : "";
-  return `Assignment: ${args.role}. You work alone; there are no peers or backlog.\n${task}\n\n${instructions[args.role]}${rasterInstructions}\n\n${gitAssignmentLine(grant)}`;
+  return `Assignment: ${args.role}. You work alone; there are no peers or backlog.\n${task}\n\n${instructions[args.role]}${rasterInstructions}\nStart summary with the conclusion (1–3 sentences), then evidence as path:line references and command outcomes. Do not paste code, diffs or logs the reader can open. Answer summaries stay complete but cite code by location instead of long quotes.\n\n${gitAssignmentLine(grant)}`;
 }
 
 export class WorkerPool {

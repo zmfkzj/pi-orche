@@ -8,7 +8,7 @@ import type { BacklogProposal } from "../backlog.js";
 import { resolveRoute } from "../routing.js";
 import { explorationPrompt, proposalPrompt, workerInstructions } from "../prompts.js";
 import { proposalSchema } from "../result-schemas.js";
-import { apply, bounded, emit, spawnWorker, waitOutcomes } from "./context.js";
+import { apply, assignWorker, bounded, emit, spawnWorker, waitOutcomes, workerAssignment } from "./context.js";
 import { decide, explorationPlanProblem } from "./decisions.js";
 import { explorerRolesFor } from "../team.js";
 import { auditWorkspace } from "./audit.js";
@@ -36,12 +36,12 @@ export async function planAndSpawnExplorers(ctx: RunContext, runtime: ModelRunti
       id, role, cwd: ctx.options.cwd, baseSystemPrompt: ctx.options.baseSystemPrompt, tools: [...WORKER_TOOL_NAMES],
       route: resolveRoute(ctx.options.routes, role),
       modelRuntime: runtime,
-      instructions: `${workerInstructions}\nYour id is ${id}. Reply in the user's language (${ctx.state.language}). For exploration, do not create any files, including /tmp scripts. Use bash node inline or heredoc without redirection.`,
+      instructions: `${workerInstructions}\nFor exploration, do not create any files, including /tmp scripts. Use bash node inline or heredoc without redirection.`,
     });
   }
   for (const [index, id] of ctx.workerIds.entries()) {
     const peers = ctx.workerIds.filter(peer => peer !== id);
-    ctx.manager.assign(id, "explore", explorationPrompt(ctx.options.problem, plan.explorers[index]!.angle, peers));
+    assignWorker(ctx, id, "explore", explorationPrompt(ctx.options.problem, plan.explorers[index]!.angle, peers), true);
   }
 }
 async function converge(ctx: RunContext, cause: string, effects: readonly CoordinatorEffect[]): Promise<void> {
@@ -50,11 +50,11 @@ async function converge(ctx: RunContext, cause: string, effects: readonly Coordi
       emit(ctx, { type: "preempted", timestamp: Date.now(), agentId: effect.agentId, action: "redirect" });
       const redirect = ctx.manager.send({
         id: randomUUID(), type: "redirect", from: "main", to: effect.agentId, kind: "backlog_proposal",
-        prompt: proposalPrompt(cause, ctx.workerIds.filter(id => id !== effect.agentId)),
+        prompt: workerAssignment(ctx, effect.agentId, proposalPrompt(cause, ctx.workerIds.filter(id => id !== effect.agentId))),
       });
       await bounded(ctx, redirect, ctx.limits.assignmentMs, "Redirect");
     } else if (effect.type === "assign_proposal") {
-      ctx.manager.assign(effect.agentId, "backlog_proposal", proposalPrompt(cause, ctx.workerIds.filter(id => id !== effect.agentId)));
+      assignWorker(ctx, effect.agentId, "backlog_proposal", proposalPrompt(cause, ctx.workerIds.filter(id => id !== effect.agentId)));
     } else if (effect.type === "stop") {
       emit(ctx, { type: "preempted", timestamp: Date.now(), agentId: effect.agentId, action: "stop" });
       await ctx.manager.stop(effect.agentId);

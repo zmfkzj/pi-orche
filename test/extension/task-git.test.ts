@@ -200,12 +200,12 @@ describe("orche_task git grant: validation", () => {
 });
 
 describe("orche_run workers keep 'Do not commit.'", () => {
-  it("(e) workerInstructions is unchanged and only the task variant defers to the assignment", () => {
+  it("(e) workerInstructions keeps the commit prohibition and only the task variant defers to the assignment", () => {
     expect(workerInstructions).toContain(" Never edit outside explicitly owned files. Do not commit. Use short direct send_message NOTES");
     expect(workerInstructions).not.toContain(TASK_COMMIT_RULE);
     expect(taskWorkerInstructions).toContain(` Never edit outside explicitly owned files. ${TASK_COMMIT_RULE} Use short direct send_message NOTES`);
     expect(taskWorkerInstructions).not.toContain("Do not commit.");
-    expect(taskWorkerInstructions.replace(TASK_COMMIT_RULE, NO_COMMIT_RULE)).toBe(workerInstructions);
+    expect(`${taskWorkerInstructions.replace(TASK_COMMIT_RULE, NO_COMMIT_RULE)} Your id, user request and reply language arrive in the first assignment.`).toBe(workerInstructions);
   });
 
   const task = { id: "change", description: "Set value to one", owner: "A1", files: ["core.mjs"], status: "pending" };

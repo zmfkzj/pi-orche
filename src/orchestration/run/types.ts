@@ -169,6 +169,8 @@ export interface RunContext {
   mainNotes: NoteMessage[];
   bufferedNoteIds: Set<string>;
   workerIds: string[];
+  /** Workers whose first assignment in this run already carried the identity/request/language briefing. */
+  briefedWorkers?: Set<string>;
   workerAnswers: Map<string, string>;
   advisors?: AdvisorEngine;
   providerHost?: Promise<ProviderExtensionHost>;
