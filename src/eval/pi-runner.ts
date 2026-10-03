@@ -106,7 +106,8 @@ export async function observedPiRuntime(traceFile: string, capture?: { systemDir
       transport: 'sse',
       fetch: async (input, init) => {
         const url = new URL(input instanceof Request ? input.url : String(input));
-        appendFileSync(traceFile, JSON.stringify({ type: 'provider_endpoint', id, ...identity, actor, model: actualModel, effort, sessionId: options?.sessionId ?? `pi-request-${id}`, host: url.host, path: url.pathname }) + '\n');
+        appendFileSync(traceFile, JSON.stringify({ type: 'provider_endpoint', id, ...identity, actor, model: actualModel, effort, sessionId: options?.sessionId ?? `pi-request-${id}`, host: url.host, path: url.pathname, url: url.origin + url.pathname }) + '\n');
+        if (arm.baseModel.startsWith('openai-codex/') && (url.host !== 'chatgpt.com' || url.pathname !== '/backend-api/codex/responses')) throw new Error('Provider endpoint constraint violation');
         return nativeFetch(input, init);
       },
       onResponse: async (response, physicalModel) => {
@@ -189,7 +190,7 @@ export async function runPiChild(options: PiRunnerOptions): Promise<RunnerResult
   const arm = buildStudyArm(options.arm ?? options.promptVariant ?? 'C0', options.baseModel), armMetadata = studyArmMetadata(arm);
   const variant = options.promptVariant === undefined && options.arm === undefined ? undefined : await loadPromptVariant(arm.promptVariant);
   if (variant) await writeFile(join(options.outDir, 'prompt-variant.json'), JSON.stringify({ name: variant.name, file: variant.file, sha256: variant.sha256, chars: variant.chars }, null, 2));
-  const observed = await observedPiRuntime(traceFile, variant ? { systemDir: join(options.outDir, 'system-prompts') } : undefined, armMetadata);
+  const observed = await observedPiRuntime(traceFile, { systemDir: join(options.outDir, 'system-prompts') }, armMetadata);
   await writeFile(eventsFile, '');
   const startedAt = Date.now();
   // A fixed budget: the run's overall cap is the task's timeout and is never extended while the run is busy (see ./limits.ts); the same limits go into the command metadata.

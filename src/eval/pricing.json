@@ -1,0 +1,8 @@
+{
+  "currency": "USD",
+  "unit": "per million tokens",
+  "source": "Installed Pi 1.0.0 bundled catalog: @earendil-works/pi-ai/dist/providers/data/openai-codex.json, gpt-6.1-sol; observed 2026-10-02",
+  "assumption": "Flat base-tier API-equivalent resource estimate, NOT OAuth subscription billing or an official price quote. Long-context tier premiums above 272000 input tokens are not modeled. Unknown request tokens are excluded and costs are known lower bounds. Judge costs excluded. Input is uncached input; cached read/write priced separately.",
+  "model": "gpt-6.1-sol",
+  "rates": { "input": 2, "output": 10, "cacheRead": 0.1, "cacheWrite": 2.5 }
+}

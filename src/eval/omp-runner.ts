@@ -6,11 +6,13 @@ import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { Type, type Static } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
+import { prepareOmpOverlay } from './omp-overlay.js';
 
 const usageSchema = Type.Object({ input: Type.Number(), output: Type.Number(), cacheRead: Type.Number(), cacheWrite: Type.Number() });
 // omp persists injected system notices and worker messages as plain text, not only content parts.
 const messageSchema = Type.Object({
   role: Type.Optional(Type.String()), provider: Type.Optional(Type.String()), model: Type.Optional(Type.String()),
+  stopReason: Type.Optional(Type.String()), errorMessage: Type.Optional(Type.String()),
   usage: Type.Optional(usageSchema), content: Type.Optional(Type.Union([Type.String(), Type.Array(Type.Object({ type: Type.String(), text: Type.Optional(Type.String()) }))])),
 });
 const rowSchema = Type.Object({
@@ -23,6 +25,7 @@ const rowSchema = Type.Object({
   host: Type.Optional(Type.String()), path: Type.Optional(Type.String()),
   originalEffort: Type.Optional(Type.Union([Type.String(), Type.Null()])), enforced: Type.Optional(Type.Boolean()),
 });
+const wireRowSchema = Type.Composite([Type.Omit(rowSchema, ['message']), Type.Object({ message: Type.Optional(Type.Union([messageSchema, Type.String()])) })]);
 export type OmpRecord = Static<typeof rowSchema>;
 
 export interface UsageTotals { requests: number; input: number; output: number; cacheRead: number; cacheWrite: number }
@@ -83,20 +86,35 @@ export function parseJsonLines(text: string): OmpRecord[] {
     if (!line.trim()) continue;
     let value: unknown;
     try { value = JSON.parse(line); } catch { throw new Error('Malformed JSON event/session record: invalid JSON'); }
-    if (!Value.Check(rowSchema, value)) throw new Error('Malformed JSON event/session record: ' + JSON.stringify([...Value.Errors(rowSchema, value)]));
+    if (!Value.Check(wireRowSchema, value)) throw new Error('Malformed JSON event/session record: ' + JSON.stringify([...Value.Errors(wireRowSchema, value)]));
+    // Omp emits startup/auth diagnostic notices as top-level message strings. Preserve them, never count as assistant usage.
+    if (typeof value.message === 'string') value = { ...value, message: { role: 'diagnostic', content: value.message } };
+    if (!Value.Check(rowSchema, value)) throw new Error('Malformed normalized JSON event/session record');
     records.push(value);
   }
   return records;
 }
-export async function globalOmpSnapshot() {
+/** Pi and omp share this environment key; a Pi private overlay must NEVER become omp's credential/catalog directory. */
+export function ompEnvironment(input: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...input };
+  delete env.PI_CODING_AGENT_DIR; delete env.PI_CODING_AGENT_SESSION_DIR;
+  return env;
+}
+export function assistantCompleted(message?: { role?: string; stopReason?: string }): boolean {
+  return message?.role === 'assistant' && !['error','aborted'].includes(message.stopReason ?? '');
+}
+export async function globalOmpSnapshot(env = ompEnvironment()) {
   const files = [];
   for (const path of [join(homedir(), '.omp/agent/config.yml'), join(homedir(), '.omp/plugins/omp-plugins.lock.json'), join(homedir(), '.omp/plugins/package.json')]) {
     try { const info = await stat(path); files.push({ path, sha256: createHash('sha256').update(await readFile(path)).digest('hex'), mtimeMs: info.mtimeMs }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; files.push({ path, absent: true }); }
   }
-  const inventory = await runProcess(omp, ['plugin','list','--json'], { cwd: homedir(), timeoutMs: 30_000 });
+  const inventory = await runProcess(omp, ['plugin','list','--json'], { cwd: homedir(), timeoutMs: 30_000, env });
   if (inventory.exitCode !== 0) throw new Error('Cannot snapshot plugin inventory: ' + inventory.stderr);
-  return { files, plugins: JSON.parse(inventory.stdout) as unknown };
+  const code = `import sqlite3,hashlib,json,os\nc=sqlite3.connect('file:'+os.path.expanduser('~/.omp/agent/agent.db')+'?mode=ro',uri=True)\nrows=c.execute('SELECT id,provider,credential_type,data,disabled_cause FROM auth_credentials ORDER BY id').fetchall()\nprint(hashlib.sha256(json.dumps(rows,sort_keys=True).encode()).hexdigest())`;
+  const credentials = await runProcess('python3', ['-c',code], { cwd: homedir(), timeoutMs: 10_000, env });
+  if (credentials.exitCode !== 0) throw new Error('Cannot read-only snapshot global omp credential state');
+  return { files, plugins: JSON.parse(inventory.stdout) as unknown, credentialSha256: credentials.stdout.trim() };
 }
 
 /** Persisted assistant messages and side-call model_usage entries; never count repeated event projections. */
@@ -206,7 +224,7 @@ function purpose(body){
 }
 function usage(raw){const cached=raw.input_tokens_details?.cached_tokens ?? 0;return {input:Math.max(0,(raw.input_tokens ?? 0)-cached),output:raw.output_tokens ?? 0,cacheRead:cached,cacheWrite:raw.input_tokens_details?.cache_write_tokens ?? 0};}
 async function observe(response,id){
-  let captured=null;
+  let captured=null;const toolCalls=new Set();
   try{
     const reader=response.body.getReader(),decoder=new TextDecoder();
     let buffer='',json='',sawEvents=false;
@@ -215,7 +233,7 @@ async function observe(response,id){
       const data=text.startsWith('data:')?text.slice(5).trim():text;
       if(text.startsWith('data:')||text.startsWith('event:'))sawEvents=true;
       if(text.startsWith('event:')||data==='[DONE]')return;
-      try{const event=JSON.parse(data);const raw=event.response?.usage ?? event.usage;if(raw)captured=usage(raw);}
+      try{const event=JSON.parse(data);const raw=event.response?.usage ?? event.usage;if(raw)captured=usage(raw);for(const item of [event.item,...(event.response?.output??[])])if(['function_call','custom_tool_call'].includes(item?.type)&&item.name)toolCalls.add(item.name);}
       catch{if(!sawEvents)json+=value+'\n';}
     }
     while(true){
@@ -225,7 +243,7 @@ async function observe(response,id){
     }
     line(buffer);
     if(!captured&&!sawEvents&&json.trim()){const value=JSON.parse(json);if(value.usage)captured=usage(value.usage);}
-    emit({type:'provider_response',id,status:response.status,contentType:response.headers.get('content-type'),usage:captured});
+    emit({type:'provider_response',id,status:response.status,contentType:response.headers.get('content-type'),usage:captured,toolCalls:[...toolCalls]});
   }catch(error){emit({type:'provider_response',id,status:response.status,usage:captured,error:error.name});}
 }
 globalThis.fetch=Object.assign(async(input,init)=>{
@@ -240,7 +258,9 @@ globalThis.fetch=Object.assign(async(input,init)=>{
   if(!decoded?.body?.model)return originalFetch(input,init);
   const body=decoded.body,id=++serial,originalEffort=body.reasoning?.effort ?? null;
   const endpoint=new URL(url);
-  const record={type:'provider_request',id,model:body.model,effort:originalEffort,originalEffort,enforced:false,sessionId:decoded.headers.get('session_id') ?? decoded.headers.get('x-session-id') ?? body.prompt_cache_key ?? null,purpose:purpose(body),host:endpoint.host,path:endpoint.pathname};
+  const declared=[...(body.tools??[]),...(body.input??[]).flatMap(item=>item.type==='additional_tools'?(item.tools??[]):[])];
+  const record={type:'provider_request',id,model:body.model,effort:originalEffort,originalEffort,enforced:false,sessionId:decoded.headers.get('session_id') ?? decoded.headers.get('x-session-id') ?? body.prompt_cache_key ?? 'process-main',purpose:purpose(body),host:endpoint.host,path:endpoint.pathname,url:endpoint.origin+endpoint.pathname,toolNames:[...new Set(declared.map(tool=>tool.name??tool.function?.name).filter(Boolean))],toolCalls:(body.input??[]).filter(item=>['function_call','custom_tool_call'].includes(item.type)).map(item=>item.name)};
+  if(endpoint.host!=='chatgpt.com'||endpoint.pathname!=='/backend-api/codex/responses'){emit(record);emit({type:'provider_blocked',id,reason:'Non Codex endpoint blocked'});throw new Error('Comparison requires Codex endpoint');}
   if(record.model!=='gpt-6.1-sol'){
     emit(record);emit({type:'provider_blocked',id,reason:'Non gpt-6.1-sol model blocked'});
     throw new Error('Comparison requires gpt-6.1-sol for every request');
@@ -282,8 +302,11 @@ export async function runOmp(options: RunnerOptions): Promise<RunnerResult> {
   await mkdir(options.outDir, { recursive: true });
   const out = resolve(options.outDir), sessionDir = join(out, 'sessions');
   await mkdir(sessionDir, { recursive: true });
-  const before = await globalOmpSnapshot();
-  const configured = await runProcess(omp, ['config','get','modelRoles','--json'], { cwd: options.cwd, timeoutMs: 30_000 });
+  const privateOverlay = await prepareOmpOverlay();
+  const env = { ...ompEnvironment(), PI_CODING_AGENT_DIR: privateOverlay.dir };
+  try {
+  const before = await globalOmpSnapshot(env);
+  const configured = await runProcess(omp, ['config','get','modelRoles','--json'], { cwd: options.cwd, timeoutMs: 30_000, env });
   if (configured.exitCode !== 0) throw new Error('Cannot read model role names');
   const configuredRoles: unknown = JSON.parse(configured.stdout);
   if (!configuredRoles || typeof configuredRoles !== 'object' || !('value' in configuredRoles) || !configuredRoles.value || typeof configuredRoles.value !== 'object') throw new Error('Malformed model role configuration');
@@ -295,7 +318,7 @@ export async function runOmp(options: RunnerOptions): Promise<RunnerResult> {
   await writeFile(join(options.cwd, '.omp/plugin-overrides.json'), JSON.stringify(overrides, null, 2));
   await appendFile(join(options.cwd, '.git/info/exclude'), '\n/.omp/plugin-overrides.json\n');
   const inspectionCode = 'import {getEnabledPlugins,getPluginSettings} from \"/home/arthur/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/src/extensibility/plugins/loader.ts\"; const settings=await getPluginSettings(\"om-orche\",process.cwd()); console.log(JSON.stringify({plugins:(await getEnabledPlugins(process.cwd())).map(p=>p.name),omOrcheEnabled:settings.enabled,telemetryEnabled:settings.telemetryEnabled}));';
-  const inspection = await runProcess('bun', ['--eval', inspectionCode], { cwd: options.cwd, timeoutMs: 30_000 });
+  const inspection = await runProcess('bun', ['--eval', inspectionCode], { cwd: options.cwd, timeoutMs: 30_000, env });
   const activePlugins: unknown = JSON.parse(inspection.stdout);
   const inspectionSchema = Type.Object({ plugins: Type.Array(Type.String()), omOrcheEnabled: Type.Boolean(), telemetryEnabled: Type.Boolean() });
   if (inspection.exitCode !== 0 || !Value.Check(inspectionSchema, activePlugins) || activePlugins.plugins.includes('omp-daybreak-delegate') || !activePlugins.plugins.includes('om-orche') || !activePlugins.omOrcheEnabled || activePlugins.telemetryEnabled) throw new Error('Per-run plugin isolation inspection failed');
@@ -305,9 +328,9 @@ export async function runOmp(options: RunnerOptions): Promise<RunnerResult> {
   await writeFile(tracePath, '');
   const args = ['--preload', preloadPath, omp, '-p', options.instruction, '--cwd', options.cwd, '--model', ompModel, '--thinking', 'high', '--config', overlayPath, '--session-dir', sessionDir, '--no-title', '--approval-mode', 'yolo', '--mode', 'json', '--max-time', String(options.timeoutSec)];
   const startedAt = Date.now();
-  const processResult = await runProcess('bun', args, { cwd: options.cwd, timeoutMs: (options.timeoutSec + 30) * 1000, stdoutFile: join(out, 'events.jsonl'), stderrFile: join(out, 'stderr.txt'), env: { ...process.env, PI_CODEX_WEBSOCKET: '0', COMPARE_TRACE_FILE: tracePath } });
+  const processResult = await runProcess('bun', args, { cwd: options.cwd, timeoutMs: (options.timeoutSec + 30) * 1000, stdoutFile: join(out, 'events.jsonl'), stderrFile: join(out, 'stderr.txt'), env: { ...env, PI_CODEX_WEBSOCKET: '0', COMPARE_TRACE_FILE: tracePath } });
   const finishedAt = Date.now();
-  const after = await globalOmpSnapshot();
+  const after = await globalOmpSnapshot(env);
   const unchanged = JSON.stringify(before) === JSON.stringify(after);
   const rows = parseJsonLines(await readFile(tracePath, 'utf8'));
   const usage = extractOmpProviderUsage(rows);
@@ -321,9 +344,11 @@ export async function runOmp(options: RunnerOptions): Promise<RunnerResult> {
   const final = [...events].reverse().find(event => event.type === 'message_end' && event.message?.role === 'assistant');
   const content = final?.message?.content ?? [];
   const answer = typeof content === 'string' ? content : content.filter(part => part.type === 'text').map(part => part.text ?? '').join('\n');
-  const status = processResult.timedOut ? 'timeout' : processResult.exitCode === 0 && unchanged && usage.validModelEffort ? 'done' : 'failed';
-  const error = !unchanged ? 'Global omp config/plugin state changed' : !usage.validModelEffort ? 'Model/effort constraint violation' : processResult.exitCode !== 0 ? `omp exit ${processResult.exitCode}: ${processResult.stderr}` : undefined;
-  const evidence = { before, after, globalStateUnchanged: unchanged, projectOverrides: overrides, activePlugins, persistedSessions: sessions, providerCapture: 'Process-local fetch observer; SSE forced; model/effort violations blocked and invalidate run. Known tokens + explicitly counted unknown-usage requests.' };
+  const completedAssistant = assistantCompleted(final?.message);
+  const status = processResult.timedOut ? 'timeout' : processResult.exitCode === 0 && unchanged && usage.validModelEffort && completedAssistant ? 'done' : 'failed';
+  const error = !unchanged ? 'Global omp config/plugin/credential state changed' : !usage.validModelEffort ? 'Model/effort constraint violation' : processResult.exitCode !== 0 ? `omp exit ${processResult.exitCode}: ${processResult.stderr}` : !completedAssistant ? final?.message?.errorMessage ?? 'omp has no completed assistant response' : undefined;
+  const evidence = { before, after, globalStateUnchanged: unchanged, credentialOverlay: privateOverlay.publicEvidence, projectOverrides: overrides, activePlugins, persistedSessions: sessions, providerCapture: 'Process-local fetch observer; SSE forced; model/effort violations blocked and invalidate run. Known tokens + explicitly counted unknown-usage requests.' };
   await writeFile(join(out, 'isolation.json'), JSON.stringify(evidence, null, 2));
   return { status, answer, startedAt, finishedAt, exitCode: processResult.exitCode, ...(error ? { error } : {}), usage, command: ['bun', ...args], overlay, evidence };
+  } finally { await privateOverlay.cleanup(); }
 }
