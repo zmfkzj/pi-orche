@@ -7,6 +7,7 @@ import { spillToolResult } from "../tools/spill.js";
 import { formatOutcome, OrcheBusyError, OrcheController, type OrcheControllerOptions, type OrcheRunArgs } from "./controller.js";
 import type { MainMode } from "../orchestration/routing.js";
 import { delegationRules, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
+import { contextWarning, DEFAULT_CONTEXT_WARNING, type ContextWarningSettings, type ContextWarningState } from "./context-warning.js";
 import { CONFIG_FILE, loadOrcheConfigFile } from "./config.js";
 import { orcheTaskParameters, WorkerPool } from "./workers.js";
 import { runErrorResult } from "./tool-result.js";
@@ -25,13 +26,13 @@ const ACTIVATE_BUILTINS = ["grep", "find", "ls"];
  * extension-only keys (`concurrentSessions`, `records`) that the plain route parser behind `discoverMainMode` (mode.ts) rejects as unknown, which
  * made a config with `records` look invalid at session start and drop its `mainMode`.
  */
-async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup> {
+async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup & { contextWarning?: ContextWarningSettings }> {
   const candidates = [...(options.projectTrusted ? [join(options.cwd, ".pi", CONFIG_FILE)] : []), join(options.agentDir, CONFIG_FILE)];
   for (const path of candidates) {
     try { await access(path); } catch { continue; }
     try {
-      const { routes } = await loadOrcheConfigFile(path);
-      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), path };
+      const { routes, contextWarning } = await loadOrcheConfigFile(path);
+      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), path, contextWarning };
     } catch (error) {
       return { path, error: error instanceof Error ? error.message : String(error) };
     }
@@ -105,6 +106,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       dir: ctx.sessionManager.getSessionDir() || undefined,
     });
     const state = new MainModeState(pi);
+    let warningSettings: ContextWarningSettings = { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
+    let warningState: ContextWarningState = { warnedLevel: 0 };
     const showMode = (ctx: Pick<ExtensionContext, "ui">) =>
       ctx.ui.setStatus("orche-mode", `orche: ${state.session}${state.overriding ? ` (one-turn ${state.effective})` : ""}`);
     const recovery = (cwd: string): Pick<OrcheRunArgs, "onFailedHandover" | "handoverSkipped"> =>
@@ -143,6 +146,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       }
       const found = await discoverConfiguredMainMode({ cwd: ctx.cwd, agentDir: options.agentDir ?? getAgentDir(), projectTrusted: ctx.isProjectTrusted() });
       state.setConfig(found.mode, found.path);
+      warningSettings = found.contextWarning ?? { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
+      warningState = { warnedLevel: 0 };
       state.restore(ctx.sessionManager.getBranch());
       state.apply();
       showMode(ctx);
@@ -150,6 +155,13 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     });
     pi.on("before_agent_start", event => {
       event.systemPromptOptions.sections["orche-delegation"] = delegationRules(state.effective);
+    });
+    // Direct mode keeps the whole task in the main window: advise the user (not the model) when it fills up.
+    pi.on("turn_end", (_event, ctx) => {
+      const checked = contextWarning(state.effective, ctx.getContextUsage(), warningSettings, warningState);
+      warningState = checked.state;
+      if (checked.message) ctx.ui.notify(checked.message, "warning");
+      return undefined;
     });
     // Second line of defence next to the tool set: `--tools`, another extension or the model can still reach a disabled tool.
     pi.on("tool_call", event => {

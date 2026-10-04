@@ -3,6 +3,7 @@ import { isAbsolute, join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parseRouteConfig, RouteConfigError, type RouteConfig } from "../orchestration/routing.js";
 import { DEFAULT_WINDOW_MS } from "./concurrent-sessions.js";
+import { DEFAULT_CONTEXT_WARNING, type ContextWarningSettings } from "./context-warning.js";
 
 export const CONFIG_FILE = "orche.config.json";
 
@@ -23,6 +24,8 @@ export interface DiscoveredConfig {
   records: RecordsSettings;
   /** Request-only earlier-output projection for reused task workers, with defaults applied. */
   taskContext: TaskContextSettings;
+  /** Main-session context advisory in direct mode, with defaults applied. */
+  contextWarning?: ContextWarningSettings;
   source: ConfigSource;
   /** Config files that exist but were not used, with the reason. */
   ignored: string[];
@@ -134,12 +137,30 @@ export function parseTaskContextConfig(value: unknown): TaskContextSettings {
     minClearTokens: (settings.minClearTokens as number | undefined) ?? DEFAULT_TASK_CONTEXT.minClearTokens,
   };
 }
+export function parseContextWarningConfig(value: unknown): ContextWarningSettings {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.contextWarning: expected object");
+  const settings = value as Record<string, unknown>;
+  if (Object.keys(settings).some(key => key !== "enabled" && key !== "thresholds")) throw new RouteConfigError("config.contextWarning: unknown field");
+  if (settings.enabled !== undefined && typeof settings.enabled !== "boolean") throw new RouteConfigError("config.contextWarning.enabled: expected boolean");
+  const thresholds = settings.thresholds;
+  if (thresholds !== undefined) {
+    if (!Array.isArray(thresholds) || thresholds.length === 0 || thresholds.length > 5) throw new RouteConfigError("config.contextWarning.thresholds: expected 1-5 percentages");
+    for (const [index, threshold] of thresholds.entries()) {
+      if (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold <= 0 || threshold >= 100) throw new RouteConfigError(`config.contextWarning.thresholds[${index}]: expected a percentage greater than 0 and below 100`);
+      if (index > 0 && threshold <= (thresholds[index - 1] as number)) throw new RouteConfigError("config.contextWarning.thresholds: expected strictly ascending percentages");
+    }
+  }
+  return {
+    enabled: (settings.enabled as boolean | undefined) ?? DEFAULT_CONTEXT_WARNING.enabled,
+    thresholds: [...((thresholds as number[] | undefined) ?? DEFAULT_CONTEXT_WARNING.thresholds)],
+  };
+}
 
 /**
  * Load one orche config file: the route settings (validated by `parseRouteConfig`) plus the extension-only
  * `concurrentSessions`, `records` and `taskContext` settings, validated here and removed before the route parser sees the file.
  */
-export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings }> {
+export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings }> {
   let value: unknown;
   try { value = JSON.parse(await readFile(path, "utf8")); }
   catch (error) { throw new RouteConfigError(`Cannot load route config ${path}: ${error instanceof Error ? error.message : String(error)}`); }
@@ -147,14 +168,16 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
   let concurrent: ConcurrentSessionsConfig | undefined;
   let records: RecordsConfig | undefined;
   let taskContext = { ...DEFAULT_TASK_CONTEXT };
+  let contextWarning: ContextWarningSettings = { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
   if (value && typeof value === "object" && !Array.isArray(value)) {
-    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, ...rest } = value as Record<string, unknown>;
+    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, ...rest } = value as Record<string, unknown>;
     if (Object.hasOwn(value, "concurrentSessions")) concurrent = parseConcurrentSessionsConfig(concurrentSessions);
     if (Object.hasOwn(value, "records")) records = parseRecordsConfig(recordsValue);
     if (Object.hasOwn(value, "taskContext")) taskContext = parseTaskContextConfig(taskContextValue);
+    if (Object.hasOwn(value, "contextWarning")) contextWarning = parseContextWarningConfig(contextWarningValue);
     routeValue = rest;
   }
-  return { routes: parseRouteConfig(routeValue), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext };
+  return { routes: parseRouteConfig(routeValue), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning };
 }
 export class NoRouteError extends Error {
   override readonly name = "NoRouteError";
