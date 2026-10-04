@@ -1,19 +1,19 @@
 import { access } from "node:fs/promises";
 import { join } from "node:path";
-import { Type } from "@sinclair/typebox";
+
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createOrcheTools } from "../tools/index.js";
 import { spillToolResult } from "../tools/spill.js";
-import { formatOutcome, OrcheBusyError, OrcheController, type OrcheControllerOptions, type OrcheRunArgs } from "./controller.js";
+import { OrcheController, type OrcheControllerOptions } from "./controller.js";
 import type { MainMode } from "../orchestration/routing.js";
 import { delegationRules, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
 import { contextWarning, DEFAULT_CONTEXT_WARNING, type ContextWarningSettings, type ContextWarningState } from "./context-warning.js";
 import { CONFIG_FILE, loadOrcheConfigFile } from "./config.js";
 import { orcheTaskParameters, WorkerPool } from "./workers.js";
-import { runErrorResult } from "./tool-result.js";
+
 import { formatRecordList, listRecords } from "./records.js";
+import { orcheTaskRenderers } from "./render.js";
 import { partialUpdate } from "./progress.js";
-import { orcheRunRenderers, orcheTaskRenderers } from "./render.js";
 import { defaultRunLimits } from "../orchestration/limits.js";
 import { formatDuration } from "../agent/liveness.js";
 
@@ -32,7 +32,7 @@ async function discoverConfiguredMainMode(options: { cwd: string; agentDir: stri
     try { await access(path); } catch { continue; }
     try {
       const { routes, contextWarning } = await loadOrcheConfigFile(path);
-      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), path, contextWarning };
+      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), ...(routes.legacyMainMode ? { legacyMode: routes.legacyMainMode } : {}), path, contextWarning };
     } catch (error) {
       return { path, error: error instanceof Error ? error.message : String(error) };
     }
@@ -40,34 +40,24 @@ async function discoverConfiguredMainMode(options: { cwd: string; agentDir: stri
   return {};
 }
 /**
- * The time-budget sentence of the orche_run / orche_task descriptions, written from the default limits (so that it cannot drift from limits.ts):
+ * The time-budget sentence of the orche_task description, written from the default limits (so that it cannot drift from limits.ts):
  * base cap, extension length and count, and the ceiling they make. `limits` in orche.config.json override the defaults.
  */
-function timeBudget(subject: "run" | "assignment"): string {
-  const { overallMs, assignmentMs, extensionMs, maxExtensions } = defaultRunLimits;
+function timeBudget(): string {
+  const { assignmentMs, extensionMs, maxExtensions } = defaultRunLimits;
   const minutes = (ms: number) => ms / 60_000;
-  const base = subject === "run" ? `base ${minutes(overallMs)} minutes` : `base ${minutes(assignmentMs)} minutes per assignment`;
-  const active = subject === "run" ? "run" : "worker";
-  const ceiling = formatDuration((subject === "run" ? overallMs : assignmentMs) + maxExtensions * extensionMs);
+  const base = `base ${minutes(assignmentMs)} minutes per assignment`;
+  const active = "worker";
+  const ceiling = formatDuration(assignmentMs + maxExtensions * extensionMs);
   return `${base}; when the deadline passes while the ${active} is still actively working (using tools or producing output) it is extended by ${minutes(extensionMs)} minutes, at most ${maxExtensions} times (${maxExtensions}×${minutes(extensionMs)} minutes at most, ${ceiling} in total; these are the defaults, limits.maxExtensions / limits.extensionMs in orche.config.json change them);`;
 }
 
 /** How long a one-turn override waits for the session to start the turn it just queued before giving up. */
 const SINGLE_START_TIMEOUT_MS = 10_000;
 
-const orcheRunParameters = Type.Object({
-  request: Type.String({
-    minLength: 1,
-    description: "Self-contained goal, decisions, constraints and acceptance checks; the orchestrator does not see the conversation. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs.",
-  }),
-  context: Type.Optional(Type.String({
-    maxLength: 30_000,
-    description: "Background findings and decisions, appended to request. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs.",
-  })),
-});
-export const ORCHE_USAGE = "Usage: /orche single|multi|direct <PROMPT> | /orche mode [auto|single|multi|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche cancel";
+export const ORCHE_USAGE = "Usage: /orche single|direct <PROMPT> | /orche mode [single|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche cancel";
 export type OrcheCommand =
-  | { mode: "single" | "multi" | "direct"; prompt: string }
+  | { mode: "single" | "direct"; prompt: string }
   | { mode: "cancel" }
   | { mode: "workers" }
   | { mode: "records" }
@@ -85,8 +75,8 @@ export function parseOrcheCommand(args: string): OrcheCommand | undefined {
     if (switchMode[1] === undefined) return { mode: "mode" };
     return isMainMode(switchMode[1]) ? { mode: "mode", value: switchMode[1] } : undefined;
   }
-  const match = /^\s*(single|multi|direct)(?:\s+([\s\S]*\S))?\s*$/.exec(args);
-  return match?.[2] ? { mode: match[1] as "single" | "multi" | "direct", prompt: match[2] } : undefined;
+  const match = /^\s*(single|direct)(?:\s+([\s\S]*\S))?\s*$/.exec(args);
+  return match?.[2] ? { mode: match[1] as "single" | "direct", prompt: match[2] } : undefined;
 }
 
 export interface OrcheExtensionOptions extends OrcheControllerOptions {
@@ -110,10 +100,6 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     let warningState: ContextWarningState = { warnedLevel: 0 };
     const showMode = (ctx: Pick<ExtensionContext, "ui">) =>
       ctx.ui.setStatus("orche-mode", `orche: ${state.session}${state.overriding ? ` (one-turn ${state.effective})` : ""}`);
-    const recovery = (cwd: string): Pick<OrcheRunArgs, "onFailedHandover" | "handoverSkipped"> =>
-      state.effective === "auto" && pi.getActiveTools().includes("orche_task")
-        ? { onFailedHandover: (handover, assignmentRequests, signal) => pool().adoptFailedRun(handover, cwd, assignmentRequests, signal) }
-        : { handoverSkipped: state.effective === "multi" ? "orche_task is disabled in multi mode" : "orche_task is unavailable" };
 
     // (1) Our tools replace Pi's read/edit by name; they are bound to the cwd of the call, not of the process.
     const byCwd = new Map<string, Map<string, ToolDefinition>>();
@@ -152,6 +138,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       state.apply();
       showMode(ctx);
       if (found.error) ctx.ui.notify(`orche: ${found.error}; using the default mode ${state.session}`, "warning");
+      if (found.legacyMode && !found.error) ctx.ui.notify(`orche: mainMode "${found.legacyMode}" in ${found.path} was removed (multi-agent orche_run delegation); using "single". Set mainMode to "single" or "direct".`, "warning");
     });
     pi.on("before_agent_start", event => {
       event.systemPromptOptions.sections["orche-delegation"] = delegationRules(state.effective);
@@ -176,7 +163,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
 
     // (2) Delegation, one-turn overrides and worker/session controls.
     pi.registerCommand("orche", {
-      description: "/orche single <prompt>: delegate to one worker for one turn. /orche multi <prompt>: run the multi-agent orchestrator. /orche direct <prompt>: edit directly for one turn. /orche mode [auto|single|multi|direct]: show/set delegation. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent run records (transcripts and manifests of orche runs and tasks). /orche cancel: stop the active task or run.",
+      description: "/orche single <prompt>: delegate to one worker for one turn. /orche direct <prompt>: edit directly for one turn. /orche mode [single|direct]: show/set delegation. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche cancel: stop the active task.",
       handler: async (args, ctx: ExtensionCommandContext) => {
         const parsed = parseOrcheCommand(args);
         if (!parsed) {
@@ -185,11 +172,11 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         }
         if (parsed.mode === "cancel") {
           if (!controller.cancel()) {
-            ctx.ui.notify("no active orche run", "info");
+            ctx.ui.notify("no active orche task", "info");
             return;
           }
           await controller.whenIdle();
-          ctx.ui.notify("orche run cancelled", "info");
+          ctx.ui.notify("orche task cancelled", "info");
           return;
         }
         if (parsed.mode === "workers") {
@@ -223,10 +210,10 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           ctx.ui.notify(`orche mode: ${state.session} (${source === "config" ? `config ${path ?? ""}`.trim() : source === "session" ? "set with /orche mode in this session" : "default"})`, "info");
           return;
         }
-        if (parsed.mode === "single" || parsed.mode === "direct") {
+        {
           // Override only an idle turn. Queued turns retain the session mode, so refuse incompatible modes.
           if (!ctx.isIdle()) {
-            const compatible = parsed.mode === "direct" ? state.session === "direct" : state.session === "auto" || state.session === "single";
+            const compatible = state.session === parsed.mode;
             if (!compatible) {
               ctx.ui.notify(`orche ${parsed.mode}: refused. The agent is busy and this session is in mode ${state.session}, where a queued turn could not ${parsed.mode === "direct" ? "edit files" : "delegate to one worker"}. Wait for the current turn, or switch with /orche mode ${parsed.mode}.`, "warning");
               return;
@@ -261,87 +248,13 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           }
           return;
         }
-        if (controller.taskActive) {
-          ctx.ui.notify(new OrcheBusyError("task").message, "error");
-          return;
-        }
-        const request = parsed.prompt;
-        const show = (lines: readonly string[]) => {
-          ctx.ui.setStatus("orche", `orche: ${lines.at(-1) ?? "starting"}`);
-          ctx.ui.setWidget("orche", lines.map(line => `orche · ${line}`));
-        };
-        const multi = async () => {
-          try {
-            show([]);
-            const outcome = await controller.run({
-              request,
-              cwd: ctx.cwd,
-              model: ctx.model,
-              thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(),
-              projectTrusted: ctx.isProjectTrusted(),
-              signal: ctx.signal,
-              currentSession: currentSession(ctx),
-              ...recovery(ctx.cwd),
-              onProgress: show,
-            });
-            pi.sendMessage(
-              { customType: RESULT_MESSAGE_TYPE, content: formatOutcome(outcome), display: true, details: outcome.details },
-              { triggerTurn: false },
-            );
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            ctx.ui.notify(message, "error");
-            if (!(error instanceof OrcheBusyError)) {
-              pi.sendMessage({ customType: RESULT_MESSAGE_TYPE, content: `orche could not run: ${message}`, display: true, details: { status: "failed" } }, { triggerTurn: false });
-            }
-          } finally {
-            ctx.ui.setStatus("orche", undefined);
-            ctx.ui.setWidget("orche", undefined);
-          }
-        };
-        // The interactive TUI only feeds editor input to commands while a command or turn is not pending: it queues
-        // a typed `/orche cancel` behind a pending handler. So in the TUI the run goes to the background and the
-        // handler returns (the editor stays usable); one-shot modes and RPC keep the handler pending until the
-        // run ends, because print/json exit when it returns and RPC clients can send `/orche cancel` concurrently.
-        if (ctx.mode === "tui") void multi(); else await multi();
       },
     });
 
-    // (3) orche_run tool for the main model
-    pi.registerTool({
-      name: "orche_run",
-      label: "orche",
-      description:
-        `Delegate a coding request to the pi-orche orchestrator: a coordinator plans, parallel workers explore/implement in this workspace, and an independent verifier checks the result. Returns the final report. The orchestrator does NOT see this conversation, so the request must be self-contained: goal, decisions so far, relevant files and findings, constraints, acceptance criteria. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs. Only one run can be active; it can take several minutes and edits files in the current directory. Time budget: ${timeBudget("run")} an idle run times out at the base deadline, and the report says why a timeout was not extended.`,
-      promptSnippet: "orche_run: delegate a substantial change/investigation to the multi-agent orchestrator and get its verified report",
-      parameters: orcheRunParameters,
-      executionMode: "sequential",
-      ...orcheRunRenderers,
-      execute: async (_id, params, signal, onUpdate, ctx) => {
-        const outcome = await controller.run({
-          request: params.request,
-          ...(params.context ? { context: params.context } : {}),
-          cwd: ctx.cwd,
-          model: ctx.model,
-          thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(),
-          projectTrusted: ctx.isProjectTrusted(),
-          signal,
-          currentSession: currentSession(ctx),
-          ...recovery(ctx.cwd),
-          // Every update carries the start time and the deadline (details.startedAt / details.deadline) for the TUI's elapsed timer (render.ts); the text stays the progress lines.
-          onTiming: (timing, lines) => onUpdate?.(partialUpdate(lines, timing)),
-          onProgress: (lines, timing) => onUpdate?.(partialUpdate(lines, timing)),
-        });
-        // A run that ended failed or cancelled is still an error to the model, but returned (not thrown) so the
-        // transcript keeps outcome.details (see tool-result.ts). Errors before an outcome exists still throw.
-        if (outcome.cancelledByUser || outcome.report.status !== "done") return runErrorResult(outcome);
-        return { content: [{ type: "text", text: formatOutcome(outcome) }], details: outcome.details };
-      },
-    });
     pi.registerTool({
       name: "orche_task",
       label: "orche task",
-      description: `Delegate one self-contained request to one persistent worker. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs. Choose explore, answer, implement, verify, game-asset (create/modify game art, audio and model assets) or video (produce/edit video); pass worker to reuse a live worker with its retained context and original model. Implement, game-asset and video may write within files (or the workspace when omitted); other roles are read-only. Workers never git commit or push unless this assignment carries \`git\` ({commit, push, remote, branch}; implement, game-asset and video only): set it only when the user explicitly asked in this conversation to commit or push, and scope the commit to the task's files where possible. Only one task or multi run can be active. Time budget: ${timeBudget("assignment")} an idle worker times out at the base deadline, and the result says why a timeout was not extended.`,
+      description: `Delegate one self-contained request to one persistent worker. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs. Choose explore, answer, implement, verify, game-asset (create/modify game art, audio and model assets) or video (produce/edit video); pass worker to reuse a live worker with its retained context and original model. Implement, game-asset and video may write within files (or the workspace when omitted); other roles are read-only. Workers never git commit or push unless this assignment carries \`git\` ({commit, push, remote, branch}; implement, game-asset and video only): set it only when the user explicitly asked in this conversation to commit or push, and scope the commit to the task's files where possible. Only one task can be active. Time budget: ${timeBudget()} an idle worker times out at the base deadline, and the result says why a timeout was not extended.`,
       promptSnippet: "orche_task: one reusable worker for explore, answer, implement, verify, game-asset (game art/audio/model assets) or video (production/editing)",
       promptGuidelines: [
         "orche_task workers never git commit or push on their own. Pass `git` ({commit:true} or {push:true, remote?, branch?}) only when the user explicitly asked in this conversation to commit or push; never on your own initiative. Only implement, game-asset and video accept it; explore, answer and verify reject it.",

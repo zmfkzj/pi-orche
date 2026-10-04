@@ -266,7 +266,7 @@ describe("orche_task errors that are not failures of a worker stay plain", () =>
     const blockedReport = await fixture(() => [result("implement", "Cannot proceed", { status: "blocked", reason: "dependency absent" })]);
     const outcome = await blockedReport.execute({ role: "implement" });
     expect(outcome.details).toMatchObject({ status: "blocked" });
-    expect(outcome.text).toContain("Note: consider orche_run (multi) — the worker reported blocked");
+    expect(outcome.text).toContain("Note: follow up with the same worker — the worker reported blocked");
     const asTool = await (await fixture(() => [result("verify", "Failed", { passed: false })])).executeTool({ role: "verify" });
     expect(asTool).not.toHaveProperty("isError");
   });

@@ -146,14 +146,16 @@ describe("orche_task git grant: instructions", () => {
 });
 
 describe("orche_task git grant: guidance to the main session", () => {
-  it.each(["auto", "single"] as const)("%s mode tells the main to set git only on an explicit user request and to scope the commit", mode => {
+  it("single mode tells the main to set git only on an explicit user request and to scope the commit", () => {
+    const mode = "single" as const;
     const rules = delegationRules(mode);
     expect(rules).toContain("Git: workers never commit or push on their own, and this session cannot run commits itself.");
     expect(rules).toContain("Only when the user explicitly asked in this conversation to commit or push, pass `git`");
     expect(rules).toContain("explore, answer and verify reject it");
     expect(rules).toContain("scope the commit to the task's files where possible");
   });
-  it.each(["multi", "direct"] as const)("%s mode has no git grant guidance (orche_task is off)", mode => {
+  it("direct mode has no git grant guidance (orche_task is off)", () => {
+    const mode = "direct" as const;
     expect(delegationRules(mode)).not.toContain("Git: workers never commit");
   });
   it("describes the parameter in the schema", () => {

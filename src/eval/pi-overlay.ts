@@ -25,7 +25,7 @@ export async function preparePiOverlay(timeoutSec: number, baseModel = benchmark
       await writeFile(join(dir, 'auth.json'), JSON.stringify(auth), { mode: 0o600 });
     }
     const settings = { defaultProvider: baseModel.split('/')[0], defaultModel: baseModel.split('/').slice(1).join('/'), defaultThinkingLevel: 'high', transport: 'sse', enableInstallTelemetry: false, enableAnalytics: false };
-    const config = { ...buildStudyArm('C0', baseModel).routes, mainMode: 'auto', limits: evalRunLimits(timeoutSec) };
+    const config = { ...buildStudyArm('C0', baseModel).routes, mainMode: 'single', limits: evalRunLimits(timeoutSec) };
     await writeFile(join(dir, 'settings.json'), JSON.stringify(settings));
     await writeFile(join(dir, 'orche.config.json'), JSON.stringify(config));
     return { dir, settings, config, credentialSource: source, cleanup: () => rm(dir, { recursive: true, force: true }) };

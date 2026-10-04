@@ -39,54 +39,34 @@ describe("mainMode: tool sets", () => {
     expect(h.session.getToolDefinition("read")?.description).toContain("LINE#TAG");
   });
 
-  it.each(["auto", "single", "multi", "direct"] as const)("%s applies the complete tool matrix", async mainMode => {
+  it.each(["single", "direct"] as const)("%s applies the complete tool matrix", async mainMode => {
     const h = await harness({ mainSteps: [], orcheSteps: [], mainMode });
     const active = h.session.getActiveToolNames();
     for (const name of MUTATORS) expect(active.includes(name)).toBe(mainMode === "direct");
-    expect(active.includes("orche_run")).toBe(mainMode === "auto" || mainMode === "multi");
-    expect(active.includes("orche_task")).toBe(mainMode === "auto" || mainMode === "single");
+    expect(active.includes("orche_run")).toBe(false);
+    expect(h.session.getToolDefinition("orche_run")).toBeUndefined();
+    expect(active.includes("orche_task")).toBe(mainMode === "single");
     expect(active).toEqual(expect.arrayContaining(["read", "grep", "find", "ls", "ast_search", "diagnostics", "bash"]));
   });
 
   it("injects mode-dependent delegation rules into the system prompt", async () => {
     const seen: string[] = [];
     const capture = (): FauxResponseStep => context => { seen.push(systemOf(context)); return reply("ok"); };
-    const multi = await harness({ mainSteps: [capture()], orcheSteps: [], mainMode: "multi" });
-    await multi.session.prompt("hello");
-    const auto = await harness({ mainSteps: [capture()], orcheSteps: [], mainMode: "auto" });
-    await auto.session.prompt("hello");
     const single = await harness({ mainSteps: [capture()], orcheSteps: [], mainMode: "single" });
     await single.session.prompt("hello");
+    const direct = await harness({ mainSteps: [capture()], orcheSteps: [], mainMode: "direct" });
+    await direct.session.prompt("hello");
     expect(seen[0]).toContain("You cannot edit files in this session");
-    expect(seen[0]).toContain("delegate every change with the orche_run tool".replace("delegate", "Delegate"));
-    expect(seen[0]).toContain("self-contained");
-    expect(seen[1]).toContain("at least two independent units with disjoint write sets");
-    expect(seen[1]).toContain("Use ONLY");
-    expect(seen[1]).toContain("parallel competing hypotheses are clearly warranted");
-    expect(seen[1]).toContain("After a failed orche_run, do not start another orche_run for the same request");
-    expect(seen[1]).toContain("implement for fixes, verify for re-checks");
-    expect(seen[1]).toContain("reported id in `worker`");
-    expect(seen[1]).toContain("whenever in doubt, use single through orche_task");
-    for (const system of [seen[0], seen[2]]) expect(system).not.toContain("After a failed orche_run");
-    expect(seen[2]).toContain("orche_run is disabled in mode single");
-    expect(seen[2]).toContain("/orche mode auto or multi");
-    expect(seen[2]).toContain("Never stop to ask the user to switch modes in order to proceed");
-    expect(seen[2]).toContain("refine the requirements with the user: goal, constraints and acceptance criteria");
-    expect(seen[2]).toContain("ONE orche_task in ONE end-to-end assignment");
-    expect(seen[2]).toContain("run the trusted project checks yourself");
-    expect(seen[2]).not.toContain("Judgment before Production");
-    expect(seen[2]).not.toContain("start with explore");
-    expect(seen[2]).not.toContain("dispatch a verify worker");
-    expect(seen[2]).not.toContain("prefer multi");
-    expect(seen[2]).not.toContain("never split");
-    expect(seen[1]).not.toContain("Judgment before Production");
-    expect(seen[1]).toContain("game-asset for game art/audio/model assets");
-    expect(seen[1]).toContain("video for video production");
-    for (const system of seen.slice(1)) {
-      expect(system).toContain("explore | answer | implement | verify | game-asset | video");
-    }
-    expect(auto.session.getToolDefinition("orche_task")?.description).toContain("game-asset");
-    expect(auto.session.getToolDefinition("orche_task")?.description).toContain("video");
+    expect(seen[0]).toContain("Never stop to ask the user to switch modes in order to proceed");
+    expect(seen[0]).toContain("refine the requirements with the user: goal, constraints and acceptance criteria");
+    expect(seen[0]).toContain("ONE orche_task in ONE end-to-end assignment");
+    expect(seen[0]).toContain("run the trusted project checks yourself");
+    expect(seen[0]).toContain("explore | answer | implement | verify | game-asset | video");
+    for (const removed of ["orche_run", "Judgment before Production", "start with explore", "dispatch a verify worker", "prefer multi", "never split", "/orche mode auto"]) expect(seen[0]).not.toContain(removed);
+    expect(seen[1]).toContain(EXTERNAL_PERMISSION);
+    expect(seen[1]).not.toContain("orche_run");
+    expect(single.session.getToolDefinition("orche_task")?.description).toContain("game-asset");
+    expect(single.session.getToolDefinition("orche_task")?.description).toContain("video");
   });
 });
 
@@ -95,7 +75,7 @@ describe("mainMode: external paths", () => {
     const rules = delegationRules("direct");
     for (const text of [EXTERNAL_PERMISSION, "absolute paths and ../ paths", "Delegated workers' workspace confinement does not restrict this main direct session", "their scope remains unchanged", "Existing OS permissions and other policies still apply", "does not grant elevated OS privileges or bypass those restrictions"])
       expect(rules).toContain(text);
-    for (const mode of ["auto", "single", "multi"] as const) {
+    for (const mode of ["single"] as const) {
       expect(delegationRules(mode)).not.toContain(EXTERNAL_PERMISSION);
       expect(delegationRules(mode)).toContain("You cannot edit files in this session");
     }
@@ -104,10 +84,10 @@ describe("mainMode: external paths", () => {
   it.each([join(tmpdir(), "orche-external.txt"), "../orche-external.txt"])("keeps the tool guard matrix unchanged for external path %s", path => {
     for (const name of MUTATORS) {
       expect(guardToolCall("direct", name, { path })).toBeUndefined();
-      for (const mode of ["auto", "single", "multi"] as const)
+      for (const mode of ["single"] as const)
         expect(guardToolCall(mode, name, { path })).toContain(`Blocked by orche mode "${mode}"`);
     }
-    for (const name of ["orche_task", "orche_run"])
+    for (const name of ["orche_task"])
       expect(guardToolCall("direct", name, {})).toContain("is disabled");
   });
 
@@ -118,7 +98,7 @@ describe("mainMode: external paths", () => {
     const root = await mkdtemp(join(tmpdir(), "orche-direct-external-"));
     roots.push(root);
     const file = join(root, "external.txt");
-    const h = await harness({ mainSteps: [], orcheSteps: [], mainMode: "multi" });
+    const h = await harness({ mainSteps: [], orcheSteps: [], mainMode: "single" });
     const path = pathKind === "absolute" ? file : relative(h.cwd, file);
     if (pathKind === "parent-relative") expect(path).toMatch(/^\.\.\//);
     let system = "";
@@ -150,7 +130,7 @@ describe("mainMode: external paths", () => {
       await h.session.prompt(`Please update ${path} again`);
       expect(system).toContain(EXTERNAL_PERMISSION);
       expect(await readFile(file, "utf8")).toBe("persistent\n");
-      await h.session.prompt("/orche mode multi");
+      await h.session.prompt("/orche mode single");
     }
     // One-turn restoration / leaving persistent direct must restore the restriction.
     for (const name of MUTATORS) expect(h.session.getActiveToolNames()).not.toContain(name);
@@ -158,12 +138,12 @@ describe("mainMode: external paths", () => {
     const before = await readFile(file, "utf8");
     h.main.faux.setResponses([tool("write", { path, content: "forbidden" }), reply("blocked")]);
     await h.session.prompt(`Please update ${path} without direct mode`);
-    expect(lastResult(h)).toContain('Blocked by orche mode \\"multi\\"');
+    expect(lastResult(h)).toContain('Blocked by orche mode \\"single\\"');
     expect(h.session.systemPrompt).not.toContain(EXTERNAL_PERMISSION);
     expect(await readFile(file, "utf8")).toBe(before);
   });
 
-  it.each(["auto", "single", "multi"] as const)("%s blocks external writes even if write is reactivated", async mainMode => {
+  it.each(["single"] as const)("%s blocks external writes even if write is reactivated", async mainMode => {
     const root = await mkdtemp(join(tmpdir(), "orche-blocked-external-"));
     roots.push(root);
     const file = join(root, "external.txt");
@@ -189,11 +169,11 @@ describe("mainMode: external paths", () => {
 // Guard specimens are pure string data; none of these commands are executed.
 describe("mainMode: shell guard diagnostics", () => {
   it("rejects PowerShell in every delegation mode, without using Bash grammar", () => {
-    const error = guardToolCall("multi", "powershell", { command: "ls" });
+    const error = guardToolCall("single", "powershell", { command: "ls" });
     expect(error).toContain("PowerShell is unsupported");
     expect(error).toContain("dedicated PowerShell parser");
     expect(error).not.toContain("explicitly requests mutation");
-    for (const mode of ["auto", "single", "multi"] as const) {
+    for (const mode of ["single"] as const) {
       expect(guardToolCall(mode, "powershell", { command: "Set-Content file value" })).toContain(`Blocked by orche mode "${mode}"`);
       expect(guardToolCall(mode, "bash", { command: "touch file" })).toContain("explicitly requests mutation");
     }
@@ -201,46 +181,45 @@ describe("mainMode: shell guard diagnostics", () => {
     expect(guardToolCall("direct", "bash", { command: "touch file" })).toBeUndefined();
   });
   it.each([undefined, null, 42, {}, [], "", " \t\n"])("rejects malformed command %j", command => {
-    expect(guardToolCall("multi", "bash", { command })).toContain("command must be a non-blank string");
+    expect(guardToolCall("single", "bash", { command })).toContain("command must be a non-blank string");
   });
   it("rejects missing command", () => {
-    expect(guardToolCall("multi", "bash", {})).toContain("invalid command");
+    expect(guardToolCall("single", "bash", {})).toContain("invalid command");
   });
   it("distinguishes mutation from unverified syntax and offers safe alternatives", () => {
-    const mutation = guardToolCall("multi", "bash", { command: "touch file" });
-    const unsupported = guardToolCall("multi", "bash", { command: "curl http://x" }); // `ls *.ts` is read-only and now allowed
+    const mutation = guardToolCall("single", "bash", { command: "touch file" });
+    const unsupported = guardToolCall("single", "bash", { command: "curl http://x" }); // `ls *.ts` is read-only and now allowed
     expect(mutation).toContain("explicitly requests mutation");
     expect(mutation).toContain("Do not retry it directly: delegate");
     expect(unsupported).toContain("could not be verified");
     expect(unsupported).not.toContain("explicitly requests mutation");
     for (const error of [mutation, unsupported]) {
       expect(error).toContain("read with offset/limit, grep, simple static Bash");
-      expect(error).toContain("delegate with orche_run");
+      expect(error).toContain("delegate with orche_task");
       expect(error).toContain("may create generated files");
     }
-    expect(guardToolCall("multi", "bash", { command: "npm test" })).toBeUndefined();
-    expect(delegationRules("multi")).toContain("trusted project checks that may create generated files");
+    expect(guardToolCall("single", "bash", { command: "npm test" })).toBeUndefined();
   });
-  // Exact wording for mode "multi"; the suggestion is only ever appended after it.
-  const MULTI_ADVICE = "Use read with offset/limit, grep, simple static Bash inspection commands, or delegate with orche_run. Supported tests and linters are trusted project checks that may create generated files and execute project configuration, not guaranteed read-only.";
-  const MULTI_DELEGATE = "Do not retry it directly: delegate the change with the orche_run tool (a self-contained request: goal, decisions so far, relevant files and findings, constraints, acceptance criteria).";
+  // Exact wording for mode "single"; the suggestion is only ever appended after it.
+  const SINGLE_ADVICE = "Use read with offset/limit, grep, simple static Bash inspection commands, or delegate with orche_task. Supported tests and linters are trusted project checks that may create generated files and execute project configuration, not guaranteed read-only.";
+  const SINGLE_DELEGATE = "Do not retry it directly: delegate the change with the orche_task tool (a self-contained request: goal, decisions so far, relevant files and findings, constraints, acceptance criteria).";
   it("leaves a block without a hint exactly as before", () => {
-    expect(guardToolCall("multi", "bash", { command: "curl http://x" })).toBe(
-      `Blocked by orche mode "multi": this shell command could not be verified (command curl); unsupported does not mean mutating. ${MULTI_ADVICE}`,
+    expect(guardToolCall("single", "bash", { command: "curl http://x" })).toBe(
+      `Blocked by orche mode "single": this shell command could not be verified (command curl); unsupported does not mean mutating. ${SINGLE_ADVICE}`,
     );
-    expect(guardToolCall("multi", "bash", { command: "touch file" })).toBe(
-      `Blocked by orche mode "multi": this shell command explicitly requests mutation (command touch). ${MULTI_DELEGATE} ${MULTI_ADVICE}`,
+    expect(guardToolCall("single", "bash", { command: "touch file" })).toBe(
+      `Blocked by orche mode "single": this shell command explicitly requests mutation (command touch). ${SINGLE_DELEGATE} ${SINGLE_ADVICE}`,
     );
     for (const command of ["node -e 1", "echo hi > out.txt", "npm --prefix x run fix", "npm --prefix x install"]) {
-      expect(guardToolCall("multi", "bash", { command }), command).not.toContain("Suggestion:");
+      expect(guardToolCall("single", "bash", { command }), command).not.toContain("Suggestion:");
     }
   });
   it("suggests quoting or the find/grep/ls tools for a blocked expansion", () => {
     const suggestion = "Suggestion: quote literal patterns or use the find/grep/ls tools (e.g. find with pattern '**/*.ts').";
-    expect(guardToolCall("multi", "bash", { command: "rm *" })).toBe(
-      `Blocked by orche mode "multi": this shell command could not be verified (active brace/glob/tilde expansion (quote literal patterns)); unsupported does not mean mutating. ${MULTI_ADVICE} ${suggestion}`,
+    expect(guardToolCall("single", "bash", { command: "rm *" })).toBe(
+      `Blocked by orche mode "single": this shell command could not be verified (active brace/glob/tilde expansion (quote literal patterns)); unsupported does not mean mutating. ${SINGLE_ADVICE} ${suggestion}`,
     );
-    for (const mode of ["auto", "single", "multi"] as const) {
+    for (const mode of ["single"] as const) {
       for (const command of ["git log *", "cat $(echo x)", "ls ~user", "echo `id`", "test -n \"$(id)\""]) {
         const error = guardToolCall(mode, "bash", { command });
         expect(error, `${mode}: ${command}`).toContain(`Blocked by orche mode "${mode}":`);
@@ -250,39 +229,39 @@ describe("mainMode: shell guard diagnostics", () => {
     }
   });
   it("suggests `cd <dir> && <tool> run <script>` for an unknown leading option", () => {
-    expect(guardToolCall("multi", "bash", { command: "npm --foo test" })).toContain("Suggestion: use `cd <dir> && npm run <script>` instead of the leading --foo option.");
-    expect(guardToolCall("multi", "bash", { command: "pnpm --foo test" })).toContain("Suggestion: use `cd <dir> && pnpm run <script>` instead of the leading --foo option.");
-    expect(guardToolCall("multi", "bash", { command: "yarn --foo test" })).toContain("use `cd <dir> && yarn run <script>`");
-    expect(guardToolCall("multi", "bash", { command: "git -c a=b diff" })).toContain("Suggestion: use `cd <dir> && git <subcommand>` instead of the leading -c option.");
-    const error = guardToolCall("multi", "bash", { command: "npm --foo test" })!;
+    expect(guardToolCall("single", "bash", { command: "npm --foo test" })).toContain("Suggestion: use `cd <dir> && npm run <script>` instead of the leading --foo option.");
+    expect(guardToolCall("single", "bash", { command: "pnpm --foo test" })).toContain("Suggestion: use `cd <dir> && pnpm run <script>` instead of the leading --foo option.");
+    expect(guardToolCall("single", "bash", { command: "yarn --foo test" })).toContain("use `cd <dir> && yarn run <script>`");
+    expect(guardToolCall("single", "bash", { command: "git -c a=b diff" })).toContain("Suggestion: use `cd <dir> && git <subcommand>` instead of the leading -c option.");
+    const error = guardToolCall("single", "bash", { command: "npm --foo test" })!;
     expect(error).toContain("could not be verified");
-    expect(error).toContain("Blocked by orche mode \"multi\":");
+    expect(error).toContain("Blocked by orche mode \"single\":");
     expect(error.endsWith(".")).toBe(true);
   });
   it("lists the allowed read-only git subcommands when a git command is blocked, keeping the mutation/unverified wording", () => {
     const allowedGit = "Suggestion: allowed read-only git: status, diff, log, show, ….";
-    const mutation = guardToolCall("multi", "bash", { command: "git commit -m x" })!;
+    const mutation = guardToolCall("single", "bash", { command: "git commit -m x" })!;
     expect(mutation).toContain("explicitly requests mutation (git commit)");
-    expect(mutation).toContain(MULTI_DELEGATE);
+    expect(mutation).toContain(SINGLE_DELEGATE);
     expect(mutation.endsWith(allowedGit)).toBe(true);
     for (const command of ["git branch newname", "git submodule update", "git frobnicate"]) {
-      const unverified = guardToolCall("multi", "bash", { command })!;
+      const unverified = guardToolCall("single", "bash", { command })!;
       expect(unverified, command).toContain("could not be verified");
       expect(unverified, command).not.toContain("explicitly requests mutation");
       expect(unverified.endsWith(allowedGit), command).toBe(true);
     }
-    expect(guardToolCall("multi", "bash", { command: "git commit -h" })).toBeUndefined();
-    expect(guardToolCall("multi", "bash", { command: "git status" })).toBeUndefined();
+    expect(guardToolCall("single", "bash", { command: "git commit -h" })).toBeUndefined();
+    expect(guardToolCall("single", "bash", { command: "git status" })).toBeUndefined();
   });
   it("does not touch other tools' messages or the direct mode", () => {
     expect(guardToolCall("direct", "bash", { command: "rm *" })).toBeUndefined();
-    expect(guardToolCall("multi", "edit", {})).not.toContain("Suggestion:");
-    expect(guardToolCall("multi", "powershell", { command: "ls" })).not.toContain("Suggestion:");
-    expect(guardToolCall("multi", "bash", { command: "" })).not.toContain("Suggestion:");
+    expect(guardToolCall("single", "edit", {})).not.toContain("Suggestion:");
+    expect(guardToolCall("single", "powershell", { command: "ls" })).not.toContain("Suggestion:");
+    expect(guardToolCall("single", "bash", { command: "" })).not.toContain("Suggestion:");
   });
 });
 
-describe("mainMode: multi guard", () => {
+describe("mainMode: single guard", () => {
   it("blocks edit, write and ast_rewrite even when something re-activates them; the files stay untouched", async () => {
     const h = await harness({
       mainSteps: [
@@ -292,7 +271,7 @@ describe("mainMode: multi guard", () => {
         reply("ok"),
       ],
       orcheSteps: [],
-      mainMode: "multi",
+      mainMode: "single",
     });
     h.session.setActiveToolsByName([...h.session.getActiveToolNames(), ...MUTATORS]);
     await h.session.prompt("change the greeting");
@@ -300,8 +279,8 @@ describe("mainMode: multi guard", () => {
     expect(results).toHaveLength(3);
     for (const result of results) {
       expect(result).toMatchObject({ isError: true });
-      expect(JSON.stringify(result)).toContain('Blocked by orche mode \\"multi\\"');
-      expect(JSON.stringify(result)).toContain("orche_run");
+      expect(JSON.stringify(result)).toContain('Blocked by orche mode \\"single\\"');
+      expect(JSON.stringify(result)).toContain("orche_task");
     }
     expect(await readFile(join(h.cwd, "greeting.txt"), "utf8")).toBe("hello world\n");
     expect(await readdir(h.cwd)).toEqual(["greeting.txt"]);
@@ -317,7 +296,7 @@ describe("mainMode: multi guard", () => {
         reply("done"),
       ],
       orcheSteps: [],
-      mainMode: "multi",
+      mainMode: "single",
     });
     await h.session.prompt("inspect");
     const [ls, redirect, env, sed] = toolResults(h);
@@ -326,40 +305,15 @@ describe("mainMode: multi guard", () => {
     for (const [result, why] of [[redirect, "output redirection"], [env, "environment assignment GIT_EXTERNAL_DIFF"], [sed, "command sed"]] as const) {
       expect(result).toMatchObject({ isError: true });
       expect(JSON.stringify(result)).toContain(why);
-      expect(JSON.stringify(result)).toContain("orche_run");
+      expect(JSON.stringify(result)).toContain("orche_task");
     }
     expect(await readdir(h.cwd)).toEqual(["greeting.txt"]);
     expect(await readFile(join(h.cwd, "greeting.txt"), "utf8")).toBe("hello world\n");
   });
 
-  it("the model delegates with orche_run and the orchestration runs; context reaches the problem", async () => {
-    let classification = "";
-    let mainContext = "";
-    const h = await harness({
-      mainSteps: [
-        tool("orche_run", { request: "Change the greeting to 'bye world'. Acceptance: greeting.txt reads bye world.", context: "CONTEXT_MARKER: we agreed on the wording earlier." }),
-        context => { mainContext = JSON.stringify(context.messages.findLast(message => message.role === "toolResult")); return reply("delegated"); },
-      ],
-      orcheSteps: [
-        context => {
-          classification = JSON.stringify(context.messages.findLast(message => message.role === "user"));
-          return decision({ type: "classify", taskClass: "answer", workerCount: 1, language: "en", reason: "explanation" });
-        },
-        ...answerScript("ORCHE_DID_IT").slice(1),
-      ],
-      mainMode: "multi",
-    });
-    await h.session.prompt("please change the greeting");
-    expect(mainContext).toContain("ORCHE_DID_IT");
-    expect(classification).toContain("Change the greeting to 'bye world'");
-    expect(classification).toContain("Context from the requesting session");
-    expect(classification).toContain("CONTEXT_MARKER");
-    expect(h.orche.faux.getPendingResponseCount()).toBe(0);
-  });
-
-  it("direct mode blocks orche_run if something re-activates it", async () => {
-    const h = await harness({ mainSteps: [tool("orche_run", { request: "do it" }), reply("ok")], orcheSteps: answerScript("MUST_NOT_RUN"), mainMode: "direct" });
-    h.session.setActiveToolsByName([...h.session.getActiveToolNames(), "orche_run"]);
+  it("direct mode blocks orche_task if something re-activates it", async () => {
+    const h = await harness({ mainSteps: [tool("orche_task", { role: "explore", request: "do it" }), reply("ok")], orcheSteps: answerScript("MUST_NOT_RUN"), mainMode: "direct" });
+    h.session.setActiveToolsByName([...h.session.getActiveToolNames(), "orche_task"]);
     await h.session.prompt("go");
     expect(lastResult(h)).toContain('Blocked by orche mode \\"direct\\"');
     expect(h.orche.faux.state.callCount).toBe(0);
@@ -368,41 +322,41 @@ describe("mainMode: multi guard", () => {
 
 describe("/orche mode", () => {
   it("prints the mode and its source, switches it, applies the tool set and survives a reload of the session", async () => {
-    const h = await harness({ mainSteps: [], orcheSteps: [], mainMode: "multi" });
+    const h = await harness({ mainSteps: [], orcheSteps: [], mainMode: "single" });
     await h.session.prompt("/orche mode");
-    expect(notes(h).at(-1)).toMatch(/^orche mode: multi \(config .*orche\.config\.json\)$/);
+    expect(notes(h).at(-1)).toMatch(/^orche mode: single \(config .*orche\.config\.json\)$/);
 
     await h.session.prompt("/orche mode direct");
     expect(notes(h).at(-1)).toBe("orche mode: direct (saved in this session)");
     expect(h.session.getActiveToolNames()).toEqual(expect.arrayContaining(MUTATORS));
-    expect(h.session.getActiveToolNames()).not.toContain("orche_run");
+    expect(h.session.getActiveToolNames()).not.toContain("orche_task");
     await h.session.prompt("/orche mode");
     expect(notes(h).at(-1)).toBe("orche mode: direct (set with /orche mode in this session)");
     expect(h.session.sessionManager.getBranch().some(entry => entry.type === "custom" && entry.customType === "orche-mode")).toBe(true);
 
-    await h.session.prompt("/orche mode auto");
-    await h.session.prompt("/orche mode multi");
+    for (const removed of ["auto", "multi"]) {
+      await h.session.prompt(`/orche mode ${removed}`);
+      expect(notes(h).at(-1)).toContain("/orche mode [single|direct]");
+    }
+    await h.session.prompt("/orche mode single");
     await h.session.reload();
     await h.session.prompt("/orche mode");
-    expect(notes(h).at(-1)).toBe("orche mode: multi (set with /orche mode in this session)");
+    expect(notes(h).at(-1)).toBe("orche mode: single (set with /orche mode in this session)");
     for (const name of MUTATORS) expect(h.session.getActiveToolNames()).not.toContain(name);
-
-    await h.session.prompt("/orche mode auto");
-    await h.session.reload();
-    expect(h.session.getActiveToolNames()).toEqual(expect.arrayContaining(["orche_run", "orche_task"]));
-    for (const name of MUTATORS) expect(h.session.getActiveToolNames()).not.toContain(name);
+    expect(h.session.getActiveToolNames()).toContain("orche_task");
+    expect(h.session.getActiveToolNames()).not.toContain("orche_run");
   });
 
   it("rejects unknown modes with the usage text and changes nothing", async () => {
-    const h = await harness({ mainSteps: [], orcheSteps: [], mainMode: "multi" });
+    const h = await harness({ mainSteps: [], orcheSteps: [], mainMode: "single" });
     await h.session.prompt("/orche mode turbo");
-    expect(notes(h)).toEqual([expect.stringContaining("/orche mode [auto|single|multi|direct]")]);
+    expect(notes(h)).toEqual([expect.stringContaining("/orche mode [single|direct]")]);
     for (const name of MUTATORS) expect(h.session.getActiveToolNames()).not.toContain(name);
   });
 });
 
 describe("/orche direct is a one-turn override", () => {
-  it("in multi: edits are allowed and orche_run is off for that turn, then the multi tool set returns", async () => {
+  it("in single: edits are allowed and orche_task is off for that turn, then the single tool set returns", async () => {
     let duringTurn: string[] = [];
     const h = await harness({
       mainSteps: [
@@ -413,20 +367,20 @@ describe("/orche direct is a one-turn override", () => {
         reply("edited"),
       ],
       orcheSteps: answerScript("MUST_NOT_RUN"),
-      mainMode: "multi",
+      mainMode: "single",
     });
     await h.session.prompt("/orche direct create direct.txt");
     expect(duringTurn).toEqual(expect.arrayContaining(MUTATORS));
-    expect(duringTurn).not.toContain("orche_run");
+    expect(duringTurn).not.toContain("orche_task");
     expect(await readFile(join(h.cwd, "direct.txt"), "utf8")).toBe("direct edit");
     expect(h.orche.faux.state.callCount).toBe(0);
-    // restored after settle: later prompts are multi again
+    // restored after settle: later prompts are single again
     for (const name of MUTATORS) expect(h.session.getActiveToolNames()).not.toContain(name);
-    expect(h.session.getActiveToolNames()).toContain("orche_run");
+    expect(h.session.getActiveToolNames()).toContain("orche_task");
     h.session.setActiveToolsByName([...h.session.getActiveToolNames(), "write"]);
     h.main.faux.setResponses([tool("write", { path: "second.txt", content: "x" }), reply("blocked")]);
     await h.session.prompt("now try again without the override");
-    expect(lastResult(h)).toContain('Blocked by orche mode \\"multi\\"');
+    expect(lastResult(h)).toContain('Blocked by orche mode \\"single\\"');
     expect(await readdir(h.cwd)).not.toContain("second.txt");
   });
 
@@ -439,7 +393,7 @@ describe("/orche direct is a one-turn override", () => {
         return reply("aborted");
       }],
       orcheSteps: [],
-      mainMode: "multi",
+      mainMode: "single",
     });
     const turn = h.session.prompt("/orche direct long job");
     await entered.promise;
@@ -447,27 +401,27 @@ describe("/orche direct is a one-turn override", () => {
     await h.session.abort();
     await turn;
     for (const name of MUTATORS) expect(h.session.getActiveToolNames()).not.toContain(name);
-    expect(h.session.getActiveToolNames()).toContain("orche_run");
+    expect(h.session.getActiveToolNames()).toContain("orche_task");
   });
 
   it("is restored when the turn ends in a model error", async () => {
     const h = await harness({
       mainSteps: [reply("", { stopReason: "error", errorMessage: "400 invalid request" })],
       orcheSteps: [],
-      mainMode: "multi",
+      mainMode: "single",
     });
     await h.session.prompt("/orche direct anything");
     for (const name of MUTATORS) expect(h.session.getActiveToolNames()).not.toContain(name);
-    expect(h.session.getActiveToolNames()).toContain("orche_run");
+    expect(h.session.getActiveToolNames()).toContain("orche_task");
   });
 
-  it("is refused while the agent is busy in multi (no queued turn that could not edit); the busy turn is unaffected", async () => {
+  it("is refused while the agent is busy in single (no queued turn that could not edit); the busy turn is unaffected", async () => {
     const gate = deferred();
     const entered = deferred();
     const h = await harness({
       mainSteps: [async () => { entered.resolve(); await gate.promise; return reply("first done"); }],
       orcheSteps: [],
-      mainMode: "multi",
+      mainMode: "single",
     });
     const first = h.session.prompt("first request");
     await entered.promise;
@@ -496,10 +450,10 @@ describe("mainMode config discovery", () => {
   const cfg = (extra: object) => ({ routes: {}, ...extra });
 
   it("reads mainMode from the same selected file as the routes: trusted project, then user, else none", async () => {
-    const both = await layout({ project: cfg({ mainMode: "single" }), user: cfg({ mainMode: "auto" }) });
+    const both = await layout({ project: cfg({ mainMode: "single" }), user: cfg({ mainMode: "direct" }) });
     expect(await discoverMainMode({ ...both, projectTrusted: true })).toMatchObject({ mode: "single" });
-    expect(await discoverMainMode({ ...both, projectTrusted: false })).toMatchObject({ mode: "auto" });
-    const projectWithoutKey = await layout({ project: cfg({}), user: cfg({ mainMode: "auto" }) });
+    expect(await discoverMainMode({ ...both, projectTrusted: false })).toMatchObject({ mode: "direct" });
+    const projectWithoutKey = await layout({ project: cfg({}), user: cfg({ mainMode: "direct" }) });
     expect(await discoverMainMode({ ...projectWithoutKey, projectTrusted: true })).toEqual({ path: expect.stringContaining(".pi"), });
     const none = await layout({});
     expect(await discoverMainMode({ ...none, projectTrusted: true })).toEqual({});
@@ -509,9 +463,11 @@ describe("mainMode config discovery", () => {
     const bad = await layout({ user: cfg({ mainMode: "turbo" }) });
     const found = await discoverMainMode({ ...bad, projectTrusted: true });
     expect(found.mode).toBeUndefined();
-    expect(found.error).toContain("config.mainMode: expected auto, single, multi, direct");
+    expect(found.error).toContain("config.mainMode: expected single, direct");
     expect(() => parseRouteConfig({ routes: {}, mainMode: 3 })).toThrow("config.mainMode");
-    for (const mainMode of ["auto", "single", "multi", "direct"] as const) expect(parseRouteConfig({ routes: {}, mainMode }).mainMode).toBe(mainMode);
+    for (const mainMode of ["single", "direct"] as const) expect(parseRouteConfig({ routes: {}, mainMode }).mainMode).toBe(mainMode);
+    // The removed modes are still read, as single, and flagged so the extension can warn.
+    for (const legacy of ["auto", "multi"] as const) expect(parseRouteConfig({ routes: {}, mainMode: legacy })).toMatchObject({ mainMode: "single", legacyMainMode: legacy });
     // Pi's "max" thinking level is a valid route setting (the user config uses it); unknown levels are still rejected.
     expect(parseRouteConfig({ routes: { analyst: { model: "p/m", thinking: "max" } } }).routes.analyst?.thinking).toBe("max");
     expect(() => parseRouteConfig({ routes: { analyst: { model: "p/m", thinking: "ultra" } } })).toThrow("thinking");
@@ -525,15 +481,24 @@ describe("mainMode config discovery", () => {
     expect(notes(h).join("\n")).toContain("using the default mode direct");
     for (const name of ["orche_run", "orche_task"]) expect(h.session.getActiveToolNames()).not.toContain(name);
   });
+
+  it("a removed mainMode (auto/multi) in the config runs as single and warns once at session start", async () => {
+    const h = await harness({ mainSteps: [], orcheSteps: [], writeUserConfig: false });
+    await writeFile(join(h.agentDir, "orche.config.json"), JSON.stringify({ routes: {}, mainMode: "multi" }));
+    await h.session.reload();
+    expect(notes(h).filter(note => note.includes("was removed"))).toEqual([expect.stringContaining('mainMode "multi"')]);
+    expect(h.session.getActiveToolNames()).toContain("orche_task");
+    for (const name of MUTATORS) expect(h.session.getActiveToolNames()).not.toContain(name);
+  });
 });
 
 
 describe("single-worker mode and one-turn override", () => {
-  it("/orche single selects one delegated worker, then restores multi", async () => {
+  it("/orche single selects one delegated worker for one turn, then restores direct", async () => {
     let during: string[] = [];
     let system = "";
     const h = await harness({
-      mainMode: "multi",
+      mainMode: "direct",
       mainSteps: [context => {
         during = h.session.getActiveToolNames();
         system = systemOf(context);
@@ -547,11 +512,11 @@ describe("single-worker mode and one-turn override", () => {
     for (const name of MUTATORS) expect(during).not.toContain(name);
     expect(system).toContain("orche mode: single");
     expect(lastResult(h)).toContain("Greeting inspected");
-    expect(h.session.getActiveToolNames()).toContain("orche_run");
+    expect(h.session.getActiveToolNames()).toContain("edit");
     expect(h.session.getActiveToolNames()).not.toContain("orche_task");
   });
 
-  it.each(["auto", "single", "multi", "direct"] as const)("/orche single busy rules in %s", async mainMode => {
+  it.each(["single", "direct"] as const)("/orche single busy rules in %s", async mainMode => {
     const entered = deferred();
     const gate = deferred();
     const h = await harness({ mainMode, orcheSteps: [], mainSteps: [async () => {
@@ -560,7 +525,7 @@ describe("single-worker mode and one-turn override", () => {
     const first = h.session.prompt("first");
     await entered.promise;
     await h.session.prompt("/orche single follow-up");
-    const compatible = mainMode === "auto" || mainMode === "single";
+    const compatible = mainMode === "single";
     expect(notes(h).at(-1)).toContain(compatible ? "queued" : "refused");
     gate.resolve();
     await first;
@@ -568,7 +533,7 @@ describe("single-worker mode and one-turn override", () => {
     expect(h.main.faux.state.callCount).toBe(compatible ? 2 : 1);
   });
 
-  it.each(["auto", "single", "multi", "direct"] as const)("/orche direct busy rules in %s", async mainMode => {
+  it.each(["single", "direct"] as const)("/orche direct busy rules in %s", async mainMode => {
     const entered = deferred();
     const gate = deferred();
     const h = await harness({ mainMode, orcheSteps: [], mainSteps: [async () => {
@@ -585,22 +550,19 @@ describe("single-worker mode and one-turn override", () => {
   });
 
   it.each([
-    ["single", "orche_run", "orche_task"],
-    ["multi", "orche_task", "orche_run"],
     ["direct", "orche_task", "make the change directly"],
-    ["direct", "orche_run", "make the change directly"],
   ] as const)("%s guards unavailable %s", (mode, name, advice) => {
     expect(guardToolCall(mode, name, {})).toContain(`Blocked by orche mode "${mode}"`);
     expect(guardToolCall(mode, name, {})).toContain(advice);
   });
 
-  it.each(["auto", "single", "multi", "direct"] as const)("%s policy is byte-stable", mode => {
+  it.each(["single", "direct"] as const)("%s policy is byte-stable", mode => {
     expect(delegationRules(mode)).toBe(delegationRules(mode));
   });
 
-  it("auto policy restricts multi and keeps reuse and supervision explicit", () => {
-    const rules = delegationRules("auto");
-    for (const criterion of ["at least two independent units with disjoint write sets", "each substantial on its own", "parallel execution clearly shortens the work", "a defect's cause is unknown AND parallel competing hypotheses are clearly warranted", "user explicitly asks for multi-agent orchestration or parallel workers", "whenever in doubt, use single through orche_task", "Never claim a reuse that did not happen", "workers are gone after a reload", "a worker's report is not acceptance", "report unverified items as unverified", "Intent/Purpose; numbered requirements checklist R1..Rn", "Original request section containing the user's ORIGINAL request text verbatim"])
+  it("single policy keeps reuse and supervision explicit", () => {
+    const rules = delegationRules("single");
+    for (const criterion of ["Never claim a reuse that did not happen", "workers are gone after a reload", "a worker's report is not acceptance", "report unverified items as unverified", "Intent/Purpose; numbered requirements checklist R1..Rn", "Original request section containing the user's ORIGINAL request text verbatim"])
       expect(rules).toContain(criterion);
   });
 });

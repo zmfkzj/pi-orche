@@ -5,9 +5,12 @@ import { MAX_WORKERS_LIMIT, type TeamSettings } from "./team.js";
 import { parseRunLimits, RunLimitsError, type RunLimits } from "./limits.js";
 import { isArtifactPattern, type AuditSettings } from "./artifacts.js";
 
-/** Main-session delegation: auto chooses single/multi, single uses one worker, multi uses the orchestrator, direct edits locally. */
-export const MAIN_MODES = ["auto", "single", "multi", "direct"] as const;
+/** Main-session delegation: single hands work to one orche_task worker, direct edits locally. */
+export const MAIN_MODES = ["single", "direct"] as const;
 export type MainMode = (typeof MAIN_MODES)[number];
+/** Removed modes (multi-agent orche_run delegation): still accepted in config and session history, read as `single`. */
+export const LEGACY_MAIN_MODES = ["auto", "multi"] as const;
+export type LegacyMainMode = (typeof LEGACY_MAIN_MODES)[number];
 /** Direct by default: benchmarks showed single agents match delegation quality at lower cost; switch with /orche mode or `mainMode`. */
 export const DEFAULT_MAIN_MODE: MainMode = "direct";
 export interface ModelRoute { role: string; model: string; thinking?: ThinkingLevel; extendedContext?: boolean }
@@ -27,8 +30,10 @@ export interface RouteConfig {
   readonly verifyCommands?: readonly string[];
   /** Worker team shape: maximum workers, explorer route roles and analyst angles (defaults in ./team.ts). */
   readonly workers?: Partial<TeamSettings>;
-  /** Behavior of the main session in the Pi package (ignored by the standalone CLI). Default `auto`. */
+  /** Behavior of the main session in the Pi package (ignored by the standalone CLI). Default `direct`. */
   readonly mainMode?: MainMode;
+  /** A removed mode (`auto`/`multi`) found in the file; it is read as `single` and the Pi package warns about it. */
+  readonly legacyMainMode?: LegacyMainMode;
   /** Run caps in milliseconds and worker request/repair budgets; explicit values only. */
   readonly limits?: Partial<RunLimits>;
   /** Extra generated-output patterns exempting only new files from workspace violations. */
@@ -85,7 +90,8 @@ export function parseRouteConfig(value: unknown): RouteConfig {
     });
     if (new Set(providerExtensions).size !== providerExtensions.length) throw new RouteConfigError("config.providerExtensions: duplicate source");
   }
-  if (config.mainMode !== undefined && !MAIN_MODES.includes(config.mainMode as MainMode)) throw new RouteConfigError(`config.mainMode: expected ${MAIN_MODES.join(", ")}`);
+  const legacyMainMode = typeof config.mainMode === "string" && (LEGACY_MAIN_MODES as readonly string[]).includes(config.mainMode) ? config.mainMode as LegacyMainMode : undefined;
+  if (config.mainMode !== undefined && !legacyMainMode && !MAIN_MODES.includes(config.mainMode as MainMode)) throw new RouteConfigError(`config.mainMode: expected ${MAIN_MODES.join(", ")}`);
   let verifyCommands: string[] | undefined;
   if (config.verifyCommands !== undefined) {
     const list = config.verifyCommands;
@@ -106,7 +112,7 @@ export function parseRouteConfig(value: unknown): RouteConfig {
     ...(config.extendedContext !== undefined ? { extendedContext: config.extendedContext } : {}),
     ...(verifyCommands ? { verifyCommands } : {}),
     ...(config.workers !== undefined ? { workers: parseWorkers(config.workers) } : {}),
-    ...(config.mainMode !== undefined ? { mainMode: config.mainMode as MainMode } : {}),
+    ...(legacyMainMode ? { mainMode: "single" as const, legacyMainMode } : config.mainMode !== undefined ? { mainMode: config.mainMode as MainMode } : {}),
   };
 }
 function parseImages(value: unknown): ImageSettings {

@@ -398,7 +398,7 @@ const MAX_LISTED_FILES = 50;
  * Split the net changes of one assignment into the worker's and the rest. Changes of the worker: paths
  * written by a successful edit/write call, and changes that appeared while a write-capable tool call (bash,
  * ast_rewrite, ...) of the worker was in flight, since such a call can write any file (ambiguous ones stay
- * the worker's, exactly as in the orche_run audit). Changes seen only while none of its tools ran cannot be
+ * the worker's, exactly as in the run audit). Changes seen only while none of its tools ran cannot be
  * its own. A read-only role cannot edit, so nothing is attributed to it. Between two assignments of a reused
  * worker no tool of it runs, so the stale-context changes are never its own either.
  */
@@ -495,8 +495,8 @@ function assignmentPrompt(args: TaskParameters & { mainMode?: MainMode }, comman
   const scope = args.files === undefined ? "anywhere inside the workspace" : JSON.stringify(args.files);
   const instructions: Record<TaskRole, string> = {
     explore: 'Investigate independently, read source and reproduce. DO NOT EDIT. Report findings with concrete evidence and optionally data.cause. report_result {kind:"explore",summary,data:{cause,evidence}}.',
-    answer: `Strictly read-only. Inspect relevant files and provide an evidence-backed answer, concrete code references and explanations. Never change files. report_result {kind:"answer",summary:FULL_EVIDENCED_ANSWER,data:{evidence${args.mainMode === "single" || args.mainMode === "auto" ? ',checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence"}]' : ""}}}.${args.mainMode === "single" || args.mainMode === "auto" ? " Checklist is required when the request contains R-ids." : ""}`,
-    implement: args.mainMode === "single" || args.mainMode === "auto"
+    answer: `Strictly read-only. Inspect relevant files and provide an evidence-backed answer, concrete code references and explanations. Never change files. report_result {kind:"answer",summary:FULL_EVIDENCED_ANSWER,data:{evidence${args.mainMode === "single" ? ',checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence"}]' : ""}}}.${args.mainMode === "single" ? " Checklist is required when the request contains R-ids." : ""}`,
+    implement: args.mainMode === "single"
       ? `Own the task end to end: first analyse the requirements and create the Task DAG with task_plan, covering every requirement id. If a requirement can be read more than one way with observably different behaviour, choose the reading closest to the Original request text, implement it, and report it in data.ambiguities. Then execute nodes sequentially in dependency order, updating statuses, implementing completely, adding or updating tests, running the project's relevant checks and iterating until they pass, preserving unrelated changes. Main does not intervene while you run. Write scope: ${scope}. Finish with report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks],checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence",verifiedBy:"test name or check command that asserts this requirement's acceptance and passed"}],ambiguities:[{id:"R2",readings:["reading A","reading B"],chosen:"reading A"}]}}. Checklist is required when the request contains R-ids; every met item needs verifiedBy, otherwise report it partial. ambiguities may be omitted when there are none.`
       : `Implement completely, preserving unrelated changes. Write scope: ${scope}. Run local checks on touched files. report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks]}}.`,
     "game-asset": `Game asset production. Create or modify game assets (sprites, sprite sheets/atlases, tilesets, textures, icons/UI art, 3D models, animations, VFX, SFX/music, fonts, and their engine import/metadata files) inside the write scope ${scope}. First detect the engine and the project's conventions (Unity .meta, Godot .import/.tres, Unreal, Phaser/Pixi atlas JSON; existing naming, folder layout, resolution/pixels-per-unit, palette, pivot/origin, power-of-two, compression). Produce assets with locally available tools via bash (check command -v first: ImageMagick, Inkscape, Blender --background with Python, Aseprite --batch, ffmpeg, sox, Python Pillow/numpy, or hand-written SVG/procedural scripts); keep reusable generator scripts with the assets when the project has a place for them, and leave no temp files in the workspace. Never hand-fabricate binary bytes. Verify every output is valid (identify/file/ffprobe/blender), and view raster outputs or rendered previews with the read tool. Do not download third-party assets unless the request allows it; record source and license when you do. report_result {kind:"game-asset",summary,data:{status:"done" or "blocked",reason,outputs:[{path,type,spec}],evidence:[checks]}}. spec is a descriptive string.`,
@@ -676,7 +676,7 @@ export class WorkerPool {
     if (this.disposed) throw new Error("Worker pool is disposed");
     const grant = resolveGitGrant(args.role, args.git); // before any worker is touched: a bad grant spawns and changes nothing
     const started = Date.now();
-    const workflowMode = args.mainMode === "single" || args.mainMode === "auto";
+    const workflowMode = args.mainMode === "single";
     const singleWorkflow = workflowMode && ["explore", "answer", "implement", "verify"].includes(args.role);
     const inheritMain = singleWorkflow;
     const modelWarnings: string[] = [];
@@ -1026,7 +1026,7 @@ export class WorkerPool {
       } else meta.unmetStreak = new Map();
       const roleData = ["status", "reason", "passed", "issues", "cause"].filter(key => data[key] !== undefined).map(key => `${key}: ${typeof data[key] === "string" ? data[key] : JSON.stringify(data[key])}`);
       if (Array.isArray(data.outputs)) roleData.push(`outputs: ${data.outputs.length}`);
-      const note = data.status === "blocked" ? workflowMode && typeof data.reason === "string" && data.reason ? data.reason : "the worker reported blocked" : args.role === "verify" && data.passed === false ? "verification failed" : !workflowMode && args.role === "implement" && changes.length >= 4 ? "the implementation changed four or more files" : undefined;
+      const note = data.status === "blocked" ? workflowMode && typeof data.reason === "string" && data.reason ? data.reason : "the worker reported blocked" : args.role === "verify" && data.passed === false ? "verification failed" : undefined;
       const roster = this.roster();
       const gitLines = gitReport ? formatGitReport(gitReport) : [];
       const details: TaskDetails = {
@@ -1037,7 +1037,7 @@ export class WorkerPool {
       finishRecord("done", details, { summary: meta.summary });
       const planNotes = singleWorkflow && !meta.plan ? ["Note: no Task DAG recorded in this assignment."] : [];
       const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, ...modelWarnings, ...contextLine(), "", meta.summary, ...roleData, ...checklistLines, "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
-        ...planNotes, ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: ${workflowMode ? "follow up with the same worker" : "consider orche_run (multi)"} — ${note}`] : [])].join("\n");
+        ...planNotes, ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: follow up with the same worker — ${note}`] : [])].join("\n");
       return { text: withRecordLine(text, record?.dir), details };
     } catch (error) {
       const base = error instanceof Error ? error.message : String(error);

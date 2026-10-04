@@ -42,10 +42,10 @@ export async function createHarness(options: {
   orcheSteps: FauxResponseStep[];
   extension?: OrcheExtensionOptions;
   writeUserConfig?: boolean;
-  /** `mainMode` in the user config (default auto delegates; unset omits the key). */
+  /** `mainMode` in the user config (default single delegates; unset omits the key). */
   /** Resolve the main provider in the worker runtime; default tests keep separate scripts/routes. */
   inheritMainModel?: boolean;
-  mainMode?: "auto" | "single" | "multi" | "direct" | "unset";
+  mainMode?: "single" | "direct" | "unset";
   /**
    * `records` in the user config. The default is OFF here (`{ enabled: false }`), unlike the extension's own default (on): suites that do not
    * look at records keep their exact result texts and write nothing. Pass `true` for the defaults, or a `records` object (`dir`, `retentionDays`,
@@ -67,7 +67,7 @@ export async function createHarness(options: {
   main.runtime.registerNativeProvider(orche.faux.provider);
   if (options.writeUserConfig !== false) {
     const records = options.records === true ? {} : options.records === undefined || options.records === false ? { enabled: false } : options.records;
-    await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: orche.route.model }, records, ...(options.taskContext ? { taskContext: options.taskContext } : {}), ...(options.mainMode === "unset" ? {} : { mainMode: options.mainMode ?? "auto" }) }));
+    await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: orche.route.model }, records, ...(options.taskContext ? { taskContext: options.taskContext } : {}), ...(options.mainMode === "unset" ? {} : { mainMode: options.mainMode ?? "single" }) }));
   }
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
   const resourceLoader = new DefaultResourceLoader({

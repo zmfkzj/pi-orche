@@ -27,7 +27,7 @@ async function fixture(steps: FauxResponseStep[], records = false) {
 }
 
 describe("single-workflow task delegation", () => {
-  it.each(["single", "auto"] as const)("%s registers task_plan, persists replacement plans and reports checklist summary/details", async mainMode => {
+  it.each(["single"] as const)("%s registers task_plan, persists replacement plans and reports checklist summary/details", async mainMode => {
     const { execute, pool } = await fixture([tool("task_plan", plan), report("partial")], true);
     const result = await execute({ mainMode });
     expect(pool.session("W1").getActiveToolNames()).toContain("task_plan");

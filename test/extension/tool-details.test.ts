@@ -250,63 +250,8 @@ async function harness(path: Path, limits?: Record<string, number>, steps: { mai
   return h;
 }
 
-describe.each(paths)("$name through a real session: start time and deadline in every update and in the final details", path => {
-  it("sends details.startedAt and details.deadline in each partial update and in the final details; the text is the progress lines, the final content has no timing", async () => {
-    const h = await harness(path);
-    const partials = watch(h, path.name);
-    const before = Date.now();
-    await h.session.prompt("delegate");
-    const after = Date.now();
-    const [result] = resultsOf(h, path.name);
-    expect(result?.isError).toBeFalsy();
-
-    // partial updates: the first one (the start) has no lines yet; all carry the same start and the deadline
-    expect(partials.length).toBeGreaterThanOrEqual(2);
-    expect(partials[0]!.details!.progress).toEqual([]);
-    const startedAt = result!.details!.startedAt as number;
-    expect(startedAt).toBeGreaterThanOrEqual(before);
-    expect(startedAt).toBeLessThanOrEqual(after);
-    for (const partial of partials) {
-      expect(partial.details!.startedAt).toBe(startedAt);
-      expect(partial.details!.deadline).toMatchObject({ baseMs: BASE, capMs: BASE, extensionMs: BASE, extensionsUsed: 0, maxExtensions: 10, hardLimitMs: 330 * MINUTE });
-      // the deadline counts from the start of the call (a run's own clock starts a few ms later, a task's after its worker was given the assignment)
-      expect(partial.details!.deadline.deadlineAt).toBeGreaterThanOrEqual(startedAt + BASE);
-      expect(partial.details!.deadline.deadlineAt).toBeLessThan(after + BASE);
-      // the model never sees partials, and what the TUI/RPC gets as text is only the progress lines
-      expect(textOf(partial)).toBe((partial.details!.progress as string[]).join("\n"));
-      expectNoTimingText(textOf(partial));
-      expect(partial.details).not.toHaveProperty("finishedAt");
-    }
-
-    // the final details
-    const details = result!.details!;
-    expect(details.finishedAt).toBeGreaterThanOrEqual(startedAt);
-    expect(details.finishedAt).toBeLessThanOrEqual(after);
-    expect(details.durationMs).toBeLessThanOrEqual(details.finishedAt - startedAt);
-    expect(details.deadline).toEqual(partials.at(-1)!.details!.deadline);
-
-    // the model-facing text: the usual report, nothing of the timer
-    const text = textOf(result!);
-    expect(text).toMatch(path.head);
-    expect(text).toContain(path.name === "orche_run" ? "RUN_DONE" : "Evidence found");
-    expectNoTimingText(text);
-  });
-
-  it("follows the limits of the config file: maxExtensions 5, extensionMs 600000", async () => {
-    const h = await harness(path, { maxExtensions: 5, extensionMs: 600_000 });
-    const partials = watch(h, path.name);
-    await h.session.prompt("delegate");
-    const [result] = resultsOf(h, path.name);
-    expect(result?.isError).toBeFalsy();
-    const want = { baseMs: BASE, capMs: BASE, extensionMs: 600_000, extensionsUsed: 0, maxExtensions: 5, hardLimitMs: BASE + 5 * 600_000 };
-    expect(partials.length).toBeGreaterThan(0);
-    for (const partial of partials) expect(partial.details!.deadline).toMatchObject(want);
-    expect(result!.details!.deadline).toMatchObject(want);
-  });
-});
-
 describe("registration", () => {
-  it.each(["orche_run", "orche_task"])("%s has the TUI renderers, and its description states the default extension budget (10 × 30 min, 5h30m)", async name => {
+  it.each(["orche_task"])("%s has the TUI renderers, and its description states the default extension budget (10 × 30 min, 5h30m)", async name => {
     const h = await createHarness({ mainSteps: [], orcheSteps: [] });
     open.push(h);
     const definition = h.session.getToolDefinition(name)!;
@@ -323,40 +268,6 @@ describe("registration", () => {
 });
 
 describe("the timing of calls that did not succeed", () => {
-  it("orche_run: a failed run keeps startedAt / finishedAt / deadline in its error details", async () => {
-    const h = await harness(paths[0]!, undefined, { main: [tool("orche_run", { request: "do the impossible" }), reply("noted")], orche: [decision({ type: "fail", reason: "cannot be done" })] });
-    const partials = watch(h, "orche_run");
-    await h.session.prompt("go");
-    const [result] = resultsOf(h, "orche_run");
-    expect(result?.isError).toBe(true);
-    expect(textOf(result!)).toMatch(/^orche FAILED /);
-    expectNoTimingText(textOf(result!));
-    expect(result!.details).toMatchObject({ status: "failed", startedAt: expect.any(Number), finishedAt: expect.any(Number), deadline: { baseMs: BASE, maxExtensions: 10 }, failure: { kind: "failed" } });
-    for (const partial of partials) expect(partial.details!.startedAt).toBe(result!.details!.startedAt);
-  });
-
-  it("orche_run: a timeout extended while the coordinator works: the partial updates carry the new cap, the failure keeps the final one", async () => {
-    // A model request that never answers keeps the coordinator "waiting for the model", which counts as active.
-    const hold: FauxResponseStep = async (_context, options) => {
-      await new Promise<void>(resolve => { if (options?.signal?.aborted) resolve(); else options?.signal?.addEventListener("abort", () => resolve(), { once: true }); });
-      return reply("stopped");
-    };
-    const limits = { overallMs: 800, extensionMs: 250, maxExtensions: 2, decisionMs: 100_000, assignmentMs: 100_000, explorationMs: 100_000 };
-    const h = await harness(paths[0]!, limits, { main: [tool("orche_run", { request: "long job" }), reply("noted")], orche: [hold] });
-    const partials = watch(h, "orche_run");
-    await h.session.prompt("delegate");
-    const [result] = resultsOf(h, "orche_run");
-    expect(result?.isError).toBe(true);
-    expect(textOf(result!)).toContain("extension budget 2/2 used");
-    // cap 800 → 1050 → 1300 (each relative to the run's own start), extensions 0 → 1 → 2 of 2
-    const steps = partials.map(partial => partial.details!.deadline as DeadlineInfo);
-    const distinct = steps.filter((deadline, index) => index === 0 || deadline.extensionsUsed !== steps[index - 1]!.extensionsUsed);
-    expect(distinct.map(deadline => [deadline.capMs, deadline.extensionsUsed, deadline.maxExtensions])).toEqual([[800, 0, 2], [1050, 1, 2], [1300, 2, 2]]);
-    for (const deadline of steps) expect(deadline).toMatchObject({ baseMs: 800, extensionMs: 250, hardLimitMs: 1300 });
-    expect(partials.map(partial => partial.details!.startedAt)).toEqual(partials.map(() => result!.details!.startedAt));
-    expect(result!.details!.deadline).toMatchObject({ capMs: 1300, extensionsUsed: 2, maxExtensions: 2, baseMs: 800, hardLimitMs: 1300 });
-    expect(result!.details!.finishedAt - result!.details!.startedAt).toBeGreaterThanOrEqual(1290);
-  });
 
   it("orche_task: a timed-out assignment keeps its timing in the error details, and the deadline in the partial updates follows the extensions", async () => {
     const blocked: FauxResponseStep = async (_context, options) => {

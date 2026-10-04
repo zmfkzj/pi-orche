@@ -373,7 +373,7 @@ export async function runComparison(options: { tasks: readonly string[] | 'all';
     if (exists && !options.resume && !job.force) throw new Error(`Existing run ${job.taskId}/${job.system}/r${job.repeat}; use --resume or --rerun`);
     return !exists || job.force;
   });
-  const manifest = { startedAt: Date.now(), tasks: tasks.map(task => task.id), systems, repeats, concurrency: initialConcurrency, baseModel, effort: 'high', endpoint: 'https://chatgpt.com/backend-api/codex/responses', invocation: { 'pi-solo': 'Pi CLI print/json default tools/prompt, isolated agent dir, no extensions', 'pi-orche': 'Identical Pi CLI plus src/extension/index.ts, mainMode auto', omp: 'Full omp CLI with om-orche plugin and per-run all-high overlay', 'pi-orche-direct': 'runOrchestrated SDK (legacy pi alias)' }, jobOrder: planned.map(job => `${job.taskId}/${job.system}/r${job.repeat}`) };
+  const manifest = { startedAt: Date.now(), tasks: tasks.map(task => task.id), systems, repeats, concurrency: initialConcurrency, baseModel, effort: 'high', endpoint: 'https://chatgpt.com/backend-api/codex/responses', invocation: { 'pi-solo': 'Pi CLI print/json default tools/prompt, isolated agent dir, no extensions', 'pi-orche': 'Identical Pi CLI plus src/extension/index.ts, mainMode single (auto removed)', omp: 'Full omp CLI with om-orche plugin and per-run all-high overlay', 'pi-orche-direct': 'runOrchestrated SDK (legacy pi alias)' }, jobOrder: planned.map(job => `${job.taskId}/${job.system}/r${job.repeat}`) };
   const manifestPath = join(outDir, 'bench-manifest.json');
   let previous: typeof manifest | undefined;
   try { previous = JSON.parse(await readFile(manifestPath,'utf8')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }

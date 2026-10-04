@@ -30,7 +30,8 @@ describe("contextWarning (pure)", () => {
     expect(state.warnedLevel).toBe(0);
     expect(contextWarning("direct", usage(55), settings, state).message).toContain("55%");
   });
-  it.each(["auto", "single", "multi"] as const)("is silent in %s mode, when disabled, and when usage is unknown", mode => {
+  it("is silent in single mode, when disabled, and when usage is unknown", () => {
+    const mode = "single" as const;
     expect(contextWarning(mode, usage(80), settings, { warnedLevel: 0 }).message).toBeUndefined();
     expect(contextWarning("direct", usage(80), { ...settings, enabled: false }, { warnedLevel: 0 }).message).toBeUndefined();
     expect(contextWarning("direct", usage(null), settings, { warnedLevel: 0 }).message).toBeUndefined();

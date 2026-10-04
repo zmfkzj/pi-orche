@@ -106,8 +106,8 @@ describe("orche_task persistent session workers", () => {
 
   it.each([
     ["single", "change the greeting", true],
-    ["auto", "change the greeting", true],
-    ["auto", "/orche single change the greeting", true],
+    ["single", "/orche single change the greeting", true],
+    ["direct", "/orche single change the greeting", true],
   ] as const)("uses the effective mode for implement instructions (%s, %s)", async (mainMode, prompt, endToEnd) => {
     let instruction = "";
     const files = ["greeting.txt"];
@@ -303,14 +303,12 @@ describe("orche_task persistent session workers", () => {
     await running;
   });
 
-  it("refuses /orche multi during a task; /orche cancel leaves its worker reusable", async () => {
+  it("/orche cancel during a task leaves its worker reusable", async () => {
     capturePool();
     const entered = deferred();
     const h = await harness({ mainSteps: [tool("orche_task", { role: "explore", request: "long task" }), reply("cancel acknowledged"), tool("orche_task", { role: "explore", request: "follow up", worker: "W1" }), reply("done")], orcheSteps: [blocked(entered), result("explore", "Reused after cancellation")] });
     const running = h.session.prompt("start task");
     await entered.promise;
-    await h.session.prompt("/orche multi competing");
-    expect(h.notifications.some(note => note.message.includes("already active"))).toBe(true);
     await h.session.prompt("/orche cancel");
     await running;
     expect(JSON.stringify(taskResults(h))).toContain("cancelled by user");
@@ -382,13 +380,13 @@ describe("orche_task persistent session workers", () => {
   ] as const)("adds escalation note only for relevant %s outcomes", async (role, data, note) => {
     const { execute } = await fixture([result(role, "report", data)]);
     const outcome = await execute({ role });
-    expect(outcome.text.includes("Note: consider orche_run (multi)")).toBe(note);
+    expect(outcome.text.includes("Note: follow up with the same worker")).toBe(note);
+    expect(outcome.text).not.toContain("orche_run");
   });
 
   it.each([
     ["single", "change four files"],
-    ["auto", "change four files"],
-    ["auto", "/orche single change four files"],
+    ["single", "/orche single change four files"],
   ] as const)("does not add a four-file size note in the single workflow (%s, %s)", async (mainMode, prompt) => {
     const files = ["one.txt", "two.txt", "three.txt", "four.txt"];
     const h = await harness({

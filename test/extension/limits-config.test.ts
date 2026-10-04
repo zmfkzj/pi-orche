@@ -10,10 +10,10 @@ import { answerScript, createHarness, tool, type Harness } from "./harness.js";
 
 /**
  * The timeout-extension keys of `limits` in orche.config.json (`maxExtensions`, `extensionMs`) really reach the deadline of
- * BOTH delegation tools, end to end through a real AgentSession with the extension loaded: the tool is called by the (faux) main
+ * the delegation tool, end to end through a real AgentSession with the extension loaded: the tool is called by the (faux) main
  * model, the config is discovered the way the extension does it (trusted `<cwd>/.pi/orche.config.json`, else
- * `<agentDir>/orche.config.json`), and what is asserted is the ExtendableDeadline the real run (controller path: `orche_run` →
- * runOrchestrated) or the real assignment (WorkerPool path: `orche_task`) is built with, plus, with short caps, the behaviour
+ * `<agentDir>/orche.config.json`), and what is asserted is the ExtendableDeadline the real assignment (WorkerPool path:
+ * `orche_task`) is built with, plus, with short caps, the behaviour
  * it produces. Everything lives in temporary directories: the harness agent dir is a temp dir, so no user config is ever touched.
  */
 const open: Harness[] = [];
@@ -28,7 +28,7 @@ const DEFAULT_EXT = 30 * MINUTE;
 
 /** The user-level file the harness writes has no `limits`; these rewrite it (or add the project file) with the given `limits`. */
 const configOf = (h: Harness, limits?: unknown) => JSON.stringify({
-  routes: {}, default: { model: h.orche.route.model }, records: { enabled: false }, mainMode: "auto", ...(limits === undefined ? {} : { limits }),
+  routes: {}, default: { model: h.orche.route.model }, records: { enabled: false }, mainMode: "single", ...(limits === undefined ? {} : { limits }),
 });
 const writeUser = (h: Harness, limits?: unknown) => writeFile(join(h.agentDir, "orche.config.json"), configOf(h, limits));
 async function writeProject(h: Harness, limits?: unknown) {
@@ -60,7 +60,7 @@ const explored = (summary = "Evidence found") => tool("report_result", { kind: "
 /** The two delegation tools, each with a script that makes it finish normally. */
 interface Path {
   name: string;
-  toolName: "orche_run" | "orche_task";
+  toolName: "orche_task";
   /** `calls` tool calls by the main model, each followed by a final text turn. */
   mainSteps(calls: number): FauxResponseStep[];
   orcheSteps(calls: number): FauxResponseStep[];
@@ -68,11 +68,6 @@ interface Path {
   git: boolean;
 }
 const paths: Path[] = [
-  {
-    name: "orche_run (controller path: runOrchestrated)", toolName: "orche_run", git: false,
-    mainSteps: calls => Array.from({ length: calls }, () => [tool("orche_run", { request: "explain greeting.txt" }), reply("relayed")]).flat(),
-    orcheSteps: calls => Array.from({ length: calls }, () => answerScript("RUN_DONE")).flat(),
-  },
   {
     name: "orche_task (WorkerPool path: executeAssignment)", toolName: "orche_task", git: true,
     mainSteps: calls => Array.from({ length: calls }, () => [tool("orche_task", { role: "explore", request: "Inspect greeting.txt" }), reply("relayed")]).flat(),
@@ -218,29 +213,8 @@ describe("the configured extension budget is what a run/assignment really gets (
     return reply("aborted");
   };
 
-  it("orche_run: a coordinator that is busy at every deadline gets base + maxExtensions × extensionMs from the config file, then the timeout says the budget is used up", async () => {
-    const h = await harness(paths[0]!, { mainSteps: [tool("orche_run", { request: "long job" }), reply("noted")], orcheSteps: [hold()] });
-    // The phase caps are set high so that only the overall deadline (800 ms + 2 × 250 ms) is in play.
-    await writeUser(h, { overallMs: 800, extensionMs: 250, maxExtensions: 2, decisionMs: 100_000, assignmentMs: 100_000, explorationMs: 100_000 });
-    const deadlines = recordDeadlines();
-    await h.session.prompt("delegate");
-    expect(deadlines().map(settingsOf)).toEqual([expected(800, 250, 2)]);
-    const [result] = resultsOf(h, "orche_run");
-    expect(result?.isError).toBe(true);
-    expect(textOf(result!)).toContain("overall timeout at Coordinator decision");
-    expect(textOf(result!)).toContain("extension budget 2/2 used");
-    const details = result!.details!;
-    expect(details.extensions.map((extension: { n: number; max: number; extensionMs: number }) => [extension.n, extension.max, extension.extensionMs])).toEqual([[1, 2, 250], [2, 2, 250]]);
-    expect(details.progress.join("\n")).toContain("timeout extended 2/2");
-    expect(details.timeouts).toHaveLength(1);
-    expect(details.timeouts[0]).toMatchObject({ scope: "overall", extensions: { used: 2, max: 2, extensionMs: 250, notExtended: { reason: "budget" } } });
-    expect(details.timeouts[0].effectiveCapMs).toBeGreaterThanOrEqual(1290);
-    expect(details.timeouts[0].effectiveCapMs).toBeLessThan(1500);
-    expect(details.durationMs).toBeGreaterThanOrEqual(1290);
-  });
-
   it("orche_task: a worker that is busy at every deadline gets assignmentMs + maxExtensions × extensionMs from the config file, then the timeout says the budget is used up", async () => {
-    const h = await harness(paths[1]!, { mainSteps: [tool("orche_task", { role: "explore", request: "long task" }), reply("noted")], orcheSteps: [blockedUntilAbort()] });
+    const h = await harness(paths[0]!, { mainSteps: [tool("orche_task", { role: "explore", request: "long task" }), reply("noted")], orcheSteps: [blockedUntilAbort()] });
     await writeUser(h, { assignmentMs: 300, extensionMs: 200, maxExtensions: 2 });
     const deadlines = recordDeadlines();
     await h.session.prompt("delegate");
@@ -253,19 +227,8 @@ describe("the configured extension budget is what a run/assignment really gets (
     expect(details).toMatchObject({ worker: "W1", status: "timeout", notExtended: { reason: "budget", message: "extension budget 2/2 used" } });
   });
 
-  it("with `maxExtensions: 0` in the config nothing is extended: the plain timeout at the base cap, for both tools", async () => {
-    const hRun = await harness(paths[0]!, { mainSteps: [tool("orche_run", { request: "long job" }), reply("noted")], orcheSteps: [hold()] });
-    await writeUser(hRun, { overallMs: 300, extensionMs: 250, maxExtensions: 0, decisionMs: 100_000, assignmentMs: 100_000, explorationMs: 100_000 });
-    const runDeadlines = recordDeadlines();
-    await hRun.session.prompt("delegate");
-    expect(runDeadlines().map(settingsOf)).toEqual([expected(300, 250, 0)]);
-    const runResult = resultsOf(hRun, "orche_run")[0]!;
-    expect(runResult.isError).toBe(true);
-    expect(textOf(runResult)).toContain("overall timeout at Coordinator decision");
-    expect(runResult.details).not.toHaveProperty("extensions");
-    vi.restoreAllMocks();
-
-    const hTask = await harness(paths[1]!, { mainSteps: [tool("orche_task", { role: "explore", request: "long task" }), reply("noted")], orcheSteps: [blockedUntilAbort()] });
+  it("with `maxExtensions: 0` in the config nothing is extended: the plain timeout at the base cap", async () => {
+    const hTask = await harness(paths[0]!, { mainSteps: [tool("orche_task", { role: "explore", request: "long task" }), reply("noted")], orcheSteps: [blockedUntilAbort()] });
     await writeUser(hTask, { assignmentMs: 200, extensionMs: 250, maxExtensions: 0 });
     const taskDeadlines = recordDeadlines();
     await hTask.session.prompt("delegate");

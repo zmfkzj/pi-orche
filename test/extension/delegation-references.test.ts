@@ -4,7 +4,8 @@ import { delegationRules } from "../../src/extension/mode.js";
 import { createHarness } from "./harness.js";
 
 describe("delegation by reference", () => {
-  it.each(["auto", "single", "multi"] as const)("keeps %s rules byte-stable and asks for references, not copies", mode => {
+  it("keeps single rules byte-stable and asks for references, not copies", () => {
+    const mode = "single" as const;
     const rules = delegationRules(mode);
     expect(delegationRules(mode)).toBe(rules);
     expect(rules).toContain("Pass references, not copies");
@@ -19,7 +20,8 @@ describe("delegation by reference", () => {
     const h = await createHarness({ mainSteps: [reply("Inspected")], orcheSteps: [] });
     try {
       await h.session.prompt("Inspect guidance");
-      for (const name of ["orche_run", "orche_task"]) {
+      expect(h.session.getToolDefinition("orche_run")).toBeUndefined();
+      for (const name of ["orche_task"]) {
         const tool = h.session.getToolDefinition(name);
         expect(tool?.description).toContain("Pass references, not copies");
         expect(tool?.description).toContain("never whole files, diffs or long logs");

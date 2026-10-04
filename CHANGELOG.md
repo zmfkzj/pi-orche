@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- **The `auto` and `multi` main modes, the `orche_run` tool and `/orche multi` were removed from the Pi package.** Benchmarks (bench3, hard6, parallel3, multi-vs-single) showed the multi-agent orchestrator no more accurate than one worker on coupled or parallel tasks at about twice the cost. The package now offers `direct` (default) and `single`; a config value or saved session choice of `auto`/`multi` is read as `single` with a warning, and `/orche mode auto|multi` is a usage error. The failed-run handover to `orche_task` and the four-file "consider orche_run" note are gone. The orchestration engine (`runOrchestrated`, the CLI, eval arms) stays as a library; the eval `pi-orche` arm now uses `mainMode: single`.
+
 ### Changed
 
 - **Default `mainMode` is now `direct`.** Benchmarks (bench3, hard6, parallel3, long sessions) showed single agents matching delegated quality at lower cost and latency; switch to `single`/`auto`/`multi` with `/orche mode` or `mainMode` when delegation is wanted. An invalid `mainMode` also falls back to `direct`.
