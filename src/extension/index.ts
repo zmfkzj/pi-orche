@@ -130,7 +130,9 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         execute: (id, params, signal, onUpdate, ctx) => forCwd(ctx.cwd, template.name).execute(id, params, signal, onUpdate, ctx),
       });
     }
-    pi.on("tool_result", (event, ctx) => spillToolResult(event, ctx.cwd));
+    pi.on("tool_result", (event, ctx) => spillToolResult(
+      event, ctx.cwd, process.env.PI_ORCHE_TOOL_EVENTS ? ctx.sessionManager.getSessionId() : undefined,
+    ));
     pi.on("session_start", async (_event, ctx) => {
       const active = pi.getActiveTools();
       // An explicit `--tools` / defaultTools selection that leaves out our tools is the user's choice: keep it.

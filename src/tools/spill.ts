@@ -5,9 +5,11 @@ import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import {
   createSyntheticSourceInfo,
   type Extension,
+  type ExtensionContext,
   type ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 import { filterOutput, genericPreview } from "./output-filter.js";
+import { appendToolEvent, artifactAccessEvent, outputReducedEvent } from "./tool-events.js";
 
 export { SPILL_MAX_CHARS, SPILL_MAX_LINES } from "./output-filter.js";
 const MAX_SOURCE_BYTES = 32 * 1024 * 1024;
@@ -43,6 +45,7 @@ async function fullBashOutput(details: unknown): Promise<{ file: string; text: s
 /** Filter bash/grep results and spill oversized results, preserving full originals. */
 export interface SpillEvent {
   toolName: string;
+  toolCallId?: string;
   input?: Record<string, unknown>;
   content: (TextContent | ImageContent)[];
   details?: unknown;
@@ -56,7 +59,11 @@ export interface SpillResult {
   structuredContent?: ToolResultEvent["structuredContent"];
 }
 
-export async function spillToolResult(event: SpillEvent, cwd: string): Promise<SpillResult | undefined> {
+export async function spillToolResult(event: SpillEvent, cwd: string, sessionId?: string): Promise<SpillResult | undefined> {
+  const eventLog = process.env.PI_ORCHE_TOOL_EVENTS;
+  // Snapshot before Pi applies a replacement to its mutable hook event.
+  const loggedEvent = eventLog ? { ...event } : undefined;
+  if (eventLog) appendToolEvent(eventLog, () => artifactAccessEvent(loggedEvent!, cwd, sessionId));
   if (EXEMPT_TOOLS.includes(event.toolName)) return undefined;
   const texts = event.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
   const rest = event.content.filter((part) => part.type !== "text");
@@ -76,8 +83,10 @@ export async function spillToolResult(event: SpillEvent, cwd: string): Promise<S
   // Never inline the recovered full file when no reduction applies.
   const inline = preview?.text ?? genericPreview(piText, event.toolName === "bash" || event.toolName === "grep")?.text ?? piText;
   let notice: string;
+  let artifact: string | null = null;
   try {
     const path = await saveArtifact(cwd, event.toolName, text, full?.file);
+    artifact = path;
     const reason = preview?.reason ?? "Pi output truncation";
     notice = `[Output ${filtered ? "filtered" : "truncated"}: ${reason}${preview?.omittedLines ? ` (${preview.omittedLines} lines omitted)` : ""}. Full output saved to ${path}; use read with offset/limit or grep to inspect it.]`;
   } catch (error) {
@@ -85,6 +94,11 @@ export async function spillToolResult(event: SpillEvent, cwd: string): Promise<S
   }
   // Keep the status in the output, but end with one artifact notice.
   const resultText = `${inline}${status && !inline.endsWith(status) ? `\n${status}` : ""}\n\n${notice}`;
+  if (eventLog) appendToolEvent(eventLog, () => outputReducedEvent(loggedEvent!, cwd, {
+    original: text, inline, visible: resultText, piText, artifact,
+    filtered: !!filtered, preview,
+    originalUnavailable: !!full && (full.text === undefined || (!preview && inline !== piText)),
+  }, sessionId));
   return {
     content: [{ type: "text", text: resultText }, ...rest],
     ...(event.isError === undefined ? {} : { isError: event.isError }),
@@ -96,7 +110,9 @@ export async function spillToolResult(event: SpillEvent, cwd: string): Promise<S
 /** Session extension applying {@link spillToolResult} to every tool result (public `tool_result` hook). */
 export function createSpillExtension(cwd: string): Extension {
   const path = "<orche:spill>";
-  const handler = (event: ToolResultEvent) => spillToolResult(event, cwd);
+  const handler = (event: ToolResultEvent, ctx?: ExtensionContext) => spillToolResult(
+    event, cwd, process.env.PI_ORCHE_TOOL_EVENTS ? ctx?.sessionManager.getSessionId() : undefined,
+  );
   return {
     path,
     resolvedPath: path,

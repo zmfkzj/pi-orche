@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Added opt-in `PI_ORCHE_TOOL_EVENTS` metadata-only JSONL for output reductions and artifact accesses, with original-line visibility ranges and session ids, without changing tool output.
 - Failed, non-cancelled extension `orche_run` calls in auto mode now hand live workers and their full contexts to `orche_task`, with collision-free usable ids, roles, last tasks and remaining issues in the result. Auto delegation recovers via those workers rather than repeating the run; multi mode reports skipped handover. Successful/cancelled runs and SDK callers without the opt-in hook retain normal disposal.
 - One-worker `change` runs now need only the classification coordinator decision: deterministic repository-wide execution, V1 verification, context-preserving fixes within the normal cap, and a composed implementation/verification summary. Blocked implementers and exhausted verification fail without coordinator replanning; larger changes and other classes are unchanged.
 
