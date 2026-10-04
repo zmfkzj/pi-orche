@@ -1,0 +1,8 @@
+{
+  "name": "p3-library-features-ko",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

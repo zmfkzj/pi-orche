@@ -1,0 +1,8 @@
+{
+  "name": "p2-handler-migration",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

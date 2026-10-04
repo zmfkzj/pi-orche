@@ -1,0 +1,64 @@
+import { createRepository } from './repository.mjs';
+import { createAuditLog, summarizeAudit } from './audit.mjs';
+import { exportBundle, importBundle } from './import-export.mjs';
+import { recordSummary } from './presentation.mjs';
+/** Administration facade used by the local CLI. Algorithm functions stay separate. */
+export function createMaintenance(options = {}) {
+  const repository = createRepository(options);
+  const audit = createAuditLog(options);
+  return {
+    create(input) {
+      const record = repository.insert(input);
+      audit.created(record);
+      return record;
+    },
+    update(id, patch, revision) {
+      const before = repository.get(id);
+      const record = repository.update(id, patch, revision);
+      audit.updated(before, record);
+      return record;
+    },
+    remove(id, revision) {
+      const before = repository.get(id);
+      const removed = repository.remove(id, revision);
+      if (removed) audit.removed(before);
+      return removed;
+    },
+    get(id) {
+      return repository.get(id);
+    },
+    list(options) {
+      return repository.list(options);
+    },
+    backup() {
+      return exportBundle(repository);
+    },
+    restore(bundle) {
+      return importBundle(repository, bundle);
+    },
+    diagnostics() {
+      return {
+        domain: 'cache',
+        records: recordSummary(repository.snapshot().records),
+        audit: summarizeAudit(audit.query()),
+      };
+    },
+    history(id) {
+      return audit.query({ id });
+    },
+  };
+}
+export function registerMaintenance(registry, maintenance) {
+  registry.register('cache-list', {
+    description: 'List Cache namespace profile metadata',
+    run: input => maintenance.list(input || {}),
+  });
+  registry.register('cache-create', {
+    description: 'Create Cache namespace profile metadata',
+    run: input => maintenance.create(input),
+  });
+  registry.register('cache-diagnostics', {
+    description: 'Summarize Cache namespace profile metadata',
+    run: () => maintenance.diagnostics(),
+  });
+}

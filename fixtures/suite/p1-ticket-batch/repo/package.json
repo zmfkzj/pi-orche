@@ -1,0 +1,8 @@
+{
+  "name": "p1-ticket-batch",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}
