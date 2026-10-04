@@ -11,7 +11,7 @@ import { createSession } from "../../src/pi/session-factory.js";
 
 const opened: { dispose(): Promise<void> }[] = [];
 afterEach(async () => { for (const item of opened.splice(0).reverse()) await item.dispose(); vi.restoreAllMocks(); });
-const checklist = (status: "met" | "unmet" | "partial" = "met") => [{ id: "R1", status, evidence: "greeting.txt:1 inspected" }];
+const checklist = (status: "met" | "unmet" | "partial" = "met") => [{ id: "R1", status, evidence: "greeting.txt:1 inspected", ...(status === "met" ? { verifiedBy: "node --test greeting.test.mjs" } : {}) }];
 const report = (status: "met" | "unmet" | "partial" = "met", kind = "implement") => tool("report_result", { kind, summary: "Evidence-backed result", data: { status: "done", checklist: checklist(status) } });
 const request = "Intent/Purpose: improve greeting\nRequirements:\nR1: greeting is correct (test greeting.txt).\nConstraints and non-goals: no commits.\nAssumptions: plain text.\nOriginal request\n원문 그대로: 인사말을 고쳐줘.";
 const plan = { nodes: [{ id: "inspect", title: "Inspect greeting", dependsOn: [], covers: ["R1"], status: "pending" as const }] };
@@ -32,7 +32,7 @@ describe("single-workflow task delegation", () => {
     const result = await execute({ mainMode });
     expect(pool.session("W1").getActiveToolNames()).toContain("task_plan");
     expect(result.details).toMatchObject({ checklist: checklist("partial"), plan, compactions: { count: 0, events: [] } });
-    expect(result.text).toContain("Checklist: 0/1 met; unmet: R1 (partial: greeting.txt:1 inspected)");
+    expect(result.text).toContain("Checklist (worker self-report, not acceptance): 0/1 met, 0 with a named passing check; unmet: R1 (partial: greeting.txt:1 inspected)");
     expect(await readFile(join(result.details.record!, "events.jsonl"), "utf8")).toContain('"type":"task_plan"');
     expect(await readFile(join(result.details.record!, "run.json"), "utf8")).toContain('"checklist"');
   });
@@ -160,7 +160,7 @@ describe("single-workflow task delegation", () => {
     h.orche.faux.setResponses([tool("task_plan", plan), context => {
       expect(JSON.stringify(context.messages)).toContain("Unknown covers ids: R1");
       return tool("task_plan", { nodes: [{ ...plan.nodes[0]!, covers: ["R2"] }] });
-    }, tool("report_result", { kind: "implement", summary: "updated", data: { checklist: [{ id: "R2", status: "met", evidence: "checked" }] } })]);
+    }, tool("report_result", { kind: "implement", summary: "updated", data: { checklist: [{ id: "R2", status: "met", evidence: "checked", verifiedBy: "node --test" }] } })]);
     const third = await execute({ worker: "W1", request: "R2: revised requirement\nOriginal request\noriginal" });
     expect(third.details.plan?.nodes[0]?.covers).toEqual(["R2"]);
     expect(pool.session("W1").getActiveToolNames()).toContain("task_plan");

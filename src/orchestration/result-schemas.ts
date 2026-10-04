@@ -21,8 +21,17 @@ export const checklistSchema = Type.Array(Type.Object({
   id: Type.String({ pattern: "^R[1-9][0-9]*$" }),
   status: Type.Union([Type.Literal("met"), Type.Literal("unmet"), Type.Literal("partial")]),
   evidence: Type.String({ minLength: 1 }),
+  /** The test or check command that asserts this requirement's acceptance and passed. */
+  verifiedBy: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
 }));
-export interface ChecklistItem { id: string; status: "met" | "unmet" | "partial"; evidence: string }
+export interface ChecklistItem { id: string; status: "met" | "unmet" | "partial"; evidence: string; verifiedBy?: string }
+/** Requirements the worker could read more than one way, with the reading it implemented. */
+export const ambiguitiesSchema = Type.Array(Type.Object({
+  id: Type.Optional(Type.String({ pattern: "^R[1-9][0-9]*$" })),
+  readings: Type.Array(Type.String({ minLength: 1, maxLength: 500 }), { minItems: 2, maxItems: 5 }),
+  chosen: Type.String({ minLength: 1, maxLength: 500 }),
+}), { maxItems: 30 });
+export interface Ambiguity { id?: string; readings: string[]; chosen: string }
 /** Requirement declarations only; quoted original text and incidental prose are never contracts. */
 export function requirementDefinitions(request: string): Map<string, string> {
   const definitions = new Map<string, string>();
@@ -41,19 +50,26 @@ export function requirementDefinitions(request: string): Map<string, string> {
   return definitions;
 }
 export function requirementIds(request: string): string[] { return [...requirementDefinitions(request).keys()]; }
-export function requiredChecklistError(ids: readonly string[], data: unknown): string | undefined {
+export function requiredChecklistError(ids: readonly string[], data: unknown, requireVerification = false): string | undefined {
   const checklist = (data as { checklist?: ChecklistItem[] } | undefined)?.checklist;
   if (!Array.isArray(checklist)) return "data.checklist is required: report every requirement id with status met|unmet|partial and evidence.";
   if (!Value.Check(checklistSchema, checklist)) return `Invalid checklist: ${[...Value.Errors(checklistSchema, checklist)].map(error => `${error.path}: ${error.message}`).join("; ")}`;
+  const ambiguities = (data as { ambiguities?: unknown } | undefined)?.ambiguities;
+  if (ambiguities !== undefined && !Value.Check(ambiguitiesSchema, ambiguities)) return `Invalid ambiguities: ${[...Value.Errors(ambiguitiesSchema, ambiguities)].map(error => `${error.path}: ${error.message}`).join("; ")}`;
   const seen = new Set<string>();
   for (const item of checklist) {
     if (seen.has(item.id)) return `Duplicate checklist id ${item.id}; report each requirement once.`;
     seen.add(item.id);
   }
   const missing = ids.filter(id => !seen.has(id));
-  return missing.length ? `Checklist missing ${missing.join(", ")}; report every requirement with evidence.` : undefined;
+  if (missing.length) return `Checklist missing ${missing.join(", ")}; report every requirement with evidence.`;
+  if (requireVerification) {
+    const unverified = checklist.filter(item => item.status === "met" && !item.verifiedBy?.trim()).map(item => item.id);
+    if (unverified.length) return `Checklist items reported met without verifiedBy: ${unverified.join(", ")}. Name the test or check command that asserts each requirement's acceptance and passed, or report the item partial/unmet.`;
+  }
+  return undefined;
 }
-export const answerResultSchema = Type.Object({ evidence, checklist: Type.Optional(checklistSchema) });
+export const answerResultSchema = Type.Object({ evidence, checklist: Type.Optional(checklistSchema), ambiguities: Type.Optional(ambiguitiesSchema) });
 
 /** `data` of an explore RESULT: an optional cause claim with its evidence. */
 export const exploreResultSchema = Type.Object({
@@ -67,6 +83,7 @@ export const implementResultSchema = Type.Object({
   reason: Type.Optional(Type.String()),
   evidence,
   checklist: Type.Optional(checklistSchema),
+  ambiguities: Type.Optional(ambiguitiesSchema),
 });
 
 /** Production reports require a verdict and an inventory of delivered outputs. */

@@ -42,6 +42,18 @@ describe("implement/answer checklist contract", () => {
     [{ id: "R2", status: "unmet" }],
     "R1",
   ].map(value => [value]))("rejects malformed checklist %j", value => expect(Value.Check(checklistSchema, value)).toBe(false));
+  it("requires verifiedBy for met implement items only when verification is requested", () => {
+    expect(requiredChecklistError(["R1"], { checklist })).toBeUndefined();
+    expect(requiredChecklistError(["R1"], { checklist }, true)).toContain("reported met without verifiedBy: R1");
+    expect(requiredChecklistError(["R1"], { checklist: [{ ...checklist[0], verifiedBy: "node --test test/a.test.mjs" }] }, true)).toBeUndefined();
+    expect(requiredChecklistError(["R1"], { checklist: [{ id: "R1", status: "partial", evidence: "no test yet" }] }, true)).toBeUndefined();
+  });
+  it("validates reported ambiguities", () => {
+    const verified = [{ ...checklist[0], verifiedBy: "node --test" }];
+    expect(requiredChecklistError(["R1"], { checklist: verified, ambiguities: [{ id: "R1", readings: ["count every claim", "count failures"], chosen: "count every claim" }] }, true)).toBeUndefined();
+    expect(requiredChecklistError(["R1"], { checklist: verified, ambiguities: [{ id: "R1", readings: ["only one"], chosen: "only one" }] }, true)).toContain("Invalid ambiguities");
+    expect(Value.Check(implementResultSchema, { checklist: verified, ambiguities: [{ readings: ["a", "b"], chosen: "a" }] })).toBe(true);
+  });
   it("requires complete unique coverage only when requested, with actionable errors", () => {
     expect(requiredChecklistError(["R1"], undefined)).toContain("required");
     expect(requiredChecklistError(["R1", "R2"], { checklist })).toContain("missing R2");

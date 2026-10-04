@@ -16,7 +16,7 @@ import { normalizeOwnedPath, type TaskItem } from "../orchestration/backlog.js";
 import { checkWriteRealPath, WRITE_TOOLS, WRITING_KINDS } from "../orchestration/ownership.js";
 import { resolveRunLimits } from "../orchestration/limits.js";
 import { taskWorkerInstructions } from "../orchestration/prompts.js";
-import { orchestrationResultSchemas, requirementDefinitions, requirementIds, requiredChecklistError, type ChecklistItem } from "../orchestration/result-schemas.js";
+import { orchestrationResultSchemas, requirementDefinitions, requirementIds, requiredChecklistError, type Ambiguity, type ChecklistItem } from "../orchestration/result-schemas.js";
 import { createTaskPlanTool, renderTaskPlan, type TaskPlan } from "../tools/task-plan.js";
 import { configureTaskWorkflow, enableTaskWorkflow, taskCompactionSettings, type CompactionStats } from "../pi/session-factory.js";
 import { withExtendedContext } from "../pi/extended-context.js";
@@ -80,6 +80,8 @@ export interface TaskDetails {
   model?: string;
   thinking?: ThinkingLevel;
   checklist?: ChecklistItem[];
+  /** Requirements the worker reported as ambiguous, with the reading it implemented. */
+  ambiguities?: Ambiguity[];
   plan?: TaskPlan;
   compactions?: { count: number; events: CompactionStats[] };
   warnings?: string[];
@@ -495,7 +497,7 @@ function assignmentPrompt(args: TaskParameters & { mainMode?: MainMode }, comman
     explore: 'Investigate independently, read source and reproduce. DO NOT EDIT. Report findings with concrete evidence and optionally data.cause. report_result {kind:"explore",summary,data:{cause,evidence}}.',
     answer: `Strictly read-only. Inspect relevant files and provide an evidence-backed answer, concrete code references and explanations. Never change files. report_result {kind:"answer",summary:FULL_EVIDENCED_ANSWER,data:{evidence${args.mainMode === "single" || args.mainMode === "auto" ? ',checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence"}]' : ""}}}.${args.mainMode === "single" || args.mainMode === "auto" ? " Checklist is required when the request contains R-ids." : ""}`,
     implement: args.mainMode === "single" || args.mainMode === "auto"
-      ? `Own the task end to end: first analyse the requirements and create the Task DAG with task_plan, covering every requirement id. Then execute nodes sequentially in dependency order, updating statuses, implementing completely, adding or updating tests, running the project's relevant checks and iterating until they pass, preserving unrelated changes. Main does not intervene while you run. Write scope: ${scope}. Finish with report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks],checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence"}]}}. Checklist is required when the request contains R-ids.`
+      ? `Own the task end to end: first analyse the requirements and create the Task DAG with task_plan, covering every requirement id. If a requirement can be read more than one way with observably different behaviour, choose the reading closest to the Original request text, implement it, and report it in data.ambiguities. Then execute nodes sequentially in dependency order, updating statuses, implementing completely, adding or updating tests, running the project's relevant checks and iterating until they pass, preserving unrelated changes. Main does not intervene while you run. Write scope: ${scope}. Finish with report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks],checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence",verifiedBy:"test name or check command that asserts this requirement's acceptance and passed"}],ambiguities:[{id:"R2",readings:["reading A","reading B"],chosen:"reading A"}]}}. Checklist is required when the request contains R-ids; every met item needs verifiedBy, otherwise report it partial. ambiguities may be omitted when there are none.`
       : `Implement completely, preserving unrelated changes. Write scope: ${scope}. Run local checks on touched files. report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks]}}.`,
     "game-asset": `Game asset production. Create or modify game assets (sprites, sprite sheets/atlases, tilesets, textures, icons/UI art, 3D models, animations, VFX, SFX/music, fonts, and their engine import/metadata files) inside the write scope ${scope}. First detect the engine and the project's conventions (Unity .meta, Godot .import/.tres, Unreal, Phaser/Pixi atlas JSON; existing naming, folder layout, resolution/pixels-per-unit, palette, pivot/origin, power-of-two, compression). Produce assets with locally available tools via bash (check command -v first: ImageMagick, Inkscape, Blender --background with Python, Aseprite --batch, ffmpeg, sox, Python Pillow/numpy, or hand-written SVG/procedural scripts); keep reusable generator scripts with the assets when the project has a place for them, and leave no temp files in the workspace. Never hand-fabricate binary bytes. Verify every output is valid (identify/file/ffprobe/blender), and view raster outputs or rendered previews with the read tool. Do not download third-party assets unless the request allows it; record source and license when you do. report_result {kind:"game-asset",summary,data:{status:"done" or "blocked",reason,outputs:[{path,type,spec}],evidence:[checks]}}. spec is a descriptive string.`,
     video: `Video production. Plan and produce video deliverables inside the write scope ${scope}: script/storyboard/shot list, editing and compositing, motion graphics (code-based such as Remotion, Motion Canvas or manim when the project uses them), subtitles (SRT/VTT), audio mixing and loudness normalization, thumbnails and final encodes. Use locally available tools via bash (check command -v first: ffmpeg/ffprobe, the project's own video tooling, Python, ImageMagick, sox). Render a short draft before long renders; make final encode settings explicit (container, video codec, resolution, fps, CRF/bitrate, pixel format, audio codec/sample rate, loudness target). Verify every output with ffprobe (duration, streams, resolution, fps) and inspect extracted frames with the read tool. Leave no intermediate files in the workspace unless requested. report_result {kind:"video",summary,data:{status:"done" or "blocked",reason,outputs:[{path,type,spec}],evidence:[checks]}}. spec is a descriptive string.`,
@@ -542,7 +544,7 @@ export class WorkerPool {
       validateResult: (kind, data) => {
         if (!["implement", "answer"].includes(kind)) return undefined;
         const ids = worker.singleWorkflow ? worker.requirementIds ?? [] : [];
-        return ids.length || (data && typeof data === "object" && "checklist" in data) ? requiredChecklistError(ids, data) : undefined;
+        return ids.length || (data && typeof data === "object" && "checklist" in data) ? requiredChecklistError(ids, data, kind === "implement" && ids.length > 0) : undefined;
       },
       toolGuard: async (name, input) => {
         if (name === "task_plan" && !worker.singleWorkflow) return "task_plan is available only for standard single-workflow task assignments.";
@@ -1009,7 +1011,13 @@ export class WorkerPool {
       const checklistLines: string[] = [];
       if (checklist) {
         const unmet = checklist.filter(item => item.status !== "met");
-        checklistLines.push(`Checklist: ${checklist.length - unmet.length}/${checklist.length} met${unmet.length ? `; unmet: ${unmet.map(item => `${item.id} (${item.status}: ${item.evidence})`).join("; ")}` : ""}`);
+        const verified = checklist.filter(item => item.status === "met" && item.verifiedBy).length;
+        checklistLines.push(`Checklist (worker self-report, not acceptance): ${checklist.length - unmet.length}/${checklist.length} met, ${verified} with a named passing check${unmet.length ? `; unmet: ${unmet.map(item => `${item.id} (${item.status}: ${item.evidence})`).join("; ")}` : ""}`);
+        const ambiguities = Array.isArray(data.ambiguities) ? data.ambiguities as Ambiguity[] : [];
+        if (ambiguities.length) {
+          checklistLines.push(`Ambiguities resolved by the worker: ${ambiguities.map(item => `${item.id ?? "?"}: chose "${item.chosen}" over ${item.readings.filter(reading => reading !== item.chosen).map(reading => `"${reading}"`).join(", ")}`).join("; ")}`);
+          checklistLines.push("Note: check each chosen reading against the user's original request before accepting; send a correction to the same worker if it differs.");
+        }
         if (singleWorkflow) {
           const previous = meta.unmetStreak ?? new Map<string, number>();
           meta.unmetStreak = new Map(unmet.filter(item => meta.requirementDefinitions?.has(item.id)).map(item => [item.id, (previous.get(item.id) ?? 0) + 1]));
@@ -1022,7 +1030,7 @@ export class WorkerPool {
       const roster = this.roster();
       const gitLines = gitReport ? formatGitReport(gitReport) : [];
       const details: TaskDetails = {
-        worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, ...(meta.model ? { model: meta.model } : {}), ...workflowDetails(), ...(checklist ? { checklist } : {}), durationMs, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...changeReport, roster,
+        worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, ...(meta.model ? { model: meta.model } : {}), ...workflowDetails(), ...(checklist ? { checklist } : {}), ...(Array.isArray(data.ambiguities) && data.ambiguities.length ? { ambiguities: data.ambiguities as Ambiguity[] } : {}), durationMs, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...changeReport, roster,
         ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(), ...(record ? { record: record.dir } : {}),
         ...contextDetails(),
       };

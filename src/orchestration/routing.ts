@@ -8,7 +8,8 @@ import { isArtifactPattern, type AuditSettings } from "./artifacts.js";
 /** Main-session delegation: auto chooses single/multi, single uses one worker, multi uses the orchestrator, direct edits locally. */
 export const MAIN_MODES = ["auto", "single", "multi", "direct"] as const;
 export type MainMode = (typeof MAIN_MODES)[number];
-export const DEFAULT_MAIN_MODE: MainMode = "auto";
+/** Direct by default: benchmarks showed single agents match delegation quality at lower cost; switch with /orche mode or `mainMode`. */
+export const DEFAULT_MAIN_MODE: MainMode = "direct";
 export interface ModelRoute { role: string; model: string; thinking?: ThinkingLevel; extendedContext?: boolean }
 export interface RouteSettings { readonly model: string; readonly thinking?: ThinkingLevel; readonly extendedContext?: boolean }
 export interface ImageSettings { readonly model: string; readonly timeoutMs?: number }
