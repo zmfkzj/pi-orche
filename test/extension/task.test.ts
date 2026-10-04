@@ -47,10 +47,8 @@ const blocked = (entered: { resolve(): void }): FauxResponseStep => async (_cont
   return reply("aborted");
 };
 const taskResults = (h: Harness) => h.session.messages.filter(message => message.role === "toolResult" && message.toolName === "orche_task");
-// Read the pre-change implement instruction from HEAD, not from the implementation under test.
-const HEAD_IMPLEMENT = execFileSync("git", ["show", "HEAD:src/extension/workers.ts"], { encoding: "utf8" })
-  .match(/^    implement: `(.*)`,$/m)?.[1];
-if (!HEAD_IMPLEMENT) throw new Error("Missing HEAD implement instruction");
+// The auto-mode implement instruction as it was before the single-workflow change (pinned literal, not read from git).
+const HEAD_IMPLEMENT = 'Implement completely, preserving unrelated changes. Write scope: ${scope}. Run local checks on touched files. report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks]}}.';
 
 describe("orche_task persistent session workers", () => {
   it("registers the tool, spawns W1, reports evidence, audit and stable roster", async () => {
