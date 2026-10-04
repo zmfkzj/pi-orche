@@ -59,20 +59,30 @@ describe("mainMode: tool sets", () => {
     expect(seen[0]).toContain("You cannot edit files in this session");
     expect(seen[0]).toContain("delegate every change with the orche_run tool".replace("delegate", "Delegate"));
     expect(seen[0]).toContain("self-contained");
-    expect(seen[1]).toContain("two or more independent write sets");
-    expect(seen[1]).toContain("REQUIRED");
-    expect(seen[1]).toContain("parallel hypotheses");
+    expect(seen[1]).toContain("at least two independent units with disjoint write sets");
+    expect(seen[1]).toContain("Use ONLY");
+    expect(seen[1]).toContain("parallel competing hypotheses are clearly warranted");
     expect(seen[1]).toContain("After a failed orche_run, do not start another orche_run for the same request");
     expect(seen[1]).toContain("implement for fixes, verify for re-checks");
     expect(seen[1]).toContain("reported id in `worker`");
-    expect(seen[1]).toContain("an orche_task worker reported blocked");
+    expect(seen[1]).toContain("whenever in doubt, use single through orche_task");
     for (const system of [seen[0], seen[2]]) expect(system).not.toContain("After a failed orche_run");
     expect(seen[2]).toContain("orche_run is disabled in mode single");
     expect(seen[2]).toContain("/orche mode auto or multi");
+    expect(seen[2]).toContain("Never stop to ask the user to switch modes in order to proceed");
+    expect(seen[2]).toContain("refine the requirements with the user: goal, constraints and acceptance criteria");
+    expect(seen[2]).toContain("ONE orche_task in ONE end-to-end assignment");
+    expect(seen[2]).toContain("run the trusted project checks yourself");
+    expect(seen[2]).not.toContain("Judgment before Production");
+    expect(seen[2]).not.toContain("start with explore");
+    expect(seen[2]).not.toContain("dispatch a verify worker");
+    expect(seen[2]).not.toContain("prefer multi");
+    expect(seen[2]).not.toContain("never split");
+    expect(seen[1]).not.toContain("Judgment before Production");
+    expect(seen[1]).toContain("game-asset for game art/audio/model assets");
+    expect(seen[1]).toContain("video for video production");
     for (const system of seen.slice(1)) {
       expect(system).toContain("explore | answer | implement | verify | game-asset | video");
-      expect(system).toContain("game-asset for creating/modifying game art/audio/model assets");
-      expect(system).toContain("video for producing/editing video");
     }
     expect(auto.session.getToolDefinition("orche_task")?.description).toContain("game-asset");
     expect(auto.session.getToolDefinition("orche_task")?.description).toContain("video");
@@ -526,9 +536,9 @@ describe("single-worker mode and one-turn override", () => {
       mainSteps: [context => {
         during = h.session.getActiveToolNames();
         system = systemOf(context);
-        return tool("orche_task", { role: "explore", request: "Inspect greeting.txt without changing files" });
+        return tool("orche_task", { role: "answer", request: "Inspect greeting.txt without changing files" });
       }, reply("supervised")],
-      orcheSteps: [tool("report_result", { kind: "explore", summary: "Greeting inspected" })],
+      orcheSteps: [tool("report_result", { kind: "answer", summary: "Greeting inspected", data: { evidence: ["greeting.txt:1"] } })],
     });
     await h.session.prompt("/orche single inspect the greeting");
     expect(during).toContain("orche_task");
@@ -587,9 +597,9 @@ describe("single-worker mode and one-turn override", () => {
     expect(delegationRules(mode)).toBe(delegationRules(mode));
   });
 
-  it("auto policy requires multi actively and keeps reuse and supervision explicit", () => {
+  it("auto policy restricts multi and keeps reuse and supervision explicit", () => {
     const rules = delegationRules("auto");
-    for (const criterion of ["two or more independent write sets", "parallel hypotheses", "independent verification", "user asks for orchestration", "failed verification twice", "never split a multi-sized job", "never claim a reuse that did not happen", "workers are gone after a reload", "a worker's report is not acceptance", "report unverified items as unverified", "Goal; Scope and non-goals; Decided and open; Inputs and dependencies; Acceptance and verification; Return"])
+    for (const criterion of ["at least two independent units with disjoint write sets", "each substantial on its own", "parallel execution clearly shortens the work", "a defect's cause is unknown AND parallel competing hypotheses are clearly warranted", "user explicitly asks for multi-agent orchestration or parallel workers", "whenever in doubt, use single through orche_task", "Never claim a reuse that did not happen", "workers are gone after a reload", "a worker's report is not acceptance", "report unverified items as unverified", "Intent/Purpose; numbered requirements checklist R1..Rn", "Original request section containing the user's ORIGINAL request text verbatim"])
       expect(rules).toContain(criterion);
   });
 });

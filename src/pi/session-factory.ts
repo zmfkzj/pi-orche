@@ -6,6 +6,9 @@ import {
   SessionManager,
   SettingsManager,
   type AgentSession,
+  estimateTokens,
+  DEFAULT_COMPACTION_SETTINGS,
+  type SessionCompactEvent,
   type Extension,
   type ResourceLoader,
   type ToolDefinition,
@@ -63,8 +66,38 @@ export interface SessionOptions {
   bashHeartbeat?: { intervalMs?: number };
   /** Opt-in request-only projection; the owner records each assignment boundary before prompting. */
   contextProjection?: ReturnType<typeof createAssignmentProjector>;
+  /** Opt-in only for single-workflow task workers. Essentials are restored verbatim after every successful compaction. */
+  taskCompaction?: { essentials: () => string; onCompact?: (stats: CompactionStats) => void };
+  /** Effective main window, including extended context, when inheriting its model. */
+  inheritedContextWindow?: number;
 }
 export type ToolGuard = (toolName: string, input: Record<string, unknown>) => string | undefined | Promise<string | undefined>;
+export interface CompactionStats { tokensBefore: number; tokensAfter: number }
+export function taskCompactionSettings(contextWindow: number) {
+  const reserveTokens = Math.floor(contextWindow * 0.5);
+  return { enabled: true, reserveTokens, keepRecentTokens: Math.min(DEFAULT_COMPACTION_SETTINGS.keepRecentTokens, contextWindow - reserveTokens) };
+}
+
+export const COMPACTION_ASSIGNMENT_LABEL = "Assignment in progress at compaction time (superseded by any later Assignment message)";
+
+function createCompactionExtension(options: SessionOptions, getSession: () => AgentSession): Extension {
+  const path = "<orche:task-compaction>";
+  const handler = (event: SessionCompactEvent) => {
+    // Successful compaction has already rebuilt the canonical transcript. Never use old indices again.
+    options.contextProjection?.reset();
+    const session = getSession();
+    const essentials = options.taskCompaction?.essentials();
+    if (essentials) {
+      // The compact hook is a finalized boundary (also between turns), so append synchronously:
+      // sendCustomMessage would queue while streaming and could miss the very next request.
+      session.sessionManager.appendCustomMessageEntry("orche:task-essentials", `${COMPACTION_ASSIGNMENT_LABEL}:\n${essentials}`, false);
+      session.refreshContext();
+    }
+    options.taskCompaction?.onCompact?.({ tokensBefore: event.compactionEntry.tokensBefore, tokensAfter: session.messages.reduce((sum, message) => sum + estimateTokens(message), 0) });
+  };
+  return { path, resolvedPath: path, hidden: true, sourceInfo: createSyntheticSourceInfo(path, { source: "orche" }),
+    handlers: new Map([["session_compact", [handler as never]]]), tools: new Map(), messageRenderers: new Map(), entryRenderers: new Map(), commands: new Map(), flags: new Map(), shortcuts: new Map() };
+}
 /** Session extension applying a {@link ToolGuard} through Pi's public, blocking `tool_call` hook. */
 function createGuardExtension(guard: ToolGuard): Extension {
   const path = "<orche:guard>";
@@ -87,15 +120,38 @@ function createGuardExtension(guard: ToolGuard): Extension {
   };
 }
 /** Never persisted: raw results remain in the agent state and session JSONL. */
-function createContextProjectionExtension(projector: NonNullable<SessionOptions["contextProjection"]>): Extension {
+function createContextProjectionExtension(getProjector: () => SessionOptions["contextProjection"]): Extension {
   const path = "<orche:task-context>";
   return {
     path, resolvedPath: path, hidden: true,
     sourceInfo: createSyntheticSourceInfo(path, { source: "orche" }),
-    handlers: new Map([["context", [((event: { messages: AgentMessage[] }) => ({ messages: projector.project(event.messages) })) as never]]]),
+    handlers: new Map([["context", [((event: { messages: AgentMessage[] }) => ({ messages: getProjector()?.project(event.messages) ?? event.messages })) as never]]]),
     tools: new Map(), messageRenderers: new Map(), entryRenderers: new Map(),
     commands: new Map(), flags: new Map(), shortcuts: new Map(),
   };
+}
+
+const taskSessions = new WeakMap<AgentSession, { options: SessionOptions; tools: Extension["tools"] }>();
+/** Upgrade a handed-over run worker at its first single-workflow task boundary without losing history. */
+export async function enableTaskWorkflow(session: AgentSession, taskCompaction: NonNullable<SessionOptions["taskCompaction"]>, planTool: ToolDefinition, projector: NonNullable<SessionOptions["contextProjection"]>): Promise<void> {
+  const state = taskSessions.get(session);
+  if (!state) throw new Error("Session cannot enable the single workflow; omit worker to start a new worker.");
+  state.options.taskCompaction = taskCompaction;
+  state.options.contextProjection = projector;
+  state.tools.set(planTool.name, { definition: planTool, sourceInfo: createSyntheticSourceInfo("<orche:task-workflow>", { source: "orche" }) });
+  await session.reload();
+  session.setActiveToolsByName([...session.getActiveToolNames(), planTool.name]);
+  if (session.model) session.settingsManager.applyOverrides({ compaction: taskCompactionSettings(session.model.contextWindow) });
+}
+
+/** Toggle a previously installed workflow at role/mode boundaries; specialists retain ordinary behaviour. */
+export function configureTaskWorkflow(session: AgentSession, taskCompaction: SessionOptions["taskCompaction"]): void {
+  const state = taskSessions.get(session);
+  if (!state) throw new Error("Session cannot configure the single workflow; omit worker to start a new worker.");
+  state.options.taskCompaction = taskCompaction;
+  const names = session.getActiveToolNames().filter(name => name !== "task_plan");
+  session.setActiveToolsByName(taskCompaction ? [...names, "task_plan"] : names);
+  session.settingsManager.applyOverrides({ compaction: taskCompaction && session.model ? taskCompactionSettings(session.model.contextWindow) : { enabled: false } });
 }
 
 let defaultRuntime: Promise<ModelRuntime> | undefined;
@@ -109,11 +165,16 @@ export async function createSession(
     options.route.model.slice(slash + 1),
   );
   if (!catalogModel) throw new Error(`Unknown model: ${options.route.model}`);
-  const { model, info } = withExtendedContext(catalogModel, options.route.extendedContext);
+  const resolved = withExtendedContext(catalogModel, options.route.extendedContext);
+  const model = options.inheritedContextWindow && options.inheritedContextWindow > resolved.model.contextWindow
+    ? { ...resolved.model, contextWindow: options.inheritedContextWindow } : resolved.model;
+  const info = { ...resolved.info, contextWindow: model.contextWindow, extended: model.contextWindow > catalogModel.contextWindow };
+  let createdSession: AgentSession;
+  const compactionExtension = createCompactionExtension(options, () => createdSession);
   options.onContextWindow?.(info);
   const loader: ResourceLoader = {
     getExtensions: () => ({
-      extensions: [createSpillExtension(options.cwd), ...(options.toolGuard ? [createGuardExtension(options.toolGuard)] : []), ...(options.contextProjection ? [createContextProjectionExtension(options.contextProjection)] : [])],
+      extensions: [createSpillExtension(options.cwd), ...(options.toolGuard ? [createGuardExtension(options.toolGuard)] : []), createContextProjectionExtension(() => options.contextProjection), compactionExtension],
       errors: [],
       runtime: createExtensionRuntime(),
     }),
@@ -134,12 +195,13 @@ export async function createSession(
     modelRuntime: runtime,
     model,
     thinkingLevel: options.route.thinking ?? "off",
-    tools: options.tools,
+    // Allow a later hand-over upgrade, but do not register task_plan for run workers.
+    tools: options.tools ? [...new Set([...options.tools, "task_plan"])] : undefined,
     customTools: [...createOrcheTools({ cwd: options.cwd, bashHeartbeat: { ...options.bashHeartbeat }, astRewriteFileGuard: options.writeFileGuard ?? (options.toolGuard ? () => "Blocked: directory ast_rewrite requires a per-file write guard in guarded sessions" : undefined) }), ...(options.customTools ?? [])],
     resourceLoader: loader,
     sessionManager,
     settingsManager: SettingsManager.inMemory({
-      compaction: { enabled: false },
+      compaction: options.taskCompaction ? taskCompactionSettings(model.contextWindow) : { enabled: false },
       retry: {
         enabled: true,
         maxRetries: 1,
@@ -149,6 +211,8 @@ export async function createSession(
       },
     }),
   });
+  createdSession = session;
+  taskSessions.set(session, { options, tools: compactionExtension.tools });
   if (sessionManager.isPersisted()) markDisposal(session, sessionManager);
   return session;
 }

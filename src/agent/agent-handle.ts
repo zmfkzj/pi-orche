@@ -81,6 +81,8 @@ export interface SpawnOptions extends SessionOptions {
    * `images.timeoutMs`. Liveness bounds such a tool by it (plus a grace) instead of the generic in-flight bound; see liveness.ts.
    */
   toolTimeoutsMs?: Readonly<Record<string, number>>;
+  /** Assignment-local additional RESULT validation for opt-in workflows. */
+  validateResult?: (kind: string, data: unknown) => string | undefined;
 }
 /** Contract for the `data` of a RESULT; `optional` also accepts an absent `data`. */
 export interface ResultDataSchema {

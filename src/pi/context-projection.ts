@@ -202,6 +202,8 @@ export function createAssignmentProjector() {
   let boundaryIndex = 0;
   let plan: AssignmentProjectionPlan | undefined;
   return {
+    /** Compaction rebases the transcript: suspend projection until the next boundary. */
+    reset() { boundaryIndex = 0; plan = undefined; },
     beginAssignment(messages: readonly AgentMessage[], boundary: number, options: {
       enabled?: boolean;
       minClearTokens?: number;

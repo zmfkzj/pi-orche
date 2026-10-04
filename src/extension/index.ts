@@ -343,9 +343,10 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         // details; argument validation and errors before a worker ran still throw (see WorkerPool.executeTool).
         return pool().executeTool({
           ...params,
+          mainMode: state.effective,
           cwd: ctx.cwd,
           model: ctx.model,
-          thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(),
+          thinking: pi.getThinkingLevel(),
           projectTrusted: ctx.isProjectTrusted(),
           signal,
           currentSession: currentSession(ctx),

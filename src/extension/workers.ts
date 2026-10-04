@@ -16,8 +16,12 @@ import { normalizeOwnedPath, type TaskItem } from "../orchestration/backlog.js";
 import { checkWriteRealPath, WRITE_TOOLS, WRITING_KINDS } from "../orchestration/ownership.js";
 import { resolveRunLimits } from "../orchestration/limits.js";
 import { taskWorkerInstructions } from "../orchestration/prompts.js";
-import { orchestrationResultSchemas } from "../orchestration/result-schemas.js";
-import { resolveRoute, resolveSpecialistRoute } from "../orchestration/routing.js";
+import { orchestrationResultSchemas, requirementDefinitions, requirementIds, requiredChecklistError, type ChecklistItem } from "../orchestration/result-schemas.js";
+import { createTaskPlanTool, renderTaskPlan, type TaskPlan } from "../tools/task-plan.js";
+import { configureTaskWorkflow, enableTaskWorkflow, taskCompactionSettings, type CompactionStats } from "../pi/session-factory.js";
+import { withExtendedContext } from "../pi/extended-context.js";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { resolveRoute, resolveSpecialistRoute, type MainMode } from "../orchestration/routing.js";
 import { WorkspaceAudit, type GitlinkChange, type WorkspaceChange } from "../orchestration/workspace.js";
 import { WorkspaceActivity } from "../orchestration/run/activity.js";
 import { CHANGED_WHILE_QUIET } from "../orchestration/run/audit.js";
@@ -37,7 +41,7 @@ import { createAssignmentProjector, type ContextClearedStats } from "../pi/conte
 
 export const orcheTaskParameters = Type.Object({
   role: Type.Union([Type.Literal("explore"), Type.Literal("answer"), Type.Literal("implement"), Type.Literal("verify"), Type.Literal("game-asset"), Type.Literal("video")]),
-  request: Type.String({ minLength: 1, description: "Self-contained goal, decisions, constraints and acceptance checks; the worker does not see the conversation. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs." }),
+  request: Type.String({ minLength: 1, description: "Self-contained goal, decisions, constraints and acceptance checks; the worker does not see the conversation. In the single workflow include Intent/Purpose, a testable R1..Rn requirements checklist, Constraints and non-goals, explicit Assumptions and a final Original request section with the user's text verbatim. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Only short decisive irreproducible snippets inline; never whole files, diffs or long logs." }),
   context: Type.Optional(Type.String({ maxLength: 30_000, description: "Background findings and decisions, appended to request. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs." })),
   worker: Type.Optional(Type.String()),
   files: Type.Optional(Type.Array(Type.String())),
@@ -53,6 +57,8 @@ export const orcheTaskParameters = Type.Object({
 });
 export type TaskParameters = Static<typeof orcheTaskParameters>;
 export type TaskRole = TaskParameters["role"];
+// Extension-supplied effective mode; omitted SDK callers retain legacy routing/instructions.
+type TaskArgs = Omit<OrcheRunArgs, "model"> & TaskParameters & { mainMode?: MainMode; model?: { provider: string; id: string; contextWindow?: number } };
 /** A change the worker is not credited with, and why. */
 export type OtherChange = WorkspaceChange & { reason: string };
 /** HEAD of the task cwd's repository moved during the task (`from` absent: unborn branch; `branch` absent: detached). */
@@ -72,6 +78,11 @@ export interface TaskDetails {
   status: string;
   /** Model route of the worker (`provider/model`), when known. */
   model?: string;
+  thinking?: ThinkingLevel;
+  checklist?: ChecklistItem[];
+  plan?: TaskPlan;
+  compactions?: { count: number; events: CompactionStats[] };
+  warnings?: string[];
   durationMs: number;
   /**
    * When the assignment started and ended (epoch ms; `finishedAt - startedAt` is `durationMs`) and its deadline as it stood at the end (cap, extensions
@@ -138,6 +149,16 @@ interface Worker {
   files?: readonly string[];
   /** `provider/model` of the worker's route. */
   model?: string;
+  thinking?: ThinkingLevel;
+  singleWorkflow?: boolean;
+  taskWorkflowInstalled?: boolean;
+  requirementDefinitions?: Map<string, string>;
+  requirementIds?: string[];
+  request?: string;
+  plan?: TaskPlan;
+  unmetStreak?: Map<string, number>;
+  compactions?: CompactionStats[];
+  recordEvent?: (event: Record<string, unknown>) => void;
   /** Tool-activity tracker of the assignment in flight (write roles only; the spawn callbacks resolve it at event time). */
   activity?: WorkspaceActivity;
   /** HEAD at the end of the previous assignment (`sha` absent: unborn), for the stale-context prefix. */
@@ -149,6 +170,13 @@ interface Worker {
   imageConfig?: string;
   latestInput: number;
   timer?: ReturnType<typeof setTimeout>;
+}
+
+function taskCompactionFor(worker: Worker) {
+  return {
+    essentials: () => `Requirements checklist and original request, verbatim:\n${worker.request ?? ""}\n\nTask DAG at compaction time:\n${worker.plan ? renderTaskPlan(worker.plan) : "No Task DAG recorded in this assignment."}`,
+    onCompact: (stats: CompactionStats) => { (worker.compactions ??= []).push(stats); worker.recordEvent?.({ type: "compaction", timestamp: Date.now(), worker: worker.id, ...stats }); },
+  };
 }
 export interface WorkerPoolOptions {
   controller: OrcheController;
@@ -460,13 +488,15 @@ function formatStaleContext(report: (Pick<TaskDetails, "submodules" | "headMoved
 
 
 
-function assignmentPrompt(args: TaskParameters, commands: readonly string[], imagesAvailable = false, grant?: GitGrant): string {
+function assignmentPrompt(args: TaskParameters & { mainMode?: MainMode }, commands: readonly string[], imagesAvailable = false, grant?: GitGrant): string {
   const task = args.context?.trim() ? `${args.request}\n\n## Context from the requesting session\n${args.context.trim()}` : args.request;
   const scope = args.files === undefined ? "anywhere inside the workspace" : JSON.stringify(args.files);
   const instructions: Record<TaskRole, string> = {
     explore: 'Investigate independently, read source and reproduce. DO NOT EDIT. Report findings with concrete evidence and optionally data.cause. report_result {kind:"explore",summary,data:{cause,evidence}}.',
-    answer: 'Strictly read-only. Inspect relevant files and provide an evidence-backed answer, concrete code references and explanations. Never change files. report_result {kind:"answer",summary:FULL_EVIDENCED_ANSWER,data:{evidence}}.',
-    implement: `Implement completely, preserving unrelated changes. Write scope: ${scope}. Run local checks on touched files. report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks]}}.`,
+    answer: `Strictly read-only. Inspect relevant files and provide an evidence-backed answer, concrete code references and explanations. Never change files. report_result {kind:"answer",summary:FULL_EVIDENCED_ANSWER,data:{evidence${args.mainMode === "single" || args.mainMode === "auto" ? ',checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence"}]' : ""}}}.${args.mainMode === "single" || args.mainMode === "auto" ? " Checklist is required when the request contains R-ids." : ""}`,
+    implement: args.mainMode === "single" || args.mainMode === "auto"
+      ? `Own the task end to end: first analyse the requirements and create the Task DAG with task_plan, covering every requirement id. Then execute nodes sequentially in dependency order, updating statuses, implementing completely, adding or updating tests, running the project's relevant checks and iterating until they pass, preserving unrelated changes. Main does not intervene while you run. Write scope: ${scope}. Finish with report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks],checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence"}]}}. Checklist is required when the request contains R-ids.`
+      : `Implement completely, preserving unrelated changes. Write scope: ${scope}. Run local checks on touched files. report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks]}}.`,
     "game-asset": `Game asset production. Create or modify game assets (sprites, sprite sheets/atlases, tilesets, textures, icons/UI art, 3D models, animations, VFX, SFX/music, fonts, and their engine import/metadata files) inside the write scope ${scope}. First detect the engine and the project's conventions (Unity .meta, Godot .import/.tres, Unreal, Phaser/Pixi atlas JSON; existing naming, folder layout, resolution/pixels-per-unit, palette, pivot/origin, power-of-two, compression). Produce assets with locally available tools via bash (check command -v first: ImageMagick, Inkscape, Blender --background with Python, Aseprite --batch, ffmpeg, sox, Python Pillow/numpy, or hand-written SVG/procedural scripts); keep reusable generator scripts with the assets when the project has a place for them, and leave no temp files in the workspace. Never hand-fabricate binary bytes. Verify every output is valid (identify/file/ffprobe/blender), and view raster outputs or rendered previews with the read tool. Do not download third-party assets unless the request allows it; record source and license when you do. report_result {kind:"game-asset",summary,data:{status:"done" or "blocked",reason,outputs:[{path,type,spec}],evidence:[checks]}}. spec is a descriptive string.`,
     video: `Video production. Plan and produce video deliverables inside the write scope ${scope}: script/storyboard/shot list, editing and compositing, motion graphics (code-based such as Remotion, Motion Canvas or manim when the project uses them), subtitles (SRT/VTT), audio mixing and loudness normalization, thumbnails and final encodes. Use locally available tools via bash (check command -v first: ffmpeg/ffprobe, the project's own video tooling, Python, ImageMagick, sox). Render a short draft before long renders; make final encode settings explicit (container, video codec, resolution, fps, CRF/bitrate, pixel format, audio codec/sample rate, loudness target). Verify every output with ffprobe (duration, streams, resolution, fps) and inspect extracted frames with the read tool. Leave no intermediate files in the workspace unless requested. report_result {kind:"video",summary,data:{status:"done" or "blocked",reason,outputs:[{path,type,spec}],evidence:[checks]}}. spec is a descriptive string.`,
     verify: `Independent read-only review. DO NOT EDIT. ${commands.length ? `Run configured checks via bash: ${commands.map(command => JSON.stringify(command)).join(", ")}` : "Discover and run the project's own checks via bash (package.json, Makefile, pyproject.toml, Cargo.toml, go.mod or CI config)"}, plus focused checks; inspect source and git diff. report_result {kind:"verify",summary,data:{passed:boolean,evidence:[commands and outcomes],issues:[{file,description}]}}. passed:true requires actual passing checks; unexecuted checks never count as passed.`,
@@ -506,10 +536,16 @@ export class WorkerPool {
       return { id, sourceId: source.id, role: worker.role, ...(source.lastTask ? { lastTask: source.lastTask } : {}) };
     });
   }
-  private callbacks(worker: Worker): Pick<WorkerAdoptOptions, "toolGuard" | "writeFileGuard" | "onToolExecution" | "onContextWindow"> {
+  private callbacks(worker: Worker): Pick<WorkerAdoptOptions, "toolGuard" | "writeFileGuard" | "onToolExecution" | "onContextWindow" | "validateResult"> {
     return {
       onContextWindow: info => { worker.contextWindow = info.contextWindow; },
+      validateResult: (kind, data) => {
+        if (!["implement", "answer"].includes(kind)) return undefined;
+        const ids = worker.singleWorkflow ? worker.requirementIds ?? [] : [];
+        return ids.length || (data && typeof data === "object" && "checklist" in data) ? requiredChecklistError(ids, data) : undefined;
+      },
       toolGuard: async (name, input) => {
+        if (name === "task_plan" && !worker.singleWorkflow) return "task_plan is available only for standard single-workflow task assignments.";
         const blocked = await this.guard(worker, name, input);
         if (blocked) return blocked;
         await worker.activity?.enter(worker.id, name);
@@ -597,7 +633,7 @@ export class WorkerPool {
    * (arguments, unknown or busy worker, startup), and with a {@link TaskFailedError} when a worker ran and the task failed,
    * timed out or was cancelled. A worker that completed and reported `blocked` or `passed: false` resolves (details.status).
    */
-  execute(args: OrcheRunArgs & TaskParameters): Promise<{ text: string; details: TaskDetails }> {
+  execute(args: TaskArgs): Promise<{ text: string; details: TaskDetails }> {
     // The details of the assignment that ran, once one did: the controller replaces whatever the callback threw when the
     // task is cancelled, even after the assignment completed.
     let ran: TaskDetails | undefined;
@@ -625,7 +661,7 @@ export class WorkerPool {
    * {@link execute} as an orche_task tool result: the text and details on success; for a {@link TaskFailedError} an
    * `isError` result with the same text and the structured details; anything else still rejects.
    */
-  async executeTool(args: OrcheRunArgs & TaskParameters): Promise<AgentToolResult<TaskDetails> | ErrorToolResult<TaskDetails>> {
+  async executeTool(args: TaskArgs): Promise<AgentToolResult<TaskDetails> | ErrorToolResult<TaskDetails>> {
     try {
       const result = await this.execute(args);
       return { content: [{ type: "text", text: result.text }], details: result.details };
@@ -634,10 +670,14 @@ export class WorkerPool {
       throw error;
     }
   }
-  private async executeAssignment(args: OrcheRunArgs & TaskParameters, signal: AbortSignal): Promise<{ text: string; details: TaskDetails }> {
+  private async executeAssignment(args: TaskArgs, signal: AbortSignal): Promise<{ text: string; details: TaskDetails }> {
     if (this.disposed) throw new Error("Worker pool is disposed");
     const grant = resolveGitGrant(args.role, args.git); // before any worker is touched: a bad grant spawns and changes nothing
     const started = Date.now();
+    const workflowMode = args.mainMode === "single" || args.mainMode === "auto";
+    const singleWorkflow = workflowMode && ["explore", "answer", "implement", "verify"].includes(args.role);
+    const inheritMain = singleWorkflow;
+    const modelWarnings: string[] = [];
     const retired: string[] = [];
     const retirementLines: string[] = [];
     const files = WRITING_KINDS.has(args.role) && args.files !== undefined ? scopePaths(args.files) : undefined;
@@ -682,9 +722,7 @@ export class WorkerPool {
     const runtime = await this.options.controller.modelRuntime(startupSignal);
     if (this.disposed) throw new Error("Worker pool is disposed");
     signal.throwIfAborted();
-    if (config.source.kind === "session" && args.model && !runtime.getModel(args.model.provider, args.model.id)) throw new NoRouteError(
-      `The session model ${sessionModel} cannot be resolved by orche's own model runtime (it does not see providers that other Pi extensions register, nor in-memory credentials). Route orche explicitly in ${args.cwd}/.pi/orche.config.json, and list the provider's Pi package in "providerExtensions" if the provider comes from an extension (see docs/pi-package.md).`,
-    );
+
     if (config.routes.providerExtensions?.length) {
       const key = JSON.stringify(config.routes.providerExtensions);
       if (!this.providers.has(key)) {
@@ -709,6 +747,37 @@ export class WorkerPool {
     const reusedContext = !!worker;
     this.manager ??= new AgentManager(runtime, { resultSchemas: orchestrationResultSchemas, stopTimeoutMs: this.options.stopTimeoutMs });
     this.manager.setRequestBudget(limits.assignmentRequests);
+    const routeRole = args.role === "answer" ? "analyst" : args.role === "explore" ? config.routes.workers?.explorerRoles?.[0] ?? "explorer-path" : args.role === "implement" ? "implementer" : args.role === "verify" ? "verifier" : args.role;
+    const mainModel = inheritMain && args.model ? runtime.getModel(args.model.provider, args.model.id) : undefined;
+    const mainWindow = args.model?.contextWindow ?? mainModel?.contextWindow ?? 0;
+    const route = mainModel
+      ? { role: routeRole, model: sessionModel!, thinking: args.thinking ?? "off", extendedContext: false }
+      : worker && (!inheritMain || !args.model && this.manager.session(worker.id).model) ? this.manager.get(worker.id).route
+      : args.role === "game-asset" || args.role === "video"
+        ? resolveSpecialistRoute(config.routes, routeRole, (provider, id) => !!runtime.getModel(provider, id))
+        : resolveRoute(config.routes, routeRole);
+    if (inheritMain && args.model && !mainModel) modelWarnings.push(`Warning: main model ${sessionModel} is unresolvable in orche's runtime; falling back to configured route ${route.model}.`);
+    if (inheritMain && !args.model) modelWarnings.push(worker && this.manager.session(worker.id).model
+      ? "Warning: main model is absent; keeping this worker's current model and thinking."
+      : `Warning: main model is absent; using configured route ${route.model}.`);
+    if (config.source.kind === "session" && args.model && !runtime.getModel(args.model.provider, args.model.id)) throw new NoRouteError(
+      `The session model ${sessionModel} cannot be resolved by orche's own model runtime (it does not see providers that other Pi extensions register, nor in-memory credentials). Route orche explicitly in ${args.cwd}/.pi/orche.config.json, and list the provider's Pi package in "providerExtensions" if the provider comes from an extension (see docs/pi-package.md).`,
+    );
+    if (worker && inheritMain && (args.model || !this.manager.session(worker.id).model)) {
+      const session = this.manager.session(worker.id);
+      const catalog = runtime.getModel(route.model.slice(0, route.model.indexOf("/")), route.model.slice(route.model.indexOf("/") + 1));
+      if (!catalog) throw new Error(`Cannot switch ${worker.id}: model ${route.model} is unavailable; omit worker to start a new worker.`);
+      const resolvedModel = withExtendedContext(catalog, route.extendedContext).model;
+      const effective = mainModel && mainWindow > resolvedModel.contextWindow ? { ...resolvedModel, contextWindow: mainWindow } : resolvedModel;
+      try {
+        if (session.model?.provider !== effective.provider || session.model?.id !== effective.id || session.model?.contextWindow !== effective.contextWindow) await session.setModel(effective);
+        if (session.thinkingLevel !== (route.thinking ?? "off")) session.setThinkingLevel(route.thinking ?? "off");
+        worker.model = `${session.model!.provider}/${session.model!.id}`;
+        worker.thinking = session.thinkingLevel;
+        worker.contextWindow = session.model!.contextWindow;
+        if (worker.singleWorkflow) session.settingsManager.applyOverrides({ compaction: taskCompactionSettings(worker.contextWindow) });
+      } catch (error) { throw new Error(`Cannot switch model/thinking for ${worker.id}: ${String(error)}. Omit worker to start a new worker.`); }
+    }
     if (!worker) {
       if (this.workers.size >= 3) {
         const oldest = [...this.workers.values()].filter(item => this.manager!.get(item.id).status === "idle").sort((a, b) => a.lastUsed - b.lastUsed)[0];
@@ -720,30 +789,55 @@ export class WorkerPool {
       const id = `W${this.nextId++}`;
       // The worker's one transcript, for all of its assignments: <records>/<session>/workers/<id>-<spawn time>.jsonl.
       const sessionFile = workerSessionFile(resolved, { ...(args.currentSession?.id ? { parentSessionId: args.currentSession.id } : {}), workerId: id, spawnedAt: Date.now() });
-      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig };
+      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow };
       const meta = worker;
-      const routeRole = args.role === "answer" ? "analyst" : args.role === "explore" ? config.routes.workers?.explorerRoles?.[0] ?? "explorer-path" : args.role === "implement" ? "implementer" : args.role === "verify" ? "verifier" : args.role;
-      const route = args.role === "game-asset" || args.role === "video"
-        ? resolveSpecialistRoute(config.routes, routeRole, (provider, id) => !!runtime.getModel(provider, id))
-        : resolveRoute(config.routes, routeRole);
       meta.model = route.model;
-      const customTools = images ? [createGenerateImageTool({ cwd: args.cwd, runtime, images })] : [];
+      meta.thinking = route.thinking ?? "off";
+      const customTools = [...(images ? [createGenerateImageTool({ cwd: args.cwd, runtime, images })] : []), ...(singleWorkflow ? [createTaskPlanTool(plan => {
+        meta.plan = plan;
+        meta.recordEvent?.({ type: "task_plan", timestamp: Date.now(), worker: meta.id, plan });
+      }, () => meta.requirementIds ?? [])] : [])];
       // generate_image has its own timeout (images.timeoutMs, 180 s by default): liveness bounds a silent call by it, not by the generic tool bound.
       await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, signal: startupSignal, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name)], customTools, peerMessaging: false, ...(sessionFile ? { sessionFile } : {}),
         ...(images ? { toolTimeoutsMs: { generate_image: images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } } : {}),
         contextProjection: createAssignmentProjector(),
+        ...(mainModel ? { inheritedContextWindow: mainWindow } : {}),
+        ...(singleWorkflow ? { taskCompaction: taskCompactionFor(meta) } : {}),
         instructions: `${taskWorkerInstructions}\nYou work alone: there are no peer workers. Reply in the language of the request.`,
         ...this.callbacks(meta),
       });
       if (this.disposed) { await this.manager.dispose(id); throw new Error("Worker pool is disposed"); }
       this.workers.set(id, worker);
+      const effectiveSession = this.manager.session(id);
+      meta.model = effectiveSession.model ? `${effectiveSession.model.provider}/${effectiveSession.model.id}` : route.model;
+      meta.thinking = effectiveSession.thinkingLevel ?? route.thinking ?? "off";
+    }
+    if (worker && singleWorkflow && !worker.taskWorkflowInstalled) {
+      const meta = worker;
+      const projector = createAssignmentProjector();
+      await enableTaskWorkflow(this.manager.session(meta.id), taskCompactionFor(meta), createTaskPlanTool(plan => { meta.plan = plan; meta.recordEvent?.({ type: "task_plan", timestamp: Date.now(), worker: meta.id, plan }); }, () => meta.requirementIds ?? []), projector);
+      this.manager.setContextProjection(meta.id, projector);
+      meta.taskWorkflowInstalled = true;
     }
     clearTimeout(startupTimer);
     const meta = worker;
+    if (meta.taskWorkflowInstalled) configureTaskWorkflow(this.manager.session(meta.id), singleWorkflow ? taskCompactionFor(meta) : undefined);
+    meta.singleWorkflow = singleWorkflow;
+    const activeSession = this.manager.session(meta.id);
+    if (activeSession.model) meta.model = `${activeSession.model.provider}/${activeSession.model.id}`;
+    meta.thinking = activeSession.thinkingLevel ?? meta.thinking ?? route.thinking ?? "off";
+    meta.contextWindow = activeSession.model?.contextWindow ?? meta.contextWindow;
     clearTimeout(meta.timer);
     meta.role = args.role;
     meta.files = files;
     meta.latestInput = 0;
+    meta.plan = undefined;
+    const definitions = requirementDefinitions(args.request);
+    meta.unmetStreak = new Map(singleWorkflow ? [...meta.unmetStreak ?? []].filter(([id]) => definitions.has(id) && definitions.get(id) === meta.requirementDefinitions?.get(id)) : []);
+    meta.requirementDefinitions = definitions;
+    meta.requirementIds = requirementIds(args.request);
+    meta.request = args.context ? `${args.request}\n\nContext:\n${args.context}` : args.request;
+    meta.compactions = [];
     // This assignment's record. The worker's entry is read from the manager, so `sessionFile` is there only when the transcript really is persisted.
     const workerFile = this.manager.agentRecord(meta.id).sessionFile;
     const record = createRunRecord(resolved, {
@@ -753,10 +847,13 @@ export class WorkerPool {
       manifest: {
         config: describeSource(config.source), routes: routesSummary(config.routes),
         worker: { id: meta.id, role: args.role, ...(workerFile ? { sessionFile: workerFile } : {}) },
-        assignment: { role: args.role, reusedWorker: reusedContext, ...(files ? { files } : {}), ...(grant ? { git: grant } : {}) },
+        assignment: { role: args.role, reusedWorker: reusedContext, model: meta.model, thinking: meta.thinking, ...(files ? { files } : {}), ...(grant ? { git: grant } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}) },
         ...(concurrent ? { concurrentSessions: concurrent.activity } : {}),
       },
     });
+    meta.recordEvent = event => record?.appendEvent(event);
+    const workflowDetails = () => ({ thinking: meta.thinking, ...(meta.plan ? { plan: structuredClone(meta.plan) } : {}),
+      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}) });
     let requests = 0;
     let contextCleared: ContextClearedStats | undefined;
     const contextDetails = () => contextCleared ? { contextCleared } : {};
@@ -817,7 +914,7 @@ export class WorkerPool {
       try { ({ changeReport: report, gitReport } = await collect()); } catch { /* keep the empty lists */ }
       const finishedAt = Date.now();
       return {
-        worker: meta.id, role: args.role, status, ...(meta.model ? { model: meta.model } : {}), durationMs: finishedAt - started, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...report, roster: this.roster(),
+        worker: meta.id, role: args.role, status, ...(meta.model ? { model: meta.model } : {}), ...workflowDetails(), durationMs: finishedAt - started, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...report, roster: this.roster(),
         ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(),
         ...(record ? { record: record.dir } : {}),
         ...contextDetails(),
@@ -832,7 +929,7 @@ export class WorkerPool {
         ...(extra.summary ? { summary: extra.summary } : {}),
         ...(extra.failure ? { failure: extra.failure } : {}),
         ...(status === "cancelled" && this.options.controller.cancelledByUser ? { cancelledByUser: true } : {}),
-        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs },
+        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs, model: details.model, thinking: details.thinking, checklist: details.checklist, plan: details.plan, compactions: details.compactions, warnings: details.warnings },
         workspace: { changes: details.changes, otherChanges: details.otherChanges, ...(details.submodules ? { submodules: details.submodules } : {}), ...(details.headMoved ? { headMoved: details.headMoved } : {}) },
         ...(details.git ? { git: details.git } : {}),
         ...(retired.length ? { retired } : {}),
@@ -862,7 +959,9 @@ export class WorkerPool {
         meta.activity = activity;
       }
       signal.throwIfAborted();
-      this.manager.assign(meta.id, args.role, prefix + assignmentPrompt({ ...args, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant), { enabled: reusedContext && config.taskContext.clearBetweenAssignments, minClearTokens: config.taskContext.minClearTokens });
+      const prompt = assignmentPrompt({ ...args, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant);
+      const handoff = reusedContext && workflowMode ? prompt.replace(/^(Assignment[^\n]*\n)/, "$1This Assignment message supersedes earlier requirement ids and plans, including any assignment preserved at compaction time. Use only this round's requirements and Task DAG.\n") : prompt;
+      this.manager.assign(meta.id, args.role, prefix + handoff, { enabled: reusedContext && config.taskContext.clearBetweenAssignments, minClearTokens: config.taskContext.minClearTokens });
       assigned = true;
       if (signal.aborted) abort();
       progress();
@@ -899,26 +998,38 @@ export class WorkerPool {
       meta.summary = outcome.result.summary;
       const { changeReport, gitReport } = await collect();
       meta.lastUsed = Date.now();
-      if (meta.contextWindow && meta.latestInput >= meta.contextWindow * 0.7) {
+      if (!meta.singleWorkflow && meta.contextWindow && meta.latestInput >= meta.contextWindow * 0.7) {
         await this.retire(meta.id); retired.push(meta.id);
         retirementLines.push(`${meta.id} retired: context nearly full; start a new worker with the contract and evidence`);
       }
       const finishedAt = Date.now();
       const durationMs = finishedAt - started;
       const data = outcome.result.data && typeof outcome.result.data === "object" ? outcome.result.data as Record<string, unknown> : {};
+      const checklist = Array.isArray(data.checklist) ? data.checklist as ChecklistItem[] : undefined;
+      const checklistLines: string[] = [];
+      if (checklist) {
+        const unmet = checklist.filter(item => item.status !== "met");
+        checklistLines.push(`Checklist: ${checklist.length - unmet.length}/${checklist.length} met${unmet.length ? `; unmet: ${unmet.map(item => `${item.id} (${item.status}: ${item.evidence})`).join("; ")}` : ""}`);
+        if (singleWorkflow) {
+          const previous = meta.unmetStreak ?? new Map<string, number>();
+          meta.unmetStreak = new Map(unmet.filter(item => meta.requirementDefinitions?.has(item.id)).map(item => [item.id, (previous.get(item.id) ?? 0) + 1]));
+          for (const [id, count] of meta.unmetStreak) if (count >= 2) checklistLines.push(`Note: ${id} unmet in ${count} consecutive assignments of ${meta.id}; hand only the unmet items to a NEW worker (omit worker) with their requirements and the relevant context.`);
+        }
+      } else meta.unmetStreak = new Map();
       const roleData = ["status", "reason", "passed", "issues", "cause"].filter(key => data[key] !== undefined).map(key => `${key}: ${typeof data[key] === "string" ? data[key] : JSON.stringify(data[key])}`);
       if (Array.isArray(data.outputs)) roleData.push(`outputs: ${data.outputs.length}`);
-      const note = data.status === "blocked" ? "the worker reported blocked" : args.role === "verify" && data.passed === false ? "verification failed" : args.role === "implement" && changes.length >= 4 ? "the implementation changed four or more files" : undefined;
+      const note = data.status === "blocked" ? workflowMode && typeof data.reason === "string" && data.reason ? data.reason : "the worker reported blocked" : args.role === "verify" && data.passed === false ? "verification failed" : !workflowMode && args.role === "implement" && changes.length >= 4 ? "the implementation changed four or more files" : undefined;
       const roster = this.roster();
       const gitLines = gitReport ? formatGitReport(gitReport) : [];
       const details: TaskDetails = {
-        worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, ...(meta.model ? { model: meta.model } : {}), durationMs, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...changeReport, roster,
+        worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, ...(meta.model ? { model: meta.model } : {}), ...workflowDetails(), ...(checklist ? { checklist } : {}), durationMs, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...changeReport, roster,
         ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(), ...(record ? { record: record.dir } : {}),
         ...contextDetails(),
       };
       finishRecord("done", details, { summary: meta.summary });
-      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, ...contextLine(), "", meta.summary, ...roleData, "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
-        ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: consider orche_run (multi) — ${note}`] : [])].join("\n");
+      const planNotes = singleWorkflow && !meta.plan ? ["Note: no Task DAG recorded in this assignment."] : [];
+      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, ...modelWarnings, ...contextLine(), "", meta.summary, ...roleData, ...checklistLines, "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
+        ...planNotes, ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: ${workflowMode ? "follow up with the same worker" : "consider orche_run (multi)"} — ${note}`] : [])].join("\n");
       return { text: withRecordLine(text, record?.dir), details };
     } catch (error) {
       const base = error instanceof Error ? error.message : String(error);
@@ -928,10 +1039,11 @@ export class WorkerPool {
       }
       // The worker ran: same message as ever (warning first), now with the details of what it did. The details come first: they re-check
       // for other sessions, which the warning in the message must know about.
+      meta.unmetStreak = new Map();
       const details = await failedDetails(error.status);
       const thrown = warning ? withConcurrentWarning(error, warning) : error;
       finishRecord(error.kind === "cancelled" ? "cancelled" : "failed", details, { failure: failureReason(base) });
-      throw new TaskFailedError([thrown instanceof Error ? thrown.message : base, ...contextLine()].join("\n"), details, { kind: error.kind, status: error.status, reason: failureReason(base) });
+      throw new TaskFailedError([thrown instanceof Error ? thrown.message : base, ...modelWarnings, ...contextLine()].join("\n"), details, { kind: error.kind, status: error.status, reason: failureReason(base) });
     } finally {
       signal.removeEventListener("abort", abort);
       await stopPromise;
@@ -943,6 +1055,7 @@ export class WorkerPool {
       unsubscribe();
       // Nothing may snapshot on the private index while the tracker still has jobs queued.
       meta.activity = undefined;
+      meta.recordEvent = undefined;
       await activity?.drain().catch(() => undefined);
       if (audit && before) meta.tree = await audit.snapshot().catch(() => meta.tree);
       if (audit) {
@@ -953,6 +1066,9 @@ export class WorkerPool {
       if (this.workers.has(meta.id)) this.idle(meta);
       args.onProgress?.([], timingNow());
     }
+    } catch (error) {
+      if (worker) worker.unmetStreak = new Map();
+      throw error;
     } finally {
       clearTimeout(startupTimer);
       signal.removeEventListener("abort", abort);

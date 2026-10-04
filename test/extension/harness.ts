@@ -43,6 +43,8 @@ export async function createHarness(options: {
   extension?: OrcheExtensionOptions;
   writeUserConfig?: boolean;
   /** `mainMode` in the user config (default auto delegates; unset omits the key). */
+  /** Resolve the main provider in the worker runtime; default tests keep separate scripts/routes. */
+  inheritMainModel?: boolean;
   mainMode?: "auto" | "single" | "multi" | "direct" | "unset";
   /**
    * `records` in the user config. The default is OFF here (`{ enabled: false }`), unlike the extension's own default (on): suites that do not
@@ -70,7 +72,7 @@ export async function createHarness(options: {
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
   const resourceLoader = new DefaultResourceLoader({
     cwd, agentDir, settingsManager, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-    extensionFactories: [createOrcheExtension({ agentDir, createRuntime: async () => main.runtime, ...options.extension })],
+    extensionFactories: [createOrcheExtension({ agentDir, createRuntime: async () => options.inheritMainModel || options.writeUserConfig === false ? main.runtime : orche.runtime, ...options.extension })],
   });
   await resourceLoader.reload();
   const model = main.runtime.getModel(main.faux.provider.id, main.faux.getModel().id)!;

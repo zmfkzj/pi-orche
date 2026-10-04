@@ -386,3 +386,20 @@ it("keeps every reasoning signature's generating context over mixed boundaries a
   expect(noClears).toBeGreaterThanOrEqual(3);
   expect(checks).toBeGreaterThan(100);
 });
+
+describe("compaction projection boundary reset", () => {
+  it("drops all stale index maps mid-assignment and plans afresh at the next boundary", () => {
+    const projector = createAssignmentProjector();
+    const before: AgentMessage[] = [user("old"), assistant([call("reused"), thinking()]), result("reused", "x".repeat(5000))];
+    projector.beginAssignment(before, before.length, { minClearTokens: 0 });
+    expect(textOf(projector.project(before)[2]!)).toContain("cleared");
+    projector.reset();
+    const after: AgentMessage[] = [user("summary"), assistant([call("reused")]), result("reused", "y".repeat(5000))];
+    expect(projector.project(after)).toBe(after);
+    expect(() => projector.project([user("short summary")])).not.toThrow();
+    expect(projector.plan).toBeUndefined();
+    projector.beginAssignment(after, after.length, { minClearTokens: 0 });
+    expect(projector.plan?.stats.results).toBe(1);
+    expect(textOf(projector.project(after)[2]!)).toContain("cleared");
+  });
+});

@@ -82,7 +82,7 @@ interface WorkerStats {
 }
 /** Opaque, one-use ownership handle; detaching never disposes the session. */
 export interface WorkerTransfer { readonly snapshot: AgentSnapshot }
-export type WorkerAdoptOptions = Pick<Partial<SpawnOptions>, "id" | "role" | "toolGuard" | "writeFileGuard" | "onToolExecution" | "onContextWindow" | "contextProjection">;
+export type WorkerAdoptOptions = Pick<Partial<SpawnOptions>, "id" | "role" | "toolGuard" | "writeFileGuard" | "onToolExecution" | "onContextWindow" | "contextProjection" | "validateResult">;
 const detachedWorkers = new WeakMap<WorkerTransfer, Worker>();
 
 export class AgentManager {
@@ -183,6 +183,8 @@ export class AgentManager {
           return owner.rejectResult(worker, `Expected RESULT kind "${worker.snapshot.currentAssignment.kind}"; received "${payload.kind}"`, contract);
         const errors = contract ? resultDataErrors(contract, payload.data) : undefined;
         if (errors) return owner.rejectResult(worker, errors, contract!);
+        const workflowError = options.validateResult?.(payload.kind, payload.data);
+        if (workflowError) return owner.rejectResult(worker, workflowError, contract ?? { schema: Type.Unknown(), optional: true });
         worker.result = payload;
         return {
           content: [
@@ -744,6 +746,12 @@ export class AgentManager {
   }
   session(id: string): AgentSession {
     return this.require(id).adapter.session;
+  }
+  setContextProjection(id: string, projector: NonNullable<SpawnOptions["contextProjection"]>): void {
+    const worker = this.require(id);
+    if (worker.snapshot.status !== "idle") throw new Error(`Agent ${id} is not idle`);
+    worker.contextProjection = projector;
+    worker.projectionAssignment = undefined;
   }
   /** Transfer only settled, idle workers; the caller becomes responsible for adopting them. */
   detach(id: string): WorkerTransfer {

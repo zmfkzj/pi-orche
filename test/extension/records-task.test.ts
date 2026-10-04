@@ -292,7 +292,9 @@ describe("through the registered orche_task tool", () => {
     expect(results[0]!.content[0]!.text.split("\n").at(-1)).toBe(`Record: ${dirs[0]}`);
     expect(results[0]!.details).toMatchObject({ worker: "W1", record: dirs[0] });
     expect(results[1]!.isError).toBe(true);
-    expect(results[1]!.content[0]!.text).toBe(`Still no report\n\nRecord: ${dirs[1]}`);
+    const fallbackWarning = `Warning: main model ${h.main.route.model} is unresolvable in orche's runtime; falling back to configured route ${h.orche.route.model}.`;
+    expect(results[1]!.content[0]!.text).toBe(`Still no report\n${fallbackWarning}\n\nRecord: ${dirs[1]}`);
+    expect(results[1]!.details.warnings).toEqual([fallbackWarning]);
     expect(results[1]!.details).toMatchObject({ status: "no_result", record: dirs[1], failure: { kind: "failed" } });
     expect(readJson(join(dirs[0]!, "run.json")).worker.sessionFile).toBe(readJson(join(dirs[1]!, "run.json")).worker.sessionFile);
     expect(readJson(join(dirs[0]!, "run.json")).parentSession).toEqual({ id: parent });

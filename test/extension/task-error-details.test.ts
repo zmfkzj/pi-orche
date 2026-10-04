@@ -282,12 +282,14 @@ describe("orche_task through the registered tool", () => {
     return h;
   };
 
-  it("a failed task is an error to the model with the same text AND the structured details", async () => {
+  it("a failed task is an error to the model with its failure, fallback warning AND structured details", async () => {
     const h = await session([tool("orche_task", { role: "explore", request: "Find the evidence" }), reply("noted")], noReport);
     await h.session.prompt("investigate");
     const [taskResult] = taskResults(h);
     expect(taskResult).toMatchObject({ isError: true });
-    expect(taskResult!.content).toEqual([{ type: "text", text: "Still no report" }]); // the text a thrown error had
+    const fallbackWarning = `Warning: main model ${h.main.route.model} is unresolvable in orche's runtime; falling back to configured route ${h.orche.route.model}.`;
+    expect(taskResult!.content).toEqual([{ type: "text", text: `Still no report\n${fallbackWarning}` }]);
+    expect(taskResult!.details!.warnings).toEqual([fallbackWarning]);
     expect(taskResult!.details).toMatchObject({
       worker: "W1", role: "explore", status: "no_result", model: h.orche.route.model, durationMs: expect.any(Number), requests: expect.any(Number),
       changes: [], otherChanges: [], roster: expect.stringContaining("W1"),

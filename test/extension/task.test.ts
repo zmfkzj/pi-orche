@@ -47,6 +47,10 @@ const blocked = (entered: { resolve(): void }): FauxResponseStep => async (_cont
   return reply("aborted");
 };
 const taskResults = (h: Harness) => h.session.messages.filter(message => message.role === "toolResult" && message.toolName === "orche_task");
+// Read the pre-change implement instruction from HEAD, not from the implementation under test.
+const HEAD_IMPLEMENT = execFileSync("git", ["show", "HEAD:src/extension/workers.ts"], { encoding: "utf8" })
+  .match(/^    implement: `(.*)`,$/m)?.[1];
+if (!HEAD_IMPLEMENT) throw new Error("Missing HEAD implement instruction");
 
 describe("orche_task persistent session workers", () => {
   it("registers the tool, spawns W1, reports evidence, audit and stable roster", async () => {
@@ -100,6 +104,42 @@ describe("orche_task persistent session workers", () => {
     expect(await readFile(join(h.cwd, "allowed.txt"), "utf8")).toBe("allowed");
     expect(outcome.text).toContain("Changed files: allowed.txt");
     expect(outcome.details.changes).toEqual([{ path: "allowed.txt", status: "added" }]);
+  });
+
+  it.each([
+    ["single", "change the greeting", true],
+    ["auto", "change the greeting", true],
+    ["auto", "/orche single change the greeting", true],
+  ] as const)("uses the effective mode for implement instructions (%s, %s)", async (mainMode, prompt, endToEnd) => {
+    let instruction = "";
+    const files = ["greeting.txt"];
+    const h = await harness({
+      mainMode,
+      mainSteps: [tool("orche_task", { role: "implement", request: "Change greeting.txt", files }), reply("done")],
+      orcheSteps: [context => {
+        const assignment = context.messages.findLast(message => message.role === "user");
+        if (!assignment || assignment.role !== "user") throw new Error("Missing worker assignment");
+        const text = typeof assignment.content === "string" ? assignment.content : assignment.content.filter(part => part.type === "text").map(part => part.text).join("\n");
+        instruction = text.match(/(?:Own the task end to end:|Implement completely,)[\s\S]*?(?=\nStart summary)/)?.[0] ?? "";
+        return result("implement", "Done", { status: "done" });
+      }],
+    });
+    await h.session.prompt(prompt);
+    expect(taskResults(h)).toHaveLength(1);
+    expect(taskResults(h)[0]).toMatchObject({ isError: false });
+    expect(instruction).toBe(endToEnd
+      ? `Own the task end to end: first analyse the requirements and create the Task DAG with task_plan, covering every requirement id. Then execute nodes sequentially in dependency order, updating statuses, implementing completely, adding or updating tests, running the project's relevant checks and iterating until they pass, preserving unrelated changes. Main does not intervene while you run. Write scope: ${JSON.stringify(files)}. Finish with report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks],checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence"}]}}. Checklist is required when the request contains R-ids.`
+      : HEAD_IMPLEMENT.replace("${scope}", JSON.stringify(files)));
+    expect(h.orche.faux.getPendingResponseCount()).toBe(0);
+  });
+
+  it("keeps the omitted-mode SDK implement instruction byte-identical to HEAD", async () => {
+    const { pool, execute } = await fixture([result("implement", "Done", { status: "done" })]);
+    await execute({ role: "implement", files: [] });
+    const assignment = pool.session("W1").messages.findLast(message => message.role === "user");
+    if (!assignment || assignment.role !== "user") throw new Error("Missing worker assignment");
+    const text = typeof assignment.content === "string" ? assignment.content : assignment.content.filter(part => part.type === "text").map(part => part.text).join("\n");
+    expect(text.match(/Implement completely,[\s\S]*?(?=\nStart summary)/)?.[0]).toBe(HEAD_IMPLEMENT.replace("${scope}", "[]"));
   });
 
   it.each(["game-asset", "video"] as const)("spawns a %s route, enforces its files scope and reports output count", async role => {
@@ -345,6 +385,41 @@ describe("orche_task persistent session workers", () => {
     const { execute } = await fixture([result(role, "report", data)]);
     const outcome = await execute({ role });
     expect(outcome.text.includes("Note: consider orche_run (multi)")).toBe(note);
+  });
+
+  it.each([
+    ["single", "change four files"],
+    ["auto", "change four files"],
+    ["auto", "/orche single change four files"],
+  ] as const)("does not add a four-file size note in the single workflow (%s, %s)", async (mainMode, prompt) => {
+    const files = ["one.txt", "two.txt", "three.txt", "four.txt"];
+    const h = await harness({
+      mainMode,
+      mainSteps: [tool("orche_task", { role: "implement", request: "Create four files", files }), reply("done")],
+      orcheSteps: [...files.map(path => tool("write", { path, content: "implemented\n" })), result("implement", "Four files created", { status: "done" })],
+    });
+    await h.session.prompt(prompt);
+    const [outcome] = taskResults(h);
+    expect(outcome).toMatchObject({ isError: false, details: { changes: [...files].sort().map(path => ({ path, status: "added" })) } });
+    if (!outcome || outcome.role !== "toolResult") throw new Error("Missing orche_task result");
+    const text = outcome.content.filter(part => part.type === "text").map(part => part.text).join("\n");
+    expect(text.split("\n").filter(line => line.startsWith("Note:"))).toEqual(["Note: no Task DAG recorded in this assignment."]);
+    expect(text).not.toContain("four or more files");
+    expect(text).not.toContain("orche_run");
+    expect(text).not.toContain("/orche mode");
+    for (const path of files) expect(await readFile(join(h.cwd, path), "utf8")).toBe("implemented\n");
+    expect(h.orche.faux.getPendingResponseCount()).toBe(0);
+  });
+
+  it.each([
+    ["implement", { status: "blocked", reason: "dependency absent" }, "dependency absent"],
+    ["verify", { passed: false, issues: [{ file: "x.ts", description: "failed" }] }, "verification failed"],
+  ] as const)("keeps single-mode %s follow-up advice on the same worker", async (role, data, reason) => {
+    const { h, pool } = await fixture([result(role, "report", data)]);
+    const outcome = await pool.execute({ role, request: "Check the unit", cwd: h.cwd, projectTrusted: false, mainMode: "single" });
+    expect(outcome.text).toContain(`Note: follow up with the same worker — ${reason}`);
+    expect(outcome.text).not.toContain("consider orche_run");
+    expect(outcome.text).not.toContain("/orche mode");
   });
 
   it("session_shutdown disposes worker sessions and clears the idle pool idempotently", async () => {

@@ -1,4 +1,5 @@
 import { Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import type { ResultDataSchema } from "../agent/agent-handle.js";
 
 /** `data` of a backlog_proposal RESULT. */
@@ -16,6 +17,44 @@ export const proposalSchema = Type.Object({
 /** Evidence shape is left to the worker; only the decision-relevant fields are typed. */
 const evidence = Type.Optional(Type.Unknown());
 
+export const checklistSchema = Type.Array(Type.Object({
+  id: Type.String({ pattern: "^R[1-9][0-9]*$" }),
+  status: Type.Union([Type.Literal("met"), Type.Literal("unmet"), Type.Literal("partial")]),
+  evidence: Type.String({ minLength: 1 }),
+}));
+export interface ChecklistItem { id: string; status: "met" | "unmet" | "partial"; evidence: string }
+/** Requirement declarations only; quoted original text and incidental prose are never contracts. */
+export function requirementDefinitions(request: string): Map<string, string> {
+  const definitions = new Map<string, string>();
+  let current: string | undefined;
+  for (const line of request.split(/\r?\n/)) {
+    if (/^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?Original(?:[ \t]+user)?[ \t]+request\b/i.test(line)) break;
+    const match = /^[ \t]*(R[1-9]\d*)(?::|[.)]|[ \t]+-)[ \t]*(.*)$/.exec(line);
+    if (match) {
+      current = match[1]!;
+      definitions.set(current, match[2]!.trim());
+    } else if (current && /^[ \t]+\S/.test(line)) {
+      // Indented acceptance details belong to the preceding requirement for revision detection.
+      definitions.set(current, `${definitions.get(current)}\n${line.trim()}`);
+    } else current = undefined;
+  }
+  return definitions;
+}
+export function requirementIds(request: string): string[] { return [...requirementDefinitions(request).keys()]; }
+export function requiredChecklistError(ids: readonly string[], data: unknown): string | undefined {
+  const checklist = (data as { checklist?: ChecklistItem[] } | undefined)?.checklist;
+  if (!Array.isArray(checklist)) return "data.checklist is required: report every requirement id with status met|unmet|partial and evidence.";
+  if (!Value.Check(checklistSchema, checklist)) return `Invalid checklist: ${[...Value.Errors(checklistSchema, checklist)].map(error => `${error.path}: ${error.message}`).join("; ")}`;
+  const seen = new Set<string>();
+  for (const item of checklist) {
+    if (seen.has(item.id)) return `Duplicate checklist id ${item.id}; report each requirement once.`;
+    seen.add(item.id);
+  }
+  const missing = ids.filter(id => !seen.has(id));
+  return missing.length ? `Checklist missing ${missing.join(", ")}; report every requirement with evidence.` : undefined;
+}
+export const answerResultSchema = Type.Object({ evidence, checklist: Type.Optional(checklistSchema) });
+
 /** `data` of an explore RESULT: an optional cause claim with its evidence. */
 export const exploreResultSchema = Type.Object({
   cause: Type.Optional(Type.String()),
@@ -27,6 +66,7 @@ export const implementResultSchema = Type.Object({
   status: Type.Optional(Type.Union([Type.Literal("done"), Type.Literal("blocked")])),
   reason: Type.Optional(Type.String()),
   evidence,
+  checklist: Type.Optional(checklistSchema),
 });
 
 /** Production reports require a verdict and an inventory of delivered outputs. */
@@ -52,10 +92,11 @@ export const verifyResultSchema = Type.Object({
 /**
  * RESULT `data` contracts per assignment kind, checked inside `report_result` so a
  * malformed payload is repaired in the same turn instead of by a new assignment.
- * Kinds without an entry (e.g. answer) accept any data.
+ * Kinds without an entry accept any data.
  */
 export const orchestrationResultSchemas: Readonly<Record<string, ResultDataSchema>> = {
   explore: { schema: exploreResultSchema, optional: true },
+  answer: { schema: answerResultSchema, optional: true },
   backlog_proposal: { schema: proposalSchema },
   implement: { schema: implementResultSchema, optional: true },
   fix: { schema: implementResultSchema, optional: true },
