@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "id": "cause",
+      "criterion": "Identifies that overlaps uses inclusive comparisons (<= / >=), treating the intervals as closed."
+    },
+    {
+      "id": "counterexample",
+      "criterion": "Gives adjacent intervals as a counterexample, e.g. [9:00, 10:00) and [10:00, 11:00) (or 540–600 and 600–660): overlaps returns true but the correct answer is false."
+    },
+    {
+      "id": "symptom",
+      "criterion": "Explains the user-facing symptom: back-to-back bookings are rejected as conflicts by canBook/book."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "Concludes the reviewer's approval is wrong."
+    }
+  ],
+  "referenceAnswer": "리뷰어의 판단은 틀렸습니다. src/booking.js의 overlaps는 a.start <= b.end && b.start <= a.end로 닫힌 구간처럼 비교합니다. 반례: [9:00, 10:00)과 [10:00, 11:00)(분 단위 540–600, 600–660)에 대해 true를 반환하지만 반열린 구간이므로 정답은 false입니다. 그 결과 canBook이 앞뒤로 붙은 예약을 충돌로 거절합니다.",
+  "passRule": "all"
+}

@@ -1,0 +1,16 @@
+{
+  "id": "i06-daily-bucket-ko",
+  "title": "월요일 아침 주문이 일요일 보고서에 잡힘",
+  "category": "analysis",
+  "language": "ko",
+  "instruction": "일별 매출 보고서에서 한국 시간 월요일 오전에 들어온 주문 일부가 일요일 매출로 집계됩니다. data/orders.json으로 `npm run simulate`를 실행하면 재현됩니다. 원인 파일과 함수, 잘못 집계되는 과정, 어떤 시간대의 주문이 영향을 받는지, 그리고 샘플 데이터 기준 현재 출력과 올바른 일별 합계를 보고해 주세요. 코드는 수정하지 마세요.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "id": "per-instance",
+      "criterion": "Identifies that src/limiter.js keeps token buckets in process memory (a Map), so each replica limits independently."
+    },
+    {
+      "id": "effective",
+      "criterion": "States that deploy/service.yaml runs 4 replicas behind a load balancer, so a key can get up to 400 requests per minute (4 × 100), not 100."
+    },
+    {
+      "id": "other",
+      "criterion": "Names at least one other way the limit breaks: restarts/redeploys reset the buckets, autoscaling (maxReplicas 8 in the HPA) raises the effective limit further to 800, or uneven load balancing."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "Concludes the requirement is not met and recommends a shared limiter (e.g. Redis/central store with atomic counters) or sticky per-key routing."
+    }
+  ],
+  "referenceAnswer": "The requirement is not met. src/limiter.js keeps a token bucket per key in an in-process Map, so every replica enforces 100/min on its own. deploy/service.yaml runs 4 replicas behind the load balancer, so a key can get up to 400 requests per minute; the HPA in the same file allows up to 8 replicas, i.e. up to 800/min. Restarts and redeploys also reset the buckets. A shared limiter (e.g. Redis with atomic increments or a central rate-limit service), or routing each key to one instance, is needed.",
+  "passRule": "all"
+}

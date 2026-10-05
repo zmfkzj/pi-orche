@@ -1,0 +1,16 @@
+{
+  "id": "i19-cache-ttl-ko",
+  "title": "캐시 TTL을 24시간으로 늘려도 되는가",
+  "category": "review",
+  "language": "ko",
+  "instruction": "상품 가격 조회 부하를 줄이려고 src/prices.js의 캐시 TTL을 5분에서 24시간으로 늘리자는 제안이 있습니다. 쓰기 시 캐시를 삭제하니 오래된 값이 남을 일은 없다는 것이 제안의 근거입니다. 이 근거가 맞는지, TTL을 늘려도 되는지 평가해 주세요. 문제가 있다면 일어나는 순서(타임라인)를 구체적으로 제시하고 영향 범위를 설명해 주세요. 코드는 수정하지 마세요.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

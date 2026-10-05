@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "id": "cause",
+      "criterion": "Identifies that compareVersions splits on '.' and parseInt()s each part: the pre-release suffix of the patch part is dropped (parseInt('0-beta') === 0) and the pre-release's dot-separated number becomes an extra numeric component."
+    },
+    {
+      "id": "counterexample",
+      "criterion": "Gives a concrete counterexample with actual and correct result, e.g. compareVersions('1.0.0-beta.1', '1.0.0') returns a positive number (1) although a pre-release is lower than its release (should be negative); or compareVersions('1.0.0-rc', '1.0.0') returns 0 instead of negative."
+    },
+    {
+      "id": "updater",
+      "criterion": "Explains the consequence in src/updater.js shouldUpdate: a user on 1.0.0 is offered 1.0.0-beta.1 as an update (shouldUpdate('1.0.0', '1.0.0-beta.1') is true, i.e. a downgrade to a pre-release), and/or a user on 1.0.0-beta.1 is not offered the 1.0.0 release."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "Concludes the README claim is false (multi-digit components like 1.10.0 vs 1.9.0 are handled correctly; pre-releases are not)."
+    }
+  ],
+  "referenceAnswer": "The claim is false for pre-releases. src/version.js compareVersions splits on '.' and parseInt()s every part: '1.0.0-beta.1' becomes [1, 0, 0, 1] (parseInt('0-beta') is 0 and the '.1' becomes a fourth component). So compareVersions('1.0.0-beta.1', '1.0.0') returns 1, i.e. the beta is treated as newer than the release, although a pre-release is lower than its release; compareVersions('1.0.0-rc', '1.0.0') returns 0 instead of a negative number. Multi-digit parts are fine (1.10.0 > 1.9.0). Consequence in src/updater.js shouldUpdate: users on 1.0.0 are offered 1.0.0-beta.1 as an update (a downgrade to a beta), and users on 1.0.0-beta.1 are not offered 1.0.0.",
+  "passRule": "all"
+}

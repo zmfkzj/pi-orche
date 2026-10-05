@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "id": "transitions",
+      "criterion": "Lists the transitions in src/jobs.js: queued → running (start), running → succeeded (complete), running → failed (fail), failed → queued (retry), and failed → dead when retries are exhausted or the error is not retryable."
+    },
+    {
+      "id": "condition",
+      "criterion": "States the retry condition in fail(): error.retryable === true AND job.attempts < MAX_ATTEMPTS (3)."
+    },
+    {
+      "id": "count",
+      "criterion": "Explains attempts counts runs (incremented in start), so a job runs at most 3 times in total, i.e. at most 2 retries back to queued."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "Answers yes: failed jobs go back to queued only for retryable errors and at most 2 times (3 runs total); otherwise they become dead."
+    }
+  ],
+  "referenceAnswer": "네, 조건부로 가능합니다. src/jobs.js의 전이는 queued → running(start), running → succeeded(complete), running → failed(fail)입니다. fail 안에서 error.retryable === true이고 job.attempts < MAX_ATTEMPTS(3)이면 queued로 되돌리고(재시도), 아니면 dead가 됩니다. attempts는 start에서 실행할 때마다 1 증가하므로 작업은 최대 3번 실행되고, queued로 돌아가는 재시도는 최대 2번입니다. retryable이 아닌 오류는 바로 dead가 됩니다.",
+  "passRule": "all"
+}

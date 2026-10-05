@@ -1,0 +1,16 @@
+{
+  "id": "c12-disabled-button",
+  "title": "Disabled button state",
+  "category": "feature",
+  "language": "en",
+  "instruction": "Create the disabled state of the launcher button: assets/ui/button-disabled.png, same size and shape as assets/ui/button.png, desaturated grey.",
+  "expectsChanges": true,
+  "timeoutSec": 1800,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": true
+  }
+}

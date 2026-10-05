@@ -1,0 +1,4 @@
+{
+  "category": "repo",
+  "trap": "Header comment documents CLI > env precedence, the code does the opposite."
+}

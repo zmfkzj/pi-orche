@@ -1,0 +1,16 @@
+{
+  "id": "c08-card-frame",
+  "title": "Relic card frame",
+  "category": "feature",
+  "language": "en",
+  "instruction": "Design the frame for relic cards: assets/ui/card-frame.png, 512x768 PNG. The art window (x 48-463, y 96-479) must be fully transparent so the card art shows through; the rest is the frame, in the game's pixel-art style.",
+  "expectsChanges": true,
+  "timeoutSec": 1800,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": true
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "category": "cause",
+  "trap": "README documents short stale reads; the TTL explanation is plausible but the real cause is a no-op invalidation."
+}

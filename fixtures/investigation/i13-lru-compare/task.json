@@ -1,0 +1,16 @@
+{
+  "id": "i13-lru-compare",
+  "title": "Which LRU for the hot path?",
+  "category": "analysis",
+  "language": "en",
+  "instruction": "We have two LRU cache implementations, src/lru-map.js and src/lru-array.js, and want to keep one for the session hot path (about 10,000 entries, mostly reads). Compare them: are they behaviourally equivalent, and how do their costs differ? Recommend one and justify it with concrete evidence (code locations; a short scenario if they differ). Do not modify files.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

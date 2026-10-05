@@ -1,0 +1,16 @@
+{
+  "id": "i24-semver-compare",
+  "title": "Does compareVersions handle pre-releases?",
+  "category": "analysis",
+  "language": "en",
+  "instruction": "The release tooling's README says src/version.js compareVersions 'orders any two semantic versions correctly, including pre-releases'. The auto-updater relies on it to decide whether to install an update. Verify the claim. If it is wrong, give concrete counterexamples with the actual and the correct result, explain the cause in the code, and describe what the auto-updater (src/updater.js) would do wrong as a consequence. Do not modify files.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

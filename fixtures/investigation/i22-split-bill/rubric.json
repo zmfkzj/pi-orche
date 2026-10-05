@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "id": "cause",
+      "criterion": "Identifies that every part is Math.round(totalCents / people), so the parts sum to people × rounded share, which differs from the total whenever totalCents is not divisible by people."
+    },
+    {
+      "id": "counterexample",
+      "criterion": "Gives a concrete counterexample with returned parts and sum, e.g. splitCents(100, 3) → [33, 33, 33] summing to 99 (or splitCents(200, 3) → [67, 67, 67] summing to 201)."
+    },
+    {
+      "id": "scope",
+      "criterion": "States that it can be off in both directions (short or over) and affects all totals not divisible by the number of people."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "Concludes the claim is false."
+    }
+  ],
+  "referenceAnswer": "The claim is false. src/split.js splitCents gives every person Math.round(totalCents / people), so the parts add up to people × that rounded share. Whenever totalCents is not divisible by people the sum is off: splitCents(100, 3) returns [33, 33, 33] (sum 99, one cent short) and splitCents(200, 3) returns [67, 67, 67] (sum 201, one cent over). The remainder has to be distributed explicitly.",
+  "passRule": "all"
+}

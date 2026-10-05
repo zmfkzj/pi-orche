@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "id": "throws",
+      "criterion": "Identifies that sessions carry a function (onExpire, set in src/session.js createSession), so structuredClone throws a DataCloneError where cloneJSON silently drops the function: the switch breaks snapshot()."
+    },
+    {
+      "id": "dates",
+      "criterion": "Notes the Date difference: cloneJSON turns expiresAt into an ISO string (which isExpired copes with via new Date), structuredClone keeps a Date."
+    },
+    {
+      "id": "other",
+      "criterion": "Mentions at least one other difference relevant here: the Map of flags (JSON turns it into {} / loses entries, structuredClone keeps it) or undefined fields being dropped vs kept."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "Concludes the PR is NOT safe to merge as is (it would throw on every snapshot) unless the function is removed or excluded first."
+    }
+  ],
+  "referenceAnswer": "Not safe as is. src/session.js createSession stores an onExpire callback on every session; structuredClone cannot clone functions and throws DataCloneError, so snapshot() would throw for every session, while cloneJSON silently drops the function. Other differences: cloneJSON turns expiresAt (Date) into an ISO string (isExpired wraps it in new Date, so that works either way) while structuredClone keeps a Date; the flags Map becomes {} with cloneJSON (its entries are lost today) and is preserved by structuredClone; undefined fields are dropped by JSON and kept by structuredClone. The callback has to be removed or excluded from the clone before switching.",
+  "passRule": "all"
+}

@@ -1,0 +1,16 @@
+{
+  "id": "c03-thumbnail",
+  "title": "Launch trailer thumbnail",
+  "category": "feature",
+  "language": "en",
+  "instruction": "Make the thumbnail for the Ember Hollow launch trailer: assets/video/thumbnail.png, 1280x720 PNG. It must show the words OUT NOW and read well at small sizes on a video platform.",
+  "expectsChanges": true,
+  "timeoutSec": 1800,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": true
+  }
+}

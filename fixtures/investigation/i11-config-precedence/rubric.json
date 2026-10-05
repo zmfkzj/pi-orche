@@ -1,0 +1,18 @@
+{
+  "items": [
+    {
+      "id": "precedence",
+      "criterion": "States the actual precedence from src/config.js loadConfig: defaults < config file < CLI arguments < environment variables (later spreads win)."
+    },
+    {
+      "id": "comment",
+      "criterion": "Points out that the header comment of src/config.js (CLI > env > file > defaults) contradicts the code."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "Concludes the server listens on 8080 (the PORT environment variable wins over --port 9090)."
+    }
+  ],
+  "referenceAnswer": "It listens on 8080. src/config.js loadConfig merges {...defaults, ...fileConfig, ...cliConfig, ...envConfig}, so later sources win: environment variables > CLI arguments > config file > defaults. PORT=8080 therefore beats --port 9090 and app.json's 7070. The header comment in src/config.js (CLI > env > file > defaults) is wrong; it contradicts the merge order.",
+  "passRule": "all"
+}

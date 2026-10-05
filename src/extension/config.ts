@@ -4,6 +4,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parseRouteConfig, RouteConfigError, type RouteConfig } from "../orchestration/routing.js";
 import { DEFAULT_WINDOW_MS } from "./concurrent-sessions.js";
 import { DEFAULT_CONTEXT_WARNING, type ContextWarningSettings } from "./context-warning.js";
+import type { CreationSettings, InvestigationSettings } from "../workflow/policy.js";
 
 export const CONFIG_FILE = "orche.config.json";
 
@@ -170,6 +171,11 @@ export function parseContextWarningConfig(value: unknown): ContextWarningSetting
  * verification; `auto`: also at risk score ≥ `threshold`; `always`; `off`; G-X stage 1 found its threshold findings costly and exotic),
  * `checker.maxFixRounds` how often its blocking findings go back to the same worker before orche re-runs the probes itself, and `nav`
  * whether v2 sessions (worker, Framer, Verifier) get the code_nav tool.
+ *
+ * `investigation.critic` and `creation.divergence` are the workflow policies of docs/workflow-policy.md (src/workflow/policy.ts), off by
+ * default until measured: an independent critic of answers (`auto`: on an explicit review request or when the Primary reports open
+ * hypotheses or uncertainty; `always`), and `creation.candidates` divergent candidates → critic selection → refinement (`auto`: when
+ * the front passes `candidates` ≥ 2; `always`).
  */
 export interface CheckerSettings { gate: "auto" | "always" | "review" | "off"; threshold: number; maxFixRounds: number }
 export interface SingleSettings {
@@ -183,10 +189,31 @@ export interface SingleSettings {
    * user's wording; `evidence` also re-reads the changed code and re-runs trusted checks itself (the earlier behaviour).
    */
   mainReview: "evidence" | "report";
+  investigation: InvestigationSettings;
+  creation: CreationSettings;
 }
 /** threshold 7: calibrated on 90 stored v1 single results (experiments/risk/calibrate.ts): all 7 failed ones score 8 or more, 66% of all are verified (74% at 5). */
-export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false, pipeline: "v1", frame: "grounded", checker: { gate: "review", threshold: 7, maxFixRounds: 1 }, nav: true, mainReview: "report" };
-const SINGLE_KEYS = new Set(["ledger", "pipeline", "frame", "checker", "nav", "mainReview"]);
+export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false, pipeline: "v1", frame: "grounded", checker: { gate: "review", threshold: 7, maxFixRounds: 1 }, nav: true, mainReview: "report", investigation: { critic: "off" }, creation: { divergence: "off", candidates: 3 } };
+const SINGLE_KEYS = new Set(["ledger", "pipeline", "frame", "checker", "nav", "mainReview", "investigation", "creation"]);
+const GATES = ["off", "auto", "always"];
+function parseInvestigation(value: unknown): InvestigationSettings {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.single.investigation: expected object");
+  const fields = value as Record<string, unknown>;
+  if (Object.keys(fields).some(key => key !== "critic")) throw new RouteConfigError("config.single.investigation: unknown field");
+  if (fields.critic !== undefined && !GATES.includes(fields.critic as string)) throw new RouteConfigError('config.single.investigation.critic: expected "off", "auto" or "always"');
+  return { critic: (fields.critic as InvestigationSettings["critic"] | undefined) ?? DEFAULT_SINGLE.investigation.critic };
+}
+function parseCreation(value: unknown): CreationSettings {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.single.creation: expected object");
+  const fields = value as Record<string, unknown>;
+  if (Object.keys(fields).some(key => key !== "divergence" && key !== "candidates")) throw new RouteConfigError("config.single.creation: unknown field");
+  if (fields.divergence !== undefined && !GATES.includes(fields.divergence as string)) throw new RouteConfigError('config.single.creation.divergence: expected "off", "auto" or "always"');
+  if (fields.candidates !== undefined && fields.candidates !== 2 && fields.candidates !== 3) throw new RouteConfigError("config.single.creation.candidates: expected 2 or 3");
+  return {
+    divergence: (fields.divergence as CreationSettings["divergence"] | undefined) ?? DEFAULT_SINGLE.creation.divergence,
+    candidates: (fields.candidates as CreationSettings["candidates"] | undefined) ?? DEFAULT_SINGLE.creation.candidates,
+  };
+}
 const CHECKER_KEYS = new Set(["gate", "threshold", "maxFixRounds"]);
 export function parseSingleConfig(value: unknown): SingleSettings {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.single: expected object");
@@ -217,6 +244,8 @@ export function parseSingleConfig(value: unknown): SingleSettings {
     checker,
     nav: (settings.nav as boolean | undefined) ?? DEFAULT_SINGLE.nav,
     mainReview: (settings.mainReview as SingleSettings["mainReview"] | undefined) ?? DEFAULT_SINGLE.mainReview,
+    investigation: settings.investigation === undefined ? { ...DEFAULT_SINGLE.investigation } : parseInvestigation(settings.investigation),
+    creation: settings.creation === undefined ? { ...DEFAULT_SINGLE.creation } : parseCreation(settings.creation),
   };
 }
 

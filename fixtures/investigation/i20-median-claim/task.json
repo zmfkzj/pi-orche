@@ -1,0 +1,16 @@
+{
+  "id": "i20-median-claim",
+  "title": "Is median correct for all inputs?",
+  "category": "analysis",
+  "language": "en",
+  "instruction": "A pull request comment claims: 'src/stats.js median is correct for every non-empty array of numbers; the tests prove it.' Decide whether the claim is true. If it is false, give the smallest concrete counterexample you can, the value median returns for it and the correct value, and explain the cause. Do not modify files.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

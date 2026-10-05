@@ -1,0 +1,18 @@
+{
+  "items": [
+    {
+      "id": "prefix-match",
+      "criterion": "Identify src/router.js:14 (compile) as missing an end anchor: a route matches extra trailing segments (for example /health/extra), dispatching the wrong handler instead of 404."
+    },
+    {
+      "id": "method-match",
+      "criterion": "Identify src/router.js:26 or the dispatch loop as not checking route.method against req.method: requests with a different method invoke the first path match, e.g. POST /items invokes GET /items instead of creating an item."
+    },
+    {
+      "id": "chunk-loss",
+      "criterion": "Identify src/middleware.js:13 (readJson) as replacing previously collected body chunks: a valid JSON body split over chunks is parsed from only its final chunk and can return 400 or lose earlier data."
+    }
+  ],
+  "referenceAnswer": "Three bugs: src/router.js:14 compile builds a regex without a $ end anchor; /health/extra matches /health instead of returning 404. src/router.js:26 dispatch iterates routes without a method check; POST /items selects the GET /items handler and never creates an item. src/middleware.js:13 readJson uses chunks.splice(0, chunks.length, chunk), throwing away previous body chunks, so valid multipart/chunked JSON may produce 400 or parse only the final chunk.",
+  "passRule": "all"
+}

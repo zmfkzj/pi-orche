@@ -1,0 +1,16 @@
+{
+  "id": "i09-rbac-export-ko",
+  "title": "viewer의 리포트 내보내기 권한",
+  "category": "analysis",
+  "language": "ko",
+  "instruction": "사용자 mina(역할 analyst)가 report:export 권한을 가지는지 알려 주세요. 권한이 어떤 순서로 결정되는지(역할 상속, allow와 deny의 우선순위)를 코드 위치와 함께 설명하고, mina에 대한 최종 판정과 그 근거가 되는 정책 항목을 짚어 주세요. 코드는 수정하지 마세요.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

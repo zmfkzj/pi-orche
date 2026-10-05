@@ -1,0 +1,30 @@
+{
+  "items": [
+    {
+      "id": "entry",
+      "criterion": "Identify src/refunds.js refundInvoice as the entry point and validateRefund as the validator called before calculation."
+    },
+    {
+      "id": "validation",
+      "criterion": "Only paid invoices are accepted; quantity must be a positive integer no greater than quantity minus refundedQuantity."
+    },
+    {
+      "id": "window",
+      "criterion": "src/refunds.js validateRefund rejects when now - paidAt is greater than 30 * 86,400,000 milliseconds; exactly 30 days is accepted, using caller-supplied now."
+    },
+    {
+      "id": "proration",
+      "criterion": "Partial refunds use cumulative paidTotal * (refundedQuantity + requested quantity) / total quantity, rounded to cents, minus previous refundedAmount; not independent per-unit rounding."
+    },
+    {
+      "id": "rounding",
+      "criterion": "roundMoney in src/money.js uses Math.round(value * 100) / 100; cumulative amount and the difference are rounded, and paidTotal is validated nonnegative and finite."
+    },
+    {
+      "id": "state",
+      "criterion": "Return contains amount and a new invoice object, updating refundedQuantity/refundedAmount; status remains paid until all quantity is refunded, then becomes refunded, without mutating original invoice."
+    }
+  ],
+  "referenceAnswer": "환불 진입점은 src/refunds.js의 refundInvoice(invoice, quantity, now)이며, 계산 전에 같은 모듈의 validateRefund를 호출합니다. status가 paid인 청구서만 허용하고, 요청 수량은 양의 정수이며 전체 수량에서 이미 환불한 수량을 뺀 잔여 수량 이하여야 합니다.\n기간 검증은 validateRefund에서 now - paidAt > 30 * 86_400_000이면 거부하는 방식입니다. 정확히 30일인 시점은 허용됩니다. now는 호출자가 전달하므로 내부에서 현재 시각을 읽지 않습니다.\n부분 환불은 개별 단가를 각각 반올림하지 않습니다. 누적 수량 = refundedQuantity + 요청 수량, 누적 환불액 = roundMoney(paidTotal * 누적 수량 / 전체 quantity)로 구하고 이번 지급액은 roundMoney(누적 환불액 - 기존 refundedAmount)입니다. 예를 들어 10달러를 3개에 나눠 환불하면 3.33, 3.34, 3.33달러가 됩니다.\npaidTotal은 requireAmount로 유한한 음이 아닌 값인지 검증합니다. src/money.js의 roundMoney는 Math.round(value * 100) / 100을 사용하며, 누적 환불액과 이번 지급액 모두 센트로 반올림합니다.\n결과는 { amount, invoice }입니다. 원본 invoice를 변경하지 않고 새 객체를 만들어 refundedQuantity와 refundedAmount를 누적 값으로 갱신합니다. 누적 수량이 전체 수량에 도달할 때 status는 refunded가 되고, 그 전에는 paid를 유지합니다.",
+  "passRule": "all"
+}

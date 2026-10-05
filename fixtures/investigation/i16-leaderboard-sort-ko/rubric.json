@@ -1,0 +1,18 @@
+{
+  "items": [
+    {
+      "id": "builtin",
+      "criterion": "States that the built-in Array.prototype.sort is guaranteed stable (ES2019+), so with a score-only comparator ties keep the input (signup) order."
+    },
+    {
+      "id": "legacy",
+      "criterion": "States that quickSortBy is not stable (partition swaps can reorder equal elements) and gives or describes a concrete counterexample input where equal scores come out out of signup order."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "Concludes the built-in sort (src/leaderboard.js) satisfies the requirement and quickSortBy does not."
+    }
+  ],
+  "referenceAnswer": "내장 sort만 요구사항을 보장합니다. Array.prototype.sort는 ES2019부터 안정 정렬이 보장되므로, src/leaderboard.js처럼 점수만 비교해도 동점자는 입력 순서(가입 순서)를 유지합니다. src/legacy-sort.js의 quickSortBy는 분할 과정의 swap 때문에 안정적이지 않습니다. 예를 들어 가입 순서 [u1:5, u2:9, u3:5]를 내림차순 정렬하면 u2, u3, u1이 되어 동점(5)인 u3이 먼저 가입한 u1보다 앞에 옵니다. 반면 내장 sort는 u2, u1, u3입니다. 따라서 legacy quickSortBy로 바꾸면 안 됩니다.",
+  "passRule": "all"
+}

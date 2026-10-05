@@ -1,0 +1,16 @@
+{
+  "id": "i11-config-precedence",
+  "title": "Which port does the server bind?",
+  "category": "analysis",
+  "language": "en",
+  "instruction": "We start the server with `PORT=8080 node src/server.js --port 9090` while config/app.json sets port 7070. Which port does it listen on? Explain the precedence of the configuration sources as the code implements it (with locations) and whether the documentation in the repository matches. Do not modify files.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

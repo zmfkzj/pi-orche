@@ -1,0 +1,4 @@
+{
+  "category": "cause",
+  "trap": "src/config.js comment suggests the cap is reached early because the base is too high in production (plausible wrong cause: configuration)."
+}

@@ -1,0 +1,4 @@
+{
+  "category": "compare",
+  "trap": "Both functions look like the obvious answer (debounce for 'after typing stops', throttle for 'at most once per 300ms'); neither satisfies both conditions."
+}

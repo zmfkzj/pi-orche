@@ -1,0 +1,16 @@
+{
+  "id": "i01-rootcause-report-ko",
+  "title": "Rootcause Report Ko",
+  "category": "analysis",
+  "language": "ko",
+  "instruction": "동봉된 logs/incident.jsonl을 logtool로 집계하면 에러율이 운영팀이 확인한 값보다 낮게 나옵니다. 실행 결과와 로그를 대조해 정확한 원인을 조사하고, 원인이 있는 파일과 함수, 잘못 집계되는 과정, 현재 출력되는 수치와 올바른 수치(전체 건수, 에러 건수, 에러율)를 보고해 주세요. 코드는 수정하지 말고 조사 결과만 답변해 주세요.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": true,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

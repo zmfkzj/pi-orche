@@ -1,0 +1,16 @@
+{
+  "id": "c05-mode-names",
+  "title": "Names for the co-op mode",
+  "category": "docs",
+  "language": "en",
+  "instruction": "Propose names for Ember Hollow's new two-player co-op mode in docs/naming.md. List exactly 5 candidates, one per line in the form `- **Name** — one-line rationale`; each name at most 14 characters and different from every existing mode name in data/modes.json. Mark the one you recommend by appending (recommended) to its line.",
+  "expectsChanges": true,
+  "timeoutSec": 1800,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": true
+  }
+}

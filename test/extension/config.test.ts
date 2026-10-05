@@ -255,7 +255,7 @@ describe("orche config discovery", () => {
   });
 
   it("defaults single.ledger to off and reads it from the selected file", async () => {
-    const defaults = { ledger: false, pipeline: "v1", frame: "grounded", checker: { gate: "review", threshold: 7, maxFixRounds: 1 }, nav: true, mainReview: "report" };
+    const defaults = { ledger: false, pipeline: "v1", frame: "grounded", checker: { gate: "review", threshold: 7, maxFixRounds: 1 }, nav: true, mainReview: "report", investigation: { critic: "off" }, creation: { divergence: "off", candidates: 3 } };
     expect(DEFAULT_SINGLE).toEqual(defaults);
     expect(parseSingleConfig({})).toEqual(defaults);
     expect(parseSingleConfig({ ledger: true })).toEqual({ ...defaults, ledger: true });
@@ -268,11 +268,22 @@ describe("orche config discovery", () => {
   });
 
   it("reads the v2 pipeline settings; v2 implies the ledger", () => {
-    expect(parseSingleConfig({ pipeline: "v2" })).toEqual({ ledger: true, pipeline: "v2", frame: "grounded", checker: { gate: "review", threshold: 7, maxFixRounds: 1 }, nav: true, mainReview: "report" });
+    const policies = { investigation: { critic: "off" }, creation: { divergence: "off", candidates: 3 } };
+    expect(parseSingleConfig({ pipeline: "v2" })).toEqual({ ledger: true, pipeline: "v2", frame: "grounded", checker: { gate: "review", threshold: 7, maxFixRounds: 1 }, nav: true, mainReview: "report", ...policies });
     expect(parseSingleConfig({ pipeline: "v2", ledger: false, frame: "spec", checker: { gate: "always", threshold: 3, maxFixRounds: 0 }, nav: false }))
-      .toEqual({ ledger: true, pipeline: "v2", frame: "spec", checker: { gate: "always", threshold: 3, maxFixRounds: 0 }, nav: false, mainReview: "report" });
-    expect(parseSingleConfig({ frame: "off", checker: { gate: "off" } })).toEqual({ ledger: false, pipeline: "v1", frame: "off", checker: { gate: "off", threshold: 7, maxFixRounds: 1 }, nav: true, mainReview: "report" });
+      .toEqual({ ledger: true, pipeline: "v2", frame: "spec", checker: { gate: "always", threshold: 3, maxFixRounds: 0 }, nav: false, mainReview: "report", ...policies });
+    expect(parseSingleConfig({ frame: "off", checker: { gate: "off" } })).toEqual({ ledger: false, pipeline: "v1", frame: "off", checker: { gate: "off", threshold: 7, maxFixRounds: 1 }, nav: true, mainReview: "report", ...policies });
     expect(parseSingleConfig({ mainReview: "evidence", checker: { gate: "auto" } })).toMatchObject({ pipeline: "v1", mainReview: "evidence", checker: { gate: "auto" } });
+  });
+
+  it("reads the investigation and creation workflow policies (off by default)", () => {
+    expect(parseSingleConfig({ investigation: { critic: "auto" } })).toMatchObject({ investigation: { critic: "auto" }, creation: { divergence: "off", candidates: 3 } });
+    expect(parseSingleConfig({ creation: { divergence: "always", candidates: 2 } })).toMatchObject({ investigation: { critic: "off" }, creation: { divergence: "always", candidates: 2 } });
+    expect(parseSingleConfig({ creation: {} })).toMatchObject({ creation: { divergence: "off", candidates: 3 } });
+  });
+
+  it.each([{ investigation: null }, { investigation: { critic: "review" } }, { investigation: { other: 1 } }, { creation: [] }, { creation: { divergence: "on" } }, { creation: { candidates: 4 } }, { creation: { candidates: 1 } }, { creation: { n: 3 } }])("rejects invalid workflow policy settings %j", value => {
+    expect(() => parseSingleConfig(value)).toThrow("config.single");
   });
 
   it.each([{ pipeline: "v3" }, { frame: "full" }, { checker: null }, { checker: { gate: "sometimes" } }, { checker: { threshold: -1 } }, { checker: { threshold: 2.5 } }, { checker: { maxFixRounds: 3 } }, { checker: { other: 1 } }, { nav: "yes" }, { mainReview: "none" }])("rejects invalid single pipeline settings %j", value => {

@@ -1,0 +1,16 @@
+{
+  "id": "c02-logo",
+  "title": "Game logo",
+  "category": "feature",
+  "language": "en",
+  "instruction": "Design the Ember Hollow game logo: assets/brand/logo.png, 1024x512 PNG with a transparent background, the title EMBER HOLLOW clearly legible. Follow the typography and palette in docs/art-direction.md.",
+  "expectsChanges": true,
+  "timeoutSec": 1800,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": true
+  }
+}

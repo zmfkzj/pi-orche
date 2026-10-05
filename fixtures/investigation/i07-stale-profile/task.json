@@ -1,0 +1,16 @@
+{
+  "id": "i07-stale-profile",
+  "title": "Profile edits not visible",
+  "category": "analysis",
+  "language": "en",
+  "instruction": "After a user updates their display name, the profile page keeps showing the old name for several minutes. The README says reads may be stale for a short time, but product says edits must be visible immediately after saving. Investigate whether this is the expected eventual consistency or a defect: name the cause (file and function), explain exactly why the old value is served and for how long, and run `npm run simulate` to support your conclusion. Do not modify files; report only.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

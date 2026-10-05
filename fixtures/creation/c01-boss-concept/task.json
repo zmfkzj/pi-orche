@@ -1,0 +1,16 @@
+{
+  "id": "c01-boss-concept",
+  "title": "Final boss concept",
+  "category": "feature",
+  "language": "en",
+  "instruction": "Create the concept for Ember Hollow's final boss. Deliver one concept illustration at assets/concepts/boss.png (1024x1024 PNG) and a one-page design note at docs/boss.md with the boss's name, its silhouette idea, two attack patterns and its weakness. It must fit docs/art-direction.md.",
+  "expectsChanges": true,
+  "timeoutSec": 1800,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": true
+  }
+}

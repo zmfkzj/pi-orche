@@ -1,0 +1,16 @@
+{
+  "id": "i08-listener-leak",
+  "title": "Memory grows per request",
+  "category": "analysis",
+  "language": "en",
+  "instruction": "The API process's memory grows steadily under load and after a few minutes Node prints `MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 config listeners added`. `npm run simulate` reproduces it with fake requests. Find the cause (file and function), explain why memory grows with every request and what else goes wrong besides memory, and say what the listener count is after 100 requests. Do not modify files; report only.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "id": "c09-stamina-icon",
+  "title": "Stamina potion icon",
+  "category": "feature",
+  "language": "en",
+  "instruction": "Add a stamina potion icon: assets/items/potion-stamina.png, 64x64 PNG with a transparent background, in the same style as the existing potion icons in assets/items/.",
+  "expectsChanges": true,
+  "timeoutSec": 1800,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": true
+  }
+}

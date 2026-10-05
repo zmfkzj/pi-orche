@@ -1,0 +1,16 @@
+{
+  "id": "i03-router-review",
+  "title": "router review",
+  "category": "review",
+  "language": "en",
+  "instruction": "Review src/router.js and src/middleware.js for bugs; list each with file:line and impact; do not change code.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": true,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

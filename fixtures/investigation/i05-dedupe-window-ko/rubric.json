@@ -1,0 +1,18 @@
+{
+  "items": [
+    {
+      "id": "location",
+      "criterion": "Identifies src/dedupe.js isDuplicate (the comparison of the elapsed time with ttlSeconds)."
+    },
+    {
+      "id": "mechanism",
+      "criterion": "Explains the unit mismatch: Date.now() differences are in milliseconds but are compared against ttlSeconds (60) without converting to milliseconds."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "States that duplicates are only blocked for about 60 milliseconds (not 60 seconds), so a resend a few seconds later is processed again."
+    }
+  ],
+  "referenceAnswer": "원인은 src/dedupe.js의 isDuplicate입니다. 경과 시간(Date.now() 차이, 밀리초)을 config의 ttlSeconds(60)와 단위 변환 없이 비교합니다. 그래서 중복 차단 창이 60초가 아니라 60밀리초뿐이고, 몇 초 뒤 재전송된 같은 이벤트는 다시 처리됩니다. 파일은 수정하지 않았습니다.",
+  "passRule": "all"
+}

@@ -1,0 +1,16 @@
+{
+  "id": "i18-rate-limit-replicas",
+  "title": "Rate limiter in a 4-replica deployment",
+  "category": "review",
+  "language": "en",
+  "instruction": "The API must allow at most 100 requests per minute per API key, across the whole service. The limiter is src/limiter.js and the service is deployed with deploy/service.yaml. Evaluate whether the design meets the requirement in production: what limit do clients actually get, what other situations break it, and what would you change? Cite code and configuration locations. Do not modify files.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

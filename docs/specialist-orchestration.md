@@ -588,6 +588,7 @@ Phase 6  runtime·LSP adapter, 도그푸딩(사용자의 Python·Rust 저장소)
 - G-X 1단계 (10.5): 2026-10-05 02:02–05:05 UTC 실행, **불합격**(통과 22/24 vs 23/24, 성공당 비용 1.83배). main context −56%, d1·d6 탐지 6/6. 원인은 Framer 해석을 main이 worker보다 우선한 것, 탐지한 모호성의 해석이 여전히 동전 던지기인 것, Verifier의 극단 입력 finding이다(10.5). 비용(카탈로그 가격): 본 실행 $37.90 + smoke $0.93.
 - G-X 뒤 (사용자 승인): Verifier 기본 gate `review`, Framer 해석 참고용(v2 안, 미측정). G-M (10.6): v1에서 main 재검증을 뺀 `mainReview: "report"`는 품질(24/24 vs 23/24)과 context(0.41배)는 통과, 총비용 +6.8%로 비용 기준(+5%)을 근소하게 놓쳤고 unknown usage로 HOLD → 기본값 유지, opt-in. 비용(카탈로그 가격): 본 실행 $26.20 + smoke $0.43.
 - G-M2 (10.7, 2026-10-05 09:29–11:31 UTC): 합산 판정 통과(48/48 vs 46/48, context 0.41배, 비용 0.97배) → `single.mainReview` 기본값을 `report`로 변경. 비용(카탈로그 가격): $26.94.
+- Workflow Policy (2026-10-05, `docs/workflow-policy.md`): Work Type → Policy → Capability → Primary를 범용 topology 엔진 없이 구현했다. execution은 v1/v2 그대로(정책에서 유도, 오프라인 회귀 G-E0 통과), investigation critic과 creation divergence는 opt-in(기본 꺼짐). G-E1(스키마 회귀 smoke)은 통과했고, G-I2·G-C2는 과제 세트를 만들어 검토 대기 중이다(`docs/workflow-policy.md` 4장).
 
 ### 11.1 다음에 할 것 (2026-10-05 기준, 우선순위 순)
 

@@ -1,0 +1,16 @@
+{
+  "id": "c04-theme",
+  "title": "Night market launcher theme",
+  "category": "feature",
+  "language": "en",
+  "instruction": "Create a 'night market' colour theme for the game launcher: themes/night-market.css must define every CSS custom property listed in themes/_template.css with a hex colour, and the contrast ratio of --text on --bg must be at least 4.5:1. Add a short section to docs/themes.md explaining the theme.",
+  "expectsChanges": true,
+  "timeoutSec": 1800,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": true
+  }
+}

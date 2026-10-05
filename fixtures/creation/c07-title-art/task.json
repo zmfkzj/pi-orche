@@ -1,0 +1,16 @@
+{
+  "id": "c07-title-art",
+  "title": "Title screen key art",
+  "category": "feature",
+  "language": "en",
+  "instruction": "Paint the title-screen background: assets/ui/title-bg.png, 1920x1080 PNG. Keep the top-centre area (x 640-1280, y 0-360) calm and free of important detail because the logo goes there; the ember light should lead the eye toward it.",
+  "expectsChanges": true,
+  "timeoutSec": 1800,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": true
+  }
+}

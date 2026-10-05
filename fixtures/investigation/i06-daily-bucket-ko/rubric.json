@@ -1,0 +1,26 @@
+{
+  "items": [
+    {
+      "id": "location",
+      "criterion": "Identifies src/report.js dayKey (toISOString().slice(0, 10)) as the cause."
+    },
+    {
+      "id": "mechanism",
+      "criterion": "Explains that toISOString formats in UTC, so the stored UTC instants are bucketed by UTC date instead of the Asia/Seoul (UTC+9) business date."
+    },
+    {
+      "id": "not-storage",
+      "criterion": "Does not accept the comment in src/report.js claiming createdAt is stored in KST; the data in data/orders.json are UTC instants (ending in Z)."
+    },
+    {
+      "id": "window",
+      "criterion": "States that orders between 00:00 and 09:00 KST are affected (they fall on the previous UTC date)."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "Gives the current totals 2026-03-01: 47000, 2026-03-02: 12000 and the correct KST totals 2026-03-01: 30000, 2026-03-02: 29000."
+    }
+  ],
+  "referenceAnswer": "원인은 src/report.js의 dayKey입니다. toISOString()은 UTC로 포맷하므로 UTC 날짜로 묶이고, 영업일 기준인 Asia/Seoul(UTC+9) 날짜가 아닙니다. createdAt이 KST로 저장된다는 주석은 사실과 다릅니다. data/orders.json의 값은 Z로 끝나는 UTC 시각입니다. 한국 시간 00:00~09:00의 주문이 전날로 집계됩니다. 샘플 기준 현재 출력은 2026-03-01: 47000, 2026-03-02: 12000이고, 올바른 KST 합계는 2026-03-01: 30000, 2026-03-02: 29000입니다.",
+  "passRule": "all"
+}

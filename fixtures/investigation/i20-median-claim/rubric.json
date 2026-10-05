@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "id": "cause",
+      "criterion": "Identifies that median sorts with the default Array.prototype.sort (no comparator), which compares numbers as strings."
+    },
+    {
+      "id": "counterexample",
+      "criterion": "Gives a concrete counterexample where the result is wrong, e.g. [10, 2, 3] → median returns 2 but the correct median is 3 (any valid counterexample with the returned and the correct value)."
+    },
+    {
+      "id": "tests",
+      "criterion": "Notes the existing tests only use single-digit numbers (or otherwise do not exercise multi-digit ordering), so passing tests do not prove the claim."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "Concludes the claim is false."
+    }
+  ],
+  "referenceAnswer": "The claim is false. src/stats.js median sorts with values.slice().sort() and no comparator, so numbers are compared as strings. Counterexample: [10, 2, 3] sorts to [10, 2, 3] and median returns 2; the correct median is 3. The tests in test/stats.test.js use only single-digit numbers, where string order equals numeric order, so they pass without proving the claim.",
+  "passRule": "all"
+}

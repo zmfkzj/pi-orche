@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "id": "loss",
+      "criterion": "Identifies that src/orders.js placeOrder commits the DB transaction and then publishes to the broker as a separate step (dual write): a crash or publish failure after commit loses the event for a confirmed order."
+    },
+    {
+      "id": "phantom-or-dup",
+      "criterion": "Identifies at least one more failure: the retry of publish after a timeout (or a retried request) can publish duplicates, or publishing is not tied to the transaction outcome; i.e. delivery is at most at-least-once, not exactly-once."
+    },
+    {
+      "id": "idempotency",
+      "criterion": "Explains that the idempotency key in the design only lets consumers drop duplicates; it does not prevent loss, so it does not make the design exactly-once."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "Concludes the implementation does not meet the requirement and the design doc's exactly-once claim is false; recommends a transactional outbox (or equivalent) as the fix direction."
+    }
+  ],
+  "referenceAnswer": "요구사항도, 문서의 exactly-once 주장도 만족하지 않습니다. src/orders.js placeOrder는 db.transaction으로 주문을 커밋한 뒤 별도 단계로 broker.publish를 호출합니다(dual write). 커밋 후 publish 전에 프로세스가 죽거나 publish가 실패하면 확정된 주문의 이벤트가 유실됩니다. publish가 타임아웃 후 재시도되면 브로커가 실제로 받은 경우 중복 발행이 생기므로 기껏해야 at-least-once입니다. 설계 문서의 idempotency key는 소비자가 중복을 버리게 해 줄 뿐 유실을 막지 못합니다. 같은 트랜잭션에 outbox 행을 쓰고 별도 relay가 발행하는 transactional outbox가 필요합니다.",
+  "passRule": "all"
+}

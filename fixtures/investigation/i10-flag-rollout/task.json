@@ -1,0 +1,16 @@
+{
+  "id": "i10-flag-rollout",
+  "title": "Is new-checkout on for u-42?",
+  "category": "analysis",
+  "language": "en",
+  "instruction": "Support asks whether the `new-checkout` flag is on for user `u-42` and for user `u-3` in production, and why. Explain how a flag is evaluated (the order of the rules and how the percentage rollout picks users, with code locations) and give the answer for both users with the reason for each. Do not modify files.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

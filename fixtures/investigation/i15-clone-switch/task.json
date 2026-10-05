@@ -1,0 +1,16 @@
+{
+  "id": "i15-clone-switch",
+  "title": "Replace cloneJSON with structuredClone?",
+  "category": "analysis",
+  "language": "en",
+  "instruction": "A pull request proposes replacing `cloneJSON` with the built-in `structuredClone` in src/session.js because it is 'faster and handles Dates'. Evaluate the change for the session objects this code actually handles: list every behavioural difference that matters here, say whether the change is safe to merge as is, and support the decisive point with code locations (and a quick run if useful). Do not modify files.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

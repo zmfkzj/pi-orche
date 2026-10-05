@@ -41,7 +41,10 @@ import { ExtendableDeadline, extensionEvent, formatExtensionProgress, formatExte
 import { createAssignmentProjector, type ContextClearedStats } from "../pi/context-projection.js";
 import { originalRequestOf, recordCheck, recordFailure, recordHandoff, recordRecheck, recordResult, renderLedgerForWorker, renderLedgerSummary, renderResumeBriefing, startLedger, type LedgerEvent, type TaskLedger } from "../single/ledger.js";
 import { SpecialistError, type SpecialistStats } from "../specialists/session.js";
-import { runFramer, runVerifier, type SpecialistContext } from "../single/pipeline.js";
+import { runCritic, runFramer, runSelector, runVerifier, type SpecialistContext } from "../single/pipeline.js";
+import { formatPolicy, resolvePolicy, workTypeError, workTypeOf, type WorkflowPolicy, type WorkType } from "../workflow/policy.js";
+import { ANSWER_UNCERTAINTY_INSTRUCTIONS, criticTrigger, formatCritique, responsesOf, synthesisError, synthesisPrompt, type CritiqueOutcome } from "../workflow/critique.js";
+import { blindOrder, candidatesError, candidatesOf, candidatesSection, ensureScratch, formatDivergence, refinePrompt, scratchFor, type DivergenceOutcome } from "../workflow/divergence.js";
 import { formatFrame, framedRequest, renderContract, type Frame } from "../single/frame.js";
 import { assessRisk, formatRisk, type RiskAssessment } from "../single/risk.js";
 import { fixPrompt, formatCheck, recheck, scratchDir, writeScratchDiff, type Check, type Recheck } from "../single/check.js";
@@ -53,6 +56,9 @@ export const orcheTaskParameters = Type.Object({
   worker: Type.Optional(Type.String()),
   files: Type.Optional(Type.Array(Type.String())),
   task: Type.Optional(Type.String({ pattern: "^T[1-9][0-9]*$", description: "Task ledger id (T1, T2, …) named in an earlier result. Pass it for a follow-up of that same task, also when another or a new worker takes it over; omit it for a different user task, even when reusing a worker. Used only when single.ledger is on." })),
+  type: Type.Optional(Type.Union([Type.Literal("investigation"), Type.Literal("execution"), Type.Literal("creation")], { description: "The work type you classified, when the orche rules ask for it. Omitted: answer is investigation, implement execution, game-asset and video creation." })),
+  candidates: Type.Optional(Type.Integer({ minimum: 1, maximum: 3, description: "Creation only, when the orche rules ask for it: how many divergent candidates to make before a critic selects one (1: none)." })),
+  then: Type.Optional(Type.Literal("execution", { description: "Creation only: the user also asked to apply or integrate the result; the result names the next step." })),
   git: Type.Optional(Type.Object({
     commit: Type.Optional(Type.Boolean({ description: "Authorize git commit for this assignment." })),
     push: Type.Optional(Type.Boolean({ description: "Authorize git push (implies commit). Never force-push." })),
@@ -133,6 +139,23 @@ export interface TaskDetails {
    * the Verifier's check, the deterministic recheck after the fix round, and what each specialist session cost.
    */
   pipeline?: { frame?: Frame; risk?: RiskAssessment; check?: Check; recheck?: Recheck; fixRounds: number; specialists: SpecialistStats[]; notes?: string[] };
+  /**
+   * Investigation and creation workflow policies (docs/workflow-policy.md; `single.investigation`, `single.creation`), present when a
+   * policy step beyond the Primary was configured for this assignment: the policy line, the critic's trigger, critique and the
+   * Primary's responses (investigation), or the candidates, the blind order, the selection and the refined one (creation), the next
+   * phase the front asked for, and what the specialists cost. Execution keeps its own `pipeline`.
+   */
+  workflow?: WorkflowDetails;
+}
+export interface WorkflowDetails {
+  type: WorkType;
+  policy: string;
+  critique?: CritiqueOutcome;
+  divergence?: DivergenceOutcome;
+  /** `then` of the call: the phase the front continues with after this result. */
+  next?: "execution";
+  specialists: SpecialistStats[];
+  notes?: string[];
 }
 /** The workspace/git part of a task's details. */
 type ChangeReport = Pick<TaskDetails, "changes" | "otherChanges" | "submodules" | "headMoved">;
@@ -192,6 +215,8 @@ interface Worker {
   /** The task ledger of this worker's task (single workflow with `single.ledger`), read when the worker compacts. */
   taskId?: string;
   ledger?: () => TaskLedger | undefined;
+  /** Extra RESULT validation of the current workflow round (creation candidates, investigation synthesis); cleared after the round. */
+  roundCheck?: (kind: string, data: unknown) => string | undefined;
 }
 
 function taskCompactionFor(worker: Worker) {
@@ -211,6 +236,8 @@ export interface WorkerPoolOptions {
   stopTimeoutMs?: number;
   /** Receives every task-ledger event (the extension persists each as a session entry). Best effort: a throwing callback is ignored. */
   onLedgerEvent?: (event: LedgerEvent) => void;
+  /** Random source of the creation policy's blind candidate order (test seam; default Math.random). */
+  random?: () => number;
 }
 
 /** The ownership canonicalizer in phases.ts is private; mirror its syntax here,
@@ -525,7 +552,7 @@ function disputesOf(data: unknown): [string, string][] {
   });
 }
 
-function assignmentPrompt(args: TaskParameters & { mainMode?: MainMode }, commands: readonly string[], imagesAvailable = false, grant?: GitGrant): string {
+function assignmentPrompt(args: TaskParameters & { mainMode?: MainMode }, commands: readonly string[], imagesAvailable = false, grant?: GitGrant, extraInstructions = ""): string {
   const task = args.context?.trim() ? `${args.request}\n\n## Context from the requesting session\n${args.context.trim()}` : args.request;
   const scope = args.files === undefined ? "anywhere inside the workspace" : JSON.stringify(args.files);
   const instructions: Record<TaskRole, string> = {
@@ -539,7 +566,7 @@ function assignmentPrompt(args: TaskParameters & { mainMode?: MainMode }, comman
     verify: `Independent read-only review. DO NOT EDIT. ${commands.length ? `Run configured checks via bash: ${commands.map(command => JSON.stringify(command)).join(", ")}` : "Discover and run the project's own checks via bash (package.json, Makefile, pyproject.toml, Cargo.toml, go.mod or CI config)"}, plus focused checks; inspect source and git diff. report_result {kind:"verify",summary,data:{passed:boolean,evidence:[commands and outcomes],issues:[{file,description}]}}. passed:true requires actual passing checks; unexecuted checks never count as passed.`,
   };
   const rasterInstructions = imagesAvailable ? '\nUse generate_image for raster art (sprites, textures, icons, concept art, thumbnails). Request background "transparent" for sprites/icons. Always pass width/height for the exact target size: the gateway ignores size and returns roughly 1254x1254. Use kernel "nearest" for pixel art. Inspect results with read. Keep procedural/SVG generation for vector or pixel-exact assets. Record the generation prompt in outputs[].spec.' : "";
-  return `Assignment: ${args.role}. You work alone; there are no peers or backlog.\n${task}\n\n${instructions[args.role]}${rasterInstructions}\nStart summary with the conclusion (1–3 sentences), then evidence as path:line references and command outcomes. Do not paste code, diffs or logs the reader can open. Answer summaries stay complete but cite code by location instead of long quotes.\n\n${gitAssignmentLine(grant)}`;
+  return `Assignment: ${args.role}. You work alone; there are no peers or backlog.\n${task}\n\n${instructions[args.role]}${rasterInstructions}${extraInstructions ? `\n${extraInstructions}` : ""}\nStart summary with the conclusion (1–3 sentences), then evidence as path:line references and command outcomes. Do not paste code, diffs or logs the reader can open. Answer summaries stay complete but cite code by location instead of long quotes.\n\n${gitAssignmentLine(grant)}`;
 }
 
 export class WorkerPool {
@@ -550,6 +577,8 @@ export class WorkerPool {
   /** Task ledgers by task id (single workflow with `single.ledger`), including tasks whose worker is gone. */
   private readonly ledgers = new Map<string, TaskLedger>();
   private nextTaskId = 1;
+  /** Creation-policy rounds, for their scratch directories (`.orche/scratch/<worker>-c<n>`). */
+  private nextCreation = 1;
   private disposed = false;
   private disposal?: Promise<void>;
   constructor(private readonly options: WorkerPoolOptions) {
@@ -614,6 +643,8 @@ export class WorkerPool {
     return {
       onContextWindow: info => { worker.contextWindow = info.contextWindow; },
       validateResult: (kind, data) => {
+        const round = worker.roundCheck?.(kind, data);
+        if (round) return round;
         if (!["implement", "answer"].includes(kind)) return undefined;
         const ids = worker.singleWorkflow ? worker.requirementIds ?? [] : [];
         return ids.length || (data && typeof data === "object" && "checklist" in data) ? requiredChecklistError(ids, data, kind === "implement" && ids.length > 0) : undefined;
@@ -748,6 +779,8 @@ export class WorkerPool {
   private async executeAssignment(args: TaskArgs, signal: AbortSignal): Promise<{ text: string; details: TaskDetails }> {
     if (this.disposed) throw new Error("Worker pool is disposed");
     const grant = resolveGitGrant(args.role, args.git); // before any worker is touched: a bad grant spawns and changes nothing
+    const typeError = args.mainMode === "single" ? workTypeError(args.role, args.type) : undefined;
+    if (typeError) throw new Error(`Unsupported orche_task arguments: ${typeError}`);
     const started = Date.now();
     const workflowMode = args.mainMode === "single";
     const singleWorkflow = workflowMode && ["explore", "answer", "implement", "verify"].includes(args.role);
@@ -782,6 +815,15 @@ export class WorkerPool {
     // code_nav (single pipeline v2 with single.nav): for the worker sessions spawned now, the Framer and the Verifier; never for main.
     const navOn = singleWorkflow && config.single.pipeline === "v2" && config.single.nav;
     const ledgerNotes: string[] = [];
+    // Workflow policy (docs/workflow-policy.md): the work type's capability sequence around the Primary. Execution is the v1/v2 pipeline;
+    // investigation and creation add their gated steps only when `single.investigation` / `single.creation` switch them on.
+    const workType = workflowMode ? workTypeOf(args.role, args.type) : undefined;
+    const policy: WorkflowPolicy | undefined = workType ? resolvePolicy(workType, config.single, { ...(args.candidates !== undefined ? { requestedCandidates: args.candidates } : {}), standard: singleWorkflow }) : undefined;
+    const workflowNotes: string[] = [];
+    if ((args.candidates !== undefined || args.then !== undefined) && workType !== "creation") workflowNotes.push(`Note: ${[args.candidates !== undefined ? "candidates" : "", args.then !== undefined ? "then" : ""].filter(Boolean).join(" and ")} ignored: creation only.`);
+    const critiqueOn = policy?.type === "investigation" && policy.post.includes("critique");
+    const divergenceOn = policy?.type === "creation" && (policy.candidates ?? 1) > 1;
+    const next = workType === "creation" && args.then === "execution" ? "execution" as const : undefined;
     let continued: TaskLedger | undefined;
     if (args.task !== undefined && ledgerOn) {
       continued = this.ledgers.get(args.task);
@@ -926,21 +968,21 @@ export class WorkerPool {
     meta.files = files;
     meta.latestInput = 0;
     meta.plan = undefined;
-    // Single pipeline v2 (single.pipeline "v2", implement only): the Framer writes the assignment's contract before the worker starts;
+    // Single pipeline v2 (the execution policy with single.pipeline "v2", implement only): the Framer writes the assignment's contract before the worker starts;
     // the worker gets the contract first, then the main session's request verbatim. A Framer failure only costs the contract.
-    const pipelineV2 = ledgerOn && config.single.pipeline === "v2" && args.role === "implement";
+    const pipelineV2 = ledgerOn && policy?.type === "execution" && policy.post.includes("verify");
     const specialists: SpecialistStats[] = [];
     const pipelineNotes: string[] = [];
     let frame: Frame | undefined;
     let handoffRequest = args.request;
-    const specialistContext = (role: "framer" | "checker"): SpecialistContext => ({
+    const specialistContext = (role: "framer" | "checker" | "critic"): SpecialistContext => ({
       runtime, cwd: args.cwd, signal, routes: config.routes, nav: navOn,
       workerRoute: { role: routeRole, model: meta.model ?? route.model, ...(meta.thinking ?? route.thinking ? { thinking: meta.thinking ?? route.thinking } : {}) },
       ...(mainModel ? { inheritedContextWindow: mainWindow } : {}),
       ...(resolved.enabled ? { sessionFile: workerSessionFile(resolved, { ...(args.currentSession?.id ? { parentSessionId: args.currentSession.id } : {}), workerId: `${meta.id}-${role}`, spawnedAt: Date.now() }) } : {}),
-      onTool: name => args.onProgress?.([...(warning ? [warning] : []), `${meta.id} ${role === "framer" ? "Framer" : "Verifier"} · last tool: ${name}`], timingNow()),
+      onTool: name => args.onProgress?.([...(warning ? [warning] : []), `${meta.id} ${role === "framer" ? "Framer" : role === "checker" ? "Verifier" : "Critic"} · last tool: ${name}`], timingNow()),
     });
-    if (pipelineV2 && config.single.frame !== "off") {
+    if (pipelineV2 && policy.pre.includes("frame")) {
       args.onProgress?.([...(warning ? [warning] : []), `${meta.id} Framer · writing the contract`], timingNow());
       try {
         const framed = await runFramer(specialistContext("framer"), {
@@ -956,6 +998,17 @@ export class WorkerPool {
         signal.throwIfAborted();
         pipelineNotes.push(`Warning: the Framer failed (${error instanceof Error ? error.message : String(error)}); the worker got the request without a contract.`);
       }
+    }
+    // Creation policy with divergence: this first round makes the candidates in a scratch directory (added to the write scope for the round).
+    let divergence: DivergenceOutcome | undefined;
+    if (divergenceOn) {
+      const scratch = scratchFor(`${meta.id}-c${this.nextCreation++}`);
+      await ensureScratch(args.cwd, scratch);
+      divergence = { candidates: policy.candidates!, scratch, refineRounds: 0 };
+      handoffRequest = `${handoffRequest}\n${candidatesSection(policy.candidates!, scratch)}`;
+      if (files) meta.files = [...files, `${scratch}/`];
+      const count = policy.candidates!;
+      meta.roundCheck = (_kind, data) => candidatesError(data, count, scratch);
     }
     const definitions = requirementDefinitions(handoffRequest);
     meta.unmetStreak = new Map(singleWorkflow ? [...meta.unmetStreak ?? []].filter(([id]) => definitions.has(id) && definitions.get(id) === meta.requirementDefinitions?.get(id)) : []);
@@ -998,6 +1051,7 @@ export class WorkerPool {
       ...(ledger ? [`Task ledger ${ledger.taskId}, assignment ${ledger.assignments}: pass task "${ledger.taskId}" for a follow-up of this task (also when another or a new worker takes it over); omit it for a different task.`] : []),
       ...(ledger && handedFrom ? [`Note: ${meta.id} took task ${ledger.taskId} over from ${handedFrom.worker}${handedFrom.live ? "" : " (not live)"}, briefed from its task ledger.`] : []),
       ...ledgerNotes,
+      ...workflowNotes,
     ];
     const record = createRunRecord(resolved, {
       kind: "task", cwd: args.cwd,
@@ -1033,8 +1087,23 @@ export class WorkerPool {
       const cost = specialists.length ? [`Specialists: ${specialists.map(stats => `${stats.actor.split(":")[0]} ${stats.requests} requests, ${Math.round(stats.durationMs / 1000)}s`).join("; ")}`] : [];
       return [...(frame ? formatFrame(frame) : []), ...(risk ? [formatRisk(risk)] : []), ...(check ? formatCheck(check, recheckResult) : []), ...(fixRounds ? [`Fix rounds: ${fixRounds} (same worker).`] : []), ...cost, ...pipelineNotes];
     };
+    // Investigation/creation policy (absent unless a step beyond the Primary is configured, so v1/v2 execution results are unchanged).
+    let critiqueOutcome: CritiqueOutcome | undefined;
+    const policyNotes: string[] = [];
+    const policyOn = critiqueOn || divergenceOn || !!next;
+    const policyDetails = (): Pick<TaskDetails, "workflow"> => policyOn && policy ? { workflow: {
+      type: policy.type, policy: formatPolicy(policy),
+      ...(critiqueOutcome ? { critique: structuredClone(critiqueOutcome) } : {}), ...(divergence ? { divergence: structuredClone(divergence) } : {}), ...(next ? { next } : {}),
+      specialists: specialists.map(stats => structuredClone(stats)), ...(policyNotes.length ? { notes: [...policyNotes] } : {}),
+    } } : {};
+    const policyLines = (): string[] => {
+      if (!policyOn || !policy) return [];
+      const cost = specialists.length ? [`Specialists: ${specialists.map(stats => `${stats.actor.split(":")[0]} ${stats.requests} requests, ${Math.round(stats.durationMs / 1000)}s`).join("; ")}`] : [];
+      return [formatPolicy(policy), ...(critiqueOutcome ? formatCritique(critiqueOutcome) : []), ...(divergence ? formatDivergence(divergence) : []), ...cost, ...policyNotes,
+        ...(next ? ["Next: execution. The user also asked to apply or integrate this result: continue with one orche_task role implement whose request names the final deliverable above (its files) and how to integrate it; omit type."] : [])];
+    };
     const workflowDetails = () => ({ thinking: meta.thinking, ...(meta.plan ? { plan: structuredClone(meta.plan) } : {}),
-      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...pipelineDetails() });
+      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...pipelineDetails(), ...policyDetails() });
     let requests = 0;
     let contextCleared: ContextClearedStats | undefined;
     const contextDetails = () => contextCleared ? { contextCleared } : {};
@@ -1106,6 +1175,8 @@ export class WorkerPool {
       if (!record) return;
       record.addAgent(this.manager!.agentRecord(meta.id));
       recordSpecialists();
+      // The policy outcome as one file, for the yield metrics (experiments/workflow/yield.ts).
+      if (details.workflow) record.writeJson("workflow.json", { ...details.workflow, status, taskStatus: details.status, durationMs: details.durationMs, requests: details.requests });
       record.finish({
         status,
         ...(extra.summary ? { summary: extra.summary } : {}),
@@ -1142,7 +1213,7 @@ export class WorkerPool {
         meta.activity = activity;
       }
       signal.throwIfAborted();
-      const prompt = assignmentPrompt({ ...args, request: handoffRequest, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant);
+      const prompt = assignmentPrompt({ ...args, request: handoffRequest, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant, critiqueOn ? ANSWER_UNCERTAINTY_INSTRUCTIONS : "");
       const handoff = reusedContext && workflowMode ? prompt.replace(/^(Assignment[^\n]*\n)/, "$1This Assignment message supersedes earlier requirement ids and plans, including any assignment preserved at compaction time. Use only this round's requirements and Task DAG.\n") : prompt;
       this.manager.assign(meta.id, args.role, prefix + handoff, { enabled: reusedContext && config.taskContext.clearBetweenAssignments, minClearTokens: config.taskContext.minClearTokens });
       assigned = true;
@@ -1250,6 +1321,97 @@ export class WorkerPool {
           record?.appendEvent({ type: "check", timestamp: Date.now(), worker: meta.id, risk });
         }
       }
+      if (critiqueOn && policy) {
+        // Investigation policy: the critic when its gate lets it; material findings go back to this worker for one synthesis round.
+        const original = originalRequestOf(args.request) ?? args.request;
+        const firstData = dataOf(outcome.result.data);
+        const trigger = criticTrigger(policy.gates.critique, original, firstData);
+        const critiqued: CritiqueOutcome = critiqueOutcome = { trigger, synthesisRounds: 0 };
+        if (trigger.run) {
+          args.onProgress?.([...(warning ? [warning] : []), `${meta.id} Critic · reviewing the answer (${trigger.reason})`], timingNow());
+          try {
+            const reviewed = await runCritic(specialistContext("critic"), {
+              actor: `critic:${meta.id}`, question: args.context ? `${handoffRequest}\n\n## Context from the requesting session\n${args.context}` : handoffRequest,
+              original, answer: outcome.result.summary, ...(firstData.evidence !== undefined ? { evidence: firstData.evidence } : {}), trigger: trigger.reason,
+            });
+            specialists.push(reviewed.stats);
+            critiqued.critique = reviewed.value;
+          } catch (error) {
+            if (error instanceof SpecialistError) specialists.push(error.stats);
+            if (signal.aborted) throw new WorkerFailure("cancelled", "cancelled", "cancelled");
+            policyNotes.push(`Warning: the Critic failed (${error instanceof Error ? error.message : String(error)}); the answer is not critiqued.`);
+          }
+          const critique = critiqued.critique;
+          const material = critique?.findings.filter(item => item.severity === "material") ?? [];
+          record?.appendEvent({ type: "critique", timestamp: Date.now(), worker: meta.id, trigger, ...(critique ? { verdict: critique.verdict, material: material.length, minor: critique.findings.length - material.length, ...(record.writeJson("critique.json", critique) ? { file: "critique.json" } : {}) } : {}) });
+          if (critique && material.length) {
+            if (ledger) this.persist(recordResult(ledger, { role: args.role, worker: meta.id, status: outcome.status, summary: meta.summary, ...(Array.isArray(firstData.checklist) ? { checklist: firstData.checklist as ChecklistItem[] } : {}), ...(record ? { record: record.dir } : {}) }));
+            const synthesis = synthesisPrompt(critique);
+            // The pre-critique answer, for judging what the synthesis changed (right→wrong as well as wrong→right); record only.
+            const firstAnswer = outcome.result.summary;
+            meta.request = `${meta.request}\n\n${synthesis}`;
+            meta.roundCheck = (_kind, data) => synthesisError(critique, data);
+            manager.assign(meta.id, args.role, synthesis, { enabled: false });
+            deadline = ExtendableDeadline.fromLimits(limits, { baseMs: limits.assignmentMs });
+            progress();
+            try {
+              outcome = await waitRound(`${meta.id} ${args.role} synthesis`);
+              meta.summary = outcome.result.summary;
+              critiqued.synthesisRounds = 1;
+              const answered = responsesOf(outcome.result.data);
+              critiqued.responses = answered.responses;
+              if (answered.conclusionChanged !== undefined) critiqued.conclusionChanged = answered.conclusionChanged;
+              record?.appendEvent({ type: "synthesis", timestamp: Date.now(), worker: meta.id, responses: answered.responses, ...(answered.conclusionChanged !== undefined ? { conclusionChanged: answered.conclusionChanged } : {}), ...(record.writeJson("answers.json", { first: firstAnswer, final: outcome.result.summary }) ? { file: "answers.json" } : {}) });
+            } catch (error) {
+              if (!(error instanceof WorkerFailure) || error.kind === "cancelled") throw error;
+              policyNotes.push(`Warning: the synthesis round failed (${error.status}: ${failureReason(error.message)}); the answer below is the worker's first one and the critic's material findings are unanswered.`);
+            } finally { meta.roundCheck = undefined; }
+          }
+        }
+      }
+      if (divergence && policy) {
+        // Creation policy: the critic compares the candidates blind and selects one; this worker refines it into the deliverable.
+        const outcomeOf = divergence;
+        meta.roundCheck = undefined;
+        meta.files = files;
+        const generated = candidatesOf(outcome.result.data);
+        outcomeOf.generated = generated;
+        const order = blindOrder(generated.map(item => item.id), this.options.random);
+        outcomeOf.order = order;
+        const idOf = (label: number) => order[label - 1] ?? order[0] ?? "A";
+        const labelOf = (id: string) => order.indexOf(id) + 1;
+        record?.appendEvent({ type: "candidates", timestamp: Date.now(), worker: meta.id, scratch: outcomeOf.scratch, order, candidates: generated.map(item => ({ id: item.id, direction: item.direction, outputs: item.outputs })) });
+        if (generated.length > 1) {
+          args.onProgress?.([...(warning ? [warning] : []), `${meta.id} Critic · comparing ${generated.length} candidates`], timingNow());
+          try {
+            const compared = await runSelector(specialistContext("critic"), {
+              actor: `critic:${meta.id}`, brief: args.context ? `${args.request}\n\n## Context from the requesting session\n${args.context}` : args.request,
+              original: originalRequestOf(args.request) ?? args.request, presented: order.map(id => generated.find(item => item.id === id)!),
+            });
+            specialists.push(compared.stats);
+            outcomeOf.selection = compared.value;
+          } catch (error) {
+            if (error instanceof SpecialistError) specialists.push(error.stats);
+            if (signal.aborted) throw new WorkerFailure("cancelled", "cancelled", "cancelled");
+            policyNotes.push(`Warning: the creation Critic failed (${error instanceof Error ? error.message : String(error)}); the worker chose the candidate to refine itself.`);
+          }
+        }
+        const selection = outcomeOf.selection;
+        record?.appendEvent({ type: "selection", timestamp: Date.now(), worker: meta.id, ...(selection ? { selected: idOf(selection.selected), acceptable: selection.acceptable, ...(record.writeJson("selection.json", { order, selection }) ? { file: "selection.json" } : {}) } : { selected: "self" }) });
+        const chosen = selection ? generated.find(item => item.id === idOf(selection.selected)) : undefined;
+        outcomeOf.selected = chosen?.id ?? "self";
+        const refine = `${refinePrompt(args.role, chosen ?? generated[0] ?? { id: "A", direction: "", summary: "", outputs: [] }, chosen ? selection : undefined, labelOf, idOf)}\n\n${gitAssignmentLine(grant)}`;
+        meta.request = `${meta.request}\n\n${refine}`;
+        manager.assign(meta.id, args.role, refine, { enabled: false });
+        deadline = ExtendableDeadline.fromLimits(limits, { baseMs: limits.assignmentMs });
+        progress();
+        // No deliverable without the refine round: its failure fails the task (the candidates stay in the scratch directory).
+        outcome = await waitRound(`${meta.id} ${args.role} refine`);
+        outcomeOf.refineRounds = 1;
+        meta.summary = outcome.result.summary;
+        ({ changeReport, gitReport } = await collect());
+        record?.appendEvent({ type: "refine", timestamp: Date.now(), worker: meta.id, selected: outcomeOf.selected });
+      }
       meta.lastUsed = Date.now();
       if (!meta.singleWorkflow && meta.contextWindow && meta.latestInput >= meta.contextWindow * 0.7) {
         await this.retire(meta.id); retired.push(meta.id);
@@ -1294,7 +1456,7 @@ export class WorkerPool {
       finishRecord("done", details, { summary: meta.summary });
       const planNotes = singleWorkflow && !meta.plan ? ["Note: no Task DAG recorded in this assignment."] : [];
       const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, ...modelWarnings, ...contextLine(),
-        ...taskLines(), "", meta.summary, ...roleData, ...checklistLines, ...pipelineLines(), "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
+        ...taskLines(), "", meta.summary, ...roleData, ...checklistLines, ...pipelineLines(), ...policyLines(), "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
         ...planNotes, ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: follow up with the same worker — ${note}`] : [])].join("\n");
       return { text: withRecordLine(text, record?.dir), details };
     } catch (error) {
@@ -1325,6 +1487,8 @@ export class WorkerPool {
       // Nothing may snapshot on the private index while the tracker still has jobs queued.
       meta.activity = undefined;
       meta.recordEvent = undefined;
+      meta.roundCheck = undefined;
+      meta.files = files;
       await activity?.drain().catch(() => undefined);
       if (audit && before) meta.tree = await audit.snapshot().catch(() => meta.tree);
       if (audit) {
@@ -1336,7 +1500,7 @@ export class WorkerPool {
       args.onProgress?.([], timingNow());
     }
     } catch (error) {
-      if (worker) worker.unmetStreak = new Map();
+      if (worker) { worker.unmetStreak = new Map(); worker.roundCheck = undefined; }
       // Failed before its assignment started (e.g. cancelled while the Framer ran): an idle worker still gets its idle expiry.
       if (worker && this.workers.has(worker.id) && this.manager?.get(worker.id).status === "idle") this.idle(worker);
       throw error;

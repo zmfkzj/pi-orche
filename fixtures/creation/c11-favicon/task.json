@@ -1,0 +1,16 @@
+{
+  "id": "c11-favicon",
+  "title": "Favicon from the brand mark",
+  "category": "feature",
+  "language": "en",
+  "instruction": "Create the website favicon from the brand mark assets/brand/mark.png: assets/brand/favicon.png, 48x48 PNG with a transparent background.",
+  "expectsChanges": true,
+  "timeoutSec": 1800,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": true
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "items": [
+    {
+      "id": "order",
+      "criterion": "Explains the evaluation order in src/flags.js isEnabled: environment kill switch/override first, then the explicit user allow/deny lists, then the percentage rollout."
+    },
+    {
+      "id": "hashing",
+      "criterion": "Explains that the rollout buckets a user by an FNV-1a hash of `${flag}:${userId}` modulo 100 (src/hash.js bucket) compared with rolloutPercent (30)."
+    },
+    {
+      "id": "u42",
+      "criterion": "Says new-checkout is ON for u-42 (bucket 14 < 30) - or equivalently states that u-42 falls inside the 30% rollout with its bucket value."
+    },
+    {
+      "id": "u3",
+      "criterion": "Says new-checkout is OFF for u-3 because u-3 is on the flag's deny list in config/flags.json, which is checked before the rollout (even though its rollout bucket, 29, is below 30)."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "Gives both final answers correctly: u-42 on, u-3 off."
+    }
+  ],
+  "referenceAnswer": "src/flags.js isEnabled evaluates in this order: an environment override FLAG_<NAME>=on|off, then the flag's users.deny and users.allow lists in config/flags.json, then the percentage rollout: src/hash.js bucket hashes `${flag}:${userId}` with FNV-1a modulo 100 and the flag is on when the bucket is below rolloutPercent (30 for new-checkout). For u-42 the bucket is 14, so the flag is on. u-3 is on new-checkout's deny list, which is checked before the rollout, so it is off even though its bucket (29) is below 30. No production override is set in config/env.production.",
+  "passRule": "all"
+}

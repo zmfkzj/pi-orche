@@ -1,0 +1,16 @@
+{
+  "id": "c10-icon-32",
+  "title": "32 px ember potion",
+  "category": "feature",
+  "language": "en",
+  "instruction": "Make a 32x32 version of assets/items/potion-ember.png at assets/items/potion-ember-32.png (nearest-neighbour scaling, keep the transparency).",
+  "expectsChanges": true,
+  "timeoutSec": 1800,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": true
+  }
+}

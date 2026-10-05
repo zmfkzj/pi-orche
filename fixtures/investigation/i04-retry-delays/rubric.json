@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "id": "location",
+      "criterion": "Identifies the call site in src/runner.js runJob, where delayFor is called with its arguments in the wrong order (delayFor(attempt-related value and base swapped), i.e. delayFor(config.baseMs, attempt) instead of delayFor(attempt, config.baseMs, ...))."
+    },
+    {
+      "id": "mechanism",
+      "criterion": "Explains why that yields 0 for the first retry and the 2000 ms cap afterwards: attempt 0 is passed as the base (0 * 2^100 = 0) and for later retries the base becomes the exponent/attempt is multiplied so the value exceeds the cap and is clamped to capMs."
+    },
+    {
+      "id": "not-config",
+      "criterion": "Does not blame the configuration (RETRY_CAP_MS / the cap value or the comment in src/config.js) as the cause; the cap is correct and only clamps the wrong value."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "States the observed delays 0, 2000, 2000 ms and the intended delays 100, 200, 400 ms for three retries."
+    }
+  ],
+  "referenceAnswer": "Cause: src/runner.js runJob calls delayFor(config.baseMs, attempt) but delayFor in src/backoff.js is delayFor(attempt, baseMs, capMs). The attempt number becomes the base and baseMs (100) becomes the exponent: attempt 0 gives 0 * 2^100 = 0 ms, attempts 1 and 2 give 1 * 2^100 and 2 * 2^100, clamped to the 2000 ms cap. So the delays are 0, 2000, 2000 ms instead of 100, 200, 400 ms. The cap configuration (RETRY_CAP_MS=2000) is correct; the comment in src/config.js that blames a too-high base is misleading.",
+  "passRule": "all"
+}

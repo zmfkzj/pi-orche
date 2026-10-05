@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "id": "race",
+      "criterion": "Describes the cache-aside race in src/prices.js: a reader misses, reads the old price from the DB, a writer updates the DB and deletes the key, then the reader sets the old price into the cache."
+    },
+    {
+      "id": "timeline",
+      "criterion": "Gives the ordering concretely (read miss → DB read old → write DB → delete cache → set stale), showing that delete-on-write does not prevent stale entries."
+    },
+    {
+      "id": "impact",
+      "criterion": "Explains the stale value then lives for the full TTL, so raising TTL from 5 minutes to 24 hours extends the worst-case staleness of a price to 24 hours."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "Concludes the premise is wrong and TTL should not simply be raised; suggests mitigations (versioned values / compare-and-set, delayed double delete, or short TTL with refresh)."
+    }
+  ],
+  "referenceAnswer": "근거가 틀렸고 TTL을 그대로 늘리면 안 됩니다. src/prices.js의 getPrice는 캐시 미스일 때 DB를 읽고 캐시에 set하며, updatePrice는 DB를 갱신한 뒤 키를 delete합니다. 타임라인: (1) 읽기 A가 캐시 미스 후 DB에서 옛 가격을 읽음 → (2) 쓰기 B가 DB를 새 가격으로 갱신 → (3) B가 캐시 키 삭제 → (4) A가 옛 가격을 캐시에 set. 이후 옛 가격이 TTL 동안 남습니다. TTL이 24시간이면 최악의 경우 하루 동안 틀린 가격이 노출됩니다. 버전/compare-and-set, 지연 이중 삭제, 짧은 TTL과 갱신 같은 완화책이 필요합니다.",
+  "passRule": "all"
+}

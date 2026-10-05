@@ -1,0 +1,16 @@
+{
+  "id": "i17-order-events-ko",
+  "title": "주문 이벤트 발행 설계 평가",
+  "category": "review",
+  "language": "ko",
+  "instruction": "docs/design.md는 주문 이벤트가 '정확히 한 번(exactly-once)' 발행된다고 설명합니다. 요구사항은 '확정된 주문의 이벤트는 절대 유실되지 않고, 확정되지 않은 주문의 이벤트는 절대 발행되지 않는다'입니다. src/orders.js의 현재 구현이 이 요구사항과 설계 문서의 주장을 만족하는지 평가해 주세요. 실패하는 구체적인 시나리오(어느 줄 사이에서 무엇이 일어나면 어떻게 되는지)를 들고, 문서의 주장에 대한 판정을 내려 주세요. 코드는 수정하지 마세요.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

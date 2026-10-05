@@ -1,0 +1,16 @@
+{
+  "id": "i05-dedupe-window-ko",
+  "title": "중복 이벤트 차단 실패",
+  "category": "analysis",
+  "language": "ko",
+  "instruction": "웹훅 이벤트 중복 제거기는 같은 이벤트를 60초 동안 한 번만 처리해야 합니다. 그런데 몇 초 간격으로 재전송된 같은 이벤트가 두 번씩 처리됩니다. 원인을 조사해서 원인 파일과 함수, 왜 차단되지 않는지, 지금 실제로 중복이 차단되는 시간 범위가 얼마인지 보고해 주세요. 코드는 수정하지 말고 조사 결과만 답변해 주세요.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

@@ -39,11 +39,22 @@ const V2_SUPERVISION = "Supervision: a worker's report is not acceptance, and it
  * changed code or re-running checks itself. G-M + G-M2 (48 tasks per arm): 48/48 vs 46/48 passed, main context 0.41x, cost 0.97x.
  */
 const REPORT_SUPERVISION = "Supervision: a worker's report is not acceptance, and its checklist is a self-report. Read the report: its checklist, the checks it names and the readings it chose; do not re-read the changed code or re-run the project checks to verify it yourself (the worker ran them and names them). Check every reported ambiguity's chosen reading against the user's original wording (send a correction to the same worker when it differs), and report unverified items as unverified. Send a separate verify assignment only when the user explicitly asks for independent verification; otherwise send problems to the same worker with what is wrong.";
+/**
+ * Workflow policies (docs/workflow-policy.md), only when switched on: so the rules of v1/v2 sessions without them stay byte-identical.
+ * The critic needs nothing from main but reading its findings; divergence needs `candidates` (and `type` when the role is implement).
+ */
+const CRITIC_RULE = "Investigation policy: an answer may come with an independent Critic's findings and the worker's response to each (accepted, rebutted, partly). Report a material finding the worker rebutted, or left unanswered, to the user as an open point; do not re-investigate it yourself.";
+function divergenceRule(gate: "auto" | "always"): string {
+  return `Creation policy: for a creation request pass \`type: "creation"\` (required when the role is implement, e.g. names, slogans or a UI look).${gate === "auto" ? " Pass `candidates`: 3 when distinct alternatives are worth comparing (a character or boss concept, a visual identity or theme, key art, names), 1 for a precisely specified or simple asset (one icon in an existing style, a resize, a fix)." : ""} With candidates, the worker makes them in different directions, an independent Critic selects one blind and the same worker refines it into the deliverable; the result lists the candidates, the scores and the choice. When the user also asked to apply or integrate the result, pass \`then: "execution"\` and, after the result, continue with one implement orche_task as its Next line says.`;
+}
 export interface DelegationOptions {
   /** `single.pipeline`; v2 replaces the hand-off, reuse and supervision rules. */
   pipeline?: "v1" | "v2";
   /** `single.mainReview` (v1 only): `report` (default) reviews the report alone; `evidence` also re-reads code and re-runs trusted checks. */
   mainReview?: "evidence" | "report";
+  /** `single.investigation.critic` and `single.creation.divergence`: each adds its rule when not `off`. */
+  critic?: "off" | "auto" | "always";
+  divergence?: "off" | "auto" | "always";
 }
 /** Stable per effective mode and config: never include session state or a worker roster here. */
 export function delegationRules(mode: MainMode, options: DelegationOptions = {}): string {
@@ -61,6 +72,8 @@ export function delegationRules(mode: MainMode, options: DelegationOptions = {})
       `Reuse: problems and user follow-ups go to the SAME worker (pass its id in \`worker\`). Review the result, its evidence and checklist${reportOnly ? "" : ", and run trusted project checks"}. Restate additional or corrected requirements in the same hand-off format with new R-ids or revised ones and repeat. When a requirement remains unmet or partial for 2 consecutive assignments of that worker, hand ONLY the unmet items to a NEW worker (omit worker), with their requirements, relevant file references and the previous worker's evidence; do not resend the whole task. When a result names a task ledger (\`Task ledger T…\`), pass that id in \`task\` for every follow-up of the same task, including the new worker that takes over unmet items; omit \`task\` for a different user task, even when you reuse the worker. Never claim a reuse that did not happen (unknown ids are errors; workers are gone after a reload, and only a task id continues their work).`,
       reportOnly ? REPORT_SUPERVISION : "Supervision: a worker's report is not acceptance, and its checklist is a self-report. Read the report and its key evidence, run the trusted project checks yourself, check every reported ambiguity's chosen reading against the user's original wording (send a correction to the same worker when it differs), and report unverified items as unverified. Send a separate verify assignment only when the user explicitly asks for independent verification; otherwise send problems to the same worker with what is wrong.",
     ]),
+    ...(options.critic && options.critic !== "off" ? [CRITIC_RULE] : []),
+    ...(options.divergence && options.divergence !== "off" ? [divergenceRule(options.divergence)] : []),
     REFERENCE_RULE,
   ].join("\n");
 }

@@ -1,0 +1,16 @@
+{
+  "id": "i12-job-retry-ko",
+  "title": "실패한 작업의 재시도 조건",
+  "category": "analysis",
+  "language": "ko",
+  "instruction": "작업 큐에서 failed 상태의 작업이 다시 queued로 돌아갈 수 있는지, 있다면 어떤 조건에서 최대 몇 번까지인지 알려 주세요. 상태 전이 전체와 각 전이가 일어나는 코드 위치를 정리하고, 특히 재시도 판단 조건(어떤 오류가 재시도되는지 포함)을 정확히 설명해 주세요. 코드는 수정하지 마세요.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

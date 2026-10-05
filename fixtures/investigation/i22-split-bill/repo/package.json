@@ -1,0 +1,5 @@
+{
+  "name": "billing",
+  "private": true,
+  "type": "module"
+}

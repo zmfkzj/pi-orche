@@ -1,0 +1,4 @@
+{
+  "category": "cause",
+  "trap": "src/report.js comment says createdAt is stored in KST (wrong: data are UTC instants)."
+}

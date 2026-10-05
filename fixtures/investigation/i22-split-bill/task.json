@@ -1,0 +1,16 @@
+{
+  "id": "i22-split-bill",
+  "title": "Do split parts always add up?",
+  "category": "analysis",
+  "language": "en",
+  "instruction": "The billing team says src/split.js splitCents 'always returns parts that add up exactly to the total, for any total and any number of people'. Check the claim. If it is wrong, give a concrete counterexample (inputs, returned parts, their sum), describe which inputs are affected, and explain why. Do not modify files.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

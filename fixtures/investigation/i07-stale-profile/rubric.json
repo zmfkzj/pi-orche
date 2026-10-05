@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "id": "location",
+      "criterion": "Identifies the key mismatch between src/profiles.js getProfile (cache key built with cacheKey(id, fields)) and updateProfile, which deletes `user:${id}` - a key that is never written."
+    },
+    {
+      "id": "mechanism",
+      "criterion": "Explains that the invalidation is therefore a no-op, so the stale entry is served until its TTL expires."
+    },
+    {
+      "id": "not-expected",
+      "criterion": "Concludes it is a defect, not the documented eventual consistency (the delete was meant to make edits visible immediately)."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "States the stale value is served for up to the cache TTL of 5 minutes (300 s), supported by the simulation showing the old name after the update."
+    }
+  ],
+  "referenceAnswer": "It is a defect, not expected eventual consistency. src/profiles.js getProfile caches under cacheKey(id, fields), e.g. user:42:name,avatar, but updateProfile deletes user:42, a key that is never written. The invalidation is a no-op, so the cached profile with the old name is served until its TTL of 5 minutes (300 s) expires. npm run simulate shows the old name right after the update.",
+  "passRule": "all"
+}

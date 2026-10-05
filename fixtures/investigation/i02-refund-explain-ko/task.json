@@ -1,0 +1,16 @@
+{
+  "id": "i02-refund-explain-ko",
+  "title": "환불 처리 흐름 설명",
+  "category": "analysis",
+  "language": "ko",
+  "instruction": "환불 처리가 어떻게 동작하는지 한국어로 설명해줘. 진입 함수와 검증 위치, 부분 환불 금액 계산 방식, 환불 가능 기간의 경계, 반올림과 상태 변경, 원본 데이터 변경 여부를 코드에 근거해서 정리해줘. 코드는 수정하지 마.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": true,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

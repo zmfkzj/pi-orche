@@ -1,0 +1,26 @@
+{
+  "items": [
+    {
+      "id": "cause",
+      "criterion": "Identifies that uniqueBy builds new Map(items.map(item => [key(item), item])), so a later item with the same key overwrites the value: it keeps the LAST item (at the position where the key first appeared)."
+    },
+    {
+      "id": "counterexample",
+      "criterion": "Gives a counterexample, e.g. [{id:1,v:'a'},{id:1,v:'b'}] → returns [{id:1,v:'b'}] instead of [{id:1,v:'a'}]."
+    },
+    {
+      "id": "tests",
+      "criterion": "Explains the tests pass because they only check the number of items or the keys/order, not which duplicate's values are kept."
+    },
+    {
+      "id": "impact",
+      "criterion": "Explains the effect on src/import.js: when a CSV contains the same email twice, the later row wins, so the newer duplicate row (not the first, canonical one) is imported."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "Concludes the doc comment does not match the behaviour."
+    }
+  ],
+  "referenceAnswer": "일치하지 않습니다. src/collections.js의 uniqueBy는 new Map(items.map(item => [key(item), item]))을 만들기 때문에 같은 키의 뒤 항목이 값을 덮어씁니다. 키 순서는 처음 등장한 위치를 따르지만 값은 마지막 항목입니다. 반례: [{id:1,v:'a'},{id:1,v:'b'}] → 실제 [{id:1,v:'b'}], 기대 [{id:1,v:'a'}]. 테스트는 결과 개수와 키 순서만 확인하고 어느 중복의 값이 남는지는 보지 않아서 통과합니다. src/import.js에서는 같은 이메일이 두 번 있으면 뒤 행이 가져와져서, 첫 행을 기준으로 삼는다는 의도와 다르게 나중 행의 이름과 등급이 저장됩니다.",
+  "passRule": "all"
+}

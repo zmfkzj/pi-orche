@@ -1,0 +1,16 @@
+{
+  "id": "i04-retry-delays",
+  "title": "Retry delays do not grow",
+  "category": "analysis",
+  "language": "en",
+  "instruction": "Our job runner is supposed to retry failed jobs with exponential backoff (100 ms, 200 ms, 400 ms, ... capped at 2 s). Operations reports that the first retry happens immediately and every later retry waits exactly 2 seconds. Find the cause: the file and function, why exactly these delays come out, and what the delays for three retries should be instead. You can run `npm run simulate`. Do not modify any files; report your findings only.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

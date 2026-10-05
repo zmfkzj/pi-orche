@@ -1,0 +1,16 @@
+{
+  "id": "i14-search-rate-ko",
+  "title": "검색창 호출 제한 방식 선택",
+  "category": "analysis",
+  "language": "ko",
+  "instruction": "검색창 요구사항은 '입력 중에는 300ms에 최대 한 번만 API를 호출하고, 입력이 멈추면 마지막 입력값으로 반드시 한 번 더 호출한다'입니다. src/rate.js의 debounce와 throttle 중 어느 것을 써야 하는지 판단해 주세요. 각 함수가 요구사항의 두 조건을 만족하는지 코드 근거와 구체적인 입력 시나리오로 보여 주고 결론을 내려 주세요. 코드는 수정하지 마세요.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

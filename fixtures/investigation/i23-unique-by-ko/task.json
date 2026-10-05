@@ -1,0 +1,16 @@
+{
+  "id": "i23-unique-by-ko",
+  "title": "uniqueBy가 첫 항목을 유지하는가",
+  "category": "analysis",
+  "language": "ko",
+  "instruction": "src/collections.js의 uniqueBy 문서 주석은 '키가 같은 항목 중 첫 번째 항목을 유지하고 순서를 보존한다'고 합니다. 테스트도 모두 통과합니다. 주석의 설명이 실제 동작과 일치하는지 판단해 주세요. 일치하지 않는다면 반례(입력과 실제 결과, 기대 결과)를 들고, 테스트가 왜 이를 잡지 못하는지와 이 함수를 쓰는 코드(src/import.js)에 어떤 영향이 있는지 설명해 주세요. 코드는 수정하지 마세요.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

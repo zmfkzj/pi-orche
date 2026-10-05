@@ -1,0 +1,43 @@
+{
+  "roles": {
+    "viewer": {
+      "inherits": [],
+      "allow": [
+        "report:read"
+      ],
+      "deny": [
+        "report:export"
+      ]
+    },
+    "analyst": {
+      "inherits": [
+        "viewer"
+      ],
+      "allow": [
+        "report:export",
+        "report:annotate"
+      ],
+      "deny": []
+    },
+    "admin": {
+      "inherits": [
+        "analyst"
+      ],
+      "allow": [
+        "*"
+      ],
+      "deny": []
+    }
+  },
+  "users": {
+    "mina": [
+      "analyst"
+    ],
+    "joon": [
+      "admin"
+    ],
+    "sora": [
+      "viewer"
+    ]
+  }
+}

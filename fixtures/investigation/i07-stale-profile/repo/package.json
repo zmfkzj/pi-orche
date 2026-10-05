@@ -1,0 +1,6 @@
+{
+  "name": "profiles",
+  "private": true,
+  "type": "module",
+  "scripts": { "simulate": "node scripts/simulate.js" }
+}

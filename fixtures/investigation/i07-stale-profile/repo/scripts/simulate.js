@@ -1,0 +1,10 @@
+import { createProfiles } from '../src/profiles.js';
+let t = 0;
+const rows = new Map([[42, { name: 'Ada', avatar: 'a.png' }]]);
+const db = { get: id => rows.get(id), set: (id, row) => rows.set(id, row) };
+const profiles = createProfiles(db, () => t);
+console.log('before', profiles.getProfile(42));
+profiles.updateProfile(42, { name: 'Ada L.' });
+console.log('right after update', profiles.getProfile(42));
+t += 299_000; console.log('after 299 s', profiles.getProfile(42));
+t += 2_000; console.log('after 301 s', profiles.getProfile(42));

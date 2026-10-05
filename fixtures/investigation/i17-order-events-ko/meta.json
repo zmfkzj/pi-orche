@@ -1,0 +1,4 @@
+{
+  "category": "arch",
+  "trap": "docs/design.md claims exactly-once because of an idempotency key."
+}

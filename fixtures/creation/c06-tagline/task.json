@@ -1,0 +1,16 @@
+{
+  "id": "c06-tagline",
+  "title": "Store tagline",
+  "category": "docs",
+  "language": "en",
+  "instruction": "Write the store-page tagline for Ember Hollow in Korean and English: store/tagline.json as {\"ko\": \"...\", \"en\": \"...\"}. English at most 60 characters, Korean at most 30 characters, and neither may use the words epic or ultimate (or 에픽, 궁극).",
+  "expectsChanges": true,
+  "timeoutSec": 1800,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": true
+  }
+}

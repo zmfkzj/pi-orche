@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "id": "difference",
+      "criterion": "Shows that they are not equivalent: src/lru-array.js get does not move the accessed key to the most-recent position, so it evicts in insertion order (FIFO), not least-recently-used."
+    },
+    {
+      "id": "scenario",
+      "criterion": "Gives a concrete scenario, e.g. capacity 2: set a, set b, get a, set c → the Map version evicts b, the array version evicts a."
+    },
+    {
+      "id": "cost",
+      "criterion": "States the cost difference: Map version get/set are O(1); the array version uses indexOf/splice (O(n)) per operation, poor at 10,000 entries."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "Recommends src/lru-map.js."
+    }
+  ],
+  "referenceAnswer": "Use src/lru-map.js. They are not equivalent: src/lru-array.js get returns the value without moving the key to the most-recent end, so eviction follows insertion order (FIFO). With capacity 2: set a, set b, get a, set c — the Map version evicts b (a was just used), the array version evicts a. Costs: the Map version is O(1) per get/set (delete + re-insert keeps Map order); the array version does indexOf/splice/shift per operation, O(n), which is slow at 10,000 entries.",
+  "passRule": "all"
+}

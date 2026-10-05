@@ -1,0 +1,21 @@
+{
+  "new-checkout": {
+    "rolloutPercent": 30,
+    "users": {
+      "allow": [
+        "qa-1",
+        "qa-2"
+      ],
+      "deny": [
+        "u-3"
+      ]
+    }
+  },
+  "dark-mode": {
+    "rolloutPercent": 100,
+    "users": {
+      "allow": [],
+      "deny": []
+    }
+  }
+}

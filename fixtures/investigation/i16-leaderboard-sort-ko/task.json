@@ -1,0 +1,16 @@
+{
+  "id": "i16-leaderboard-sort-ko",
+  "title": "리더보드 정렬 구현 비교",
+  "category": "analysis",
+  "language": "ko",
+  "instruction": "리더보드는 점수 내림차순으로 정렬하고, 같은 점수면 먼저 가입한 사용자가 위에 와야 합니다. 입력 배열은 항상 가입 순서로 들어옵니다. src/legacy-sort.js의 quickSortBy와 src/leaderboard.js가 쓰는 내장 Array.prototype.sort 중 어느 쪽이 이 요구사항을 보장하는지 비교해 주세요. 근거(코드 위치, 반례가 있으면 구체적인 입력)와 결론을 제시해 주세요. 코드는 수정하지 마세요.",
+  "expectsChanges": false,
+  "timeoutSec": 900,
+  "grading": {
+    "visibleTests": false,
+    "hiddenTests": false,
+    "rubric": true,
+    "mustNotModify": true,
+    "custom": false
+  }
+}

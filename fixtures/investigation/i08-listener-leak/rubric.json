@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "id": "location",
+      "criterion": "Identifies src/handler.js handleRequest registering bus.on('config', ...) on every request without removing it."
+    },
+    {
+      "id": "mechanism",
+      "criterion": "Explains that each listener closure stays referenced by the long-lived config bus (and keeps its request/response objects alive), so listeners and memory grow linearly with requests."
+    },
+    {
+      "id": "side-effect",
+      "criterion": "Notes the behavioural effect: on every config change all accumulated listeners run (work grows with past requests, old requests' handlers fire)."
+    },
+    {
+      "id": "conclusion",
+      "criterion": "States that the 'config' listener count is 100 after 100 requests (one per request)."
+    }
+  ],
+  "referenceAnswer": "src/handler.js handleRequest calls bus.on('config', ...) on every request and never removes the listener. The shared config bus keeps every closure (and the request and response it captured) alive, so memory and listener count grow by one per request; after 100 requests there are 100 'config' listeners. Besides memory, every config change runs all accumulated listeners, so the work per change grows with the number of past requests and handlers of finished requests run.",
+  "passRule": "all"
+}
