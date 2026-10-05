@@ -254,11 +254,11 @@ interface Frame {
 
 | 조건 | 판단 주체 | 동작 |
 |---|---|---|
-| 위험 점수 ≥ threshold (기본 7, 아래 보정) | runtime | 자동 실행 |
+| 위험 점수 ≥ threshold (기본 7, 아래 보정) | runtime | gate `auto`일 때 자동 실행. G-X 뒤 기본 gate는 `review`(점수는 기록만) |
 | 요청문에 검토나 검증 요청이 있음 | runtime | 점수와 상관없이 실행 |
 | docs만 변경, 또는 1개 파일 10줄 이하이고 모든 met 항목에 `verifiedBy`가 있음 | runtime | 건너뜀 |
 | 사용자가 나중에 따로 검증을 요청 | front | 지금은 verify role assignment(별도 `mode: "verify"`는 미구현) |
-| 설정 `checker.gate` | 사용자 | `"auto"` / `"always"` / `"off"`(수동만) |
+| 설정 `checker.gate` | 사용자 | `"review"`(기본, 리뷰 요청 때만) / `"auto"` / `"always"` / `"off"` |
 
 **위험 점수** (순수 함수, LLM 호출 0)
 
@@ -387,8 +387,9 @@ interface TaskLedger {
     "ledger": true,                                               // Phase 1(구현): 기본 false, v2면 항상 켜짐
     "pipeline": "v2",                                            // Phase 3(구현): 기본 "v1"(지금 single). v2 = Framer + 위험 점수 Verifier + code_nav + v2 front 규칙
     "frame": "grounded",                                         // 구현: "grounded"(기본) | "spec" | "off"
-    "checker": { "gate": "auto", "threshold": 7, "maxFixRounds": 1 },   // 구현: gate auto|always|off, threshold 0–30, maxFixRounds 0–2
-    "nav": true                                                   // 구현: v2 세션의 code_nav (설계안: LSP adapter 설정은 Phase 6)
+    "checker": { "gate": "review", "threshold": 7, "maxFixRounds": 1 },   // 구현: gate review(기본)|auto|always|off, threshold 0–30, maxFixRounds 0–2
+    "nav": true,                                                  // 구현: v2 세션의 code_nav (설계안: LSP adapter 설정은 Phase 6)
+    "mainReview": "evidence"                                      // 구현(v1, 시험 중 10.6): "evidence"(기본) | "report"(main이 결과를 다시 확인하지 않음)
     // 설계안(미구현): "policy": { "bugReports": "fix" }, "creation": { "candidates": 3 }, "maxTransitions": 4. Jev "router" 설정은 G-R 뒤 뺐다.
   },
   "taskContext": { "clearBetweenAssignments": true, "minClearTokens": 10000 }   // 기존
@@ -501,6 +502,51 @@ primitive를 하나씩 끈 arm(S1−X)과 비교한다. 품질이 같고 더 싸
   - **원인 3 (Verifier의 극단 입력)**: blocking finding 10개 중 9개가 테스트도 사용자도 보내지 않을 입력이었다(SharedArrayBuffer 5, WebAssembly.Memory 2, prototype 상속 필드 1, clone 뒤 getter 재실행 1). 나머지 1개는 그럴듯한 견고성 문제(d8, 12,000 노드 cycle에서 stack overflow)다. 실패를 만든 것도, 실패를 잡은 것도 없었고 fix 8회 비용만 들었다. 요구사항 ~20개마다 `verifiedBy`를 요구하는 contract도 worker 일을 늘렸다.
   - **효과가 있었던 것**: main context가 절반 아래로 줄었다(R-줄과 재검증이 main에서 빠짐). d6은 같은 timestamp edge 요구사항이 명시된 S1에서 3/3이었다(S0 2/3, G-L 6세션 중 3세션 실패; n=3이라 시사만). frame → worker → 위험 점수 → Verifier → fix → 결정적 recheck는 28개 assignment 모두에서 오류 없이 돌았다.
   - 참고: S0 main context 최대 77,401은 G-L S0의 123,184보다 낮다. 감독 규칙 완화(`a20f255`) 뒤 longsession(75,773) 수준으로 돌아온 것이다(다른 날 실험 간 비교).
+  - **사후 분석 (비용 0)**: v1 main의 도구 사용은 전부 결과를 받은 뒤였다(3세션 합계 read 121회 310K자, bash 57회 51K자, grep 6회; hand-off 전에는 0회). v2 main은 read 4회 25K자, bash 0회였다. R-줄은 hand-off에서 약 32K자를 더 썼다. 즉 main context 절감은 대부분 **main이 결과를 스스로 다시 확인하지 않은 것**에서 왔고, Framer·Verifier와는 따로 떼어 낼 수 있다. v1 main의 후속 요청 3건(d6, p1, d1)은 모두 해석을 원문 쪽으로 고친 것이었고 해는 없었다.
+- **G-X 뒤 수정 (사용자 승인, 2026-10-05, v2 안에서만)**: (1) Verifier 기본 gate를 `review`로 바꿨다. 사용자의 말이 리뷰나 검증을 요청할 때만 돈다(`auto`는 그대로 있다). 위험 점수는 계속 계산해 결과에 남긴다. (2) Framer 해석은 참고용이다: contract는 “권장 해석은 조언이고 결정은 worker가 코드로 한다”고 쓰고, 그 해석을 따르는 요구사항에는 그 사실을 붙인다. v2 main 규칙은 Framer 권장과 다르다는 이유만으로 수정을 보내지 않고, 사용자의 말이 반대할 때만 고친다. 두 수정 모두 아직 측정하지 않았다.
+
+### 10.6 G-M 사전 등록: main 재검증 제거 (2026-10-05, 실행 전에 작성)
+
+- **질문**: v1에서 main이 결과를 스스로 다시 확인하는 것(바뀐 코드 읽기, check 재실행)만 빼면 품질과 비용을 유지하면서 main context를 크게 줄일 수 있는가. single의 존재 이유(context 보존)에 직접 닿는 가장 싼 변경이다.
+- **Arm**: S0 = `single: { ledger: true }`(G-X의 S0와 같음), S0R = `single: { ledger: true, mainReview: "report" }`. 차이는 main 규칙 세 곳뿐이다: 첫 줄(acceptance는 worker가 보고한 check에 기대어 있다), reuse(“trusted project checks 실행” 삭제), supervision(보고서만 읽고 코드 재읽기·check 재실행을 하지 않음). R-줄 hand-off와 해석을 원문과 대조하는 규칙은 그대로다.
+- **프로토콜**: G-L·G-X와 같다(8과제 고정 순서, arm당 3반복, 6세션 동시, openai-codex/gpt-6.1-sol high SSE, hidden test는 Pi에 되돌리지 않음). 실험 파일은 로컬 `results/compare/review-2026-10-05/`.
+- **지표**: 최종 통과, 과제별 통과, main context 최대·p90, 추정 비용, wall, 결과 뒤 main의 read·bash 횟수와 크기, 후속 요청 수.
+- **Gate G-M**:
+  1. S0R 최종 통과 ≥ S0 − 1, 그리고 3회 중 2회 이상 진 과제 없음.
+  2. main context 최대값(세션 평균) ≤ S0의 0.7배.
+  3. 추정 비용 ≤ S0의 1.05배, 성공당 비용 ≤ 1.1배.
+  4. parity·identity 100%, unknown usage 0(아니면 HOLD).
+- **결정 규칙**: 모두 통과하면 `mainReview: "report"`를 single 기본값으로 바꾸자고 제안한다(사용자 결정). 1을 못 넘으면 `evidence`를 유지한다. 2나 3만 못 넘으면 `evidence`를 유지하고 원인을 기록한다.
+- **한계(미리 적음)**: 과제당 n=3이라 큰 품질 손실(24개 중 2개 이상)만 걸러낼 수 있다. 기준 1은 비열등성 기준이다(1과제 여유). 이 과제들에서 worker가 check를 거짓 보고한 적이 없어, main 재검증이 막아 주는 실패(예: 빌드가 깨진 채 ‘통과’ 보고)는 여기서 거의 나타나지 않는다. 고정 순서라 위치와 난이도가 섞인다.
+- **Smoke** (a6→a1, arm당 1세션): 둘 다 2/2 통과. S0R main은 결과 뒤 도구를 한 번도 쓰지 않았다(S0: bash 3, read 3). main context 최대 5,383(S0 8,428), 비용 $0.19(S0 $0.24). 2026-10-05 07:13 UTC 본 실행 시작.
+- **결과 (2026-10-05 07:13–09:13 UTC, 6세션 완료, parity·identity 유효; 로컬 `results/compare/review-2026-10-05/README.md`)**: 품질·context 기준은 통과, 비용 기준은 근소하게 미달(+6.8%, 기준 ≤+5%)이고 두 arm 모두 unknown usage가 있어 비용은 HOLD다. **사전 규칙대로 기본값은 `evidence`로 두고, `report`는 opt-in으로 남긴다.**
+
+  | | S0 (evidence) | S0R (report) |
+  |---|---:|---:|
+  | 최종 통과 | 23/24 (d1 2/3) | 24/24 |
+  | main context 최대(세션 평균) | 72,183 | 29,402 (0.41배) |
+  | 결과 뒤 main 도구 사용(3세션) | read 121회 355K자, bash 60회, grep 3회 | read 8회 41K자, ls 1회 |
+  | 후속 요청 | 4 | 3 |
+  | 추정 비용(3세션) | $12.67 | $13.53 (+6.8%) |
+  | 성공당 비용 | $0.551 | $0.564 (1.02배) |
+  | 요청 수 | 769 | 773 |
+  | unknown usage 요청 | 9 | 4 |
+
+  - Gate: (1) 통과(24 vs 23, 진 과제 없음), (2) 통과(0.41배, paired CI −76K~−24K), (3) **미달**(총비용 1.068배; 성공당 1.02배는 통과), (4) parity·identity 통과, unknown usage 때문에 비용 **HOLD**.
+  - 비용 차이의 해석: 요청 수가 같고(773 vs 769) 과제별 비용 차이가 양쪽으로 갈린다(S0R이 p1·d1·c1·p2에서 싸고 b3·d6·c4·d8에서 비쌈). main 검토 방식보다 worker 쪽 과제 편차로 보인다. S0의 unknown usage가 더 많아 S0 비용이 더 과소 추정됐다. 사후 해석이라 기본값 결정에는 쓰지 않는다.
+  - main 재검증의 이득: S0 main은 d6에서 코드를 다시 읽어 실제 결함 하나(HTTP limit 정규식 `$`가 끝 줄바꿈을 허용)를 찾아 후속 요청을 보냈다. S0R은 그런 후속 없이 d6 3/3을 통과했다.
+
+### 10.7 G-M2 사전 등록: 확인 실행과 합산 판정 (2026-10-05, 실행 전에 작성)
+
+- **목적**: G-M의 비용 판정(근소 미달 + unknown usage HOLD)을 정리해 `mainReview` 패키지 기본값을 정한다(사용자 승인). 결과를 본 뒤 기준을 바꾸지 않고, 같은 조건으로 표본을 늘린다.
+- **설계**: G-M과 같은 arm(S0 `evidence`, S0R `report`), 같은 프로토콜·과제·모델, arm당 3세션을 동시에 더 돌린다. runtime은 커밋된 HEAD다(G-M runtime과 코드가 같고 문서만 다르다). 실험 파일은 로컬 `results/compare/review2-2026-10-05/`.
+- **판정은 G-M과 G-M2를 합친 arm당 6세션**으로 한다(`pooled-check.py`, 실행 전에 작성):
+  1. 품질: S0R 최종 통과 ≥ S0 − 2(48개 중), 그리고 어떤 과제도 S0R이 S0보다 6회 중 3회 이상 덜 통과하지 않음.
+  2. context: main context 최대값(6세션 평균) ≤ S0의 0.7배.
+  3. 비용: 총비용 ≤ S0의 1.05배, 성공당 비용 ≤ 1.1배. unknown usage 요청은 (a) 제외한 추정과 (b) 그 세션의 요청당 평균 비용으로 채운 추정, 두 가지로 판정한다. 둘의 결론이 같으면 그것이 결과이고, 다르면 HOLD다.
+  4. parity·identity 100%.
+- **결정 규칙**: 모두 통과하면 `report`를 패키지 기본값으로 바꾸자고 제안한다(사용자 결정). 하나라도 못 넘거나 HOLD면 `evidence`를 유지하고 `report`는 opt-in으로 둔다. G-M2 단독 결과는 서술적으로만 보고한다.
+- **한계(미리 적음)**: 합산해도 과제당 n=6이다. G-M을 본 뒤에 확인 실행을 정했으므로(선택적 재시험), 합산 판정은 기준을 그대로 두고 양쪽 방향으로 나올 수 있다는 점을 명시한다. `report` 쪽이 왜 6.8% 더 들었는지는 설명하지 못한다.
 
 ## 11. 로드맵
 
@@ -528,6 +574,7 @@ Phase 6  runtime·LSP adapter, 도그푸딩(사용자의 Python·Rust 저장소)
 - 커밋 (2026-10-05, 사용자 승인): `a20f255` 감독 규칙 완화, `0b1f7c2` task ledger, `5ef9baf` 이 문서와 라우팅 평가 코드, `dc6fc9e` 작업 유형 규칙과 모델 무관 라우팅 평가(10.1 후속 실행).
 - Phase 3 (구현, 커밋 전): opt-in `"single": { "pipeline": "v2" }`. implement assignment마다 grounded Framer(`src/single/frame.ts`)가 contract를 쓰고, 결과의 위험 점수(`src/single/risk.ts`)가 threshold를 넘으면 Verifier(`src/single/check.ts`)가 probe로 확인한다. blocking finding은 같은 worker에게 fix assignment로 가고, orche가 probe와 check를 다시 돌린다. 일회용 세션은 `src/specialists/session.ts`(`runAdvisorSession` 일반화), 연결은 `src/single/pipeline.ts`와 `src/extension/workers.ts`다. `code_nav`(`src/tools/code-nav.ts`, TS LanguageService worker thread + 다른 언어는 regex, diagnostics와 프로젝트 계획 공유 `src/tools/ts-project.mjs`)는 v2의 worker·Framer·Verifier에만 등록된다. v2 front 규칙은 R-줄을 쓰지 않고 검증도 다시 하지 않는다(`delegationRules(mode, { pipeline })`). 구현 중 내린 판단: edge case를 R-id(`kind: "edge"`)로 합침, needs_decision과 `mode`·`decisions` 파라미터는 보류, Jev `risk` 신호 제거, threshold 7(보정). 테스트는 `test/single/{frame,risk,check}.test.ts`, `test/specialists/session.test.ts`, `test/tools/code-nav.test.ts`, `test/extension/pipeline-v2.test.ts`(faux 모델로 frame→worker→Verifier→fix→recheck 전 경로).
 - G-X 1단계 (10.5): 2026-10-05 02:02–05:05 UTC 실행, **불합격**(통과 22/24 vs 23/24, 성공당 비용 1.83배). main context −56%, d1·d6 탐지 6/6. 원인은 Framer 해석을 main이 worker보다 우선한 것, 탐지한 모호성의 해석이 여전히 동전 던지기인 것, Verifier의 극단 입력 finding이다(10.5). 비용(카탈로그 가격): 본 실행 $37.90 + smoke $0.93.
+- G-X 뒤 (사용자 승인): Verifier 기본 gate `review`, Framer 해석 참고용(v2 안, 미측정). G-M (10.6): v1에서 main 재검증을 뺀 `mainReview: "report"`는 품질(24/24 vs 23/24)과 context(0.41배)는 통과, 총비용 +6.8%로 비용 기준(+5%)을 근소하게 놓쳤고 unknown usage로 HOLD → 기본값 유지, opt-in. 비용(카탈로그 가격): 본 실행 $26.20 + smoke $0.43.
 
 ## 12. 파일 계획 (요약)
 
