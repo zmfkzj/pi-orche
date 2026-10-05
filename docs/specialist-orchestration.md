@@ -1,6 +1,6 @@
 # 새 single 설계: 작업 유형 · topology · 컨텍스트 보존
 
-> **상태 (2026-10-05): Phase 1·2 완료. Phase 3은 opt-in으로 구현했고 G-X 1단계는 불합격(10.5): v1이 기본값으로 남는다.** 처음 기준은 HEAD `68f3624`였다(auto/multi 모드와 orche_run을 Pi 패키지에서 제거, multi 엔진은 라이브러리로만 유지). 진행 상황은 11장에 있다.
+> **상태 (2026-10-05): Phase 1·2 완료. Phase 3(v2)은 opt-in으로 구현했고 G-X 1단계는 불합격(10.5). 그 분석에서 나온 `mainReview: "report"`(main이 결과를 다시 확인하지 않음)는 G-M·G-M2를 통과해 single 기본값이 되었다(10.6–10.7). 다음 할 일은 11.1에 있다.** 처음 기준은 HEAD `68f3624`였다(auto/multi 모드와 orche_run을 Pi 패키지에서 제거, multi 엔진은 라이브러리로만 유지). 진행 상황은 11장에 있다.
 >
 > **범위**
 > - `direct`: 바꾸지 않는다. 이 문서의 어떤 구성요소도 direct main에 들어가지 않는다.
@@ -588,6 +588,37 @@ Phase 6  runtime·LSP adapter, 도그푸딩(사용자의 Python·Rust 저장소)
 - G-X 1단계 (10.5): 2026-10-05 02:02–05:05 UTC 실행, **불합격**(통과 22/24 vs 23/24, 성공당 비용 1.83배). main context −56%, d1·d6 탐지 6/6. 원인은 Framer 해석을 main이 worker보다 우선한 것, 탐지한 모호성의 해석이 여전히 동전 던지기인 것, Verifier의 극단 입력 finding이다(10.5). 비용(카탈로그 가격): 본 실행 $37.90 + smoke $0.93.
 - G-X 뒤 (사용자 승인): Verifier 기본 gate `review`, Framer 해석 참고용(v2 안, 미측정). G-M (10.6): v1에서 main 재검증을 뺀 `mainReview: "report"`는 품질(24/24 vs 23/24)과 context(0.41배)는 통과, 총비용 +6.8%로 비용 기준(+5%)을 근소하게 놓쳤고 unknown usage로 HOLD → 기본값 유지, opt-in. 비용(카탈로그 가격): 본 실행 $26.20 + smoke $0.43.
 - G-M2 (10.7, 2026-10-05 09:29–11:31 UTC): 합산 판정 통과(48/48 vs 46/48, context 0.41배, 비용 0.97배) → `single.mainReview` 기본값을 `report`로 변경. 비용(카탈로그 가격): $26.94.
+
+### 11.1 다음에 할 것 (2026-10-05 기준, 우선순위 순)
+
+**지금 상태**: single 기본 동작은 v1 + 보고서만 보는 main 검토(`mainReview: "report"`, G-M2 통과) + front가 고르는 작업 유형 규칙이다. task ledger(`single.ledger`)와 파이프라인 v2(`single.pipeline: "v2"`: 참고용 Framer, 리뷰 요청 때만 도는 Verifier, code_nav)는 opt-in이다. direct는 바뀌지 않았다. 현재 8과제 벤치마크는 새 기본값에서 48/48이라 더 이상 차이를 가르지 못한다(천장).
+
+1. **새 기본값 운영 확인 (도그푸딩, 비용 거의 0)**
+   - 왜: `report`는 hidden test가 있는 작은 과제에서만 검증했다. 실제 작업에서는 worker가 “통과”라고 보고했지만 빌드가 깨져 있거나, 환경에 따라 check 결과가 다른 경우를 main이 더는 잡지 못한다.
+   - 무엇을: 1–2주 실제 세션에서 쓴다. 사용자가 놓친 결함을 발견하면 records(`run.json`의 checklist와 `verifiedBy`)와 함께 기록해 둔다.
+   - 판정: 놓친 결함이 반복되면 가장 싼 보완을 사전 등록해 시험한다. 예: worker가 이름을 대 check 명령만 main이 한 번 실행(코드는 읽지 않음).
+2. **벤치마크 과제 보강 (다음 측정의 선행 조건)**
+   - 왜: 남은 질문(v2 Framer·code_nav가 새 기본값 위에 무엇을 더하는가)은 지금 과제로는 답할 수 없다. d1·d6도 새 기본값에서 6/6이었다.
+   - 무엇을: (a) 해석·edge case가 갈리는 새 과제 6–10개(hidden test와 참조 구현 포함). v2를 본 사람이 맞추지 않도록 별도 세션이나 미리 정한 명세에서 만든다. (b) 실제 커밋 이력에서 만든 저장소 규모 과제 4–6개(orche, 사용자의 Python·Rust 저장소). code_nav를 재려면 이것이 필요하다.
+   - 판정: `scripts/validate-suite.ts`로 starter는 실패, reference는 통과하는지 확인한 뒤에만 쓴다.
+3. **v2 재측정 (G-X2, 2번 뒤)**
+   - 왜: G-X 뒤 수정(참고용 Framer, 리뷰 요청 때만 도는 Verifier)은 아직 측정하지 않았다. 이제 비교 대상은 새 기본값(v1 + report)이다.
+   - 무엇을: 보강한 과제로 S0' = 새 기본값, S1' = v2를 비교한다. 실행 전에 사전 등록한다(10.4의 G-X 기준). 비용 약 $40.
+   - 판정: 못 넘으면 v2에서 가치가 드러나지 않은 부분을 덜어낸다. 우선 후보는 Verifier의 `auto` 임계값 모드다. 남길 후보는 모호성·edge case 탐지용 Framer(탐지 6/6)다.
+4. **needs_decision (대화형 세션)**
+   - 왜: 모호성은 잘 찾지만(탐지 6/6) 해석을 대신 고르면 동전 던지기다(d1). 이를 해결하는 것은 사용자에게 물어보는 것뿐인데, 사람 없는 벤치마크로는 잴 수 없다.
+   - 무엇을: UI가 있고 Framer가 `askUser` 모호성을 내면, worker를 돌리기 전에 질문을 돌려준다. `orche_task`에 `decisions`를 추가하고 ledger에는 `by: "user"`로 남긴다. UI가 없으면 지금처럼 권장 해석으로 진행한다.
+   - 판정: 제품 판단과 도그푸딩으로 정한다. v2를 쓸 때만 의미가 있어 3번 결과에 따라 진행한다.
+5. **평가 인프라 정리**
+   - unknown usage(HTTP 200인데 usage 이벤트가 없는 요청)가 G-M에서만 13건 나왔다(G-X·G-M2는 0건). provider trace 수집에서 원인을 찾는다.
+   - 실험마다 복사해 쓴 long-session 하네스(`driver.ts`, `analyze.ts`, `pooled-check.py`, watcher)를 하나의 도구로 묶는다. arm·설정·판정 기준을 인자로 받게 해서, 다음 실험의 준비 비용과 실수를 줄인다.
+6. **Phase 4 Investigation (G-I, G-T)**
+   - 무엇을: answer 작업에 근거 ID 인용과 gated critique를 넣는다. 승인 guard가 있는 investigation → execution 전환도 넣는다.
+   - 선행: rubric이 있는 조사 과제 세트(a5, b4, c3와 새 과제), 혼합 요청(“분석하고 괜찮으면 구현”) 세트.
+7. **Phase 5 Creation (G-C)**: generator×N, critic 또는 사용자 선택, refine. 선행은 창작 과제와 쌍대 선호 평가 방법이다. 우선순위는 낮다.
+8. **Phase 6**: code_nav의 LSP adapter(pyright-langserver, rust-analyzer)를 만들고 실제 저장소에서 도그푸딩한다. 2(b)의 저장소 규모 과제가 있어야 가치를 재다.
+
+바꾸지 않는 것: direct 모드, 사전 등록한 gate로만 기본값을 바꾸는 원칙, 13장의 “하지 않을 것”.
 
 ## 12. 파일 계획 (요약)
 
