@@ -8,7 +8,7 @@ import { OrcheController, type OrcheControllerOptions } from "./controller.js";
 import type { MainMode } from "../orchestration/routing.js";
 import { delegationRules, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
 import { contextWarning, DEFAULT_CONTEXT_WARNING, type ContextWarningSettings, type ContextWarningState } from "./context-warning.js";
-import { CONFIG_FILE, loadOrcheConfigFile } from "./config.js";
+import { CONFIG_FILE, DEFAULT_SINGLE, loadOrcheConfigFile } from "./config.js";
 import { orcheTaskParameters, WorkerPool } from "./workers.js";
 
 import { formatRecordList, listRecords } from "./records.js";
@@ -113,8 +113,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     let warningState: ContextWarningState = { warnedLevel: 0 };
     /** `single.pipeline` of the config file read at session start: the single-mode rules differ for v2 (the Framer writes implement contracts). */
     let pipeline: "v1" | "v2" = "v1";
-    /** `single.mainReview` of the same file: `report` drops main's own re-verification from the v1 rules. */
-    let mainReview: "evidence" | "report" = "evidence";
+    /** `single.mainReview` of the same file: `report` (default) drops main's own re-verification from the v1 rules. */
+    let mainReview: "evidence" | "report" = DEFAULT_SINGLE.mainReview;
     const showMode = (ctx: Pick<ExtensionContext, "ui">) =>
       ctx.ui.setStatus("orche-mode", `orche: ${state.session}${state.overriding ? ` (one-turn ${state.effective})` : ""}`);
 
@@ -152,7 +152,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       warningSettings = found.contextWarning ?? { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
       warningState = { warnedLevel: 0 };
       pipeline = found.pipeline ?? "v1";
-      mainReview = found.mainReview ?? "evidence";
+      mainReview = found.mainReview ?? DEFAULT_SINGLE.mainReview;
       state.restore(ctx.sessionManager.getBranch());
       restoredLedgers = latestLedgers(ctx.sessionManager.getBranch());
       workers?.restoreLedgers(restoredLedgers);

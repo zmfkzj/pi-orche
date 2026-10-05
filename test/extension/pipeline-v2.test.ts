@@ -145,7 +145,7 @@ describe("single pipeline v2", () => {
   });
 
   it("front rules: v2 replaces the hand-off, reuse and supervision rules; v1 keeps them", () => {
-    const v1 = delegationRules("single");
+    const v1 = delegationRules("single", { mainReview: "evidence" });
     const v2 = delegationRules("single", { pipeline: "v2" });
     expect(v1).toContain("numbered requirements checklist R1..Rn as lines `R1: …`, each testable");
     expect(v1).toContain("run the trusted project checks yourself");
@@ -164,7 +164,7 @@ describe("single pipeline v2", () => {
     expect(report).toContain("Check every reported ambiguity's chosen reading against the user's original wording");
     expect(report).not.toContain("run the trusted project checks yourself");
     expect(report).not.toContain("and run trusted project checks");
-    expect(delegationRules("single", { mainReview: "evidence" })).toBe(v1);
+    expect(delegationRules("single")).toBe(report);
     expect(delegationRules("single", { pipeline: "v2", mainReview: "report" })).toBe(v2);
   });
 });

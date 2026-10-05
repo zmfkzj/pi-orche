@@ -389,7 +389,7 @@ interface TaskLedger {
     "frame": "grounded",                                         // 구현: "grounded"(기본) | "spec" | "off"
     "checker": { "gate": "review", "threshold": 7, "maxFixRounds": 1 },   // 구현: gate review(기본)|auto|always|off, threshold 0–30, maxFixRounds 0–2
     "nav": true,                                                  // 구현: v2 세션의 code_nav (설계안: LSP adapter 설정은 Phase 6)
-    "mainReview": "evidence"                                      // 구현(v1, 시험 중 10.6): "evidence"(기본) | "report"(main이 결과를 다시 확인하지 않음)
+    "mainReview": "report"                                        // 구현(v1): "report"(기본, G-M2 뒤; main이 결과를 다시 확인하지 않음) | "evidence"(이전 동작)
     // 설계안(미구현): "policy": { "bugReports": "fix" }, "creation": { "candidates": 3 }, "maxTransitions": 4. Jev "router" 설정은 G-R 뒤 뺐다.
   },
   "taskContext": { "clearBetweenAssignments": true, "minClearTokens": 10000 }   // 기존
@@ -547,6 +547,18 @@ primitive를 하나씩 끈 arm(S1−X)과 비교한다. 품질이 같고 더 싸
   4. parity·identity 100%.
 - **결정 규칙**: 모두 통과하면 `report`를 패키지 기본값으로 바꾸자고 제안한다(사용자 결정). 하나라도 못 넘거나 HOLD면 `evidence`를 유지하고 `report`는 opt-in으로 둔다. G-M2 단독 결과는 서술적으로만 보고한다.
 - **한계(미리 적음)**: 합산해도 과제당 n=6이다. G-M을 본 뒤에 확인 실행을 정했으므로(선택적 재시험), 합산 판정은 기준을 그대로 두고 양쪽 방향으로 나올 수 있다는 점을 명시한다. `report` 쪽이 왜 6.8% 더 들었는지는 설명하지 못한다.
+- **결과 (2026-10-05 09:29–11:31 UTC, 6세션 완료, parity·identity 유효, 이번 실행의 unknown usage 0; 로컬 `results/compare/review2-2026-10-05/README.md`)**: **합산 판정 통과.** 결정 규칙대로 기본값 변경을 제안했고, 사용자가 승인한 계획(확인 실행이 G-M을 확인하면 기본값을 바꾼다)에 따라 `mainReview` 기본값을 `report`로 바꿨다.
+
+  | | S0 (evidence) | S0R (report) | 판정 |
+  |---|---:|---:|---|
+  | 최종 통과(48) | 46 | 48 (d1 6/6 vs 4/6) | 통과 |
+  | main context 최대(6세션 평균) | 77,060 | 31,504 (0.409배) | 통과 |
+  | 총비용, 알려진 사용량 | $27.01 | $26.13 (0.967배, 성공당 0.927배) | 통과 |
+  | 총비용, unknown usage 대입 | $27.15 | $26.20 (0.965배, 성공당 0.925배) | 통과 |
+  | parity·identity | 12/12 | | 통과 |
+
+  - G-M2 단독(서술): S0 23/24, S0R 24/24. main context 최대 81,937 vs 33,605, 비용 $14.34 vs $12.60, 요청 847 vs 736. G-M의 +6.8% 비용 차이는 이번에 반대 방향(−12%)으로 나와, 과제 편차였다는 해석과 맞는다.
+  - d1은 S0에서 6회 중 2회 실패했고 S0R에서는 6/6이었다. 원인은 같은 해석 동전 던지기다. main 재검증이 d1을 막지 못한다는 점은 G-L·G-X와도 같다.
 
 ## 11. 로드맵
 
@@ -575,6 +587,7 @@ Phase 6  runtime·LSP adapter, 도그푸딩(사용자의 Python·Rust 저장소)
 - Phase 3 (구현, 커밋 전): opt-in `"single": { "pipeline": "v2" }`. implement assignment마다 grounded Framer(`src/single/frame.ts`)가 contract를 쓰고, 결과의 위험 점수(`src/single/risk.ts`)가 threshold를 넘으면 Verifier(`src/single/check.ts`)가 probe로 확인한다. blocking finding은 같은 worker에게 fix assignment로 가고, orche가 probe와 check를 다시 돌린다. 일회용 세션은 `src/specialists/session.ts`(`runAdvisorSession` 일반화), 연결은 `src/single/pipeline.ts`와 `src/extension/workers.ts`다. `code_nav`(`src/tools/code-nav.ts`, TS LanguageService worker thread + 다른 언어는 regex, diagnostics와 프로젝트 계획 공유 `src/tools/ts-project.mjs`)는 v2의 worker·Framer·Verifier에만 등록된다. v2 front 규칙은 R-줄을 쓰지 않고 검증도 다시 하지 않는다(`delegationRules(mode, { pipeline })`). 구현 중 내린 판단: edge case를 R-id(`kind: "edge"`)로 합침, needs_decision과 `mode`·`decisions` 파라미터는 보류, Jev `risk` 신호 제거, threshold 7(보정). 테스트는 `test/single/{frame,risk,check}.test.ts`, `test/specialists/session.test.ts`, `test/tools/code-nav.test.ts`, `test/extension/pipeline-v2.test.ts`(faux 모델로 frame→worker→Verifier→fix→recheck 전 경로).
 - G-X 1단계 (10.5): 2026-10-05 02:02–05:05 UTC 실행, **불합격**(통과 22/24 vs 23/24, 성공당 비용 1.83배). main context −56%, d1·d6 탐지 6/6. 원인은 Framer 해석을 main이 worker보다 우선한 것, 탐지한 모호성의 해석이 여전히 동전 던지기인 것, Verifier의 극단 입력 finding이다(10.5). 비용(카탈로그 가격): 본 실행 $37.90 + smoke $0.93.
 - G-X 뒤 (사용자 승인): Verifier 기본 gate `review`, Framer 해석 참고용(v2 안, 미측정). G-M (10.6): v1에서 main 재검증을 뺀 `mainReview: "report"`는 품질(24/24 vs 23/24)과 context(0.41배)는 통과, 총비용 +6.8%로 비용 기준(+5%)을 근소하게 놓쳤고 unknown usage로 HOLD → 기본값 유지, opt-in. 비용(카탈로그 가격): 본 실행 $26.20 + smoke $0.43.
+- G-M2 (10.7, 2026-10-05 09:29–11:31 UTC): 합산 판정 통과(48/48 vs 46/48, context 0.41배, 비용 0.97배) → `single.mainReview` 기본값을 `report`로 변경. 비용(카탈로그 가격): $26.94.
 
 ## 12. 파일 계획 (요약)
 

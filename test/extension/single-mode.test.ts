@@ -34,7 +34,7 @@ describe("single mode does the work", () => {
       "never end a turn without attempting the requested change because of its size or risk",
       "The worker owns the whole task end to end",
       "problems and user follow-ups go to the SAME worker (pass its id in `worker`)",
-      "Read the report and its key evidence, run the trusted project checks yourself",
+      "Read the report: its checklist, the checks it names and the readings it chose; do not re-read the changed code or re-run the project checks to verify it yourself",
       "Send a separate verify assignment only when the user explicitly asks for independent verification",
       "This workflow is the same with and without a UI",
     ]) expect(rules).toContain(instruction);

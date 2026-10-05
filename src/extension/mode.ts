@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_MAIN_MODE, LEGACY_MAIN_MODES, loadRouteConfig, MAIN_MODES, type MainMode } from "../orchestration/routing.js";
 import { classifyBash, READ_ONLY_GIT_SUBCOMMANDS, type BashHint } from "./bash-policy.js";
-import { CONFIG_FILE } from "./config.js";
+import { CONFIG_FILE, DEFAULT_SINGLE } from "./config.js";
 import { WORK_TYPE_RULE } from "../single/work-types.js";
 
 export const MODE_ENTRY_TYPE = "orche-mode";
@@ -35,21 +35,21 @@ const V2_HANDOFF = "Single hand-off (pipeline v2): main analyses the user's inte
 const V2_REUSE = "Reuse: problems and user follow-ups go to the SAME worker (pass its id in `worker`). For implement, state additional or corrected requirements in words in the new request (the Framer carries the task's earlier requirements over by id); for answer, restate them as R-ids. When a requirement remains unmet or partial for 2 consecutive assignments of that worker, hand ONLY the unmet items to a NEW worker (omit worker), with their requirements, relevant file references and the previous worker's evidence; do not resend the whole task. When a result names a task ledger (`Task ledger T…`), pass that id in `task` for every follow-up of the same task, including the new worker that takes over unmet items; omit `task` for a different user task, even when you reuse the worker. Never claim a reuse that did not happen (unknown ids are errors; workers are gone after a reload, and only a task id continues their work).";
 const V2_SUPERVISION = "Supervision: a worker's report is not acceptance, and its checklist is a self-report. Read the result: the Framer's recommended readings, the readings the worker chose and, when it ran, the Verifier's findings with orche's recheck. The worker decides readings with the code: never send a correction only because its reading differs from the Framer's recommendation. Compare the worker's readings with the user's original wording: send a correction to the same task only when the user's words contradict a reading; when the wording leaves it open, or a reading is marked as needing the user's decision, ask the user (with a UI) or report the reading as an assumption. Report open, disputed or unchecked findings and unverified items as such; do not re-read the changed code or re-run checks to verify the change yourself. An explicit review or verification request in the user's words makes the Verifier run; send a separate verify assignment only when the user asks for one after the fact.";
 /**
- * `single.mainReview: "report"` (v1): main accepts or follows up on a result from the report alone, without re-reading the changed code
- * or re-running checks itself (G-X stage 1: that re-verification is where v1's main context grows).
+ * `single.mainReview: "report"` (v1, the default): main accepts or follows up on a result from the report alone, without re-reading the
+ * changed code or re-running checks itself. G-M + G-M2 (48 tasks per arm): 48/48 vs 46/48 passed, main context 0.41x, cost 0.97x.
  */
 const REPORT_SUPERVISION = "Supervision: a worker's report is not acceptance, and its checklist is a self-report. Read the report: its checklist, the checks it names and the readings it chose; do not re-read the changed code or re-run the project checks to verify it yourself (the worker ran them and names them). Check every reported ambiguity's chosen reading against the user's original wording (send a correction to the same worker when it differs), and report unverified items as unverified. Send a separate verify assignment only when the user explicitly asks for independent verification; otherwise send problems to the same worker with what is wrong.";
 export interface DelegationOptions {
   /** `single.pipeline`; v2 replaces the hand-off, reuse and supervision rules. */
   pipeline?: "v1" | "v2";
-  /** `single.mainReview` (v1 only): `evidence` (default) reads key evidence and runs trusted checks; `report` reviews the report alone. */
+  /** `single.mainReview` (v1 only): `report` (default) reviews the report alone; `evidence` also re-reads code and re-runs trusted checks. */
   mainReview?: "evidence" | "report";
 }
 /** Stable per effective mode and config: never include session state or a worker roster here. */
 export function delegationRules(mode: MainMode, options: DelegationOptions = {}): string {
   if (mode === "direct")
     return "orche mode: direct. Delegation tools are disabled; make changes directly with your own tools. You may edit user-requested paths outside the cwd/workspace, including absolute paths and ../ paths. Delegated workers' workspace confinement does not restrict this main direct session; their scope remains unchanged. Existing OS permissions and other policies still apply; direct mode does not grant elevated OS privileges or bypass those restrictions.";
-  const reportOnly = options.pipeline !== "v2" && options.mainReview === "report";
+  const reportOnly = options.pipeline !== "v2" && (options.mainReview ?? DEFAULT_SINGLE.mainReview) === "report";
   return [
     `orche mode: single. You cannot edit files in this session: edit, write and ast_rewrite are disabled; explicit shell mutations and unverified shell syntax are blocked. You keep the conversation, requirements and acceptance, with limited inspection to state the task precisely${reportOnly ? "; acceptance rests on the checks the worker reports" : " and trusted project checks for acceptance"}. Do not explore or implement the codebase yourself; delegate with orche_task.`,
     "orche_task (single): one persistent worker; available roles: explore | answer | implement | verify | game-asset | video. For this workflow choose implement for changes, answer for read-only questions. The worker owns the whole task end to end: investigate, implement completely, add or update tests, run relevant project checks and iterate until they pass, then report.",

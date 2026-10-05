@@ -60,7 +60,7 @@ describe("mainMode: tool sets", () => {
     expect(seen[0]).toContain("Never stop to ask the user to switch modes in order to proceed");
     expect(seen[0]).toContain("refine the requirements with the user: goal, constraints and acceptance criteria");
     expect(seen[0]).toContain("ONE orche_task in ONE end-to-end assignment");
-    expect(seen[0]).toContain("run the trusted project checks yourself");
+    expect(seen[0]).toContain("do not re-read the changed code or re-run the project checks to verify it yourself");
     expect(seen[0]).toContain("explore | answer | implement | verify | game-asset | video");
     for (const removed of ["orche_run", "Judgment before Production", "start with explore", "dispatch a verify worker", "prefer multi", "never split", "/orche mode auto"]) expect(seen[0]).not.toContain(removed);
     expect(seen[1]).toContain(EXTERNAL_PERMISSION);

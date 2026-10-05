@@ -178,11 +178,14 @@ export interface SingleSettings {
   frame: "grounded" | "spec" | "off";
   checker: CheckerSettings;
   nav: boolean;
-  /** v1 only: how main reviews a result. `evidence` (default) reads key evidence and runs trusted checks; `report` reviews the report alone. */
+  /**
+   * v1 only: how main reviews a result. `report` (the default since G-M/G-M2) reviews the report alone and checks readings against the
+   * user's wording; `evidence` also re-reads the changed code and re-runs trusted checks itself (the earlier behaviour).
+   */
   mainReview: "evidence" | "report";
 }
 /** threshold 7: calibrated on 90 stored v1 single results (experiments/risk/calibrate.ts): all 7 failed ones score 8 or more, 66% of all are verified (74% at 5). */
-export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false, pipeline: "v1", frame: "grounded", checker: { gate: "review", threshold: 7, maxFixRounds: 1 }, nav: true, mainReview: "evidence" };
+export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false, pipeline: "v1", frame: "grounded", checker: { gate: "review", threshold: 7, maxFixRounds: 1 }, nav: true, mainReview: "report" };
 const SINGLE_KEYS = new Set(["ledger", "pipeline", "frame", "checker", "nav", "mainReview"]);
 const CHECKER_KEYS = new Set(["gate", "threshold", "maxFixRounds"]);
 export function parseSingleConfig(value: unknown): SingleSettings {
