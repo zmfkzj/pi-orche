@@ -16,7 +16,8 @@ export interface SessionTarget {
   sessionFile?: string;
 }
 
-export type RecordedKind = "coordinator" | "worker" | "advisor";
+/** `specialist`: a one-shot session of the single workflow's v2 pipeline (Framer, Verifier). */
+export type RecordedKind = "coordinator" | "worker" | "advisor" | "specialist";
 
 /** The agent a session belongs to. `id` is unique within a run: `coordinator`, worker ids (`A1`, `V1`, `W3`), `advisor:<name>#<n>`. */
 export interface RecordedActor {

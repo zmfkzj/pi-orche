@@ -29,6 +29,8 @@ export const LEDGER_LIMITS = {
   itemChars: 300,
   workerChars: 8_000,
   summaryChars: 2_000,
+  checks: 20,
+  findings: 30,
 } as const;
 
 export type RequirementStatus = "open" | "met" | "partial" | "unmet";
@@ -42,7 +44,12 @@ export interface LedgerRequirement {
   evidence?: string;
   verifiedBy?: string;
 }
-export interface LedgerDecision { assignment: number; id?: string; readings: string[]; chosen: string; by: "worker" }
+/** A reading chosen for ambiguous wording: by the worker (reported in its result) or by the Framer before the worker started (`quote` is the wording). */
+export interface LedgerDecision { assignment: number; id?: string; readings: string[]; chosen: string; by: "worker" | "framer"; quote?: string; askUser?: boolean }
+/** The risk assessment of an implement result and, when it ran, the Verifier's verdict (`error`: the Verifier failed). */
+export interface LedgerCheck { assignment: number; at: number; score: number; threshold: number; decision: "verify" | "skip"; reason: string; verdict?: "pass" | "fail" | "error" }
+export type FindingState = "open" | "fixed" | "disputed" | "unchecked" | "minor";
+export interface LedgerFinding { assignment: number; id: string; severity: "blocking" | "minor"; requirement?: string; claim: string; status: FindingState; probe?: string; detail?: string }
 export interface LedgerHistoryItem { assignment: number; at: number; role: string; worker: string; status: string; summary: string; record?: string }
 export interface LedgerWorker { worker: string; model?: string; thinking?: string; sessionFile?: string }
 /** The worker that last took the task; `live` is runtime state (false once that worker is gone), never persisted. */
@@ -60,16 +67,24 @@ export interface TaskLedger {
   decisions: LedgerDecision[];
   primary?: LedgerPrimary;
   history: LedgerHistoryItem[];
+  /** Risk assessments and Verifier verdicts (single pipeline v2), oldest first. Absent in ledgers written before they existed. */
+  checks?: LedgerCheck[];
+  /** Verifier findings with their latest state. */
+  findings?: LedgerFinding[];
 }
 
 export interface RequirementUpdate { id: string; status: Exclude<RequirementStatus, "open">; evidence: string; verifiedBy?: string }
 interface EventBase { v: 1; taskId: string; at: number }
 export interface CreateEvent extends EventBase { event: "create"; cwd: string }
-/** A hand-off: its original request when new, its requirement declarations (statuses carried from the previous assignment), the worker taking it. */
-export interface HandoffEvent extends EventBase { event: "handoff"; assignment: number; original?: string; requirements: LedgerRequirement[]; primary: LedgerWorker }
+/** A hand-off: its original request when new, its requirement declarations (statuses carried from the previous assignment), the worker taking it, and the readings the Framer settled. */
+export interface HandoffEvent extends EventBase { event: "handoff"; assignment: number; original?: string; requirements: LedgerRequirement[]; primary: LedgerWorker; decisions?: LedgerDecision[] }
 export interface ResultEvent extends EventBase { event: "result"; assignment: number; statuses: RequirementUpdate[]; decisions: LedgerDecision[]; history: LedgerHistoryItem }
 export interface FailureEvent extends EventBase { event: "failure"; history: LedgerHistoryItem }
-export type LedgerEvent = CreateEvent | HandoffEvent | ResultEvent | FailureEvent;
+/** The risk assessment of the current assignment's result and, when the Verifier ran, its findings. */
+export interface CheckEvent extends EventBase { event: "check"; assignment: number; check: LedgerCheck; findings: LedgerFinding[] }
+/** orche re-ran the blocking findings' probes after the fix round. */
+export interface RecheckEvent extends EventBase { event: "recheck"; assignment: number; statuses: { id: string; status: FindingState; detail?: string }[] }
+export type LedgerEvent = CreateEvent | HandoffEvent | ResultEvent | FailureEvent | CheckEvent | RecheckEvent;
 
 const clip = (text: string, max: number): string => {
   const flat = text.trim();
@@ -121,6 +136,10 @@ export function applyEvent(ledger: TaskLedger, event: Exclude<LedgerEvent, Creat
         ledger.requirements.splice(oldest, 1);
       }
       ledger.primary = { ...event.primary, live: true };
+      if (event.decisions?.length) {
+        ledger.decisions.push(...event.decisions.map(item => ({ ...item, readings: [...item.readings] })));
+        trimOldest(ledger.decisions, LEDGER_LIMITS.decisions);
+      }
       break;
     }
     case "result": {
@@ -137,6 +156,20 @@ export function applyEvent(ledger: TaskLedger, event: Exclude<LedgerEvent, Creat
       trimOldest(ledger.history, LEDGER_LIMITS.history);
       break;
     }
+    case "check":
+      (ledger.checks ??= []).push({ ...event.check });
+      trimOldest(ledger.checks, LEDGER_LIMITS.checks);
+      (ledger.findings ??= []).push(...event.findings.map(item => ({ ...item })));
+      trimOldest(ledger.findings, LEDGER_LIMITS.findings);
+      break;
+    case "recheck":
+      for (const update of event.statuses) {
+        const finding = ledger.findings?.find(entry => entry.assignment === event.assignment && entry.id === update.id);
+        if (!finding) continue;
+        finding.status = update.status;
+        if (update.detail) finding.detail = update.detail; else delete finding.detail;
+      }
+      break;
     case "failure":
       ledger.history.push({ ...event.history });
       trimOldest(ledger.history, LEDGER_LIMITS.history);
@@ -149,7 +182,7 @@ export function applyEvent(ledger: TaskLedger, event: Exclude<LedgerEvent, Creat
  * A new assignment was handed off to `primary`: count it, keep its original request when new, and add its requirement
  * declarations. A requirement restated unchanged from the previous assignment keeps its last status. Returns the applied event.
  */
-export function recordHandoff(ledger: TaskLedger, handoff: { request: string; primary: LedgerWorker; at?: number }): HandoffEvent {
+export function recordHandoff(ledger: TaskLedger, handoff: { request: string; primary: LedgerWorker; at?: number; decisions?: readonly Omit<LedgerDecision, "assignment" | "by">[] }): HandoffEvent {
   const assignment = ledger.assignments + 1;
   const found = originalRequestOf(handoff.request);
   const original = found === undefined ? undefined : clip(found, LEDGER_LIMITS.originalChars);
@@ -160,7 +193,8 @@ export function recordHandoff(ledger: TaskLedger, handoff: { request: string; pr
     const carried = previous.find(item => item.id === id && item.text === text);
     return { assignment, id, text, status: carried?.status ?? "open", ...(carried?.evidence ? { evidence: carried.evidence } : {}), ...(carried?.verifiedBy ? { verifiedBy: carried.verifiedBy } : {}) };
   });
-  const event: HandoffEvent = { v: 1, event: "handoff", taskId: ledger.taskId, at: handoff.at ?? Date.now(), assignment, ...(isNew ? { original } : {}), requirements, primary: { ...handoff.primary } };
+  const decisions = (handoff.decisions ?? []).map((item): LedgerDecision => ({ assignment, ...(item.id ? { id: item.id } : {}), readings: item.readings.map(reading => oneLine(reading)), chosen: oneLine(item.chosen), by: "framer", ...(item.quote ? { quote: oneLine(item.quote, 200) } : {}), ...(item.askUser ? { askUser: true } : {}) }));
+  const event: HandoffEvent = { v: 1, event: "handoff", taskId: ledger.taskId, at: handoff.at ?? Date.now(), assignment, ...(isNew ? { original } : {}), requirements, primary: { ...handoff.primary }, ...(decisions.length ? { decisions } : {}) };
   applyEvent(ledger, event);
   return event;
 }
@@ -198,10 +232,30 @@ export function recordFailure(ledger: TaskLedger, failure: { role: string; worke
   return event;
 }
 
+/** The current assignment's risk assessment and, when the Verifier ran, its findings. Returns the applied event. */
+export function recordCheck(ledger: TaskLedger, check: Omit<LedgerCheck, "assignment" | "at"> & { at?: number }, findings: readonly Omit<LedgerFinding, "assignment">[] = []): CheckEvent {
+  const assignment = ledger.assignments;
+  const at = check.at ?? Date.now();
+  const event: CheckEvent = {
+    v: 1, event: "check", taskId: ledger.taskId, at, assignment,
+    check: { assignment, at, score: check.score, threshold: check.threshold, decision: check.decision, reason: oneLine(check.reason, 120), ...(check.verdict ? { verdict: check.verdict } : {}) },
+    findings: findings.map(item => ({ assignment, id: item.id, severity: item.severity, ...(item.requirement ? { requirement: item.requirement } : {}), claim: oneLine(item.claim), status: item.status, ...(item.probe ? { probe: oneLine(item.probe, 200) } : {}), ...(item.detail ? { detail: oneLine(item.detail, 200) } : {}) })),
+  };
+  applyEvent(ledger, event);
+  return event;
+}
+
+/** orche re-ran the blocking findings' probes after the fix round. Returns the applied event. */
+export function recordRecheck(ledger: TaskLedger, statuses: readonly { id: string; status: FindingState; detail?: string }[], at: number = Date.now()): RecheckEvent {
+  const event: RecheckEvent = { v: 1, event: "recheck", taskId: ledger.taskId, at, assignment: ledger.assignments, statuses: statuses.map(item => ({ id: item.id, status: item.status, ...(item.detail ? { detail: oneLine(item.detail, 200) } : {}) })) };
+  applyEvent(ledger, event);
+  return event;
+}
+
 const statusOf = (item: LedgerRequirement): string => item.status === "met" && item.verifiedBy ? `met; verified by: ${item.verifiedBy}` : item.status;
 const decisionLine = (item: LedgerDecision): string => {
   const others = item.readings.filter(reading => reading !== item.chosen);
-  return `- a${item.assignment} ${item.id ?? "?"}: chose "${item.chosen}"${others.length ? ` over ${others.map(reading => `"${reading}"`).join(", ")}` : ""}`;
+  return `- a${item.assignment} ${item.id ?? "?"}${item.quote ? ` "${item.quote}"` : ""}: ${item.by === "framer" ? "Framer chose" : "chose"} "${item.chosen}"${others.length ? ` over ${others.map(reading => `"${reading}"`).join(", ")}` : ""}${item.askUser ? " (needs the user's decision)" : ""}`;
 };
 
 /** Characters of one original request in the worker projection; the full text stays in the ledger entry. */
@@ -219,12 +273,14 @@ export function renderLedgerForWorker(ledger: TaskLedger, maxChars: number = LED
   const earlier = ledger.requirements.filter(item => item.assignment !== ledger.assignments);
   const decisions = [...ledger.decisions];
   const history = [...ledger.history];
+  const findings = (ledger.findings ?? []).filter(item => item.assignment === ledger.assignments && item.status !== "fixed");
   const priorOriginals = ledger.originalRequests.filter(item => item.assignment !== ledger.assignments);
   let originals = priorOriginals.length > 2 ? [priorOriginals[0]!, priorOriginals.at(-1)!] : priorOriginals;
   const build = (omitted: number): string => [
     `Task ledger ${ledger.taskId}: state across ${ledger.assignments} assignment(s), kept by orche outside your context and rendered when this message was written. The latest Assignment message wins where they differ; re-read files before relying on reported results.`,
     ...(current.length ? [`Requirements of assignment a${ledger.assignments} (the latest when rendered), last reported status:`, ...current.map(item => `- ${item.id} [${statusOf(item)}] ${oneLine(item.text)}`)] : []),
     ...(decisions.length ? ["Readings chosen for ambiguous requirements (keep them unless the user changes them):", ...decisions.map(decisionLine)] : []),
+    ...(findings.length ? [`Verifier findings of assignment a${ledger.assignments} not fixed when rendered:`, ...findings.map(item => `- ${item.id} ${item.severity}${item.requirement ? ` ${item.requirement}` : ""} [${item.status}] ${item.claim}${item.probe ? ` (re-run: ${item.probe})` : ""}`)] : []),
     ...(earlier.length ? ["Requirements of earlier assignments (historical):", ...earlier.map(item => `- a${item.assignment} ${item.id} [${item.status}] ${oneLine(item.text, 160)}`)] : []),
     ...(originals.length ? [`Earlier original request(s) from the user${priorOriginals.length > originals.length ? ` (${priorOriginals.length - originals.length} more not shown)` : ""}:`, ...originals.map(item => `[a${item.assignment}] ${clip(item.text, WORKER_ORIGINAL_CHARS)}`)] : []),
     ...(history.length ? ["Assignment history:", ...history.map(item => `- a${item.assignment} ${item.role} ${item.status} (${item.worker}): ${item.summary}`)] : []),
@@ -253,13 +309,16 @@ export function renderLedgerSummary(ledgers: readonly TaskLedger[], maxChars: nu
     const counts = (["met", "partial", "unmet", "open"] as const).map(status => [status, current.filter(item => item.status === status).length] as const).filter(([, count]) => count > 0);
     const open = current.filter(item => item.status !== "met").map(item => `${item.id} ${item.status}: ${oneLine(item.text, 80)}`);
     const last = ledger.history.at(-1);
-    const decisions = ledger.decisions.slice(-3).map(item => `${item.id ?? "?"}="${oneLine(item.chosen, 60)}"`);
+    const decisions = ledger.decisions.slice(-3).map(item => `${item.id ?? "?"}="${oneLine(item.chosen, 60)}"${item.askUser ? " (ask the user)" : ""}`);
+    const check = ledger.checks?.filter(item => item.assignment === ledger.assignments).at(-1);
+    const openFindings = (ledger.findings ?? []).filter(item => item.assignment === ledger.assignments && item.severity === "blocking" && item.status !== "fixed");
     const worker = ledger.primary ? `${ledger.primary.worker}${ledger.primary.live ? "" : " (gone)"}` : "no worker";
     return clip([
       `- ${ledger.taskId} · ${worker} · ${ledger.assignments} assignment(s)`,
       counts.length ? ` · current a${ledger.assignments}: ${counts.map(([status, count]) => `${count} ${status}`).join(", ")}` : "",
       open.length ? ` · not met: ${open.join("; ")}` : "",
       decisions.length ? ` · readings: ${decisions.join(", ")}` : "",
+      check ? ` · risk ${check.score}/${check.threshold}: ${check.decision === "verify" ? `verified ${check.verdict ?? "?"}` : "not verified"}${openFindings.length ? `, open findings: ${openFindings.map(item => `${item.id} ${item.status}`).join(", ")}` : ""}` : "",
       last ? ` · last: ${last.role} ${last.status}: ${oneLine(last.summary, 120)}` : "",
     ].join(""), maxChars);
   });
@@ -284,7 +343,14 @@ const optionalString = (value: unknown): boolean => value === undefined || typeo
 const isRequirement = (value: unknown): boolean => isRecord(value) && typeof value.assignment === "number" && isString(value.id) && isString(value.text)
   && STATUSES.includes(value.status as string) && optionalString(value.evidence) && optionalString(value.verifiedBy);
 const isUpdate = (value: unknown): boolean => isRecord(value) && isString(value.id) && STATUSES.includes(value.status as string) && value.status !== "open" && isString(value.evidence) && optionalString(value.verifiedBy);
-const isDecision = (value: unknown): boolean => isRecord(value) && typeof value.assignment === "number" && optionalString(value.id) && Array.isArray(value.readings) && value.readings.every(isString) && isString(value.chosen);
+const isDecision = (value: unknown): boolean => isRecord(value) && typeof value.assignment === "number" && optionalString(value.id) && Array.isArray(value.readings) && value.readings.every(isString) && isString(value.chosen)
+  && (value.by === undefined || value.by === "worker" || value.by === "framer") && optionalString(value.quote) && (value.askUser === undefined || typeof value.askUser === "boolean");
+const FINDING_STATES: readonly string[] = ["open", "fixed", "disputed", "unchecked", "minor"];
+const isCheck = (value: unknown): boolean => isRecord(value) && typeof value.assignment === "number" && typeof value.at === "number" && typeof value.score === "number" && typeof value.threshold === "number"
+  && (value.decision === "verify" || value.decision === "skip") && isString(value.reason) && (value.verdict === undefined || ["pass", "fail", "error"].includes(value.verdict as string));
+const isFinding = (value: unknown): boolean => isRecord(value) && typeof value.assignment === "number" && isString(value.id) && (value.severity === "blocking" || value.severity === "minor")
+  && optionalString(value.requirement) && isString(value.claim) && FINDING_STATES.includes(value.status as string) && optionalString(value.probe) && optionalString(value.detail);
+const isFindingStatus = (value: unknown): boolean => isRecord(value) && isString(value.id) && FINDING_STATES.includes(value.status as string) && optionalString(value.detail);
 const isHistory = (value: unknown): boolean => isRecord(value) && typeof value.assignment === "number" && typeof value.at === "number"
   && isString(value.role) && isString(value.worker) && isString(value.status) && isString(value.summary) && optionalString(value.record);
 const isWorker = (value: unknown): boolean => isRecord(value) && isString(value.worker) && optionalString(value.model) && optionalString(value.thinking) && optionalString(value.sessionFile);
@@ -294,9 +360,12 @@ export function isLedgerEvent(value: unknown): value is LedgerEvent {
   if (!isRecord(value) || value.v !== 1 || !isString(value.taskId) || typeof value.at !== "number") return false;
   switch (value.event) {
     case "create": return isString(value.cwd);
-    case "handoff": return typeof value.assignment === "number" && optionalString(value.original) && Array.isArray(value.requirements) && value.requirements.every(isRequirement) && isWorker(value.primary);
+    case "handoff": return typeof value.assignment === "number" && optionalString(value.original) && Array.isArray(value.requirements) && value.requirements.every(isRequirement) && isWorker(value.primary)
+      && (value.decisions === undefined || Array.isArray(value.decisions) && value.decisions.every(isDecision));
     case "result": return typeof value.assignment === "number" && Array.isArray(value.statuses) && value.statuses.every(isUpdate) && Array.isArray(value.decisions) && value.decisions.every(isDecision) && isHistory(value.history);
     case "failure": return isHistory(value.history);
+    case "check": return typeof value.assignment === "number" && isCheck(value.check) && Array.isArray(value.findings) && value.findings.every(isFinding);
+    case "recheck": return typeof value.assignment === "number" && Array.isArray(value.statuses) && value.statuses.every(isFindingStatus);
     default: return false;
   }
 }

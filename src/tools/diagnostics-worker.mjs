@@ -2,8 +2,8 @@
 // the parent terminates it at the deadline. Plain JS so Node can load it without a TS loader.
 import { workerData, parentPort } from "node:worker_threads";
 import { createRequire } from "node:module";
-import { existsSync, readdirSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, sep } from "node:path";
+import { planProject } from "./ts-project.mjs";
 
 const { tsPath, cwd, files, maxFiles, deadline, maxItems } = workerData;
 const ts = createRequire(import.meta.url)(tsPath);
@@ -11,8 +11,6 @@ const ts = createRequire(import.meta.url)(tsPath);
 // Noise that only says "this workspace lacks installed packages / node typings".
 const IGNORED_CODES = new Set([2580, 2591, 2592, 2593]);
 const MODULE_NOT_FOUND = 2307;
-const SOURCE = /\.(?:[cm]?[jt]s|[jt]sx)$/;
-const SKIPPED = new Set([".git", "node_modules", ".orche"]);
 
 class Deadline {
   isCancellationRequested() {
@@ -23,58 +21,7 @@ class Deadline {
   }
 }
 
-function findConfig(startDir) {
-  let dir = startDir;
-  for (;;) {
-    for (const name of ["tsconfig.json", "jsconfig.json"]) {
-      const candidate = join(dir, name);
-      if (existsSync(candidate)) return candidate;
-    }
-    if (dir === cwd || dirname(dir) === dir || !dir.startsWith(cwd)) return undefined;
-    dir = dirname(dir);
-  }
-}
-
-function listSources(dir, out) {
-  if (out.length >= maxFiles) return;
-  for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
-    if (out.length >= maxFiles) return;
-    if (entry.isDirectory()) {
-      if (!SKIPPED.has(entry.name)) listSources(join(dir, entry.name), out);
-    } else if (SOURCE.test(entry.name) && !entry.name.endsWith(".d.ts")) out.push(join(dir, entry.name));
-  }
-}
-
-const forced = { allowJs: true, checkJs: true, noEmit: true, incremental: false, composite: false, declaration: false, declarationMap: false, emitDeclarationOnly: false, skipLibCheck: true };
-const defaults = {
-  ...forced,
-  target: ts.ScriptTarget.ES2022,
-  module: ts.ModuleKind.NodeNext,
-  moduleResolution: ts.ModuleResolutionKind.NodeNext,
-  jsx: ts.JsxEmit.Preserve,
-  esModuleInterop: true,
-  resolveJsonModule: true,
-  strict: false,
-};
-
-function plan() {
-  const explicit = files.map((f) => resolve(cwd, f));
-  const configPath = findConfig(explicit.length > 0 ? dirname(explicit[0]) : cwd);
-  if (!configPath) {
-    const roots = explicit.length > 0 ? explicit : [];
-    if (explicit.length === 0) listSources(cwd, roots);
-    return { roots, options: defaults, config: undefined, errors: [] };
-  }
-  const host = { ...ts.sys, onUnRecoverableConfigFileDiagnostic: (d) => { throw new Error(ts.flattenDiagnosticMessageText(d.messageText, "\n")); } };
-  const parsed = ts.getParsedCommandLineOfConfigFile(configPath, forced, host);
-  return {
-    roots: explicit.length > 0 ? explicit : parsed.fileNames.filter((f) => !f.endsWith(".d.ts")).slice(0, maxFiles),
-    totalConfigured: parsed.fileNames.length,
-    options: { ...parsed.options, ...forced },
-    config: relative(cwd, configPath),
-    errors: parsed.errors.filter((d) => d.category === ts.DiagnosticCategory.Error),
-  };
-}
+const plan = () => planProject(ts, { cwd, files, maxFiles });
 
 function render(d) {
   const message = ts.flattenDiagnosticMessageText(d.messageText, "\n").split("\n").slice(0, 3).join("\n    ");

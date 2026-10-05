@@ -163,17 +163,53 @@ export function parseContextWarningConfig(value: unknown): ContextWarningSetting
  * requests, requirement statuses, chosen readings, history): workers get it back when they compact, the main session after its own
  * compaction, and a task whose worker is gone (reload, idle expiry, eviction) continues with a new worker briefed from it. Off by
  * default until measured (docs/specialist-orchestration.md, gate G-L).
+ *
+ * `pipeline: "v2"` (docs/specialist-orchestration.md, Phase 3; implies the ledger) frames every implement assignment before the worker
+ * starts and verifies risky results after it: `frame` is the Framer's access (`grounded`: read-only repository tools, `spec`: the
+ * request only, `off`), `checker.gate` when the Verifier runs (`auto`: risk score ≥ `threshold` or a review request, `always`, `off`),
+ * `checker.maxFixRounds` how often its blocking findings go back to the same worker before orche re-runs the probes itself, and `nav`
+ * whether v2 sessions (worker, Framer, Verifier) get the code_nav tool.
  */
+export interface CheckerSettings { gate: "auto" | "always" | "off"; threshold: number; maxFixRounds: number }
 export interface SingleSettings {
   ledger: boolean;
+  pipeline: "v1" | "v2";
+  frame: "grounded" | "spec" | "off";
+  checker: CheckerSettings;
+  nav: boolean;
 }
-export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false };
+/** threshold 7: calibrated on 90 stored v1 single results (experiments/risk/calibrate.ts): all 7 failed ones score 8 or more, 66% of all are verified (74% at 5). */
+export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false, pipeline: "v1", frame: "grounded", checker: { gate: "auto", threshold: 7, maxFixRounds: 1 }, nav: true };
+const SINGLE_KEYS = new Set(["ledger", "pipeline", "frame", "checker", "nav"]);
+const CHECKER_KEYS = new Set(["gate", "threshold", "maxFixRounds"]);
 export function parseSingleConfig(value: unknown): SingleSettings {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.single: expected object");
   const settings = value as Record<string, unknown>;
-  if (Object.keys(settings).some(key => key !== "ledger")) throw new RouteConfigError("config.single: unknown field");
+  if (Object.keys(settings).some(key => !SINGLE_KEYS.has(key))) throw new RouteConfigError("config.single: unknown field");
   if (settings.ledger !== undefined && typeof settings.ledger !== "boolean") throw new RouteConfigError("config.single.ledger: expected boolean");
-  return { ledger: (settings.ledger as boolean | undefined) ?? DEFAULT_SINGLE.ledger };
+  if (settings.pipeline !== undefined && settings.pipeline !== "v1" && settings.pipeline !== "v2") throw new RouteConfigError('config.single.pipeline: expected "v1" or "v2"');
+  if (settings.nav !== undefined && typeof settings.nav !== "boolean") throw new RouteConfigError("config.single.nav: expected boolean");
+  if (settings.frame !== undefined && !["grounded", "spec", "off"].includes(settings.frame as string)) throw new RouteConfigError('config.single.frame: expected "grounded", "spec" or "off"');
+  const checker = { ...DEFAULT_SINGLE.checker };
+  if (settings.checker !== undefined) {
+    const raw = settings.checker;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new RouteConfigError("config.single.checker: expected object");
+    const fields = raw as Record<string, unknown>;
+    if (Object.keys(fields).some(key => !CHECKER_KEYS.has(key))) throw new RouteConfigError("config.single.checker: unknown field");
+    if (fields.gate !== undefined && !["auto", "always", "off"].includes(fields.gate as string)) throw new RouteConfigError('config.single.checker.gate: expected "auto", "always" or "off"');
+    if (fields.threshold !== undefined && (typeof fields.threshold !== "number" || !Number.isInteger(fields.threshold) || fields.threshold < 0 || fields.threshold > 30)) throw new RouteConfigError("config.single.checker.threshold: expected an integer from 0 to 30");
+    if (fields.maxFixRounds !== undefined && (typeof fields.maxFixRounds !== "number" || !Number.isInteger(fields.maxFixRounds) || fields.maxFixRounds < 0 || fields.maxFixRounds > 2)) throw new RouteConfigError("config.single.checker.maxFixRounds: expected 0, 1 or 2");
+    Object.assign(checker, fields);
+  }
+  const pipeline = (settings.pipeline as SingleSettings["pipeline"] | undefined) ?? DEFAULT_SINGLE.pipeline;
+  return {
+    // The v2 pipeline keeps its contract, checks and findings in the task ledger.
+    ledger: pipeline === "v2" || ((settings.ledger as boolean | undefined) ?? DEFAULT_SINGLE.ledger),
+    pipeline,
+    frame: (settings.frame as SingleSettings["frame"] | undefined) ?? DEFAULT_SINGLE.frame,
+    checker,
+    nav: (settings.nav as boolean | undefined) ?? DEFAULT_SINGLE.nav,
+  };
 }
 
 /**

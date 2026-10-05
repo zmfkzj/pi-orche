@@ -264,6 +264,24 @@ export class RunRecord {
     this.write();
   }
 
+  /**
+   * Write a JSON file next to `run.json` (`name` must be a plain file name ending in `.json`); returns the name, or undefined when it
+   * could not be written. For structured artifacts too large for an event line (a Framer contract, a Verifier report): the event then
+   * carries the file name.
+   */
+  writeJson(name: string, value: unknown, maxBytes = 1024 * 1024): string | undefined {
+    if (!/^[\w.-]+\.json$/.test(name) || name.startsWith(".")) return undefined;
+    try {
+      const text = `${JSON.stringify(value, null, 1)}\n`;
+      if (Buffer.byteLength(text) > maxBytes) return undefined;
+      writePrivateAtomic(join(this.dir, name), text);
+      return name;
+    } catch (error) {
+      this.fail(error);
+      return undefined;
+    }
+  }
+
   /** Append one RunEvent to `events.jsonl`, bounded: long strings, long arrays, deep nesting and oversized lines are cut, and the file stops growing at {@link MAX_EVENTS_BYTES}. */
   appendEvent(event: unknown): void {
     if (this.eventsClosed) return;

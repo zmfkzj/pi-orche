@@ -28,6 +28,7 @@ import { CHANGED_WHILE_QUIET } from "../orchestration/run/audit.js";
 import { WORKER_TOOL_NAMES } from "../tools/index.js";
 import { DEFAULT_LIVENESS_WINDOW_MS, KNOWN_TOOL_TIMEOUTS_MS, mergeLiveness, type Liveness, type SessionLiveness } from "../agent/liveness.js";
 import { createGenerateImageTool } from "../tools/generate-image.js";
+import { createCodeNavTool } from "../tools/code-nav.js";
 import { loadProviderExtensions, type ProviderExtensionHost } from "../pi/provider-extensions.js";
 import { ensureBundledImageProvider } from "../pi/register-bundled-image-provider.js";
 import { describeSource, discoverOrcheConfig, NoRouteError } from "./config.js";
@@ -38,11 +39,16 @@ import { deadlineInfoOf, initialDeadline, type DeadlineInfo, type RunTiming } fr
 import { createRunRecord, pruneRecordsOnce, resolveRecords, workerSessionFile } from "./records.js";
 import { ExtendableDeadline, extensionEvent, formatExtensionProgress, formatExtensionSummary, waitExtendable, withNotExtended, type DeadlineExtension } from "../orchestration/run/extension.js";
 import { createAssignmentProjector, type ContextClearedStats } from "../pi/context-projection.js";
-import { recordFailure, recordHandoff, recordResult, renderLedgerForWorker, renderLedgerSummary, renderResumeBriefing, startLedger, type LedgerEvent, type TaskLedger } from "../single/ledger.js";
+import { originalRequestOf, recordCheck, recordFailure, recordHandoff, recordRecheck, recordResult, renderLedgerForWorker, renderLedgerSummary, renderResumeBriefing, startLedger, type LedgerEvent, type TaskLedger } from "../single/ledger.js";
+import { SpecialistError, type SpecialistStats } from "../specialists/session.js";
+import { runFramer, runVerifier, type SpecialistContext } from "../single/pipeline.js";
+import { formatFrame, framedRequest, renderContract, type Frame } from "../single/frame.js";
+import { assessRisk, formatRisk, type RiskAssessment } from "../single/risk.js";
+import { fixPrompt, formatCheck, recheck, scratchDir, writeScratchDiff, type Check, type Recheck } from "../single/check.js";
 
 export const orcheTaskParameters = Type.Object({
   role: Type.Union([Type.Literal("explore"), Type.Literal("answer"), Type.Literal("implement"), Type.Literal("verify"), Type.Literal("game-asset"), Type.Literal("video")]),
-  request: Type.String({ minLength: 1, description: "Self-contained goal, decisions, constraints and acceptance checks; the worker does not see the conversation. In the single workflow include Intent/Purpose, a testable R1..Rn requirements checklist, Constraints and non-goals, explicit Assumptions and a final Original request section with the user's text verbatim. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Only short decisive irreproducible snippets inline; never whole files, diffs or long logs." }),
+  request: Type.String({ minLength: 1, description: "Self-contained goal, decisions, constraints and acceptance checks; the worker does not see the conversation. In the single workflow include Intent/Purpose, a testable R1..Rn requirements checklist (unless the orche rules say the Framer writes it), Constraints and non-goals, explicit Assumptions and a final Original request section with the user's text verbatim. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Only short decisive irreproducible snippets inline; never whole files, diffs or long logs." }),
   context: Type.Optional(Type.String({ maxLength: 30_000, description: "Background findings and decisions, appended to request. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs." })),
   worker: Type.Optional(Type.String()),
   files: Type.Optional(Type.Array(Type.String())),
@@ -122,6 +128,11 @@ export interface TaskDetails {
   task?: string;
   /** Present when the named worker was gone and the task continued with this new worker, briefed from its ledger. */
   continuedFrom?: string;
+  /**
+   * Single pipeline v2 (`single.pipeline: "v2"`, implement assignments): the Framer's contract, the risk assessment of the result,
+   * the Verifier's check, the deterministic recheck after the fix round, and what each specialist session cost.
+   */
+  pipeline?: { frame?: Frame; risk?: RiskAssessment; check?: Check; recheck?: Recheck; fixRounds: number; specialists: SpecialistStats[]; notes?: string[] };
 }
 /** The workspace/git part of a task's details. */
 type ChangeReport = Pick<TaskDetails, "changes" | "otherChanges" | "submodules" | "headMoved">;
@@ -502,7 +513,17 @@ function formatStaleContext(report: (Pick<TaskDetails, "submodules" | "headMoved
   return `## Stale context: workspace changes since your previous assignment\n${body}\nRe-read changed evidence before relying on retained context.\n\n`;
 }
 
-
+/** A report's `data` as a record (anything else: empty). */
+const dataOf = (data: unknown): Record<string, unknown> => data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
+/** `data.disputed` of a v2 fix-round report: Verifier findings the worker says are wrong, with its reason. */
+function disputesOf(data: unknown): [string, string][] {
+  const disputed = dataOf(data).disputed;
+  if (!Array.isArray(disputed)) return [];
+  return disputed.flatMap((item): [string, string][] => {
+    const entry = dataOf(item);
+    return typeof entry.id === "string" ? [[entry.id, typeof entry.reason === "string" && entry.reason.trim() ? entry.reason.trim().slice(0, 300) : "disputed without a reason"]] : [];
+  });
+}
 
 function assignmentPrompt(args: TaskParameters & { mainMode?: MainMode }, commands: readonly string[], imagesAvailable = false, grant?: GitGrant): string {
   const task = args.context?.trim() ? `${args.request}\n\n## Context from the requesting session\n${args.context.trim()}` : args.request;
@@ -758,6 +779,8 @@ export class WorkerPool {
     signal.throwIfAborted();
     // Task ledgers (single.ledger): `task` continues a task, also with another or a new worker; without it every assignment starts a new task.
     const ledgerOn = singleWorkflow && config.single.ledger;
+    // code_nav (single pipeline v2 with single.nav): for the worker sessions spawned now, the Framer and the Verifier; never for main.
+    const navOn = singleWorkflow && config.single.pipeline === "v2" && config.single.nav;
     const ledgerNotes: string[] = [];
     let continued: TaskLedger | undefined;
     if (args.task !== undefined && ledgerOn) {
@@ -864,7 +887,7 @@ export class WorkerPool {
       const meta = worker;
       meta.model = route.model;
       meta.thinking = route.thinking ?? "off";
-      const customTools = [...(images ? [createGenerateImageTool({ cwd: args.cwd, runtime, images })] : []), ...(singleWorkflow ? [createTaskPlanTool(plan => {
+      const customTools = [...(images ? [createGenerateImageTool({ cwd: args.cwd, runtime, images })] : []), ...(navOn ? [createCodeNavTool(args.cwd)] : []), ...(singleWorkflow ? [createTaskPlanTool(plan => {
         meta.plan = plan;
         meta.recordEvent?.({ type: "task_plan", timestamp: Date.now(), worker: meta.id, plan });
       }, () => meta.requirementIds ?? [])] : [])];
@@ -903,11 +926,42 @@ export class WorkerPool {
     meta.files = files;
     meta.latestInput = 0;
     meta.plan = undefined;
-    const definitions = requirementDefinitions(args.request);
+    // Single pipeline v2 (single.pipeline "v2", implement only): the Framer writes the assignment's contract before the worker starts;
+    // the worker gets the contract first, then the main session's request verbatim. A Framer failure only costs the contract.
+    const pipelineV2 = ledgerOn && config.single.pipeline === "v2" && args.role === "implement";
+    const specialists: SpecialistStats[] = [];
+    const pipelineNotes: string[] = [];
+    let frame: Frame | undefined;
+    let handoffRequest = args.request;
+    const specialistContext = (role: "framer" | "checker"): SpecialistContext => ({
+      runtime, cwd: args.cwd, signal, routes: config.routes, nav: navOn,
+      workerRoute: { role: routeRole, model: meta.model ?? route.model, ...(meta.thinking ?? route.thinking ? { thinking: meta.thinking ?? route.thinking } : {}) },
+      ...(mainModel ? { inheritedContextWindow: mainWindow } : {}),
+      ...(resolved.enabled ? { sessionFile: workerSessionFile(resolved, { ...(args.currentSession?.id ? { parentSessionId: args.currentSession.id } : {}), workerId: `${meta.id}-${role}`, spawnedAt: Date.now() }) } : {}),
+      onTool: name => args.onProgress?.([...(warning ? [warning] : []), `${meta.id} ${role === "framer" ? "Framer" : "Verifier"} · last tool: ${name}`], timingNow()),
+    });
+    if (pipelineV2 && config.single.frame !== "off") {
+      args.onProgress?.([...(warning ? [warning] : []), `${meta.id} Framer · writing the contract`], timingNow());
+      try {
+        const framed = await runFramer(specialistContext("framer"), {
+          actor: `framer:${meta.id}`, grounded: config.single.frame === "grounded",
+          request: args.context ? `${args.request}\n\n## Context from the requesting session\n${args.context}` : args.request,
+          ...(continued ? { previous: { contract: renderLedgerForWorker(continued), ...(continued.history.at(-1) ? { outcome: `${continued.history.at(-1)!.status}: ${continued.history.at(-1)!.summary}` } : {}) } } : {}),
+        });
+        specialists.push(framed.stats);
+        frame = framed.value;
+        handoffRequest = framedRequest(renderContract(frame), args.request);
+      } catch (error) {
+        if (error instanceof SpecialistError) specialists.push(error.stats);
+        signal.throwIfAborted();
+        pipelineNotes.push(`Warning: the Framer failed (${error instanceof Error ? error.message : String(error)}); the worker got the request without a contract.`);
+      }
+    }
+    const definitions = requirementDefinitions(handoffRequest);
     meta.unmetStreak = new Map(singleWorkflow ? [...meta.unmetStreak ?? []].filter(([id]) => definitions.has(id) && definitions.get(id) === meta.requirementDefinitions?.get(id)) : []);
     meta.requirementDefinitions = definitions;
-    meta.requirementIds = requirementIds(args.request);
-    meta.request = args.context ? `${args.request}\n\nContext:\n${args.context}` : args.request;
+    meta.requirementIds = requirementIds(handoffRequest);
+    meta.request = args.context ? `${handoffRequest}\n\nContext:\n${args.context}` : handoffRequest;
     meta.compactions = [];
     // This assignment's record. The worker's entry is read from the manager, so `sessionFile` is there only when the transcript really is persisted.
     const workerFile = this.manager.agentRecord(meta.id).sessionFile;
@@ -932,8 +986,9 @@ export class WorkerPool {
       const taskId = ledger.taskId;
       meta.taskId = taskId;
       meta.ledger = () => this.ledgers.get(taskId);
-      this.persist(recordHandoff(ledger, { request: args.request, at: Date.now(),
-        primary: { worker: meta.id, ...(meta.model ? { model: meta.model } : {}), ...(meta.thinking ? { thinking: meta.thinking } : {}), ...(workerFile ? { sessionFile: workerFile } : {}) } }));
+      this.persist(recordHandoff(ledger, { request: handoffRequest, at: Date.now(),
+        primary: { worker: meta.id, ...(meta.model ? { model: meta.model } : {}), ...(meta.thinking ? { thinking: meta.thinking } : {}), ...(workerFile ? { sessionFile: workerFile } : {}) },
+        ...(frame?.ambiguities.length ? { decisions: frame.ambiguities.map(item => ({ id: item.id, quote: item.quote, readings: item.readings, chosen: item.readings[item.recommended - 1] ?? item.readings[0]!, ...(item.askUser ? { askUser: true } : {}) })) } : {}) }));
     } else {
       meta.taskId = undefined;
       meta.ledger = undefined;
@@ -956,8 +1011,30 @@ export class WorkerPool {
       },
     });
     meta.recordEvent = event => record?.appendEvent(event);
+    // The contract can exceed an event line: it is a file next to run.json, the event names it.
+    if (frame) record?.appendEvent({ type: "frame", timestamp: Date.now(), worker: meta.id, requirements: frame.requirements.length, ambiguities: frame.ambiguities.length, ...(record.writeJson("frame.json", frame) ? { file: "frame.json" } : {}) });
+    let risk: RiskAssessment | undefined;
+    let check: Check | undefined;
+    let recheckResult: Recheck | undefined;
+    let fixRounds = 0;
+    /** Specialist sessions in the record (`run.json` agents), next to the worker's own entry. */
+    const recordSpecialists = () => {
+      for (const stats of specialists) record?.addAgent({
+        id: stats.actor, role: stats.actor.split(":")[0]!, kind: "specialist", model: stats.model, ...(stats.thinking ? { thinking: stats.thinking } : {}),
+        requests: stats.requests, models: stats.models, durationMs: stats.durationMs, startedAt: stats.startedAt, status: "completed", ...(stats.sessionFile ? { sessionFile: stats.sessionFile } : {}),
+      });
+    };
+    const pipelineDetails = (): Pick<TaskDetails, "pipeline"> => pipelineV2 ? { pipeline: {
+      ...(frame ? { frame: structuredClone(frame) } : {}), ...(risk ? { risk: structuredClone(risk) } : {}), ...(check ? { check: structuredClone(check) } : {}),
+      ...(recheckResult ? { recheck: structuredClone(recheckResult) } : {}), fixRounds, specialists: specialists.map(stats => structuredClone(stats)), ...(pipelineNotes.length ? { notes: [...pipelineNotes] } : {}),
+    } } : {};
+    const pipelineLines = (): string[] => {
+      if (!pipelineV2) return [];
+      const cost = specialists.length ? [`Specialists: ${specialists.map(stats => `${stats.actor.split(":")[0]} ${stats.requests} requests, ${Math.round(stats.durationMs / 1000)}s`).join("; ")}`] : [];
+      return [...(frame ? formatFrame(frame) : []), ...(risk ? [formatRisk(risk)] : []), ...(check ? formatCheck(check, recheckResult) : []), ...(fixRounds ? [`Fix rounds: ${fixRounds} (same worker).`] : []), ...cost, ...pipelineNotes];
+    };
     const workflowDetails = () => ({ thinking: meta.thinking, ...(meta.plan ? { plan: structuredClone(meta.plan) } : {}),
-      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}) });
+      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...pipelineDetails() });
     let requests = 0;
     let contextCleared: ContextClearedStats | undefined;
     const contextDetails = () => contextCleared ? { contextCleared } : {};
@@ -1028,6 +1105,7 @@ export class WorkerPool {
     const finishRecord = (status: "done" | "failed" | "cancelled", details: TaskDetails, extra: { summary?: string; failure?: string } = {}) => {
       if (!record) return;
       record.addAgent(this.manager!.agentRecord(meta.id));
+      recordSpecialists();
       record.finish({
         status,
         ...(extra.summary ? { summary: extra.summary } : {}),
@@ -1064,44 +1142,114 @@ export class WorkerPool {
         meta.activity = activity;
       }
       signal.throwIfAborted();
-      const prompt = assignmentPrompt({ ...args, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant);
+      const prompt = assignmentPrompt({ ...args, request: handoffRequest, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant);
       const handoff = reusedContext && workflowMode ? prompt.replace(/^(Assignment[^\n]*\n)/, "$1This Assignment message supersedes earlier requirement ids and plans, including any assignment preserved at compaction time. Use only this round's requirements and Task DAG.\n") : prompt;
       this.manager.assign(meta.id, args.role, prefix + handoff, { enabled: reusedContext && config.taskContext.clearBetweenAssignments, minClearTokens: config.taskContext.minClearTokens });
       assigned = true;
       if (signal.aborted) abort();
       progress();
-      // One deadline per assignment: base `assignmentMs`, pushed out by `extensionMs` (at most `maxExtensions` times) each time it expires while the worker is
-      // still active (src/orchestration/run/extension.ts). Cancellation wins at every point: `aborted` comes back at once, in an extension window too.
-      const deadline = ExtendableDeadline.fromLimits(limits, { baseMs: limits.assignmentMs });
-      deadlineInfo = deadlineInfoOf(deadline);
+      // One deadline per round (the assignment, and each v2 fix round): base `assignmentMs`, pushed out by `extensionMs` (at most `maxExtensions` times) each time it
+      // expires while the worker is still active (src/orchestration/run/extension.ts). Cancellation wins at every point: `aborted` comes back at once, in an extension window too.
+      let deadline = ExtendableDeadline.fromLimits(limits, { baseMs: limits.assignmentMs });
       const manager = this.manager;
-      const waited = await waitExtendable({
-        deadline, signal, stage: `${meta.id} ${args.role}`, scope: "assignment",
-        wait: ms => manager.wait(meta.id, ms),
-        liveness: (now, windowMs) => this.workerLiveness(meta.id, now, windowMs),
-        onExtended: extension => {
-          extensions.push({ ...extension, reasons: [...extension.reasons] });
-          record?.appendEvent(extensionEvent(extension));
-          record?.update({ extensions: extensions.map(granted => ({ ...granted, reasons: [...granted.reasons] })) });
-          deadlineInfo = deadlineInfoOf(deadline);
-          progress();
-        },
-      });
-      if (signal.aborted || waited.type === "aborted") { await stopPromise; throw new WorkerFailure("cancelled", "cancelled", "cancelled"); }
-      if (waited.type === "timeout") {
-        const why = waited.notExtended;
-        if (why.message && why.reason !== "disabled") notExtended = { reason: why.reason, message: why.message };
-        await this.manager.stop(meta.id); await this.manager.wait(meta.id, 0);
-        // `overallCapMs` is the base plus the extensions it received; the first line carries why it was not extended, the rest what was extended.
-        const history = formatExtensionSummary(extensions, { maxExtensions: deadline.maxExtensions, extensionMs: deadline.extensionMs });
-        const headline = withNotExtended(`Worker ${meta.id} timed out after ${deadline.overallCapMs}ms`, why);
-        throw new WorkerFailure(history.length ? `${headline}\n${history.join("\n")}` : headline, "failed", "timeout");
-      }
-      if (waited.type !== "outcome") throw new WorkerFailure(`Worker ${meta.id} returned no result`, "failed", "no_result");
-      const outcome = waited.outcome;
-      if (outcome.status !== "completed" || !outcome.result) throw new WorkerFailure(outcome.error ?? outcome.lastText ?? `Worker ${meta.id}: ${outcome.status}`, "failed", outcome.status);
+      const waitRound = async (stage: string) => {
+        const current = deadline;
+        deadlineInfo = deadlineInfoOf(current);
+        const waited = await waitExtendable({
+          deadline: current, signal, stage, scope: "assignment",
+          wait: ms => manager.wait(meta.id, ms),
+          liveness: (now, windowMs) => this.workerLiveness(meta.id, now, windowMs),
+          onExtended: extension => {
+            extensions.push({ ...extension, reasons: [...extension.reasons] });
+            record?.appendEvent(extensionEvent(extension));
+            record?.update({ extensions: extensions.map(granted => ({ ...granted, reasons: [...granted.reasons] })) });
+            deadlineInfo = deadlineInfoOf(current);
+            progress();
+          },
+        });
+        if (signal.aborted || waited.type === "aborted") { await stopPromise; throw new WorkerFailure("cancelled", "cancelled", "cancelled"); }
+        if (waited.type === "timeout") {
+          const why = waited.notExtended;
+          if (why.message && why.reason !== "disabled") notExtended = { reason: why.reason, message: why.message };
+          await manager.stop(meta.id); await manager.wait(meta.id, 0);
+          // `overallCapMs` is the base plus the extensions it received; the first line carries why it was not extended, the rest what was extended.
+          const history = formatExtensionSummary(extensions, { maxExtensions: current.maxExtensions, extensionMs: current.extensionMs });
+          const headline = withNotExtended(`Worker ${meta.id} timed out after ${current.overallCapMs}ms`, why);
+          throw new WorkerFailure(history.length ? `${headline}\n${history.join("\n")}` : headline, "failed", "timeout");
+        }
+        if (waited.type !== "outcome") throw new WorkerFailure(`Worker ${meta.id} returned no result`, "failed", "no_result");
+        const { outcome: reported } = waited;
+        if (reported.status !== "completed" || !reported.result) throw new WorkerFailure(reported.error ?? reported.lastText ?? `Worker ${meta.id}: ${reported.status}`, "failed", reported.status);
+        return { ...reported, result: reported.result };
+      };
+      let outcome = await waitRound(`${meta.id} ${args.role}`);
       meta.summary = outcome.result.summary;
-      const { changeReport, gitReport } = await collect();
+      let { changeReport, gitReport } = await collect();
+      if (pipelineV2 && ledger && audit && before && meta.tree) {
+        // v2: risk score of the result; the Verifier when it is high (or asked for); its blocking findings go back to this worker; then orche re-runs the probes.
+        const taskLedger = ledger;
+        const firstData = dataOf(outcome.result.data);
+        const firstChecklist = Array.isArray(firstData.checklist) ? firstData.checklist as ChecklistItem[] : undefined;
+        const patch = await audit.patch(before, meta.tree, { paths: changeReport.changes.map(change => change.path) }).catch(() => undefined);
+        const original = originalRequestOf(args.request) ?? args.request;
+        risk = assessRisk({
+          files: patch?.files ?? changeReport.changes.map(change => ({ path: change.path, added: 0, removed: 0 })), diff: patch?.text ?? "",
+          ...(firstChecklist ? { checklist: firstChecklist } : {}), requirements: frame?.requirements ?? [], recommendedReadings: frame?.ambiguities.length ?? 0, original,
+        }, config.single.checker);
+        if (risk.decision === "verify") {
+          const scratch = scratchDir(taskLedger.taskId);
+          args.onProgress?.([...(warning ? [warning] : []), `${meta.id} Verifier · checking the change (risk ${risk.score})`], timingNow());
+          try {
+            const diffFile = await writeScratchDiff(args.cwd, scratch, taskLedger.assignments, patch?.text ?? "");
+            const verified = await runVerifier(specialistContext("checker"), {
+              actor: `checker:${meta.id}`, task: taskLedger.taskId, scratch, original,
+              handoff: args.context ? `${handoffRequest}\n\n## Context from the requesting session\n${args.context}` : handoffRequest,
+              ...(firstChecklist ? { checklist: firstChecklist } : {}), ...(Array.isArray(firstData.ambiguities) ? { ambiguities: firstData.ambiguities as Ambiguity[] } : {}),
+              files: patch?.files ?? [], diffFile, diffTruncated: patch?.truncated ?? false, verifyCommands: config.routes.verifyCommands ?? [],
+            });
+            specialists.push(verified.stats);
+            check = verified.value;
+          } catch (error) {
+            if (error instanceof SpecialistError) specialists.push(error.stats);
+            if (signal.aborted) throw new WorkerFailure("cancelled", "cancelled", "cancelled");
+            pipelineNotes.push(`Warning: the Verifier failed (${error instanceof Error ? error.message : String(error)}); the result is unverified.`);
+          }
+          this.persist(recordCheck(taskLedger, { ...risk, verdict: check ? check.verdict : "error" }, (check?.findings ?? []).map(item => ({
+            id: item.id, severity: item.severity, ...(item.requirement ? { requirement: item.requirement } : {}), claim: item.claim, status: item.severity === "blocking" ? "open" as const : "minor" as const, ...(item.probe ? { probe: item.probe } : {}),
+          }))));
+          record?.appendEvent({ type: "check", timestamp: Date.now(), worker: meta.id, risk, ...(check ? { verdict: check.verdict, findings: check.findings.length, ...(record.writeJson("check.json", check) ? { file: "check.json" } : {}) } : {}) });
+          let open = check?.findings.filter(item => item.severity === "blocking") ?? [];
+          while (check && open.length && fixRounds < config.single.checker.maxFixRounds) {
+            if (fixRounds === 0) this.persist(recordResult(taskLedger, { role: args.role, worker: meta.id, status: typeof firstData.status === "string" ? firstData.status : outcome.status, summary: meta.summary, ...(firstChecklist ? { checklist: firstChecklist } : {}), ...(record ? { record: record.dir } : {}) }));
+            fixRounds++;
+            const fix = fixPrompt(taskLedger.taskId, { ...check, findings: open }, scratch);
+            meta.request = `${meta.request}\n\n${fix}`;
+            manager.assign(meta.id, args.role, fix, { enabled: false });
+            deadline = ExtendableDeadline.fromLimits(limits, { baseMs: limits.assignmentMs });
+            progress();
+            try {
+              outcome = await waitRound(`${meta.id} ${args.role} fix ${fixRounds}`);
+            } catch (error) {
+              if (!(error instanceof WorkerFailure) || error.kind === "cancelled") throw error;
+              pipelineNotes.push(`Warning: fix round ${fixRounds} failed (${error.status}: ${failureReason(error.message)}); the workspace may hold a partial fix, and the report below is the worker's previous one.`);
+              ({ changeReport, gitReport } = await collect());
+              break;
+            }
+            meta.summary = outcome.result.summary;
+            ({ changeReport, gitReport } = await collect());
+            const disputed = new Map(disputesOf(outcome.result.data));
+            args.onProgress?.([...(warning ? [warning] : []), `${meta.id} recheck · re-running the Verifier's probes`], timingNow());
+            const rechecked = await recheck(args.cwd, scratch, { ...check, findings: open }, disputed, signal);
+            recheckResult = { findings: [...(recheckResult?.findings.filter(item => !rechecked.findings.some(next => next.id === item.id)) ?? []), ...rechecked.findings], checks: rechecked.checks };
+            this.persist(recordRecheck(taskLedger, rechecked.findings.map(item => ({ id: item.id, status: item.status, detail: item.detail }))));
+            record?.appendEvent({ type: "recheck", timestamp: Date.now(), worker: meta.id, round: fixRounds, recheck: rechecked });
+            open = open.filter(item => rechecked.findings.find(status => status.id === item.id)?.status === "open");
+          }
+        } else {
+          this.persist(recordCheck(taskLedger, risk));
+          record?.appendEvent({ type: "check", timestamp: Date.now(), worker: meta.id, risk });
+        }
+      }
       meta.lastUsed = Date.now();
       if (!meta.singleWorkflow && meta.contextWindow && meta.latestInput >= meta.contextWindow * 0.7) {
         await this.retire(meta.id); retired.push(meta.id);
@@ -1109,7 +1257,7 @@ export class WorkerPool {
       }
       const finishedAt = Date.now();
       const durationMs = finishedAt - started;
-      const data = outcome.result.data && typeof outcome.result.data === "object" ? outcome.result.data as Record<string, unknown> : {};
+      const data = dataOf(outcome.result.data);
       const checklist = Array.isArray(data.checklist) ? data.checklist as ChecklistItem[] : undefined;
       const checklistLines: string[] = [];
       if (checklist) {
@@ -1146,7 +1294,7 @@ export class WorkerPool {
       finishRecord("done", details, { summary: meta.summary });
       const planNotes = singleWorkflow && !meta.plan ? ["Note: no Task DAG recorded in this assignment."] : [];
       const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, ...modelWarnings, ...contextLine(),
-        ...taskLines(), "", meta.summary, ...roleData, ...checklistLines, "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
+        ...taskLines(), "", meta.summary, ...roleData, ...checklistLines, ...pipelineLines(), "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
         ...planNotes, ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: follow up with the same worker — ${note}`] : [])].join("\n");
       return { text: withRecordLine(text, record?.dir), details };
     } catch (error) {
@@ -1189,6 +1337,8 @@ export class WorkerPool {
     }
     } catch (error) {
       if (worker) worker.unmetStreak = new Map();
+      // Failed before its assignment started (e.g. cancelled while the Framer ran): an idle worker still gets its idle expiry.
+      if (worker && this.workers.has(worker.id) && this.manager?.get(worker.id).status === "idle") this.idle(worker);
       throw error;
     } finally {
       clearTimeout(startupTimer);

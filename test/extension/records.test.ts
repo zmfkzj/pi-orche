@@ -91,6 +91,17 @@ describe("records root", () => {
 });
 
 describe("record layout and run.json", () => {
+  it("writes JSON artifacts next to run.json (plain .json names only, bounded size)", async () => {
+    const l = await layout();
+    const record = createRunRecord(l.resolved, { kind: "task", cwd: l.cwd })!;
+    expect(record.writeJson("frame.json", { goal: "g", requirements: [{ id: "R1" }] })).toBe("frame.json");
+    expect(await json(join(record.dir, "frame.json"))).toEqual({ goal: "g", requirements: [{ id: "R1" }] });
+    expect(await mode(join(record.dir, "frame.json"))).toBe(0o600);
+    for (const name of ["../escape.json", "sub/x.json", ".hidden.json", "frame.txt"]) expect(record.writeJson(name, {})).toBeUndefined();
+    expect(record.writeJson("big.json", { text: "x".repeat(2000) }, 1000)).toBeUndefined();
+    expect((await readdir(record.dir)).filter(name => name !== "events.jsonl").sort()).toEqual(["frame.json", "run.json", "sessions"]);
+  });
+
   it("creates <root>/<parent>/<ISO timestamp>_<kind>-<id>/ with sessions/, events.jsonl and a running run.json; 0700 dirs and 0600 files", async () => {
     const l = await layout();
     const before = await mode(l.agentDir);

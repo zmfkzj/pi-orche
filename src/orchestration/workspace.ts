@@ -42,6 +42,15 @@ export interface WorkspaceComparison {
   readonly gitlinks: GitlinkChange[];
 }
 
+/** Line counts and unified diff of files between two snapshots, see {@link WorkspaceAudit.patch}. */
+export interface WorkspacePatch {
+  /** Per file: lines added and removed (`binary` when git cannot count lines). */
+  readonly files: readonly { path: string; added: number; removed: number; binary?: boolean }[];
+  /** Unified diff (3 lines of context), cut at `maxBytes`. */
+  readonly text: string;
+  readonly truncated: boolean;
+}
+
 export interface WorkspaceAuditOptions {
   /**
    * Also snapshot initialized submodules (default false: a submodule is then only its gitlink, i.e. the
@@ -266,6 +275,27 @@ export class WorkspaceAudit {
     if (from === to) return { changes: [], gitlinks: [] };
     if (!this.submodules) return { changes: await this.diff(from, to), gitlinks: [] };
     return this.compareRecursive(from, to);
+  }
+
+  /**
+   * Numstat and unified diff of the top-level work tree between two snapshots, optionally limited to `paths` (relative to the cwd).
+   * Submodule contents are not included (their files carry no line counts here).
+   */
+  async patch(from: string, to: string, options: { paths?: readonly string[]; maxBytes?: number } = {}): Promise<WorkspacePatch> {
+    const a = decodeSnapshot(from).root;
+    const b = decodeSnapshot(to).root;
+    if (a === b) return { files: [], text: "", truncated: false };
+    const scope = options.paths && options.paths.length <= 500 ? options.paths.map(path => `:(literal)${path}`) : ["."];
+    const numstat = await git(this.cwd, ["diff", "--relative", "--no-renames", "--numstat", "-z", a, b, "--", ...scope, EXCLUDED], {}, this.signal);
+    const files = numstat.split("\0").filter(Boolean).map(line => {
+      const [added = "-", removed = "-", ...rest] = line.split("\t");
+      const binary = added === "-" || removed === "-";
+      return { path: rest.join("\t"), added: binary ? 0 : Number(added), removed: binary ? 0 : Number(removed), ...(binary ? { binary: true } : {}) };
+    }).filter(file => file.path);
+    const full = await git(this.cwd, ["diff", "--relative", "--no-renames", "--no-color", "-U3", a, b, "--", ...scope, EXCLUDED], {}, this.signal);
+    const max = options.maxBytes ?? 400_000;
+    const truncated = Buffer.byteLength(full) > max;
+    return { files, text: truncated ? Buffer.from(full).subarray(0, max).toString("utf8") : full, truncated };
   }
 
   private async compareRecursive(from: string, to: string): Promise<WorkspaceComparison> {

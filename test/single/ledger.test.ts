@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  createLedger, isLedgerEvent, latestLedgers, LEDGER_ENTRY_TYPE, LEDGER_LIMITS, originalRequestOf, recordFailure, recordHandoff, recordResult,
+  createLedger, isLedgerEvent, latestLedgers, LEDGER_ENTRY_TYPE, LEDGER_LIMITS, originalRequestOf, recordCheck, recordFailure, recordHandoff, recordRecheck, recordResult,
   renderLedgerForWorker, renderLedgerSummary, renderResumeBriefing, replayLedgerEvents, startLedger, SUMMARY_TASKS, WORKER_ORIGINAL_CHARS,
   type LedgerEvent, type TaskLedger,
 } from "../../src/single/ledger.js";
@@ -170,5 +170,41 @@ describe("task ledger", () => {
     expect(restored.map(ledger => [ledger.taskId, ledger.assignments, ledger.requirements[0]?.status])).toEqual([["T1", 1, "met"], ["T2", 1, "open"]]);
     expect(restored[0]).toEqual(persisted(first.ledger));
     expect(restored[1]).not.toBe(snapshot);
+  });
+});
+
+describe("task ledger: v2 pipeline events", () => {
+  const reading = { id: "A1", quote: "once per claim", readings: ["every claim", "failed claims only"], chosen: "every claim", askUser: true };
+  it("keeps the Framer's readings, the risk check and the findings, and replays them", () => {
+    const { ledger, event: created } = startLedger("T1", "/repo", 1);
+    const events: LedgerEvent[] = [created];
+    events.push(recordHandoff(ledger, { request: handoff("R1: [edge] fail then succeed\n  Acceptance: attempts 2"), primary, at: 2, decisions: [reading] }));
+    events.push(recordCheck(ledger, { score: 7, threshold: 5, decision: "verify", reason: "threshold", verdict: "fail", at: 3 }, [
+      { id: "F1", severity: "blocking", requirement: "R1", claim: "attempts stays 1", status: "open", probe: "node .orche/scratch/T1/a.probe.mjs" },
+      { id: "F2", severity: "minor", claim: "naming", status: "minor" },
+    ]));
+    events.push(recordResult(ledger, { role: "implement", worker: "W1", status: "done", summary: "first", checklist: [{ id: "R1", status: "met", evidence: "x", verifiedBy: "node --test" }], at: 4 }));
+    expect(renderLedgerForWorker(ledger)).toContain('Verifier findings of assignment a1 not fixed when rendered:\n- F1 blocking R1 [open] attempts stays 1 (re-run: node .orche/scratch/T1/a.probe.mjs)\n- F2 minor [minor] naming');
+    events.push(recordRecheck(ledger, [{ id: "F1", status: "fixed", detail: "probe exits 0" }], 5));
+    expect(ledger.decisions).toEqual([{ assignment: 1, id: "A1", quote: "once per claim", readings: ["every claim", "failed claims only"], chosen: "every claim", by: "framer", askUser: true }]);
+    expect(ledger.findings?.map(item => [item.id, item.status, item.detail])).toEqual([["F1", "fixed", "probe exits 0"], ["F2", "minor", undefined]]);
+    expect(renderLedgerForWorker(ledger)).toContain('- a1 A1 "once per claim": Framer chose "every claim" over "failed claims only" (needs the user\'s decision)');
+    expect(renderLedgerForWorker(ledger)).not.toContain("F1 blocking");
+    expect(renderLedgerSummary([ledger])).toContain('readings: A1="every claim" (ask the user) · risk 7/5: verified fail');
+    for (const event of events) expect(isLedgerEvent(JSON.parse(JSON.stringify(event)))).toBe(true);
+    expect(replayLedgerEvents(JSON.parse(JSON.stringify(events)) as LedgerEvent[]).get("T1")).toEqual(persisted(ledger));
+    expect(latestLedgers(events.map(entry))[0]).toEqual(persisted(ledger));
+  });
+
+  it("rejects malformed check, recheck and reading events", () => {
+    const base = { v: 1, taskId: "T1", at: 1, assignment: 1 };
+    const check = { assignment: 1, at: 1, score: 1, threshold: 5, decision: "skip", reason: "below threshold" };
+    expect(isLedgerEvent({ ...base, event: "check", check, findings: [] })).toBe(true);
+    expect(isLedgerEvent({ ...base, event: "check", check: { ...check, decision: "maybe" }, findings: [] })).toBe(false);
+    expect(isLedgerEvent({ ...base, event: "check", check, findings: [{ assignment: 1, id: "F1", severity: "fatal", claim: "x", status: "open" }] })).toBe(false);
+    expect(isLedgerEvent({ ...base, event: "recheck", statuses: [{ id: "F1", status: "gone" }] })).toBe(false);
+    const handoffEvent = { ...base, event: "handoff", requirements: [], primary: { worker: "W1" } };
+    expect(isLedgerEvent({ ...handoffEvent, decisions: [{ assignment: 1, readings: ["a", "b"], chosen: "a", by: "framer" }] })).toBe(true);
+    expect(isLedgerEvent({ ...handoffEvent, decisions: [{ assignment: 1, readings: ["a", "b"], chosen: "a", by: "oracle" }] })).toBe(false);
   });
 });
