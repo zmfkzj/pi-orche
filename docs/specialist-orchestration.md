@@ -1,6 +1,6 @@
-# 새 single 설계: Jev 실행 정책 라우팅 · topology · 컨텍스트 보존
+# 새 single 설계: 작업 유형 · topology · 컨텍스트 보존
 
-> **상태 (2026-10-04): 설계 제안. 소스 변경 없음.** 기준은 HEAD `68f3624`다(auto/multi 모드와 orche_run을 Pi 패키지에서 제거, multi 엔진은 라이브러리로만 유지).
+> **상태 (2026-10-05): Phase 1·2 완료. Phase 3은 opt-in으로 구현했고 G-X 1단계는 불합격(10.5): v1이 기본값으로 남는다.** 처음 기준은 HEAD `68f3624`였다(auto/multi 모드와 orche_run을 Pi 패키지에서 제거, multi 엔진은 라이브러리로만 유지). 진행 상황은 11장에 있다.
 >
 > **범위**
 > - `direct`: 바꾸지 않는다. 이 문서의 어떤 구성요소도 direct main에 들어가지 않는다.
@@ -12,14 +12,15 @@
 > 2. `explore` role은 없앤다. 아래 구조에서는 role 자체가 선택적 override가 된다(7장).
 > 3. Execution의 검증은 위험 점수가 기준을 넘을 때 자동으로 실행하고, 사용자가 요청하면 수동으로 실행한다(5.3).
 > 4. 라우팅 평가에는 사용자의 로컬 Pi/OMP 세션 요청을 쓴다. 파일은 로컬 전용 `results/routing-eval/`(권한 0600)에 두고, 라벨은 사용자가 확정한다.
-> 5. 구현 순서는 Phase 1(ledger) → Phase 2(라우터 shadow)다.
+> 5. 구현 순서는 Phase 1(ledger) → Phase 2(라우터 평가) → Phase 3(Execution)다.
 > 6. 지시 없는 버그 보고(로그·에러만 붙여 넣은 요청)의 기본 동작은 `fix`다: 진단한 뒤 바로 고친다.
 > 7. 라우팅 정답셋 100건의 라벨을 확정했다(6번 정책을 적용해 버그 보고 2건을 execution으로 바꿈). Creation 보충 23건은 다른 PC 세션에서 추출했고, 사용자 검토 없이 임시 라벨 그대로 쓴다.
 > 8. main의 감독 규칙에서 "verifiedBy 검사가 수용 기준을 확인하는지 확인" 부분을 뺐다(비교 실험 없이). 해석을 원문과 대조하는 규칙과 미확인 항목 보고는 유지한다.
 > 9. ledger 결함 수정: `orche_task`의 `task`로만 task를 잇고(생략하면 worker를 재사용해도 새 task), 세션에는 변경 이벤트만 남긴다. ledger 이득 측정 실험은 하지 않는다.
-> 10. G-R(10.1)에서 Jev+규칙은 기준 미달이고, 우리 정의를 준 LLM(front가 고르는 방식)이 가장 정확했다. **확정**: 작업 유형은 front가 고른다. single 규칙에 작업 유형 정의(`src/single/work-types.ts`)를 넣었고, 지금은 유형을 기존 role로 위임한다(별도 `mode` 필드는 Creation 파이프라인이 생길 때 다시 본다). 다른 모델(분류기나 LLM)도 `experiments/routing/evaluate.ts`의 `--arm`으로 바로 평가할 수 있다.
+> 10. G-R(10.1)에서 Jev+규칙은 기준 미달이고, 우리 정의를 준 LLM(front가 고르는 방식)이 가장 정확했다. **확정 (2026-10-05)**: 작업 유형은 front가 고른다. single 규칙에 작업 유형 정의(`src/single/work-types.ts`)를 넣었고, 지금은 유형을 기존 role로 위임한다(별도 `mode` 필드는 Creation 파이프라인이 생길 때 다시 본다). 사용자 요청에 따라 Jev가 아닌 다른 모델(분류기나 LLM)도 `experiments/routing/evaluate.ts`의 `--arm`으로 바로 평가할 수 있게 했다.
+> 11. Phase 3 진행(사용자 승인, 2026-10-05). 구현은 opt-in `single.pipeline: "v2"`이고, 기본값은 G-X 결과로만 바꾼다.
 >
-> **핵심:** 코딩 전용 고정 파이프라인을 버리고, **Jev가 작업 성격을 분류하고 규칙이 실행 형태(topology)와 capability를 고르는** 구조로 바꾼다. Jev는 문제를 풀지 않는 control plane이다. 문제 해결의 소유자는 task마다 하나인 persistent Primary worker다. 그 밖의 specialist는 모두 한 번 쓰고 버리는 세션이며, 작업 상태의 원본은 task ledger에 둔다.
+> **핵심:** 코딩 전용 고정 파이프라인을 버리고, **대화 전체를 보는 front가 작업 유형을 고르고, 유형별 topology가 필요한 capability(frame, retrieve, verify …)를 붙이는** 구조로 바꾼다. 문제 해결의 소유자는 task마다 하나인 persistent Primary worker다. 그 밖의 specialist는 모두 한 번 쓰고 버리는 세션이며, 작업 상태의 원본은 task ledger에 둔다. (처음 설계는 Jev 분류기가 유형을 고르는 것이었으나 G-R에서 탈락했다. 3장은 그 기록이다.)
 
 ## 1. 근거
 
@@ -39,7 +40,7 @@
 - **jev_router**(OMP 플러그인): TypeSafe Jev 분류기로 DEFAULT/ORCHESTRATE(front door)와 TASK_NORMAL/TASK_DEEP(worker 모델 등급)를 정했다. 입력은 요청 텍스트뿐이었고, confidence/margin 두 기준을 모두 넘을 때만 결정을 채택했다. `~/.omp/agent/jev-router/decisions.jsonl`의 53건 기준으로 지연은 중앙값 243ms, p90 292ms다.
 - **om-orche** (`633eb4b`, 2026-09-29): Jev 라우팅을 **main 스스로 고르는 정책 안내**로 바꿨다. 안내에는 Judgment(판단형)와 Production(제작형) 두 정책과 단계별 전환 규칙("둘 다면 Judgment로 시작하고, 변경 승인 뒤 Production으로", "Production 중 전제가 깨지면 그 부분만 Judgment로")이 들어 있다. 게임 에셋은 별도 조직 없이 Production으로 처리한다.
 - **Jev 라우팅이 실패한 이유 (사용자 확인)**: 요청 텍스트, 즉 컨텍스트의 일부만 보고 판단해서 정확도가 낮았고, 거의 모든 요청을 ORCHESTRATE로 분류했다.
-- 이번 설계와의 차이: (a) 선택을 다시 Jev와 규칙으로 외부화하되, 위 실패에 대한 대책을 넣는다(3.1의 "이전 실패에 대한 대책"). (b) Creation topology를 추가한다. 그러므로 10장 실험에서 **main 스스로 고르기(om-orche 방식)**를 반드시 대조군으로 둔다.
+- 이번 설계와의 차이: (a) 선택을 다시 Jev와 규칙으로 외부화하되, 위 실패에 대한 대책을 넣는다(3.1의 "이전 실패에 대한 대책"). (b) Creation topology를 추가한다. 그러므로 10장 실험에서 **main 스스로 고르기(om-orche 방식)**를 반드시 대조군으로 둔다. (a)는 G-R(10.1) 뒤 철회했다: front가 고른다.
 
 ### 1.3 Pi에는 Jev가 이미 들어 있다
 
@@ -50,13 +51,11 @@
 ## 2. 전체 구조
 
 ```text
-User ⇄ Front (single 모드 main: 대화·승인·보고, 편집 불가)
-          │ orche_task {request, task?, decisions?, mode?}
-          ▼
-   Policy Router ─ Jev classify 1회 (~0.25초) → descriptor → 규칙 → ExecutionPolicy
-          │          (topology · capability · Primary 모델/effort · escalation)
+User ⇄ Front (single 모드 main: 대화·승인·보고, 편집 불가. 작업 유형을 고름: respond/investigation/execution/creation)
+          │ orche_task {role, request, task?}
           ▼
    Topology runner (작은 상태 기계: investigation ⇄ execution, creation → execution)
+          │   Phase 3 구현: execution = frame → Primary → 위험 점수 → [verify → fix → recheck]
           │
           ├─ 일회용 specialist: frame · explore · generate×N · critique · verify
           ├─ 결정적 도구: retrieve(code_nav/LSP/grep, 런타임 상태, 문서, 참조 자료)
@@ -69,7 +68,7 @@ User ⇄ Front (single 모드 main: 대화·승인·보고, 편집 불가)
 | 연구 역할 | 일반화한 역할 | 이 구조의 구현 |
 |---|---|---|
 | Issue Analyzer | Problem Framer | `frame` primitive. 일회용 Framer 세션 |
-| Code Navigator | Evidence / Context Acquisition | `retrieve` primitive. 결정적 도메인 adapter, 실패하면 `explore`(LLM) |
+| Code Navigator | Evidence / Context Acquisition | `retrieve` primitive. 결정적 도메인 adapter(`code_nav`), 부족하면 grounded Framer가 읽음 |
 | Main Agent | Primary Agent | persistent worker. task 동안 유지하고 phase가 바뀌어도 재사용 |
 | Verifier | Conditional Critic / Evaluator | `critique`·`verify` primitive. 일회용 세션, gate 조건부 |
 
@@ -201,7 +200,7 @@ execution ──(전제가 깨짐 / 막힘 / 검증 반복 실패, 해당 부분
 ```
 
 - **승인 guard**: 상태를 바꾸는 phase(execution)로 넘어가려면 원래 요청이 그 변경을 명시했거나(`sideEffect=true`이고 `conditionalChange=false`), 사용자가 승인해야 한다. 승인이 없으면 runtime은 제안을 front에 반환한다(needs_decision). print/json처럼 UI가 없으면 원래 요청이 승인한 범위까지만 진행한다.
-- **전환 신호**: Primary는 `report_result.data.next`(`analysis_done`, `needs_change_authorization`, `premise_broken`, `blocked`)를 낸다. runtime은 이를 `lastOutcome`으로 Jev에 넘겨 다음 phase의 정책을 받는다. Primary가 다음 단계를 직접 고르지는 않는다.
+- **전환 신호**: Primary는 `report_result.data.next`(`analysis_done`, `needs_change_authorization`, `premise_broken`, `blocked`)를 낸다. runtime은 이를 결과에 담아 front에 넘기고, front가 대화를 보고 다음 작업 유형을 고른다(G-R 뒤 변경; 처음 설계는 `lastOutcome`을 Jev에 넘기는 것이었다). Primary가 다음 단계를 직접 고르지는 않는다.
 - **Primary 재사용**: 같은 workspace와 같은 도메인이면 phase가 바뀌어도 같은 Primary가 계속한다. 그래서 조사 단계의 context가 구현으로 이어진다(지금 single의 worker 재사용과 같은 이점). effort만 바꿀 때는 기존 worker의 model/thinking 전환 경로를 쓴다.
 
 ### 4.4 Escalation
@@ -239,6 +238,8 @@ interface Frame {
 
 사실(path:line, 원문 인용)과 추론(hypothesis와 확인 방법)을 분리하고, 해결책은 쓰지 않는다. d1이었다면 A1에 두 해석, 관측 차이("실패 후 성공 시 2 vs 1"), 권장 해석이 기록된다.
 
+**Phase 3 구현 (`src/single/frame.ts`, Execution용)**: 위 인터페이스를 줄였다. `goal`, `requirements`(`kind`: explicit/implied/edge, `acceptance` 필수, explicit은 `quote`), `ambiguities`(`readings` 2–4, `observableDifference`, `recommended`, `why`, `askUser`, `affects`), `invariants`(문장), `locations`(grounded일 때)다. edge case는 별도 E-id 대신 `kind: "edge"`인 R-id다. 그래서 지금의 checklist·ledger·compaction 장치가 그대로 edge case까지 다루고, worker는 edge마다 `verifiedBy`를 대야 한다. 렌더한 contract는 hand-off의 맨 앞(front 요청 원문보다 앞)에 놓인다. `R…:` 줄과 들여 쓴 `Acceptance:` 줄이 요구사항 정의가 되고, compaction 때 hand-off와 함께 복원된다. front가 R-줄을 썼다면 Framer는 같은 id를 유지해야 한다(어기면 보고가 거부되고 Framer가 고친다). 후속 assignment에서는 이전 contract와 결과를 받아 id를 이어 간다. `askUser` 모호성은 아직 실행을 멈추지 않는다(needs_decision 보류): 권장 해석으로 진행하고 결과에 “needs the user's decision”으로 남겨 front가 사용자에게 묻는다. Framer가 실패하면 contract 없이 진행하고 결과에 경고를 남긴다.
+
 ### 5.2 Retrieve adapter
 
 - **code**: `code_nav`(TS LanguageService, 이후 LSP), grep, ast_search. op는 `def`, `refs`, `impl`, `callers`, `callees`, `imports`, `importers`, `tests`, `symbols`, `overview`, `locate`. 출력은 파일별 `줄 종류 문맥`이고 `semantic`/`heuristic` 신뢰도를 붙인다. single의 세션에만 등록하므로 direct main과 front에는 없다.
@@ -253,10 +254,10 @@ interface Frame {
 
 | 조건 | 판단 주체 | 동작 |
 |---|---|---|
-| 위험 점수 ≥ threshold (기본 5) | runtime | 자동 실행 |
+| 위험 점수 ≥ threshold (기본 7, 아래 보정) | runtime | 자동 실행 |
 | 요청문에 검토나 검증 요청이 있음 | runtime | 점수와 상관없이 실행 |
 | docs만 변경, 또는 1개 파일 10줄 이하이고 모든 met 항목에 `verifiedBy`가 있음 | runtime | 건너뜀 |
-| 사용자가 나중에 따로 검증을 요청 | front | `orche_task {mode: "verify", task}` |
+| 사용자가 나중에 따로 검증을 요청 | front | 지금은 verify role assignment(별도 `mode: "verify"`는 미구현) |
 | 설정 `checker.gate` | 사용자 | `"auto"` / `"always"` / `"off"`(수동만) |
 
 **위험 점수** (순수 함수, LLM 호출 0)
@@ -266,17 +267,20 @@ interface Frame {
 | 변경 파일 3개 이상 | +2 |
 | 최상위 디렉터리 2개 이상 | +2 |
 | 위험 도메인 패턴(동시성, 트랜잭션/영속성, 인증/보안, 경로, 금액/반올림, 캐시 무효화, 파싱/인코딩), 최대 2개 | 도메인당 +2 |
-| Jev `risk=high` | +2 |
 | 소스는 바뀌었는데 테스트는 그대로 | +2 |
 | met 항목 중 `verifiedBy`가 없는 것 | +2 |
 | 대응 테스트가 없는 edge case | 1개당 +1 (최대 3) |
 | 사용자 결정 없이 권장 해석으로 진행한 모호성 | 1개당 +1 (최대 2) |
 | 150줄 이상 변경 | +2 |
 
-- 점수와 기여한 신호는 실행 여부와 함께 결과와 ledger에 남긴다. 예: `risk 8 ≥ 5 → verify (동시성 +2, 파일 3개 +2, edge case 테스트 없음 +2, verifiedBy 없음 +2)`.
-- 후속 implement는 마지막 검증 이후의 diff로 점수를 낸다.
+- 점수와 기여한 신호는 실행 여부와 함께 결과와 ledger에 남긴다. 예: `Risk 8 ≥ 7 → verify (concurrency +2, files (3 files) +2, …)`.
+- 위험 도메인은 테스트·문서가 아닌 파일의 바뀐 줄에서만 찾는다. 최상위 디렉터리 신호도 소스 파일만 센다(`src/`+`test/`는 거의 모든 변경이라 변별력이 없다). Jev `risk` 신호는 G-R 뒤 뺐다.
+- **threshold 보정 (2026-10-05, `experiments/risk/calibrate.ts`, 결과는 로컬 `results/risk-calibration/`)**: 저장된 v1 single 결과 90개(longsession, G-L 두 arm, multi-vs-single; 실패 7개)에 점수를 매겼다. 실패 7개(d1·d6)는 모두 8점 이상이었다. threshold 5면 74%, 7·8이면 66%를 검증하고 둘 다 실패 7/7을 검증한다. 9면 41%와 2/7이다. 점수는 대부분 짝수라 7과 8은 같고, 7은 실패 최소 점수보다 1점 여유가 있어 기본값을 7로 했다. 한계: 점수는 같은 과제 안에서 통과와 실패를 가르지 못하고 사실상 “큰 과제를 검증”한다. v1에는 contract가 없어 edge·권장 해석 신호(최대 5점)가 0이었으므로 v2 점수는 더 높다.
+- 후속 assignment는 그 assignment의 diff로 점수를 낸다(이전 assignment는 그때 점수가 매겨졌다).
 
 **Verifier 세션**: 입력은 원문 요청, frame, task baseline 이후 diff, worker checklist(검증할 주장으로 표시)다. worker transcript는 주지 않는다. 도구는 read-only, `code_nav`, trusted check bash이고, 쓰기는 `.orche/scratch/<task>/`(gitignore, 테스트 glob에 걸리지 않는 `*.probe.*` 이름)에만 허용한다. 결과는 `verdict`, `trace`(R-id별 covered/partial/missing), `findings`(executed/static 구분, 6개 이하)다. `blocking`이려면 executed 증거나 원문 인용이 필요하다. fix 뒤에는 runtime이 probe와 check를 다시 실행한다(LLM 없음).
+
+**Phase 3 구현 (`src/single/check.ts`, `src/single/pipeline.ts`)**: diff는 `.orche/scratch/<task>/change-<n>.diff`로 넘긴다. bash는 main의 trusted-check 정책(`classifyBash`)에 probe 실행(`node|python3|bun|deno|tsx|sh <scratch>/<name>.probe.<ext>`)만 더했다. 쓰기는 scratch 안의 `.probe.` 파일과 `fixtures/`만 된다. `report_check`는 executed blocking에 다시 돌릴 수 있는 `probe` 명령을, static blocking에 요청 원문 `quote`를 요구하고 verdict와 blocking 여부가 맞아야 받는다(아니면 같은 세션에서 고치게 돌려보낸다). blocking finding은 같은 worker에게 fix assignment로 가고(`maxFixRounds`, 기본 1, context 유지), worker는 틀린 finding을 `data.disputed`로 반박할 수 있다. 그 뒤 orche가 probe와 이전에 통과한 check를 다시 돌려 finding을 fixed/open/disputed/unchecked로 표시한다. Verifier가 실패하면 결과를 unverified로 두고 진행한다. Framer와 Verifier는 `routes.framer`/`routes.checker`가 없으면 worker와 같은 모델·thinking(보통 main)을 쓴다.
 
 ### 5.4 Critic (Investigation, Creation)
 
@@ -293,7 +297,6 @@ interface Frame {
 | 세션 | 수명 | context에 들어가는 것 |
 |---|---|---|
 | Front | 사용자 세션 | orche_task 호출과 압축 결과, 결정 질의응답. compaction 뒤 ledger 요약을 다시 넣는다 |
-| Jev | 무상태 | 요청 원문, workspace 신호, phase, 결과 라벨 |
 | Framer, Critic, Verifier | 1회 | 자기 몫의 ledger projection, 자기 탐색. 결과만 ledger로 |
 | Generator ×N | 1회 | brief와 자기 방향(D#)만. 다른 후보는 보지 않는다(다양성 유지) |
 | Primary | task 동안 지속, phase 사이 재사용 | ledger에서 렌더한 hand-off, 자기 작업 |
@@ -315,7 +318,7 @@ interface Frame {
 interface TaskLedger {
   v: 2; taskId: `T${number}`;
   originalRequests: { at: number; text: string }[];                     // 원문, 추가만
-  routing: { at: number; descriptor: Descriptor; source: "jev" | "rules" | "override"; policy: ExecutionPolicy }[];
+  routing: { at: number; workType: "respond" | "investigation" | "execution" | "creation"; source: "front" | "override" }[];   // (처음 설계는 Jev descriptor; G-R 뒤 변경. 미구현)
   phase: { current: "investigation" | "execution" | "creation" | "done"; transitions: { from: string; to: string; reason: string; at: number }[] };
   frame?: Frame;
   decisions: { id: `A${number}`; chosen: number | string; by: "user" | "recommended" }[];
@@ -327,6 +330,8 @@ interface TaskLedger {
   history: { at: number; stage: string; summary: string; record?: string }[];   // 50개 이하
 }
 ```
+
+**구현된 형태 (Phase 1 + Phase 3, `src/single/ledger.ts`)**: 이벤트 로그(`create`·`handoff`·`result`·`failure`, Phase 3의 `check`·`recheck`)를 재생한 상태다. 요구사항은 (assignment, R-id)로 구분하고, Framer가 정한 해석은 hand-off 이벤트에 `by: "framer"`(quote, askUser 포함)로, worker가 보고한 해석은 `by: "worker"`로 남는다. `checks`는 assignment별 위험 점수와 verdict, `findings`는 Verifier finding과 마지막 상태(open/fixed/disputed/unchecked/minor)다. worker essentials에는 아직 고쳐지지 않은 현재 assignment의 finding이, main 요약에는 마지막 위험 점수·verdict와 열린 finding이 들어간다. `routing`, `phase`, `evidence`, `candidates`는 Phase 4–5 몴이다.
 
 - 저장: 메모리에 두고, 단계마다 `pi.appendEntry("orche-ledger", …)`로 context 밖에 남긴다. reload 뒤에는 `session_start`에서 복원하고, records에는 `ledger.json`으로 남긴다.
 - **Primary essentials**(compaction 때 복원): 원문 요청, 현재 phase와 범위, 요구사항 상태, 결정, invariant와 edge case, 이번 phase에 관련된 근거 ID와 참조, 선택된 후보, 열린 finding, 현재 Task DAG. investigation에서는 근거 목록이, creation에서는 선택 이유가, execution에서는 요구사항과 finding이 compaction 뒤에도 남는다.
@@ -340,7 +345,8 @@ interface TaskLedger {
 - Creation의 후보 N개는 서로의 context를 공유하지 않으며, Primary에는 선택된 후보와 이유만 들어간다.
 - code_nav 같은 결정적 retrieve는 파일 전체 대신 범위만 읽게 한다.
 - fix 뒤 recheck를 LLM 없이 해서 검증 context가 두 번 생기지 않는다.
-- Jev 라우팅은 front context를 쓰지 않는다. front LLM이 역할을 고르느라 추론하는 일이 없어진다.
+- 작업 유형은 front가 이미 가진 대화로 고른다. 별도 분류기 호출이나 context가 없다(G-R).
+- v2에서는 front가 R-줄 checklist를 쓰지 않고(스모크: S0 2–4줄, S1 0줄), 검증도 다시 하지 않는다.
 
 ## 7. Front와 `orche_task`
 
@@ -350,21 +356,22 @@ interface TaskLedger {
   context?: string,
   task?: string,                                           // 같은 작업의 후속, 승인, 전환
   decisions?: { id: string; choice: number | string }[],  // needs_decision 답, 승인 포함
-  mode?: "investigate" | "execute" | "create" | "verify",  // 선택적 override. 없으면 Jev+규칙이 정한다
+  mode?: "investigate" | "execute" | "create" | "verify",  // 설계안. 미구현: 지금은 front가 작업 유형을 고르고 기존 role로 위임한다
   files?: string[],
   git?: { commit?: boolean; push?: boolean; remote?: string; branch?: string }
 }
 ```
 
-- 기존 `role`(implement/answer/explore/verify/game-asset/video)은 없앤다. `mode`는 사용자가 형태를 명시했을 때만 쓴다. game-asset과 video는 domain과 loadout으로 흡수되어, 정책이 Creation 또는 Execution을 고르고 `generate_image` 등 해당 도구를 붙인다.
+- (설계안) 기존 `role`(implement/answer/explore/verify/game-asset/video)은 없앤다. `mode`는 사용자가 형태를 명시했을 때만 쓴다. game-asset과 video는 domain과 loadout으로 흡수되어, 정책이 Creation 또는 Execution을 고르고 `generate_image` 등 해당 도구를 붙인다.
+- (현재) G-R 뒤 `role`을 유지했다: front가 작업 유형을 고르고 유형을 role로 위임한다(investigation→answer, execution→implement, creation→game-asset/video/implement). v2에서 implement는 Framer와 위험 점수 기반 Verifier를 거친다. `decisions`·`mode`는 needs_decision과 Creation을 넣을 때 다시 본다.
 - front가 하는 일: 대화, 요청 전달(원문 포함), needs_decision과 승인 질문을 사용자에게 전달, 결과 보고.
 - front가 하지 않는 일: 코드 탐색과 구현, 요구사항 작성, topology와 역할 선택, 검증 여부 판단.
 - 결과는 3천 자 이하로 렌더한다: 요약, phase와 정책(왜 이 형태인지), 요구사항 상태, 결정과 가정, finding 상태, 후보와 선택, 변경 파일, record 경로.
 
 ## 8. 비용 통제
 
-- Jev는 약 0.25초이고, Pi 카탈로그 가격이 없어 비용이 0으로 기록된다(토큰은 기록).
-- 기본 경로는 가볍다: frame `skip`/`spec`, critique·verify는 gate, generate는 creation에서만.
+- 작업 유형 선택은 front가 하므로 추가 호출이 없다. Framer는 implement마다 1회, Verifier는 위험 점수가 threshold를 넘을 때만 돈다.
+- 기본 경로는 가볍다: frame `spec`/`off`로 더 줄일 수 있고, critique·verify는 gate, generate는 creation에서만.
 - 지금 single은 direct의 2.3배다. 새 single의 목표는 "같은 품질이면 지금 single의 1.1배 이하, 품질이 오르면 1.3배 이하"다(10.4).
 
 ## 9. 설정
@@ -373,23 +380,22 @@ interface TaskLedger {
 {
   "mainMode": "single",
   "routes": {
-    "framer": {}, "critic": {}, "checker": {}, "generator": {},   // 선택. 없으면 main 상속 ("checker"는 라이브러리 엔진의 "verifier"와 구분)
-    "primary-deep": {}                                           // 선택. effort xhigh 대신 다른 모델을 쓸 때
+    "framer": {}, "checker": {},                                   // 선택(구현됨). 없으면 worker와 같은 모델·thinking. (설계안: "critic", "generator")
+    "primary-deep": {}                                           // 설계안. effort xhigh 대신 다른 모델을 쓸 때
   },
   "single": {
-    "pipeline": "v2",                                            // 출시 중 기본 "v1"(지금 single)
-    "router": { "classifier": "typesafe/jev-latest", "timeoutMs": 2000, "minConfidence": 0.6, "minMargin": 0.2, "shadow": false },
-    "policy": { "rules": "default", "bugReports": "fix" },        // 3.2 표의 override 경로. bugReports: "fix"(기본) | "diagnose"
-    "checker": { "gate": "auto", "threshold": 5, "maxFixRounds": 1 },
-    "creation": { "candidates": 3 },
-    "nav": { "enabled": true, "lsp": { "python": "pyright-langserver --stdio", "rust": "rust-analyzer" } },
-    "maxTransitions": 4
+    "ledger": true,                                               // Phase 1(구현): 기본 false, v2면 항상 켜짐
+    "pipeline": "v2",                                            // Phase 3(구현): 기본 "v1"(지금 single). v2 = Framer + 위험 점수 Verifier + code_nav + v2 front 규칙
+    "frame": "grounded",                                         // 구현: "grounded"(기본) | "spec" | "off"
+    "checker": { "gate": "auto", "threshold": 7, "maxFixRounds": 1 },   // 구현: gate auto|always|off, threshold 0–30, maxFixRounds 0–2
+    "nav": true                                                   // 구현: v2 세션의 code_nav (설계안: LSP adapter 설정은 Phase 6)
+    // 설계안(미구현): "policy": { "bugReports": "fix" }, "creation": { "candidates": 3 }, "maxTransitions": 4. Jev "router" 설정은 G-R 뒤 뺐다.
   },
   "taskContext": { "clearBetweenAssignments": true, "minClearTokens": 10000 }   // 기존
 }
 ```
 
-`single`은 `contextWarning`처럼 extension 전용 키로 두고 `loadOrcheConfigFile`에서 검증한다. `router.shadow: true`이면 정책을 계산해 기록만 하고 동작은 바꾸지 않는다(Phase 2).
+`single`은 `contextWarning`처럼 extension 전용 키로 두고 `loadOrcheConfigFile`에서 검증한다. 알 수 없는 키와 범위 밖 값은 오류다.
 
 ## 10. 실험과 gate
 
@@ -460,19 +466,55 @@ primitive를 하나씩 끈 arm(S1−X)과 비교한다. 품질이 같고 더 싸
 
 표본이 작으므로 결과는 서술적으로 다루고, task 단위 paired bootstrap을 보조로 쓴다.
 
+### 10.5 G-X 1단계 사전 등록 (2026-10-05, 실행 전에 작성)
+
+- **질문**: Phase 3 구현(파이프라인 v2: grounded Framer, 위험 점수로 켜지는 Verifier, fix 1회와 결정적 recheck, code_nav, v2 front 규칙)이 지금 single(v1)보다 품질을 올리는가, 그 비용은 얼마인가.
+- **Arm**: S0 = `single: { ledger: true }`(v1), S1 = `single: { pipeline: "v2" }`(기본값: frame grounded, checker gate auto·threshold 7·maxFixRounds 1, nav 켜짐, ledger 포함). 다른 설정은 같다.
+- **프로토콜**: G-L과 같다. 반복마다 Pi RPC main 세션 하나와 monorepo 하나, 8과제 고정 순서(p1, d1, c1, b3, p2, d6, c4, d8), hidden test 채점은 Pi에 되돌리지 않음, arm당 3반복, 6세션 동시 실행. openai-codex/gpt-6.1-sol high, SSE. worker와 specialist는 main 모델을 상속한다. 실험 파일은 로컬 `results/compare/pipeline-2026-10-05/`.
+- **1차 지표**: 최종 통과(arm당 24), 과제별 통과, 추정 비용, wall, main context 최대값.
+- **파이프라인 지표** (`pipeline-check.ts`): d1 모호성 탐지(`attempts`에 대해 “모든 claim을 셈”과 “실패한 claim만 셈”을 가르는 ambiguity, 또는 실패 뒤 성공의 attempts를 정하는 edge 요구사항), d6 edge 탐지(같은 timestamp가 page/cursor 경계를 넘는 edge 요구사항), Verifier 실행 비율, verdict, fix 횟수, recheck에서 고쳐진 비율, specialist 요청 수.
+- **Gate (10.4의 G-X를 이 설계에 맞춘 것)**:
+  1. S1 최종 통과 ≥ S0 최종 통과.
+  2. S1이 S0보다 3회 중 2회 이상 덜 통과한 과제가 없음.
+  3. 성공당 비용: S1이 더 많이 통과하면 S0의 1.3배 이하, 같으면 1.1배 이하.
+  4. 탐지율: S1의 d1·d6 6회 중 5회 이상 탐지(≥80%).
+  5. parity·identity 100%, unknown usage 0(아니면 HOLD).
+- **결정 규칙**: 모두 통과하면 2단계(ablation S1−frame, S1−verify, 쉬운 단일 과제 세트)를 거친 뒤에만 v2 기본값을 제안한다. 비용만 못 넘으면 더 싼 설정(frame spec, 더 높은 threshold)을 2단계에서 사전 등록해 시험한다. 품질(1·2)을 못 넘으면 v1을 기본으로 두고 원인을 분석한다.
+- **한계(미리 적음)**: 과제당 n=3. 저장소가 작아 code_nav의 가치는 여기서 잴 수 없다. d1의 모호성은 Framer가 hidden test의 해석을 고를지가 운에 가깝다(탐지와 통과를 따로 본다). 과제가 독립적이라 후속 요청·재개는 다루지 않는다. threshold 7은 같은 과제의 저장된 v1 결과로 보정했다(5.3).
+- **Smoke** (a6→a1, arm당 1세션, S1은 Verifier 강제): 둘 다 2/2 통과, parity·identity 유효, unknown usage 0. S1 비용 $0.57(S0 $0.36), wall 899초(S0 600초), main context 최대 12,221(S0 11,719). v2 front는 R-줄을 쓰지 않았고(S0 2–4줄), Framer는 7·11개 요구사항을 썼다. Verifier가 `checks`에 git 조회와 도구 호출을 넣어 설명을 고친 뒤 runtime을 다시 만들었다.
+- **결과 (2026-10-05 02:02–05:05 UTC, 6세션 모두 완료, parity·identity 유효, unknown usage 0; 로컬 `results/compare/pipeline-2026-10-05/README.md`)**: **G-X 1단계는 불합격이다(기준 1·3).** 사전에 정한 규칙대로 v1이 기본값으로 남고 v2는 opt-in이다.
+
+  | | S0 (v1) | S1 (v2) |
+  |---|---:|---:|
+  | 최종 통과 | 23/24 | 22/24 |
+  | 과제별 (p1, d1, c1, b3, p2, d6, c4, d8) | 3,3,3,3,3,2,3,3 | 2,2,3,3,3,3,3,3 |
+  | 세션당 평균 wall | 5,938초 | 10,642초 (+79%) |
+  | 추정 비용(3세션) | $13.80 | $24.10 (+75%) |
+  | 성공당 비용 | $0.600 | $1.095 (1.83배) |
+  | 요청 수 | 813 | 1,340 (specialist 369: Framer 28회 146, Verifier 16회 223) |
+  | main context 최대 / p90 | 77,401 / 63,609 | 34,369 / 28,676 (−56%) |
+
+  - Gate: (1) 22 < 23 불합격(과제 하나 차이, 노이즈 범위지만 기준은 기준이다), (2) 2회 이상 진 과제 없음 통과(p1 −1, d1 −1, d6 +1), (3) 성공당 비용 1.83배 불합격, (4) 탐지 6/6(d1 모호성 3/3, d6 edge 3/3) 통과, (5) 통과.
+  - 파이프라인: 28개 assignment 모두 frame(요구사항 10–24개, 중앙값 21; 모호성 0–5, askUser 0). 위험 점수는 어려운 과제 9–13, 나머지 0–4이고 16/28을 검증했다. verdict pass 7, fail 9, fix 8회, recheck한 finding은 모두 fixed.
+  - **원인 1 (Framer 해석의 권위)**: p1 r1에서 Framer는 cache fencing 모호성을 “설치만 막고 뒤 호출자는 기존 load에 합류”로 정했다. worker는 코드를 보고 “뒤 호출자는 낡은 flight에서 분리”로 바꾸어 보고했고, 이것이 hidden test의 해석이었다. main은 v2 감독 규칙(정한 해석과 worker 해석을 원문과 대조해 다르면 수정 요청)을 따라 Framer 해석을 강제하는 후속을 보냈고, 고친 코드는 hidden test에서 멈춰 timeout으로 실패했다.
+  - **원인 2 (탐지 ≠ 결정)**: d1의 “increments attempts once per claim”은 3/3 탐지했지만 권장 해석이 hidden test와 맞은 것은 2/3이고, 틀린 r2는 알려진 방식 그대로 실패했다. 사용자에게 물을 수 없으면 드러난 모호성도 여전히 동전 던지기다(S0는 이번에 d1 3/3, G-L에서는 2/3 실패).
+  - **원인 3 (Verifier의 극단 입력)**: blocking finding 10개 중 9개가 테스트도 사용자도 보내지 않을 입력이었다(SharedArrayBuffer 5, WebAssembly.Memory 2, prototype 상속 필드 1, clone 뒤 getter 재실행 1). 나머지 1개는 그럴듯한 견고성 문제(d8, 12,000 노드 cycle에서 stack overflow)다. 실패를 만든 것도, 실패를 잡은 것도 없었고 fix 8회 비용만 들었다. 요구사항 ~20개마다 `verifiedBy`를 요구하는 contract도 worker 일을 늘렸다.
+  - **효과가 있었던 것**: main context가 절반 아래로 줄었다(R-줄과 재검증이 main에서 빠짐). d6은 같은 timestamp edge 요구사항이 명시된 S1에서 3/3이었다(S0 2/3, G-L 6세션 중 3세션 실패; n=3이라 시사만). frame → worker → 위험 점수 → Verifier → fix → 결정적 recheck는 28개 assignment 모두에서 오류 없이 돌았다.
+  - 참고: S0 main context 최대 77,401은 G-L S0의 123,184보다 낮다. 감독 규칙 완화(`a20f255`) 뒤 longsession(75,773) 수준으로 돌아온 것이다(다른 날 실험 간 비교).
+
 ## 11. 로드맵
 
 ```text
-Phase 0  E0: 실패 분류 고정, 위험 점수 보정, 라우팅 정답셋, Jev spike(ctx.modelRegistry.classify), 하네스 arm
+Phase 0  E0: 실패 분류 고정, 위험 점수 보정(완료, threshold 7), 라우팅 정답셋, 하네스 arm
 Phase 1  ledger v2 + Primary/front essentials + reload 복원           ──► G-L   (topology와 무관, 지금 single에 먼저 적용)
-Phase 2  Policy Router 오프라인 평가                               ──► G-R 불합격 (Jev+규칙) → front `mode`로 대체, shadow 연결 안 함
+Phase 2  라우팅 오프라인 평가                                     ──► G-R 불합격 (Jev+규칙) → front가 작업 유형을 고름(확정)
 Phase 3  Execution(code): framer, code_nav, Primary, 위험 점수, verifier, recheck ──► G-X
 Phase 4  Investigation + 상태 기계 전환(승인 guard)                    ──► G-I, G-T
 Phase 5  Creation: generator×N, critic/선택, refine (game-asset/video loadout)      ──► G-C
 Phase 6  runtime·LSP adapter, 도그푸딩(사용자의 Python·Rust 저장소), gate 결과로 v2 기본값 결정
 ```
 
-**진행 상황 (2026-10-04)**
+**진행 상황 (2026-10-05)**
 
 - Phase 0: 라우팅 정답셋 100건 라벨을 확정했고(`labels.confirmed.jsonl`), Creation 보충 23건(임시 라벨)을 다른 PC 세션에서 추출했다(10.1).
 - Phase 1: 구현했다. `"single": { "ledger": true }`로 켜는 opt-in이며 기본은 꺼짐이다. 구현은 `src/single/ledger.ts`(ledger, 렌더, 복원)와 `src/extension/workers.ts`, `src/extension/index.ts` 연결이고, 테스트는 `test/single/ledger.test.ts`, `test/extension/task-ledger.test.ts`, `test/extension/config.test.ts`다.
@@ -483,26 +525,31 @@ Phase 6  runtime·LSP adapter, 도그푸딩(사용자의 Python·Rust 저장소)
   - 발견 3 (ledger와 무관): 649990c에서 main에게 "각 요구사항의 verifiedBy 검사가 수용 기준을 실제로 확인하는지 확인하라"는 감독 규칙을 넣은 뒤, main이 테스트 파일을 읽게 되었다. longsession(7c882ab)과 비교하면 세션당 main read 37 → 59회, read 결과 94K → 235K자, main context 최대 75,773 → 123,184(p90 57,564 → 100,536)이고 통과율은 나아지지 않았다(22/24 → 21/24). 다른 시점 실험 간 비교라 인과는 아니지만, single의 컨텍스트 보존 장점을 깎는다. 새 구조에서는 front가 검증을 하지 않고 Verifier가 위험 점수로 맡는다(5.3).
 - Phase 1 구현에서 문서와 달라진 점: 이번 단계에서는 진행 중인 지시(R-id)를 ledger의 원본으로 쓰지 않는다. worker essentials에는 지금처럼 현재 hand-off 원문을 그대로 두고, 그 옆에 ledger 렌더를 덧붙인다. 요구사항 ID는 assignment마다 다시 시작하므로 ledger는 (assignment, id)로 구분한다.
 - G-L 뒤 수정(2026-10-04): (1) `orche_task`에 `task`를 넣었다. 결과마다 `Task ledger T…, assignment n`을 알려 주고, `task`를 넘길 때만 같은 task를 잇는다(다른 worker·새 worker로도). 생략하면 worker를 재사용해도 새 task다. task가 다른 worker에게 넘어가면 새 worker는 이전 상태의 ledger briefing을 받는다. 사라진 worker id는 그 worker가 맡았던 `task`와 함께일 때만 받고, 아니면 오류 메시지가 마지막 task를 알려 준다. 2회 미충족 안내도 `task`를 유지하라고 말한다. (2) 세션에는 변경 이벤트(create·handoff·result·failure)만 남기고 복원 때 재생한다. 이벤트 하나는 해당 변경분 크기뿐이다(테스트: 70 assignment에서 최대 2KB 미만, snapshot 방식의 10% 미만). (3) main 감독 규칙 완화(결정 8).
+- 커밋 (2026-10-05, 사용자 승인): `a20f255` 감독 규칙 완화, `0b1f7c2` task ledger, `5ef9baf` 이 문서와 라우팅 평가 코드, `dc6fc9e` 작업 유형 규칙과 모델 무관 라우팅 평가(10.1 후속 실행).
+- Phase 3 (구현, 커밋 전): opt-in `"single": { "pipeline": "v2" }`. implement assignment마다 grounded Framer(`src/single/frame.ts`)가 contract를 쓰고, 결과의 위험 점수(`src/single/risk.ts`)가 threshold를 넘으면 Verifier(`src/single/check.ts`)가 probe로 확인한다. blocking finding은 같은 worker에게 fix assignment로 가고, orche가 probe와 check를 다시 돌린다. 일회용 세션은 `src/specialists/session.ts`(`runAdvisorSession` 일반화), 연결은 `src/single/pipeline.ts`와 `src/extension/workers.ts`다. `code_nav`(`src/tools/code-nav.ts`, TS LanguageService worker thread + 다른 언어는 regex, diagnostics와 프로젝트 계획 공유 `src/tools/ts-project.mjs`)는 v2의 worker·Framer·Verifier에만 등록된다. v2 front 규칙은 R-줄을 쓰지 않고 검증도 다시 하지 않는다(`delegationRules(mode, { pipeline })`). 구현 중 내린 판단: edge case를 R-id(`kind: "edge"`)로 합침, needs_decision과 `mode`·`decisions` 파라미터는 보류, Jev `risk` 신호 제거, threshold 7(보정). 테스트는 `test/single/{frame,risk,check}.test.ts`, `test/specialists/session.test.ts`, `test/tools/code-nav.test.ts`, `test/extension/pipeline-v2.test.ts`(faux 모델로 frame→worker→Verifier→fix→recheck 전 경로).
+- G-X 1단계 (10.5): 2026-10-05 02:02–05:05 UTC 실행, **불합격**(통과 22/24 vs 23/24, 성공당 비용 1.83배). main context −56%, d1·d6 탐지 6/6. 원인은 Framer 해석을 main이 worker보다 우선한 것, 탐지한 모호성의 해석이 여전히 동전 던지기인 것, Verifier의 극단 입력 finding이다(10.5). 비용(카탈로그 가격): 본 실행 $37.90 + smoke $0.93.
 
 ## 12. 파일 계획 (요약)
 
 | 구분 | 위치 | 내용 |
 |---|---|---|
 | 신규 | `src/single/ledger.ts` | ledger v2, 역할별 렌더, 저장과 복원 |
-| 신규 | `src/single/router.ts` | Jev descriptor(질문 정의, gate, fallback), 규칙 엔진, decision log, shadow 모드 |
+| 실험 | `experiments/routing/{router,evaluate}.ts` | (G-R 뒤 제품에서 분리) Jev descriptor와 규칙, 모델 무관 라우팅 평가 |
+| 실험 | `experiments/risk/calibrate.ts` | 저장된 v1 결과로 위험 점수 threshold 보정 |
+| 신규 | `src/single/work-types.ts` | front의 작업 유형 정의(규칙과 평가 프롬프트가 같은 문구) |
 | 신규 | `src/single/runner.ts` | topology 템플릿, 상태 기계, 승인 guard, escalation, needs_decision |
-| 신규 | `src/single/{framer,critic,verifier,generator,risk}.ts` | primitive 계약과 prompt |
+| 신규 | `src/single/{frame,check,risk,pipeline}.ts` (구현), `{critic,generator}` (Phase 4–5) | primitive 계약과 prompt |
 | 신규 | `src/specialists/session.ts` | 일회용 세션 공통부(`runAdvisorSession` 패턴 일반화) |
-| 신규 | `src/tools/nav/*`, `src/single/retrieve/*` | code_nav, runtime/docs/reference adapter |
+| 신규 | `src/tools/code-nav{.ts,-worker.mjs}`, `src/tools/ts-project.mjs` (구현), `src/single/retrieve/*` (Phase 4–6) | code_nav, runtime/docs/reference adapter |
 | 수정 | `src/extension/workers.ts` | Primary 실행기로 축소(spawn, 재사용, compaction, projection, audit, git 유지), essentials를 ledger 렌더로 |
-| 수정 | `src/extension/{index,mode,config,records}.ts` | `orche_task` 인터페이스(`mode`, `task`, `decisions`), front 규칙, `single` 설정, ledger record |
+| 수정 | `src/extension/{index,mode,config,records}.ts` | `orche_task`의 `task`(구현), front 규칙(작업 유형, v2 hand-off), `single` 설정, ledger entry |
 | 수정 | `src/eval/*` | arm, 라우팅 평가 스크립트, longsession 연결, specialist actor 귀속 |
 | 변경 없음 | direct 경로 전부, `session-factory.ts`의 compaction 메커니즘, `context-projection.ts` | |
 
 ## 13. 하지 않을 것
 
 - direct 변경.
-- Jev가 문제를 쪼개고, 배분하고, 중간 결과로 재배분하는 중앙 orchestrator가 되는 것.
+- 라우터나 runtime이 문제를 쪼개고, 배분하고, 중간 결과로 재배분하는 중앙 orchestrator가 되는 것.
 - 모든 작업에 하나의 고정 DAG를 쓰는 것.
 - Execution과 Investigation에서 같은 문제를 푸는 병렬 worker. 병렬은 Creation의 generator(N 상한)만 허용한다.
 - BOAD의 UCB 기반 specialist 자동 생성. 대신 ablation과 usefulness 기록으로 정책 표를 고친다.
@@ -510,10 +557,11 @@ Phase 6  runtime·LSP adapter, 도그푸딩(사용자의 Python·Rust 저장소)
 
 ## 14. 리스크와 열린 질문
 
-1. **Jev 오분류**: shadow 모드로 먼저 정확도를 확인한다. 승인 guard가 위험한 오분류(승인 없는 변경)를 막고, 전환 규칙이 나머지를 교정한다.
-2. **이전 결정과의 충돌**: om-orche는 9/29에 Jev 라우팅을 main 스스로 고르기로 바꿨다. 10.1에서 정면 비교하고 이긴 방식을 쓴다.
+1. **작업 유형 오분류**: front가 고른다(G-R: 고급 모델 94–97%, 승인 없는 변경 ≤1.6%). 저가 main 모델은 기준을 못 넘었다(luna low 2.4%). 승인 guard(Phase 4)가 남은 위험을 막는다.
+2. **이전 결정과의 충돌**: om-orche는 9/29에 Jev 라우팅을 main 스스로 고르기로 바꿨다. 10.1에서 정면 비교했고, 같은 결론(main이 고름)에 우리 정의를 더했다.
 3. **비용**: specialist가 늘어난다. 모든 추가 단계를 gate로 두고, 정책 표는 ablation 결과로만 넓힌다.
 4. **Creation 평가의 주관성**: rubric과 쌍대 선호를 함께 쓴다. 표본이 작다는 점은 결과에 명시한다.
 5. **retrieve 범위**: web과 운영 환경 조회는 도구와 권한에 달려 있다. 처음에는 code, 로컬 문서, 읽기 전용 상태 명령까지만 하고, 나머지는 있을 때만 쓴다.
 6. **재진술 손실**: 원문 요청은 모든 단계에 그대로 전달하고, hand-off는 ledger에서 결정적으로 렌더한다.
-7. **깨지는 변경**: `orche_task`의 `role` 제거(`mode` override로 대체), front 규칙 재작성. single 테스트와 CHANGELOG를 함께 갱신한다.
+7. **깨지는 변경**: 지금은 없다(v2는 opt-in, `role` 유지). v2를 기본값으로 바꿀 때 front 규칙이 바뀌므로 single 테스트와 CHANGELOG를 함께 갱신한다.
+8. **Verifier의 실행 범위**: probe는 프로젝트 코드를 실행한다. bash 정책은 습관적 편집을 막는 장치이지 sandbox가 아니므로, Verifier가 남긴 workspace 변경은 결과의 “other changes”로 드러나게만 한다.
