@@ -26,6 +26,8 @@ export interface DiscoveredConfig {
   taskContext: TaskContextSettings;
   /** Main-session context advisory in direct mode, with defaults applied. */
   contextWarning?: ContextWarningSettings;
+  /** Single-workflow options (task ledger), with defaults applied. */
+  single: SingleSettings;
   source: ConfigSource;
   /** Config files that exist but were not used, with the reason. */
   ignored: string[];
@@ -157,10 +159,28 @@ export function parseContextWarningConfig(value: unknown): ContextWarningSetting
 }
 
 /**
- * Load one orche config file: the route settings (validated by `parseRouteConfig`) plus the extension-only
- * `concurrentSessions`, `records` and `taskContext` settings, validated here and removed before the route parser sees the file.
+ * `single` in orche.config.json: options of the single workflow. `ledger` keeps a per-task ledger outside every LLM context (original
+ * requests, requirement statuses, chosen readings, history): workers get it back when they compact, the main session after its own
+ * compaction, and a task whose worker is gone (reload, idle expiry, eviction) continues with a new worker briefed from it. Off by
+ * default until measured (docs/specialist-orchestration.md, gate G-L).
  */
-export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings }> {
+export interface SingleSettings {
+  ledger: boolean;
+}
+export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false };
+export function parseSingleConfig(value: unknown): SingleSettings {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.single: expected object");
+  const settings = value as Record<string, unknown>;
+  if (Object.keys(settings).some(key => key !== "ledger")) throw new RouteConfigError("config.single: unknown field");
+  if (settings.ledger !== undefined && typeof settings.ledger !== "boolean") throw new RouteConfigError("config.single.ledger: expected boolean");
+  return { ledger: (settings.ledger as boolean | undefined) ?? DEFAULT_SINGLE.ledger };
+}
+
+/**
+ * Load one orche config file: the route settings (validated by `parseRouteConfig`) plus the extension-only
+ * `concurrentSessions`, `records`, `taskContext`, `contextWarning` and `single` settings, validated here and removed before the route parser sees the file.
+ */
+export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings }> {
   let value: unknown;
   try { value = JSON.parse(await readFile(path, "utf8")); }
   catch (error) { throw new RouteConfigError(`Cannot load route config ${path}: ${error instanceof Error ? error.message : String(error)}`); }
@@ -169,15 +189,17 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
   let records: RecordsConfig | undefined;
   let taskContext = { ...DEFAULT_TASK_CONTEXT };
   let contextWarning: ContextWarningSettings = { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
+  let single: SingleSettings = { ...DEFAULT_SINGLE };
   if (value && typeof value === "object" && !Array.isArray(value)) {
-    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, ...rest } = value as Record<string, unknown>;
+    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, single: singleValue, ...rest } = value as Record<string, unknown>;
     if (Object.hasOwn(value, "concurrentSessions")) concurrent = parseConcurrentSessionsConfig(concurrentSessions);
     if (Object.hasOwn(value, "records")) records = parseRecordsConfig(recordsValue);
     if (Object.hasOwn(value, "taskContext")) taskContext = parseTaskContextConfig(taskContextValue);
     if (Object.hasOwn(value, "contextWarning")) contextWarning = parseContextWarningConfig(contextWarningValue);
+    if (Object.hasOwn(value, "single")) single = parseSingleConfig(singleValue);
     routeValue = rest;
   }
-  return { routes: parseRouteConfig(routeValue), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning };
+  return { routes: parseRouteConfig(routeValue), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single };
 }
 export class NoRouteError extends Error {
   override readonly name = "NoRouteError";
@@ -228,6 +250,7 @@ export async function discoverOrcheConfig(options: {
     concurrentSessions: resolveConcurrentSessions(),
     records: resolveRecordsSettings(),
     taskContext: { ...DEFAULT_TASK_CONTEXT },
+    single: { ...DEFAULT_SINGLE },
     source: { kind: "session", model, ...(thinking ? { thinking } : {}) },
     ignored,
   };

@@ -53,6 +53,8 @@ export async function createHarness(options: {
    */
   records?: boolean | { enabled?: boolean; dir?: string; retentionDays?: number; maxBytes?: number };
   taskContext?: { clearBetweenAssignments?: boolean; minClearTokens?: number };
+  /** `single` in the user config (single-workflow options such as the task ledger); omitted when unset. */
+  single?: { ledger?: boolean };
   /** `ctx.mode` the extension sees (default: the SDK default, i.e. not "tui"). */
   mode?: "tui" | "rpc" | "print" | "json";
 }): Promise<Harness> {
@@ -67,7 +69,7 @@ export async function createHarness(options: {
   main.runtime.registerNativeProvider(orche.faux.provider);
   if (options.writeUserConfig !== false) {
     const records = options.records === true ? {} : options.records === undefined || options.records === false ? { enabled: false } : options.records;
-    await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: orche.route.model }, records, ...(options.taskContext ? { taskContext: options.taskContext } : {}), ...(options.mainMode === "unset" ? {} : { mainMode: options.mainMode ?? "single" }) }));
+    await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: orche.route.model }, records, ...(options.taskContext ? { taskContext: options.taskContext } : {}), ...(options.single ? { single: options.single } : {}), ...(options.mainMode === "unset" ? {} : { mainMode: options.mainMode ?? "single" }) }));
   }
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
   const resourceLoader = new DefaultResourceLoader({

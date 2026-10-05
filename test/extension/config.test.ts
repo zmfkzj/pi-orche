@@ -7,7 +7,7 @@ import {
   resolveConcurrentSessions, resolveRecordsSettings,
 } from "../../src/extension/config.js";
 import { resolveRunLimits } from "../../src/orchestration/limits.js";
-import { DEFAULT_TASK_CONTEXT, parseTaskContextConfig } from "../../src/extension/config.js";
+import { DEFAULT_SINGLE, DEFAULT_TASK_CONTEXT, parseSingleConfig, parseTaskContextConfig } from "../../src/extension/config.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -252,6 +252,24 @@ describe("orche config discovery", () => {
     expect(() => parseTaskContextConfig(value)).toThrow("config.taskContext");
     const files = await layout({ user: { ...cfg("u/user"), taskContext: value } });
     await expect(discoverOrcheConfig({ ...files, projectTrusted: false, session })).rejects.toThrow("config.taskContext");
+  });
+
+  it("defaults single.ledger to off and reads it from the selected file", async () => {
+    expect(DEFAULT_SINGLE).toEqual({ ledger: false });
+    expect(parseSingleConfig({})).toEqual({ ledger: false });
+    expect(parseSingleConfig({ ledger: true })).toEqual({ ledger: true });
+    const none = await layout({});
+    expect((await discoverOrcheConfig({ ...none, projectTrusted: true, session })).single).toEqual({ ledger: false });
+    const files = await layout({ user: { ...cfg("u/user"), single: { ledger: true } } });
+    const found = await discoverOrcheConfig({ ...files, projectTrusted: false, session });
+    expect(found.single).toEqual({ ledger: true });
+    expect(found.routes).toEqual(cfg("u/user"));
+  });
+
+  it.each([null, [], true, { unknown: true }, { ledger: "true" }, { ledger: 1 }, { ledger: null }])("rejects invalid single %j without fallback", async value => {
+    expect(() => parseSingleConfig(value)).toThrow("config.single");
+    const files = await layout({ user: { ...cfg("u/user"), single: value } });
+    await expect(discoverOrcheConfig({ ...files, projectTrusted: false, session })).rejects.toThrow("config.single");
   });
 
 });

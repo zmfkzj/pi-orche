@@ -16,6 +16,7 @@ import { orcheTaskRenderers } from "./render.js";
 import { partialUpdate } from "./progress.js";
 import { defaultRunLimits } from "../orchestration/limits.js";
 import { formatDuration } from "../agent/liveness.js";
+import { LEDGER_ENTRY_TYPE, LEDGER_SUMMARY_TYPE, latestLedgers, type TaskLedger } from "../single/ledger.js";
 
 export const RESULT_MESSAGE_TYPE = "orche-result";
 /** Pi built-ins that stay Pi's own but are switched on next to our tools. */
@@ -88,7 +89,19 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
   return function orcheExtension(pi: ExtensionAPI): void {
     const controller = new OrcheController(options);
     let workers: WorkerPool | undefined;
-    const pool = () => workers ??= new WorkerPool({ controller, ...(options.agentDir ? { agentDir: options.agentDir } : {}), ...(options.workerIdleTtlMs !== undefined ? { idleTtlMs: options.workerIdleTtlMs } : {}) });
+    /** Task ledgers of this session's branch (restored at session start): a fresh pool picks them up, so a task outlives its worker. */
+    let restoredLedgers: TaskLedger[] = [];
+    const pool = () => {
+      if (!workers) {
+        workers = new WorkerPool({
+          controller, ...(options.agentDir ? { agentDir: options.agentDir } : {}), ...(options.workerIdleTtlMs !== undefined ? { idleTtlMs: options.workerIdleTtlMs } : {}),
+          // One small entry per ledger event, not part of the model context: it follows the session branch and survives reloads.
+          onLedgerEvent: event => pi.appendEntry(LEDGER_ENTRY_TYPE, event),
+        });
+        if (restoredLedgers.length) workers.restoreLedgers(restoredLedgers);
+      }
+      return workers;
+    };
     /** The calling session's own file/id/directory: never reported as another session, and where the session store is. */
     const currentSession = (ctx: Pick<ExtensionContext, "sessionManager">) => ({
       file: ctx.sessionManager.getSessionFile() || undefined,
@@ -135,6 +148,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       warningSettings = found.contextWarning ?? { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
       warningState = { warnedLevel: 0 };
       state.restore(ctx.sessionManager.getBranch());
+      restoredLedgers = latestLedgers(ctx.sessionManager.getBranch());
+      workers?.restoreLedgers(restoredLedgers);
       state.apply();
       showMode(ctx);
       if (found.error) ctx.ui.notify(`orche: ${found.error}; using the default mode ${state.session}`, "warning");
@@ -149,6 +164,12 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       warningState = checked.state;
       if (checked.message) ctx.ui.notify(checked.message, "warning");
       return undefined;
+    });
+    // Single mode: the main session's own compaction drops the task results it saw; put the task ledgers' state back once.
+    pi.on("session_compact", () => {
+      if (state.effective !== "single") return;
+      const summary = workers?.ledgerSummary();
+      if (summary) pi.sendMessage({ customType: LEDGER_SUMMARY_TYPE, content: summary, display: false }, { triggerTurn: false });
     });
     // Second line of defence next to the tool set: `--tools`, another extension or the model can still reach a disabled tool.
     pi.on("tool_call", event => {

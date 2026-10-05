@@ -38,6 +38,7 @@ import { deadlineInfoOf, initialDeadline, type DeadlineInfo, type RunTiming } fr
 import { createRunRecord, pruneRecordsOnce, resolveRecords, workerSessionFile } from "./records.js";
 import { ExtendableDeadline, extensionEvent, formatExtensionProgress, formatExtensionSummary, waitExtendable, withNotExtended, type DeadlineExtension } from "../orchestration/run/extension.js";
 import { createAssignmentProjector, type ContextClearedStats } from "../pi/context-projection.js";
+import { recordFailure, recordHandoff, recordResult, renderLedgerForWorker, renderLedgerSummary, renderResumeBriefing, startLedger, type LedgerEvent, type TaskLedger } from "../single/ledger.js";
 
 export const orcheTaskParameters = Type.Object({
   role: Type.Union([Type.Literal("explore"), Type.Literal("answer"), Type.Literal("implement"), Type.Literal("verify"), Type.Literal("game-asset"), Type.Literal("video")]),
@@ -45,6 +46,7 @@ export const orcheTaskParameters = Type.Object({
   context: Type.Optional(Type.String({ maxLength: 30_000, description: "Background findings and decisions, appended to request. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs." })),
   worker: Type.Optional(Type.String()),
   files: Type.Optional(Type.Array(Type.String())),
+  task: Type.Optional(Type.String({ pattern: "^T[1-9][0-9]*$", description: "Task ledger id (T1, T2, …) named in an earlier result. Pass it for a follow-up of that same task, also when another or a new worker takes it over; omit it for a different user task, even when reusing a worker. Used only when single.ledger is on." })),
   git: Type.Optional(Type.Object({
     commit: Type.Optional(Type.Boolean({ description: "Authorize git commit for this assignment." })),
     push: Type.Optional(Type.Boolean({ description: "Authorize git push (implies commit). Never force-push." })),
@@ -116,6 +118,10 @@ export interface TaskDetails {
   contextCleared?: ContextClearedStats;
   /** Present when the assignment timed out with extensions enabled: why the expired deadline was not extended (`idle`: no activity in the activity window; `budget`: all extensions used). */
   notExtended?: { reason: "idle" | "budget"; message: string };
+  /** The task ledger this assignment belongs to (single workflow with `single.ledger`; see src/single/ledger.ts). */
+  task?: string;
+  /** Present when the named worker was gone and the task continued with this new worker, briefed from its ledger. */
+  continuedFrom?: string;
 }
 /** The workspace/git part of a task's details. */
 type ChangeReport = Pick<TaskDetails, "changes" | "otherChanges" | "submodules" | "headMoved">;
@@ -172,11 +178,17 @@ interface Worker {
   imageConfig?: string;
   latestInput: number;
   timer?: ReturnType<typeof setTimeout>;
+  /** The task ledger of this worker's task (single workflow with `single.ledger`), read when the worker compacts. */
+  taskId?: string;
+  ledger?: () => TaskLedger | undefined;
 }
 
 function taskCompactionFor(worker: Worker) {
   return {
-    essentials: () => `Requirements checklist and original request, verbatim:\n${worker.request ?? ""}\n\nTask DAG at compaction time:\n${worker.plan ? renderTaskPlan(worker.plan) : "No Task DAG recorded in this assignment."}`,
+    essentials: () => {
+      const ledger = worker.ledger?.();
+      return `Requirements checklist and original request, verbatim:\n${worker.request ?? ""}\n\nTask DAG at compaction time:\n${worker.plan ? renderTaskPlan(worker.plan) : "No Task DAG recorded in this assignment."}${ledger ? `\n\n${renderLedgerForWorker(ledger)}` : ""}`;
+    },
     onCompact: (stats: CompactionStats) => { (worker.compactions ??= []).push(stats); worker.recordEvent?.({ type: "compaction", timestamp: Date.now(), worker: worker.id, ...stats }); },
   };
 }
@@ -186,6 +198,8 @@ export interface WorkerPoolOptions {
   idleTtlMs?: number;
   /** Upper bound for a cooperative SDK abort (test seam). */
   stopTimeoutMs?: number;
+  /** Receives every task-ledger event (the extension persists each as a session entry). Best effort: a throwing callback is ignored. */
+  onLedgerEvent?: (event: LedgerEvent) => void;
 }
 
 /** The ownership canonicalizer in phases.ts is private; mirror its syntax here,
@@ -512,6 +526,9 @@ export class WorkerPool {
   private readonly workers = new Map<string, Worker>();
   private readonly providers = new Map<string, ProviderExtensionHost>();
   private nextId = 1;
+  /** Task ledgers by task id (single workflow with `single.ledger`), including tasks whose worker is gone. */
+  private readonly ledgers = new Map<string, TaskLedger>();
+  private nextTaskId = 1;
   private disposed = false;
   private disposal?: Promise<void>;
   constructor(private readonly options: WorkerPoolOptions) {
@@ -537,6 +554,40 @@ export class WorkerPool {
       this.idle(worker);
       return { id, sourceId: source.id, role: worker.role, ...(source.lastTask ? { lastTask: source.lastTask } : {}) };
     });
+  }
+  /**
+   * Ledgers restored from the session (its start, a reload or a resume). Their workers are gone; an orche_task that names the
+   * task continues it with a new worker briefed from the ledger. Replaces the current set.
+   */
+  restoreLedgers(ledgers: readonly TaskLedger[]): void {
+    this.ledgers.clear();
+    for (const source of ledgers) {
+      const ledger = structuredClone(source);
+      if (ledger.primary) ledger.primary.live = this.workers.has(ledger.primary.worker);
+      this.ledgers.set(ledger.taskId, ledger);
+      const task = /^T(\d+)$/.exec(ledger.taskId)?.[1];
+      if (task) this.nextTaskId = Math.max(this.nextTaskId, Number(task) + 1);
+      // Never give a restored task's worker id to a new worker: the main session's earlier results still name the old ones.
+      for (const name of [ledger.primary?.worker, ...ledger.history.map(item => item.worker)]) {
+        const worker = /^W(\d+)$/.exec(name ?? "")?.[1];
+        if (worker) this.nextId = Math.max(this.nextId, Number(worker) + 1);
+      }
+    }
+  }
+  /** The main-session summary of the task ledgers (newest first); undefined without any. */
+  ledgerSummary(): string | undefined {
+    return renderLedgerSummary([...this.ledgers.values()]);
+  }
+  /** The ledger of `task`, if known. */
+  ledger(task: string): TaskLedger | undefined {
+    return this.ledgers.get(task);
+  }
+  /** The most recently updated task that `worker` took. */
+  private lastTaskOf(worker: string): TaskLedger | undefined {
+    return [...this.ledgers.values()].filter(ledger => ledger.primary?.worker === worker).sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  }
+  private persist(event: LedgerEvent): void {
+    try { this.options.onLedgerEvent?.(structuredClone(event)); } catch { /* persistence is best effort */ }
   }
   private callbacks(worker: Worker): Pick<WorkerAdoptOptions, "toolGuard" | "writeFileGuard" | "onToolExecution" | "onContextWindow" | "validateResult"> {
     return {
@@ -588,6 +639,7 @@ export class WorkerPool {
     if (!worker) return;
     clearTimeout(worker.timer);
     this.workers.delete(id);
+    for (const ledger of this.ledgers.values()) if (ledger.primary?.worker === id) ledger.primary.live = false;
     await this.manager?.dispose(id);
   }
   private idle(worker: Worker): void {
@@ -684,10 +736,15 @@ export class WorkerPool {
     const retirementLines: string[] = [];
     const files = WRITING_KINDS.has(args.role) && args.files !== undefined ? scopePaths(args.files) : undefined;
     let worker = args.worker ? this.workers.get(args.worker) : undefined;
-    if (args.worker && !worker) {
+    const gone = !!args.worker && !worker;
+    const unknownWorker = () => {
       const live = this.list().map(item => `${item.id} (${item.status}, ${item.role})`).join(", ") || "none";
-      throw new Error(`Unknown worker ${args.worker}; live workers: ${live}. Omit worker to start a new one.`);
-    }
+      const last = args.worker ? this.lastTaskOf(args.worker) : undefined;
+      const hint = last ? ` ${args.worker} last worked on task ${last.taskId}: pass task "${last.taskId}" (and omit worker) to continue it with a new worker briefed from its ledger.` : "";
+      return new Error(`Unknown worker ${args.worker}; live workers: ${live}. Omit worker to start a new one.${hint}`);
+    };
+    // A gone worker (reload, idle expiry, pool eviction) can be named only together with a task it worked on (checked below, with the config).
+    if (gone && !(singleWorkflow && args.task)) throw unknownWorker();
     if (worker && this.manager!.get(worker.id).status !== "idle") throw new Error(`Worker ${worker.id} is running; wait for its assignment to finish.`);
     let assigned = false;
     let stopPromise: Promise<void> | undefined;
@@ -699,6 +756,18 @@ export class WorkerPool {
     const agentDir = this.options.agentDir ?? getAgentDir();
     const config = await discoverOrcheConfig({ cwd: args.cwd, agentDir, projectTrusted: args.projectTrusted, session: { model: sessionModel, thinking: args.thinking } });
     signal.throwIfAborted();
+    // Task ledgers (single.ledger): `task` continues a task, also with another or a new worker; without it every assignment starts a new task.
+    const ledgerOn = singleWorkflow && config.single.ledger;
+    const ledgerNotes: string[] = [];
+    let continued: TaskLedger | undefined;
+    if (args.task !== undefined && ledgerOn) {
+      continued = this.ledgers.get(args.task);
+      if (!continued) throw new Error(`Unknown task ${args.task}; known tasks: ${[...this.ledgers.keys()].join(", ") || "none"}. Omit task to start a new task.`);
+      if (gone && continued.primary?.worker !== args.worker && !continued.history.some(item => item.worker === args.worker)) throw unknownWorker();
+    } else if (args.task !== undefined) {
+      if (gone) throw unknownWorker();
+      ledgerNotes.push(`Note: task ${args.task} ignored: task ledgers apply to single-workflow standard roles with single.ledger on.`);
+    }
     // Records (records.ts): one record per assignment, outside the workspace; the worker's transcript is one stable file per worker.
     const resolved = resolveRecords({ agentDir, cwd: args.cwd, settings: config.records });
     void pruneRecordsOnce(resolved);
@@ -842,6 +911,39 @@ export class WorkerPool {
     meta.compactions = [];
     // This assignment's record. The worker's entry is read from the manager, so `sessionFile` is there only when the transcript really is persisted.
     const workerFile = this.manager.agentRecord(meta.id).sessionFile;
+    // The task ledger (single.ledger): a new task unless `task` continues one; this worker's compaction essentials read it live.
+    let ledger: TaskLedger | undefined;
+    /** The task's previous worker when another worker takes the task over now; the new one gets a briefing from the ledger. */
+    let handedFrom: { worker: string; sessionFile?: string; live: boolean } | undefined;
+    let briefing = "";
+    if (ledgerOn) {
+      if (continued) {
+        ledger = continued;
+        if (ledger.primary && ledger.primary.worker !== meta.id) {
+          handedFrom = { worker: ledger.primary.worker, ...(ledger.primary.sessionFile ? { sessionFile: ledger.primary.sessionFile } : {}), live: this.workers.has(ledger.primary.worker) };
+          briefing = renderResumeBriefing(ledger, handedFrom);
+        }
+      } else {
+        const created = startLedger(`T${this.nextTaskId++}`, args.cwd, started);
+        ledger = created.ledger;
+        this.ledgers.set(ledger.taskId, ledger);
+        this.persist(created.event);
+      }
+      const taskId = ledger.taskId;
+      meta.taskId = taskId;
+      meta.ledger = () => this.ledgers.get(taskId);
+      this.persist(recordHandoff(ledger, { request: args.request, at: Date.now(),
+        primary: { worker: meta.id, ...(meta.model ? { model: meta.model } : {}), ...(meta.thinking ? { thinking: meta.thinking } : {}), ...(workerFile ? { sessionFile: workerFile } : {}) } }));
+    } else {
+      meta.taskId = undefined;
+      meta.ledger = undefined;
+    }
+    const ledgerDetails = (): Pick<TaskDetails, "task" | "continuedFrom"> => ({ ...(ledger ? { task: ledger.taskId } : {}), ...(handedFrom ? { continuedFrom: handedFrom.worker } : {}) });
+    const taskLines = (): string[] => [
+      ...(ledger ? [`Task ledger ${ledger.taskId}, assignment ${ledger.assignments}: pass task "${ledger.taskId}" for a follow-up of this task (also when another or a new worker takes it over); omit it for a different task.`] : []),
+      ...(ledger && handedFrom ? [`Note: ${meta.id} took task ${ledger.taskId} over from ${handedFrom.worker}${handedFrom.live ? "" : " (not live)"}, briefed from its task ledger.`] : []),
+      ...ledgerNotes,
+    ];
     const record = createRunRecord(resolved, {
       kind: "task", cwd: args.cwd,
       parentSession: { ...(args.currentSession?.id ? { id: args.currentSession.id } : {}), ...(args.currentSession?.file ? { file: args.currentSession.file } : {}) },
@@ -919,7 +1021,7 @@ export class WorkerPool {
         worker: meta.id, role: args.role, status, ...(meta.model ? { model: meta.model } : {}), ...workflowDetails(), durationMs: finishedAt - started, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...report, roster: this.roster(),
         ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(),
         ...(record ? { record: record.dir } : {}),
-        ...contextDetails(),
+        ...contextDetails(), ...ledgerDetails(),
       };
     };
     /** The final `run.json` of this assignment, with this worker's entry (the lifetime totals of its one session). */
@@ -955,6 +1057,7 @@ export class WorkerPool {
         // No tool of this worker runs between two assignments: everything seen since is someone else's.
         prefix = formatStaleContext(audit ? { changes: stale?.changes ?? [], ...(stale?.gitlinks.length ? { submodules: await submoduleMoves(args.cwd, stale.gitlinks) } : {}), ...(headSince ? { headMoved: headSince } : {}) } : undefined);
       }
+      if (briefing) prefix = `${briefing}\n${prefix}`;
       if (audit && before && !readOnly) {
         const tracked = audit;
         activity = new WorkspaceActivity({ cwd: args.cwd, tree: before, snapshot: () => tracked.snapshot(), diff: (from, to) => tracked.diff(from, to), cancelled: () => signal.aborted });
@@ -1021,9 +1124,15 @@ export class WorkerPool {
         if (singleWorkflow) {
           const previous = meta.unmetStreak ?? new Map<string, number>();
           meta.unmetStreak = new Map(unmet.filter(item => meta.requirementDefinitions?.has(item.id)).map(item => [item.id, (previous.get(item.id) ?? 0) + 1]));
-          for (const [id, count] of meta.unmetStreak) if (count >= 2) checklistLines.push(`Note: ${id} unmet in ${count} consecutive assignments of ${meta.id}; hand only the unmet items to a NEW worker (omit worker) with their requirements and the relevant context.`);
+          for (const [id, count] of meta.unmetStreak) if (count >= 2) checklistLines.push(`Note: ${id} unmet in ${count} consecutive assignments of ${meta.id}; hand only the unmet items to a NEW worker (omit worker${ledger ? `, keep task "${ledger.taskId}"` : ""}) with their requirements and the relevant context.`);
         }
       } else meta.unmetStreak = new Map();
+      if (ledger) {
+        this.persist(recordResult(ledger, {
+          role: args.role, worker: meta.id, status: typeof data.status === "string" ? data.status : outcome.status, summary: meta.summary,
+          ...(checklist ? { checklist } : {}), ...(Array.isArray(data.ambiguities) ? { ambiguities: data.ambiguities as Ambiguity[] } : {}), ...(record ? { record: record.dir } : {}),
+        }));
+      }
       const roleData = ["status", "reason", "passed", "issues", "cause"].filter(key => data[key] !== undefined).map(key => `${key}: ${typeof data[key] === "string" ? data[key] : JSON.stringify(data[key])}`);
       if (Array.isArray(data.outputs)) roleData.push(`outputs: ${data.outputs.length}`);
       const note = data.status === "blocked" ? workflowMode && typeof data.reason === "string" && data.reason ? data.reason : "the worker reported blocked" : args.role === "verify" && data.passed === false ? "verification failed" : undefined;
@@ -1032,11 +1141,12 @@ export class WorkerPool {
       const details: TaskDetails = {
         worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, ...(meta.model ? { model: meta.model } : {}), ...workflowDetails(), ...(checklist ? { checklist } : {}), ...(Array.isArray(data.ambiguities) && data.ambiguities.length ? { ambiguities: data.ambiguities as Ambiguity[] } : {}), durationMs, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...changeReport, roster,
         ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(), ...(record ? { record: record.dir } : {}),
-        ...contextDetails(),
+        ...contextDetails(), ...ledgerDetails(),
       };
       finishRecord("done", details, { summary: meta.summary });
       const planNotes = singleWorkflow && !meta.plan ? ["Note: no Task DAG recorded in this assignment."] : [];
-      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, ...modelWarnings, ...contextLine(), "", meta.summary, ...roleData, ...checklistLines, "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
+      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, ...modelWarnings, ...contextLine(),
+        ...taskLines(), "", meta.summary, ...roleData, ...checklistLines, "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
         ...planNotes, ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: follow up with the same worker — ${note}`] : [])].join("\n");
       return { text: withRecordLine(text, record?.dir), details };
     } catch (error) {
@@ -1048,10 +1158,13 @@ export class WorkerPool {
       // The worker ran: same message as ever (warning first), now with the details of what it did. The details come first: they re-check
       // for other sessions, which the warning in the message must know about.
       meta.unmetStreak = new Map();
+      if (ledger) {
+        this.persist(recordFailure(ledger, { role: args.role, worker: meta.id, status: error.status, reason: failureReason(base), ...(record ? { record: record.dir } : {}) }));
+      }
       const details = await failedDetails(error.status);
       const thrown = warning ? withConcurrentWarning(error, warning) : error;
       finishRecord(error.kind === "cancelled" ? "cancelled" : "failed", details, { failure: failureReason(base) });
-      throw new TaskFailedError([thrown instanceof Error ? thrown.message : base, ...modelWarnings, ...contextLine()].join("\n"), details, { kind: error.kind, status: error.status, reason: failureReason(base) });
+      throw new TaskFailedError([thrown instanceof Error ? thrown.message : base, ...modelWarnings, ...contextLine(), ...taskLines()].join("\n"), details, { kind: error.kind, status: error.status, reason: failureReason(base) });
     } finally {
       signal.removeEventListener("abort", abort);
       await stopPromise;

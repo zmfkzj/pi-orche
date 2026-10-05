@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in single-workflow task ledger (`"single": { "ledger": true }` in `orche.config.json`, default off): per task, the original requests, each assignment's requirements with the last reported status, the readings chosen for ambiguous requirements and a short history, kept outside LLM contexts as small `orche-ledger` event entries (one per hand-off, result or failure; restored by replay). `orche_task` takes `task` (the `T…` id named in results) to continue a task, also with another or a new worker; without it every assignment starts a new task, even on a reused worker. Workers get the task's ledger back when they compact, the main session gets a summary after its own compaction, and a task whose worker is gone continues with a new worker briefed from the ledger (`details.task`, `details.continuedFrom`). Phase 1 of `docs/specialist-orchestration.md`.
+
 ### Removed
 
 - **The `auto` and `multi` main modes, the `orche_run` tool and `/orche multi` were removed from the Pi package.** Benchmarks (bench3, hard6, parallel3, multi-vs-single) showed the multi-agent orchestrator no more accurate than one worker on coupled or parallel tasks at about twice the cost. The package now offers `direct` (default) and `single`; a config value or saved session choice of `auto`/`multi` is read as `single` with a warning, and `/orche mode auto|multi` is a usage error. The failed-run handover to `orche_task` and the four-file "consider orche_run" note are gone. The orchestration engine (`runOrchestrated`, the CLI, eval arms) stays as a library; the eval `pi-orche` arm now uses `mainMode: single`.
