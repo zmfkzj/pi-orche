@@ -255,7 +255,7 @@ describe("orche config discovery", () => {
   });
 
   it("defaults single.ledger to off and reads it from the selected file", async () => {
-    const defaults = { ledger: false, pipeline: "v1", frame: "grounded", checker: { gate: "auto", threshold: 7, maxFixRounds: 1 }, nav: true };
+    const defaults = { ledger: false, pipeline: "v1", frame: "grounded", checker: { gate: "review", threshold: 7, maxFixRounds: 1 }, nav: true, mainReview: "evidence" };
     expect(DEFAULT_SINGLE).toEqual(defaults);
     expect(parseSingleConfig({})).toEqual(defaults);
     expect(parseSingleConfig({ ledger: true })).toEqual({ ...defaults, ledger: true });
@@ -268,13 +268,14 @@ describe("orche config discovery", () => {
   });
 
   it("reads the v2 pipeline settings; v2 implies the ledger", () => {
-    expect(parseSingleConfig({ pipeline: "v2" })).toEqual({ ledger: true, pipeline: "v2", frame: "grounded", checker: { gate: "auto", threshold: 7, maxFixRounds: 1 }, nav: true });
+    expect(parseSingleConfig({ pipeline: "v2" })).toEqual({ ledger: true, pipeline: "v2", frame: "grounded", checker: { gate: "review", threshold: 7, maxFixRounds: 1 }, nav: true, mainReview: "evidence" });
     expect(parseSingleConfig({ pipeline: "v2", ledger: false, frame: "spec", checker: { gate: "always", threshold: 3, maxFixRounds: 0 }, nav: false }))
-      .toEqual({ ledger: true, pipeline: "v2", frame: "spec", checker: { gate: "always", threshold: 3, maxFixRounds: 0 }, nav: false });
-    expect(parseSingleConfig({ frame: "off", checker: { gate: "off" } })).toEqual({ ledger: false, pipeline: "v1", frame: "off", checker: { gate: "off", threshold: 7, maxFixRounds: 1 }, nav: true });
+      .toEqual({ ledger: true, pipeline: "v2", frame: "spec", checker: { gate: "always", threshold: 3, maxFixRounds: 0 }, nav: false, mainReview: "evidence" });
+    expect(parseSingleConfig({ frame: "off", checker: { gate: "off" } })).toEqual({ ledger: false, pipeline: "v1", frame: "off", checker: { gate: "off", threshold: 7, maxFixRounds: 1 }, nav: true, mainReview: "evidence" });
+    expect(parseSingleConfig({ mainReview: "report", checker: { gate: "auto" } })).toMatchObject({ pipeline: "v1", mainReview: "report", checker: { gate: "auto" } });
   });
 
-  it.each([{ pipeline: "v3" }, { frame: "full" }, { checker: null }, { checker: { gate: "sometimes" } }, { checker: { threshold: -1 } }, { checker: { threshold: 2.5 } }, { checker: { maxFixRounds: 3 } }, { checker: { other: 1 } }, { nav: "yes" }])("rejects invalid single pipeline settings %j", value => {
+  it.each([{ pipeline: "v3" }, { frame: "full" }, { checker: null }, { checker: { gate: "sometimes" } }, { checker: { threshold: -1 } }, { checker: { threshold: 2.5 } }, { checker: { maxFixRounds: 3 } }, { checker: { other: 1 } }, { nav: "yes" }, { mainReview: "none" }])("rejects invalid single pipeline settings %j", value => {
     expect(() => parseSingleConfig(value)).toThrow("config.single");
   });
 

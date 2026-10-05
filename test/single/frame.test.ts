@@ -32,8 +32,8 @@ describe("Framer contract", () => {
     expect(contract.startsWith(CONTRACT_HEADER)).toBe(true);
     const handoff = framedRequest(contract, `${request}\nR9: quoted text after the original is not a requirement`);
     expect(requirementIds(handoff)).toEqual(["R1", "R2", "R3"]);
-    expect(requirementDefinitions(handoff).get("R3")).toBe("[edge] Fail then succeed counts both claims\nAcceptance: fail, succeed → attempts 2");
-    expect(contract).toContain('- A1 "increments attempts once per claim": chosen "every claim counts" over "only failed claims count". Differs when: fail then succeed: 2 vs 1.');
+    expect(requirementDefinitions(handoff).get("R3")).toBe("[edge] Fail then succeed counts both claims (follows the recommended reading of A1)\nAcceptance: fail, succeed → attempts 2");
+    expect(contract).toContain('- A1 "increments attempts once per claim": recommended "every claim counts" over "only failed claims count". Differs when: fail then succeed: 2 vs 1.');
     expect(originalRequestOf(handoff)).toBe("Make retries work.\nR9: quoted text after the original is not a requirement");
   });
 
@@ -54,8 +54,8 @@ describe("Framer contract", () => {
 
   it("summarizes for the main session", () => {
     expect(formatFrame(frame)).toEqual([
-      "Frame: 3 requirements (1 explicit, 1 implied, 1 edge), 1 ambiguity settled by the recommended reading.",
-      '- A1 "increments attempts once per claim": chose "every claim counts" over "only failed claims count"',
+      "Frame: 3 requirements (1 explicit, 1 implied, 1 edge), 1 ambiguity with a recommended reading (advice; the worker decides and reports its reading).",
+      '- A1 "increments attempts once per claim": recommended "every claim counts" over "only failed claims count"',
     ]);
     expect(formatFrame({ ...frame, ambiguities: [{ ...frame.ambiguities[0]!, askUser: true }] })[1]).toContain("— needs the user's decision");
   });

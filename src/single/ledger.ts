@@ -255,7 +255,7 @@ export function recordRecheck(ledger: TaskLedger, statuses: readonly { id: strin
 const statusOf = (item: LedgerRequirement): string => item.status === "met" && item.verifiedBy ? `met; verified by: ${item.verifiedBy}` : item.status;
 const decisionLine = (item: LedgerDecision): string => {
   const others = item.readings.filter(reading => reading !== item.chosen);
-  return `- a${item.assignment} ${item.id ?? "?"}${item.quote ? ` "${item.quote}"` : ""}: ${item.by === "framer" ? "Framer chose" : "chose"} "${item.chosen}"${others.length ? ` over ${others.map(reading => `"${reading}"`).join(", ")}` : ""}${item.askUser ? " (needs the user's decision)" : ""}`;
+  return `- a${item.assignment} ${item.id ?? "?"}${item.quote ? ` "${item.quote}"` : ""}: ${item.by === "framer" ? "Framer recommended" : "chose"} "${item.chosen}"${others.length ? ` over ${others.map(reading => `"${reading}"`).join(", ")}` : ""}${item.askUser ? " (needs the user's decision)" : ""}`;
 };
 
 /** Characters of one original request in the worker projection; the full text stays in the ledger entry. */

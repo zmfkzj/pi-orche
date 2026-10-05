@@ -73,7 +73,8 @@ describe("single pipeline v2", () => {
     // The worker got the contract first, then the main session's request.
     expect(prompts[1]).toContain("## Task contract (from orche's Framer");
     expect(prompts[1]).toContain("R2: [edge] value is a number, not a string");
-    expect(prompts[1]).toContain('A1 \\"value 2\\": chosen \\"the number 2\\"');
+    expect(prompts[1]).toContain('A1 \\"value 2\\": recommended \\"the number 2\\"');
+    expect(prompts[1]).toContain("the Framer's recommended readings are advice, not decisions");
     expect(prompts[1]).toContain("## Request from the main session (verbatim)");
     // The Verifier saw the hand-off, the claims and the diff file; the fix round got only the blocking finding.
     expect(prompts[2]).toContain(".orche/scratch/T1/change-1.diff");
@@ -90,7 +91,7 @@ describe("single pipeline v2", () => {
     expect(pipeline.recheck?.findings).toEqual([{ id: "F1", status: "fixed", detail: "probe exits 0" }]);
     expect(pipeline.specialists.map(stats => stats.actor)).toEqual(["framer:W1", "checker:W1"]);
     expect(result.details.changes).toEqual([{ path: "src/value.mjs", status: "modified" }]);
-    expect(result.text).toContain("Frame: 2 requirements (1 explicit, 1 edge), 1 ambiguity settled by the recommended reading.");
+    expect(result.text).toContain("Frame: 2 requirements (1 explicit, 1 edge), 1 ambiguity with a recommended reading (advice; the worker decides and reports its reading).");
     expect(result.text).toContain("Risk ");
     expect(result.text).toContain("- F1 blocking R1 (executed): value is 1, not 2 → fixed: probe exits 0");
     expect(result.text).toContain("Fix rounds: 1 (same worker).");
@@ -151,5 +152,19 @@ describe("single pipeline v2", () => {
     expect(v2).toContain("Do not write a requirements checklist for implement: orche's Framer");
     expect(v2).not.toContain("run the trusted project checks yourself");
     expect(delegationRules("direct", { pipeline: "v2" })).toBe(delegationRules("direct"));
+    // v2: the worker decides readings; main corrects only on the user's own words.
+    expect(v2).toContain("never send a correction only because its reading differs from the Framer's recommendation");
+    expect(v2).toContain("When the user's words ask for a review or verification, an independent Verifier checks the result");
+    // single.mainReview "report" (v1): only main's own re-verification goes; the hand-off and reading checks stay.
+    const report = delegationRules("single", { mainReview: "report" });
+    expect(report).toContain("acceptance rests on the checks the worker reports");
+    expect(report).toContain("do not re-read the changed code or re-run the project checks to verify it yourself");
+    expect(report).toContain("Review the result, its evidence and checklist. Restate");
+    expect(report).toContain("numbered requirements checklist R1..Rn as lines `R1: …`, each testable");
+    expect(report).toContain("Check every reported ambiguity's chosen reading against the user's original wording");
+    expect(report).not.toContain("run the trusted project checks yourself");
+    expect(report).not.toContain("and run trusted project checks");
+    expect(delegationRules("single", { mainReview: "evidence" })).toBe(v1);
+    expect(delegationRules("single", { pipeline: "v2", mainReview: "report" })).toBe(v2);
   });
 });

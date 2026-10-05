@@ -188,7 +188,7 @@ describe("task ledger: v2 pipeline events", () => {
     events.push(recordRecheck(ledger, [{ id: "F1", status: "fixed", detail: "probe exits 0" }], 5));
     expect(ledger.decisions).toEqual([{ assignment: 1, id: "A1", quote: "once per claim", readings: ["every claim", "failed claims only"], chosen: "every claim", by: "framer", askUser: true }]);
     expect(ledger.findings?.map(item => [item.id, item.status, item.detail])).toEqual([["F1", "fixed", "probe exits 0"], ["F2", "minor", undefined]]);
-    expect(renderLedgerForWorker(ledger)).toContain('- a1 A1 "once per claim": Framer chose "every claim" over "failed claims only" (needs the user\'s decision)');
+    expect(renderLedgerForWorker(ledger)).toContain('- a1 A1 "once per claim": Framer recommended "every claim" over "failed claims only" (needs the user\'s decision)');
     expect(renderLedgerForWorker(ledger)).not.toContain("F1 blocking");
     expect(renderLedgerSummary([ledger])).toContain('readings: A1="every claim" (ask the user) · risk 7/5: verified fail');
     for (const event of events) expect(isLedgerEvent(JSON.parse(JSON.stringify(event)))).toBe(true);

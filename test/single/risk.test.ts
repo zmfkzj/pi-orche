@@ -23,7 +23,7 @@ describe("risk score", () => {
     }, auto);
     expect(risk.signals.map(signal => [signal.name, signal.points])).toEqual([
       ["files", 2], ["top-level directories", 2], ["concurrency", 2], ["transactions/persistence", 2], ["source changed without test changes", 2],
-      ["met without verifiedBy", 2], ["edge cases without a passing test", 2], ["ambiguities settled by recommendation", 2], ["lines changed", 2],
+      ["met without verifiedBy", 2], ["edge cases without a passing test", 2], ["ambiguities left to a recommendation", 2], ["lines changed", 2],
     ]);
     expect(risk).toMatchObject({ score: 18, decision: "verify", reason: "threshold" });
     // Domain patterns read changed source lines only: the test file's escape() is not a parsing signal.
@@ -49,6 +49,11 @@ describe("risk score", () => {
     expect(assessRisk({ files: [], diff: "" }, auto)).toMatchObject({ decision: "skip", reason: "skipped: no changes" });
     expect(assessRisk({ files: [{ path: "src/a.ts", added: 400, removed: 0 }], diff: "" }, { ...auto, gate: "off" })).toMatchObject({ decision: "skip", reason: "gate off" });
     expect(assessRisk({ files: [{ path: "src/a.ts", added: 20, removed: 0 }], diff: "" }, auto)).toMatchObject({ score: 2, decision: "skip", reason: "below threshold" });
+    // review (the default gate): a high score alone does not verify; the user's request for a review does.
+    const big = { files: [{ path: "src/a.ts", added: 400, removed: 0 }, { path: "lib/b.ts", added: 9, removed: 0 }, { path: "lib/c.ts", added: 9, removed: 0 }], diff: "" };
+    expect(assessRisk(big, { ...auto, gate: "review" })).toMatchObject({ decision: "skip", reason: "gate review: no review requested" });
+    expect(assessRisk(big, { ...auto, gate: "review" }).score).toBeGreaterThanOrEqual(7);
+    expect(assessRisk({ ...big, original: "Implement it and verify it carefully." }, { ...auto, gate: "review" })).toMatchObject({ decision: "verify", reason: "forced: review requested" });
     expect(asksForReview("please review the change")).toBe(true);
     expect(asksForReview("add a preview pane")).toBe(false);
   });

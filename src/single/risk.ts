@@ -14,7 +14,7 @@ export interface RiskInput {
   checklist?: readonly ChecklistItem[];
   /** Requirement kinds from the Framer's contract (edge requirements count when they lack a passing check). */
   requirements?: readonly { id: string; kind: string }[];
-  /** Ambiguities settled by the recommended reading rather than by the user. */
+  /** Ambiguities left to the Framer's recommended reading rather than decided by the user. */
   recommendedReadings?: number;
   /** The user's original request (a review or verification request forces the check). */
   original?: string;
@@ -67,7 +67,8 @@ function changedSourceLines(diff: string): string[] {
   return lines;
 }
 
-export interface RiskOptions { threshold: number; gate: "auto" | "always" | "off" }
+/** `review`: only when the user's words ask for a review or verification (the default); `auto`: also at `threshold`. */
+export interface RiskOptions { threshold: number; gate: "auto" | "always" | "review" | "off" }
 
 export function assessRisk(input: RiskInput, options: RiskOptions): RiskAssessment {
   const signals: RiskSignal[] = [];
@@ -90,13 +91,14 @@ export function assessRisk(input: RiskInput, options: RiskOptions): RiskAssessme
   const edges = (input.requirements ?? []).filter(item => item.kind === "edge").map(item => item.id);
   const untestedEdges = edges.filter(id => { const item = checklist.find(entry => entry.id === id); return !item || item.status !== "met" || !item.verifiedBy?.trim(); });
   add("edge cases without a passing test", Math.min(3, untestedEdges.length), untestedEdges.join(", "));
-  add("ambiguities settled by recommendation", Math.min(2, input.recommendedReadings ?? 0));
+  add("ambiguities left to a recommendation", Math.min(2, input.recommendedReadings ?? 0));
   if (changedLines >= 150) add("lines changed", 2, `${changedLines} lines`);
   const score = signals.reduce((sum, signal) => sum + signal.points, 0);
   const base = { score, threshold: options.threshold, signals };
   if (options.gate === "off") return { ...base, decision: "skip", reason: "gate off" };
   if (options.gate === "always") return { ...base, decision: "verify", reason: "forced: gate always" };
   if (asksForReview(input.original)) return { ...base, decision: "verify", reason: "forced: review requested" };
+  if (options.gate === "review") return { ...base, decision: "skip", reason: "gate review: no review requested" };
   if (!files.length) return { ...base, decision: "skip", reason: "skipped: no changes" };
   if (files.every(file => isDocFile(file.path))) return { ...base, decision: "skip", reason: "skipped: docs only" };
   const allVerified = checklist.length > 0 && checklist.every(item => item.status === "met" && !!item.verifiedBy?.trim());

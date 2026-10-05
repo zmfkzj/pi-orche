@@ -165,22 +165,25 @@ export function parseContextWarningConfig(value: unknown): ContextWarningSetting
  * default until measured (docs/specialist-orchestration.md, gate G-L).
  *
  * `pipeline: "v2"` (docs/specialist-orchestration.md, Phase 3; implies the ledger) frames every implement assignment before the worker
- * starts and verifies risky results after it: `frame` is the Framer's access (`grounded`: read-only repository tools, `spec`: the
- * request only, `off`), `checker.gate` when the Verifier runs (`auto`: risk score ≥ `threshold` or a review request, `always`, `off`),
+ * starts and can verify results after it: `frame` is the Framer's access (`grounded`: read-only repository tools, `spec`: the
+ * request only, `off`), `checker.gate` when the Verifier runs (`review`, the default: only when the user's words ask for a review or
+ * verification; `auto`: also at risk score ≥ `threshold`; `always`; `off`; G-X stage 1 found its threshold findings costly and exotic),
  * `checker.maxFixRounds` how often its blocking findings go back to the same worker before orche re-runs the probes itself, and `nav`
  * whether v2 sessions (worker, Framer, Verifier) get the code_nav tool.
  */
-export interface CheckerSettings { gate: "auto" | "always" | "off"; threshold: number; maxFixRounds: number }
+export interface CheckerSettings { gate: "auto" | "always" | "review" | "off"; threshold: number; maxFixRounds: number }
 export interface SingleSettings {
   ledger: boolean;
   pipeline: "v1" | "v2";
   frame: "grounded" | "spec" | "off";
   checker: CheckerSettings;
   nav: boolean;
+  /** v1 only: how main reviews a result. `evidence` (default) reads key evidence and runs trusted checks; `report` reviews the report alone. */
+  mainReview: "evidence" | "report";
 }
 /** threshold 7: calibrated on 90 stored v1 single results (experiments/risk/calibrate.ts): all 7 failed ones score 8 or more, 66% of all are verified (74% at 5). */
-export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false, pipeline: "v1", frame: "grounded", checker: { gate: "auto", threshold: 7, maxFixRounds: 1 }, nav: true };
-const SINGLE_KEYS = new Set(["ledger", "pipeline", "frame", "checker", "nav"]);
+export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false, pipeline: "v1", frame: "grounded", checker: { gate: "review", threshold: 7, maxFixRounds: 1 }, nav: true, mainReview: "evidence" };
+const SINGLE_KEYS = new Set(["ledger", "pipeline", "frame", "checker", "nav", "mainReview"]);
 const CHECKER_KEYS = new Set(["gate", "threshold", "maxFixRounds"]);
 export function parseSingleConfig(value: unknown): SingleSettings {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.single: expected object");
@@ -189,6 +192,7 @@ export function parseSingleConfig(value: unknown): SingleSettings {
   if (settings.ledger !== undefined && typeof settings.ledger !== "boolean") throw new RouteConfigError("config.single.ledger: expected boolean");
   if (settings.pipeline !== undefined && settings.pipeline !== "v1" && settings.pipeline !== "v2") throw new RouteConfigError('config.single.pipeline: expected "v1" or "v2"');
   if (settings.nav !== undefined && typeof settings.nav !== "boolean") throw new RouteConfigError("config.single.nav: expected boolean");
+  if (settings.mainReview !== undefined && settings.mainReview !== "evidence" && settings.mainReview !== "report") throw new RouteConfigError('config.single.mainReview: expected "evidence" or "report"');
   if (settings.frame !== undefined && !["grounded", "spec", "off"].includes(settings.frame as string)) throw new RouteConfigError('config.single.frame: expected "grounded", "spec" or "off"');
   const checker = { ...DEFAULT_SINGLE.checker };
   if (settings.checker !== undefined) {
@@ -196,7 +200,7 @@ export function parseSingleConfig(value: unknown): SingleSettings {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new RouteConfigError("config.single.checker: expected object");
     const fields = raw as Record<string, unknown>;
     if (Object.keys(fields).some(key => !CHECKER_KEYS.has(key))) throw new RouteConfigError("config.single.checker: unknown field");
-    if (fields.gate !== undefined && !["auto", "always", "off"].includes(fields.gate as string)) throw new RouteConfigError('config.single.checker.gate: expected "auto", "always" or "off"');
+    if (fields.gate !== undefined && !["auto", "always", "review", "off"].includes(fields.gate as string)) throw new RouteConfigError('config.single.checker.gate: expected "review", "auto", "always" or "off"');
     if (fields.threshold !== undefined && (typeof fields.threshold !== "number" || !Number.isInteger(fields.threshold) || fields.threshold < 0 || fields.threshold > 30)) throw new RouteConfigError("config.single.checker.threshold: expected an integer from 0 to 30");
     if (fields.maxFixRounds !== undefined && (typeof fields.maxFixRounds !== "number" || !Number.isInteger(fields.maxFixRounds) || fields.maxFixRounds < 0 || fields.maxFixRounds > 2)) throw new RouteConfigError("config.single.checker.maxFixRounds: expected 0, 1 or 2");
     Object.assign(checker, fields);
@@ -209,6 +213,7 @@ export function parseSingleConfig(value: unknown): SingleSettings {
     frame: (settings.frame as SingleSettings["frame"] | undefined) ?? DEFAULT_SINGLE.frame,
     checker,
     nav: (settings.nav as boolean | undefined) ?? DEFAULT_SINGLE.nav,
+    mainReview: (settings.mainReview as SingleSettings["mainReview"] | undefined) ?? DEFAULT_SINGLE.mainReview,
   };
 }
 

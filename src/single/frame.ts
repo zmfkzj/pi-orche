@@ -24,7 +24,7 @@ export const frameSchema = Type.Object({
     quote: Type.String({ minLength: 1, maxLength: 400, description: "The ambiguous words of the request, verbatim." }),
     readings: Type.Array(text(400), { minItems: 2, maxItems: 4 }),
     observableDifference: Type.String({ minLength: 1, maxLength: 500, description: "A concrete input or scenario where the readings give different results." }),
-    recommended: Type.Integer({ minimum: 1, maximum: 4, description: "1-based index of the reading to implement." }),
+    recommended: Type.Integer({ minimum: 1, maximum: 4, description: "1-based index of the reading you recommend (advice for the implementer, who decides with the code)." }),
     why: Type.String({ minLength: 1, maxLength: 500, description: "Why that reading: the request's wording first, then the existing code, tests and docs." }),
     askUser: Type.Boolean({ description: "true only for a product decision that neither the wording nor the code settles." }),
     affects: Type.Optional(Type.Array(Type.String({ pattern: "^R[1-9][0-9]*$" }), { maxItems: 24 })),
@@ -56,7 +56,7 @@ export function framerPrompt(input: FramerInput): string {
     "",
     "## report_frame",
     `- requirements: every explicit requirement (kind "explicit", with the request's words in quote), what follows necessarily from the request or the code (kind "implied", e.g. existing tests keep passing, exported interfaces keep their shape), and the boundary cases the tests must cover (kind "edge": empty, single, equal or duplicate keys, ordering ties, concurrency, failure then retry, limits; acceptance = input → expected result). Each acceptance must be checkable by a test or a command. At most ${FRAME_LIMITS.requirements}; prefer fewer, sharper ones.${ids.length ? ` Keep the request's own ids ${ids.join(", ")} with the same meaning; number new ones after them.` : " Number them R1, R2, … in order."}`,
-    `- ambiguities: wording a careful engineer could implement in observably different ways. Quote it, give the readings, a concrete input where they differ, the reading to implement and why (the request's literal wording first, then the existing code, tests and docs), and askUser true only when it is a product decision the wording and code cannot settle. Write the requirements according to the recommended reading and list them in affects. Only real ambiguities; none is fine. At most ${FRAME_LIMITS.ambiguities}.`,
+    `- ambiguities: wording a careful engineer could implement in observably different ways. Quote it, give the readings, a concrete input where they differ, the reading you recommend and why (the request's literal wording first, then the existing code, tests and docs), and askUser true only when it is a product decision the wording and code cannot settle. Write the requirements according to the recommended reading and list them in affects. Only real ambiguities; none is fine. At most ${FRAME_LIMITS.ambiguities}.`,
     `- invariants: behaviour and interfaces that must not change (at most ${FRAME_LIMITS.invariants}).`,
     input.grounded ? "- locations: the files (path or path:line) the implementer will need, and why." : "- locations: omit (you have no repository access).",
   ].join("\n");
@@ -97,10 +97,13 @@ export function renderContract(frame: Frame, options: { maxChars?: number } = {}
     CONTRACT_HEADER,
     `Goal: ${oneLine(frame.goal)}`,
     "Requirements (report every id in data.checklist; a met item needs verifiedBy: a test or check that asserts its acceptance and passed):",
-    ...frame.requirements.flatMap(item => [`${item.id}: [${item.kind}] ${oneLine(item.text)}`, `  Acceptance: ${oneLine(item.acceptance)}`]),
+    ...frame.requirements.flatMap(item => {
+      const by = frame.ambiguities.filter(ambiguity => ambiguity.affects?.includes(item.id)).map(ambiguity => ambiguity.id);
+      return [`${item.id}: [${item.kind}] ${oneLine(item.text)}${by.length ? ` (follows the recommended reading of ${by.join(", ")})` : ""}`, `  Acceptance: ${oneLine(item.acceptance)}`];
+    }),
     ...(frame.ambiguities.length ? [
-      "Ambiguous wording, settled (implement the chosen reading; if the code or tests prove it wrong, implement the request's evident intent and report it in data.ambiguities):",
-      ...frame.ambiguities.map(item => `- ${item.id} "${oneLine(item.quote, 200)}": chosen "${oneLine(reading(item), 300)}" over ${item.readings.filter((_, index) => index !== item.recommended - 1).map(other => `"${oneLine(other, 200)}"`).join(", ")}. Differs when: ${oneLine(item.observableDifference, 300)}. Why: ${oneLine(item.why, 300)}${item.affects?.length ? ` (${item.affects.join(", ")})` : ""}`),
+      "Ambiguous wording: the Framer's recommended readings are advice, not decisions. Decide with the code, tests and docs; if you implement another reading, report it in data.ambiguities and report the requirements that follow it against your reading:",
+      ...frame.ambiguities.map(item => `- ${item.id} "${oneLine(item.quote, 200)}": recommended "${oneLine(reading(item), 300)}" over ${item.readings.filter((_, index) => index !== item.recommended - 1).map(other => `"${oneLine(other, 200)}"`).join(", ")}. Differs when: ${oneLine(item.observableDifference, 300)}. Why: ${oneLine(item.why, 300)}${item.affects?.length ? ` (${item.affects.join(", ")})` : ""}`),
     ] : []),
     ...(frame.invariants.length ? ["Invariants (must not change):", ...frame.invariants.map(item => `- ${oneLine(item, 300)}`)] : []),
     ...(frame.locations?.length ? ["Where to look:", ...frame.locations.map(item => `- ${oneLine(item.path, 200)}: ${oneLine(item.why, 200)}`)] : []),
@@ -119,13 +122,13 @@ export function framedRequest(contract: string, request: string): string {
   return `${contract}\n\n## Request from the main session (verbatim)\n${request}`;
 }
 
-/** One line for the main session's result: what the Framer settled. */
+/** Lines for the main session's result: what the Framer found and recommended. */
 export function formatFrame(frame: Frame): string[] {
   const kinds = (["explicit", "implied", "edge"] as const).map(kind => [kind, frame.requirements.filter(item => item.kind === kind).length] as const).filter(([, count]) => count > 0);
-  const lines = [`Frame: ${frame.requirements.length} requirements (${kinds.map(([kind, count]) => `${count} ${kind}`).join(", ")})${frame.ambiguities.length ? `, ${frame.ambiguities.length} ambiguit${frame.ambiguities.length === 1 ? "y" : "ies"} settled by the recommended reading` : ", no ambiguities"}.`];
+  const lines = [`Frame: ${frame.requirements.length} requirements (${kinds.map(([kind, count]) => `${count} ${kind}`).join(", ")})${frame.ambiguities.length ? `, ${frame.ambiguities.length} ambiguit${frame.ambiguities.length === 1 ? "y" : "ies"} with a recommended reading (advice; the worker decides and reports its reading)` : ", no ambiguities"}.`];
   for (const item of frame.ambiguities) {
     const chosen = item.readings[item.recommended - 1] ?? item.readings[0]!;
-    lines.push(`- ${item.id} "${oneLine(item.quote, 160)}": chose "${oneLine(chosen, 200)}" over ${item.readings.filter(other => other !== chosen).map(other => `"${oneLine(other, 160)}"`).join(", ")}${item.askUser ? " — needs the user's decision" : ""}`);
+    lines.push(`- ${item.id} "${oneLine(item.quote, 160)}": recommended "${oneLine(chosen, 200)}" over ${item.readings.filter(other => other !== chosen).map(other => `"${oneLine(other, 160)}"`).join(", ")}${item.askUser ? " — needs the user's decision" : ""}`);
   }
   return lines;
 }
