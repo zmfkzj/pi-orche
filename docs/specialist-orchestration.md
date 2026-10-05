@@ -17,7 +17,7 @@
 > 7. 라우팅 정답셋 100건의 라벨을 확정했다(6번 정책을 적용해 버그 보고 2건을 execution으로 바꿈). Creation 보충 23건은 다른 PC 세션에서 추출했고, 사용자 검토 없이 임시 라벨 그대로 쓴다.
 > 8. main의 감독 규칙에서 "verifiedBy 검사가 수용 기준을 확인하는지 확인" 부분을 뺐다(비교 실험 없이). 해석을 원문과 대조하는 규칙과 미확인 항목 보고는 유지한다.
 > 9. ledger 결함 수정: `orche_task`의 `task`로만 task를 잇고(생략하면 worker를 재사용해도 새 task), 세션에는 변경 이벤트만 남긴다. ledger 이득 측정 실험은 하지 않는다.
-> 10. G-R(10.1)에서 Jev+규칙은 기준 미달이고, 우리 정의를 준 LLM(front가 고르는 방식)이 가장 정확했다. 사전에 정한 규칙대로 topology는 Jev가 아니라 front가 `mode`로 정하는 쪽으로 간다(사용자 확인 대기).
+> 10. G-R(10.1)에서 Jev+규칙은 기준 미달이고, 우리 정의를 준 LLM(front가 고르는 방식)이 가장 정확했다. **확정**: 작업 유형은 front가 고른다. single 규칙에 작업 유형 정의(`src/single/work-types.ts`)를 넣었고, 지금은 유형을 기존 role로 위임한다(별도 `mode` 필드는 Creation 파이프라인이 생길 때 다시 본다). 다른 모델(분류기나 LLM)도 `experiments/routing/evaluate.ts`의 `--arm`으로 바로 평가할 수 있다.
 >
 > **핵심:** 코딩 전용 고정 파이프라인을 버리고, **Jev가 작업 성격을 분류하고 규칙이 실행 형태(topology)와 capability를 고르는** 구조로 바꾼다. Jev는 문제를 풀지 않는 control plane이다. 문제 해결의 소유자는 task마다 하나인 persistent Primary worker다. 그 밖의 specialist는 모두 한 번 쓰고 버리는 세션이며, 작업 상태의 원본은 task ledger에 둔다.
 
@@ -75,7 +75,7 @@ User ⇄ Front (single 모드 main: 대화·승인·보고, 편집 불가)
 
 ## 3. Jev: Execution Policy Router
 
-> **G-R 결과(10.1) 이후:** 이 절은 평가한 설계의 기록이다. Jev+규칙은 사전 기준을 넘지 못했고(승인 없는 변경 3.3%, 정확도가 front LLM보다 낮음), 코드는 `experiments/routing/`으로 옮겼다. topology는 대화 전체를 보는 front가 7장의 `mode`로 정하고, 후속 메시지는 이미 구현한 `task`로 잇는다(`turn` 질문 불필요).
+> **G-R 결과(10.1) 이후:** 이 절은 평가한 설계의 기록이다. Jev+규칙은 사전 기준을 넘지 못했고(승인 없는 변경 3.3%, 정확도가 front LLM보다 낮음), 코드는 `experiments/routing/`으로 옮겼다. 작업 유형은 대화 전체를 보는 front가 single 규칙의 정의(`src/single/work-types.ts`)로 고르고, 후속 메시지는 `task`로 잇는다(`turn` 질문 불필요).
 
 ### 3.1 Descriptor (Jev 호출 1회)
 
@@ -405,7 +405,7 @@ interface TaskLedger {
   - **클래스별 recall 0.75 이상**, 그리고 가장 큰 클래스의 예측 비율이 정답 비율과 15%p 이상 차이 나지 않음. 한 라벨로 쏠리는 분류기(예전 jev_router처럼)는 여기서 탈락한다.
   - `turn` 정확도 80% 이상, 승인 없는 변경으로 이어지는 오판 2% 이하.
   - 못 넘으면 이긴 방식(규칙이나 main 스스로 고르기)을 쓰고, Jev는 effort 선택에만 남긴다.
-- **결과 (2026-10-04, 1회 실행, 결과를 보고 규칙·프롬프트를 고치지 않음)**: `experiments/routing/evaluate.ts`, 보고서는 로컬 `results/routing-eval/eval-report.md`. 123건(정답 respond 2, investigation 45, execution 60, creation 16). LLM arm은 cliproxyapi/gpt-6.1-sol high.
+- **결과 (2026-10-04, 사전 등록한 1회 실행, 결과를 보고 규칙·프롬프트를 고치지 않음)**: `experiments/routing/evaluate.ts`(당시 프롬프트는 `v1`), 보고서는 로컬 `results/routing-eval/runs/`. 123건(정답 respond 2, investigation 45, execution 60, creation 16). LLM arm은 cliproxyapi/gpt-6.1-sol high.
 
   | arm | 정확도 | 변경 여부 정확도 | 승인 없는 변경 | 놓친 변경 | creation recall | turn(후속 34) | 호출당 지연 |
   |---|---:|---:|---:|---:|---:|---:|---:|
@@ -420,7 +420,18 @@ interface TaskLedger {
   - 가장 나은 방식은 우리 정의를 준 LLM이다(정확도·승인 없는 변경 기준 충족). 단 creation recall 50%: "만들고 적용"하는 요청 8건을 execution으로 골랐다. 프롬프트가 혼합 요청(creation 먼저, 그다음 execution)을 정의하지 않은 탓으로 보인다(사후 해석). 비용은 호출당 입력 약 800·출력 약 70 token.
   - om-orche 정책은 변경을 한 번도 잘못 고르지 않았지만, 지시 없는 버그 보고를 모두 Judgment로 보내 변경의 14.6%를 놓쳤다.
   - 한계: 라벨은 assistant가 붙였고 creation은 사용자 검토가 없다. 질문·규칙·프롬프트는 라벨을 본 뒤 썼고 held-out 세트가 없다. LLM 프롬프트가 라벨 기준과 거의 같아 LLM arm에 유리하다. 입력은 원문과 직전 응답 끝 400자뿐이라, 대화 전체를 보는 실제 front보다 불리한 조건이다. respond 2건·creation 16건은 표본이 작다.
-  - 함의: topology는 front가 고른다(`orche_task`의 `mode`, single 규칙에 위 정의와 혼합 요청 규칙을 넣는다). 별도 분류기 호출은 없으므로 지연·비용도 없다. 후속 메시지는 `task`가 담당한다.
+  - 함의: 작업 유형은 front가 고른다. 별도 분류기 호출이 없으므로 지연·비용도 없다. 후속 메시지는 `task`가 담당한다.
+- **후속 실행 (2026-10-05, 사후)**: v1의 creation 오류를 본 뒤 혼합 요청 규칙("적용까지 요청해도 creation 먼저")을 넣은 제품 문구(`front`)를 여러 모델로 돌렸다. 같은 세트에 맞춘 수정이라 creation 개선은 냉정하게 봐야 한다.
+
+  | arm (프롬프트 `front`) | 정확도 | 변경 여부 정확도 | 승인 없는 변경 | 놓친 변경 | creation recall | 지연 중앙값 | 123건 카탈로그 비용 |
+  |---|---:|---:|---:|---:|---:|---:|---:|
+  | gpt-6.1-sol high | 96.7% | 98.4% | 0.8% (1) | 0.8% | 94% | 4.6초 | $0.27 |
+  | claude-opus-5-5 high (사용자 main 모델) | 94.3% | 96.7% | 1.6% (2) | 1.6% | 88% | 3.2초 | $0.64 |
+  | gpt-6-luna low | 89.4% | 94.3% | 2.4% (3) | 3.3% | 63% | 2.4초 | $0.01 |
+  | Jev+규칙 (비교용 재실행) | 87.8% | 91.9% | 3.3% (4) | 4.9% | 75% | 0.2초 | – |
+
+  - 두 고급 모델은 승인 없는 변경 기준(≤2%)을 넘고, 저가 모델(luna low)은 넘지 못한다. front는 사용자의 main 모델이므로 추가 비용은 없다. turn 정확도는 모든 arm이 21–26/34로 낮지만, 제품에서는 front가 `task`로 후속을 명시하므로 쓰지 않는다.
+  - 다른 모델 평가: `npx --no-install tsx experiments/routing/evaluate.ts --arm llm:<provider>/<model>[:<thinking>][:front|v1|omorche] --arm classifier:<provider>/<model>`. 실행마다 `results/routing-eval/runs/<시각>-<label>/`에 보고서가 쌓이고 `runs/index.md`가 전체를 비교한다. 분류기는 Pi 카탈로그의 classifier 모델이면 무엇이든(TypeSafe, OpenRouter, Cloudflare, llama.cpp), LLM은 자격 증명이 있는 모든 모델을 쓸 수 있다.
 
 ### 10.2 topology별 end-to-end
 
