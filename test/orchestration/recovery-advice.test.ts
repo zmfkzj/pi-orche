@@ -4,7 +4,6 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describeProgress } from "../../src/extension/progress.js";
 import {
   describeWorkspaceChanges, recoveryCommands, WorkspaceAudit,
   type ExternalWorkspaceChange, type SubmoduleState, type WorkspaceChange,
@@ -118,10 +117,6 @@ describe("recovery advice", () => {
     expect(text).toContain("package-1.json");
   });
 
-  it("renders the external-change event as a warning line", () => {
-    expect(describeProgress({ type: "workspace_external_change", timestamp: 1, file: "package.json", reason: "committed outside this run" }))
-      .toBe("warning: external change (not this run): package.json — committed outside this run");
-  });
 });
 
 describe("recovery advice on a real worktree", () => {

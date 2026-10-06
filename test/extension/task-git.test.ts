@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage as reply, type FauxResponseStep, type ToolCall } from "@earendil-works/pi-ai";
 import { AgentManager } from "../../src/agent/agent-manager.js";
-import { runOrchestrated } from "../../src/orchestration/coordinator.js";
 import { NO_COMMIT_RULE, TASK_COMMIT_RULE, taskWorkerInstructions, workerInstructions } from "../../src/orchestration/prompts.js";
 import { gitAssignmentLine, orcheTaskParameters, resolveGitGrant, WorkerPool, type TaskParameters } from "../../src/extension/workers.js";
 import { OrcheController, type OrcheRunArgs } from "../../src/extension/controller.js";
@@ -224,23 +223,6 @@ describe("orche_run workers keep 'Do not commit.'", () => {
     tool("report_result", { kind: "verify", summary: "verified", data: { passed: true } }),
     decision({ type: "complete", summary: "Done." }),
   ];
-  it.each([
-    ["answer", answerScript("The answer.")],
-    ["change", change("change")],
-    ["diagnose_fix", change("diagnose_fix")],
-  ] as const)("(e) every %s worker of an orche_run run is told 'Do not commit.'", async (_path, steps) => {
-    const spawned = vi.spyOn(AgentManager.prototype, "spawn");
-    const f = await fauxRuntime([...steps]);
-    // tmpdir() is not a git work tree: the run must not snapshot or write refs into a repository.
-    const report = await runOrchestrated({ problem: "Scripted request", cwd: tmpdir(), routes: { routes: {}, default: { model: f.route.model } }, modelRuntime: f.runtime });
-    expect(report.status).toBe("done");
-    const instructions = spawned.mock.calls.map(call => call[0].instructions);
-    expect(instructions.length).toBeGreaterThan(0);
-    for (const text of instructions) {
-      expect(text).toContain("Never edit outside explicitly owned files. Do not commit. Use short direct send_message NOTES");
-      expect(text).not.toContain(TASK_COMMIT_RULE);
-    }
-  });
 });
 
 describe("orche_task git grant: result report", () => {

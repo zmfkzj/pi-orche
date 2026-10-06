@@ -1,6 +1,5 @@
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
-import type { WorkspaceChange } from "../orchestration/workspace.js";
-import { formatOutcome, withRecordLine, type OrcheOutcome, type OrcheRunDetails } from "./controller.js";
+import { withRecordLine } from "./controller.js";
 
 /**
  * Error tool results that keep their structured `details`.
@@ -41,8 +40,6 @@ export type ErrorToolResult<D extends object, F extends ToolFailure = ToolFailur
 
 /** Longest `ToolFailure.reason`. */
 export const FAILURE_REASON_CHARS = 300;
-/** Longest list (changed files, violations) copied into a failure summary; the remainder is only counted. */
-export const FAILURE_LIST_ENTRIES = 50;
 
 /**
  * Error result for a call that ran and failed: `content` is `text` (what the model reads, identical to what a thrown
@@ -50,7 +47,7 @@ export const FAILURE_LIST_ENTRIES = 50;
  * key of `details`. The result is `isError: true`, so the model sees an error exactly as for a thrown error.
  *
  * Records: when `details.record` (the record directory, see records.ts) is set, `content` ends with the one line
- * `Record: <dir>` (unless `text` already says it, as {@link runErrorResult}'s does), so a failed or cancelled call can be traced
+ * `Record: <dir>` (unless `text` already says it), so a failed or cancelled call can be traced
  * to its transcripts exactly like a successful one.
  */
 export function errorToolResult<D extends object, F extends ToolFailure>(text: string, details: D, failure: F): ErrorToolResult<D, F> {
@@ -63,56 +60,4 @@ export function errorToolResult<D extends object, F extends ToolFailure>(text: s
 export function failureReason(text: string, max: number = FAILURE_REASON_CHARS): string {
   const line = text.split("\n").map(part => part.replace(/\s+/g, " ").trim()).find(Boolean) ?? "";
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
-}
-
-/** `ToolFailure` of an orche_run that failed or was cancelled, with what the transcript needs to understand it. */
-export interface RunFailure extends ToolFailure {
-  rootCause?: string;
-  /** Ownership violations (at most {@link FAILURE_LIST_ENTRIES}). */
-  violations?: Array<{ agentId: string; file: string; via?: "workspace"; created?: true }>;
-  /** Workspace changes from the run's git snapshots; absent outside a git work tree. Lists are capped and `omitted` counts the rest. */
-  workspace?: {
-    baseline: string;
-    /** Run-attributed changes. */
-    changes: WorkspaceChange[];
-    /** Changes made by somebody else during the run (never to be restored), with the reason. */
-    external: Array<WorkspaceChange & { reason: string }>;
-    omitted?: number;
-  };
-}
-
-/** The failure summary of a run outcome that is not `done`, or that the user cancelled. */
-export function runFailureOf(outcome: OrcheOutcome): RunFailure {
-  const { report, details } = outcome;
-  const cancelled = details.cancelled;
-  const failure: RunFailure = {
-    kind: cancelled ? "cancelled" : "failed",
-    status: report.status,
-    reason: outcome.cancelledByUser ? "cancelled by user" : cancelled ? "cancelled" : failureReason(report.summary),
-    ...(outcome.cancelledByUser ? { cancelledByUser: true as const } : {}),
-    ...(report.rootCause ? { rootCause: failureReason(report.rootCause) } : {}),
-  };
-  let omitted = 0;
-  const cap = <T>(list: readonly T[] | undefined): T[] => {
-    const items = [...(list ?? [])];
-    omitted += Math.max(0, items.length - FAILURE_LIST_ENTRIES);
-    return items.slice(0, FAILURE_LIST_ENTRIES);
-  };
-  if (report.ownershipViolations?.length) failure.violations = cap(report.ownershipViolations).map(({ agentId, file, via, created }) => ({ agentId, file, ...(via ? { via } : {}), ...(created ? { created } : {}) }));
-  if (report.workspace) {
-    const changes = cap(report.workspace.changes).map(({ path, status }) => ({ path, status }));
-    const external = cap(report.workspace.external).map(({ path, status, reason }) => ({ path, status, reason }));
-    failure.workspace = { baseline: report.workspace.baseline, changes, external, ...(omitted ? { omitted } : {}) };
-  }
-  return failure;
-}
-
-/**
- * The orche_run tool result for a run that ended `failed` or was cancelled by the user: an error to the model with the
- * same text as ever (`cancelled by user` first for `/orche cancel`, then {@link formatOutcome}, which includes the
- * "Result from failed run" section) and `outcome.details` plus `failure` as details.
- */
-export function runErrorResult(outcome: OrcheOutcome): ErrorToolResult<OrcheRunDetails, RunFailure> {
-  const text = formatOutcome(outcome);
-  return errorToolResult(outcome.cancelledByUser ? `cancelled by user\n\n${text}` : text, outcome.details, runFailureOf(outcome));
 }

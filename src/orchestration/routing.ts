@@ -1,9 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { parseAdvisorConfigs, AdvisorConfigError, type AdvisorConfig } from "../advisor/config.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { MAX_WORKERS_LIMIT, type TeamSettings } from "./team.js";
 import { parseRunLimits, RunLimitsError, type RunLimits } from "./limits.js";
-import { isArtifactPattern, type AuditSettings } from "./artifacts.js";
 
 /** Main-session delegation: single hands work to one orche_task worker, direct edits locally. */
 export const MAIN_MODES = ["single", "direct"] as const;
@@ -19,7 +16,6 @@ export interface ImageSettings { readonly model: string; readonly timeoutMs?: nu
 export interface RouteConfig {
   readonly routes: Readonly<Record<string, RouteSettings>>;
   readonly default?: RouteSettings;
-  readonly advisors?: readonly AdvisorConfig[];
   /** Pi package sources (installed at user scope) whose extensions register model providers for orche's own runtime. */
   readonly providerExtensions?: readonly string[];
   /** Raster generation for game-asset/video tasks; the provider must be loaded into orche's runtime. */
@@ -28,16 +24,23 @@ export interface RouteConfig {
   readonly extendedContext?: boolean;
   /** Shell commands the verifier must run (e.g. ["npm test"]); without them it discovers the project's own checks. */
   readonly verifyCommands?: readonly string[];
-  /** Worker team shape: maximum workers, explorer route roles and analyst angles (defaults in ./team.ts). */
-  readonly workers?: Partial<TeamSettings>;
-  /** Behavior of the main session in the Pi package (ignored by the standalone CLI). Default `single`. */
+  /** `workers.explorerRoles[0]`: the route role of orche_task explore workers (default `explorer-path`). */
+  readonly workers?: { readonly explorerRoles?: readonly string[] };
+  /** Behavior of the main session in the Pi package. Default `single`. */
   readonly mainMode?: MainMode;
   /** A removed mode (`auto`/`multi`) found in the file; it is read as `single` and the Pi package warns about it. */
   readonly legacyMainMode?: LegacyMainMode;
   /** Run caps in milliseconds and worker request/repair budgets; explicit values only. */
   readonly limits?: Partial<RunLimits>;
-  /** Extra generated-output patterns exempting only new files from workspace violations. */
-  readonly audit?: AuditSettings;
+}
+/**
+ * Keys of the removed multi-worker coordinator (`orche_run`, advisors; docs/orchestrator.md): a config that still has them loads,
+ * the keys are ignored and reported as warnings.
+ */
+export const LEGACY_CONFIG_KEYS: readonly string[] = ["advisors", "audit"];
+export const LEGACY_WORKERS_KEYS: readonly string[] = ["maxWorkers", "answerAngles"];
+export function legacyConfigWarning(keys: readonly string[]): string {
+  return `config.${keys.length === 1 ? keys[0] : `{${keys.join(", ")}}`} ${keys.length === 1 ? "was" : "were"} removed with the multi-worker coordinator and ${keys.length === 1 ? "is" : "are"} ignored`;
 }
 export class RouteConfigError extends Error {
   override readonly name = "RouteConfigError";
@@ -45,6 +48,8 @@ export class RouteConfigError extends Error {
 const thinkingLevels: readonly string[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const MAX_PROVIDER_EXTENSIONS = 4;
 const MAX_VERIFY_COMMANDS = 8;
+/** The former MAX_WORKERS_LIMIT bound of `workers.explorerRoles`. */
+const MAX_EXPLORER_ROLES = 8;
 function parseSettings(value: unknown, location: string): RouteSettings {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError(`${location}: expected route object`);
   const route = value as Record<string, unknown>;
@@ -59,10 +64,12 @@ function parseSettings(value: unknown, location: string): RouteSettings {
     ...(route.extendedContext !== undefined ? { extendedContext: route.extendedContext } : {}),
   };
 }
-export function parseRouteConfig(value: unknown): RouteConfig {
+/** Parse a route config; keys of the removed coordinator are ignored and reported in `warnings` (when given). */
+export function parseRouteConfig(value: unknown, warnings?: string[]): RouteConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config: expected object");
   const config = value as Record<string, unknown>;
-  if (Object.keys(config).some(key => key !== "routes" && key !== "default" && key !== "advisors" && key !== "providerExtensions" && key !== "extendedContext" && key !== "verifyCommands" && key !== "mainMode" && key !== "workers" && key !== "limits" && key !== "audit" && key !== "images")) throw new RouteConfigError("config: unknown field");
+  const legacy = Object.keys(config).filter(key => LEGACY_CONFIG_KEYS.includes(key));
+  if (Object.keys(config).some(key => !LEGACY_CONFIG_KEYS.includes(key) && key !== "routes" && key !== "default" && key !== "providerExtensions" && key !== "extendedContext" && key !== "verifyCommands" && key !== "mainMode" && key !== "workers" && key !== "limits" && key !== "images")) throw new RouteConfigError("config: unknown field");
   let limits: Partial<RunLimits> | undefined;
   if (config.limits !== undefined) {
     try { limits = parseRunLimits(config.limits, "config.limits"); }
@@ -74,11 +81,6 @@ export function parseRouteConfig(value: unknown): RouteConfig {
   for (const [role, settings] of Object.entries(config.routes)) {
     if (!role.trim() || role !== role.trim()) throw new RouteConfigError("config.routes: role must be nonempty without surrounding whitespace");
     routes[role] = parseSettings(settings, `config.routes.${role}`);
-  }
-  let advisors: AdvisorConfig[] | undefined;
-  if (config.advisors !== undefined) {
-    try { advisors = parseAdvisorConfigs(config.advisors); }
-    catch (error) { throw error instanceof AdvisorConfigError ? new RouteConfigError(error.message) : error; }
   }
   let providerExtensions: string[] | undefined;
   if (config.providerExtensions !== undefined) {
@@ -101,17 +103,17 @@ export function parseRouteConfig(value: unknown): RouteConfig {
       return command.trim();
     });
   }
+  const workers = config.workers !== undefined ? parseWorkers(config.workers, legacy) : undefined;
+  if (legacy.length) warnings?.push(legacyConfigWarning(legacy));
   return {
     routes,
     ...(limits !== undefined ? { limits } : {}),
-    ...(config.audit !== undefined ? { audit: parseAudit(config.audit) } : {}),
     ...(config.default !== undefined ? { default: parseSettings(config.default, "config.default") } : {}),
-    ...(advisors ? { advisors } : {}),
     ...(providerExtensions ? { providerExtensions } : {}),
     ...(config.images !== undefined ? { images: parseImages(config.images) } : {}),
     ...(config.extendedContext !== undefined ? { extendedContext: config.extendedContext } : {}),
     ...(verifyCommands ? { verifyCommands } : {}),
-    ...(config.workers !== undefined ? { workers: parseWorkers(config.workers) } : {}),
+    ...(workers?.explorerRoles ? { workers } : {}),
     ...(legacyMainMode ? { mainMode: "single" as const, legacyMainMode } : config.mainMode !== undefined ? { mainMode: config.mainMode as MainMode } : {}),
   };
 }
@@ -124,44 +126,21 @@ function parseImages(value: unknown): ImageSettings {
   return { model: images.model, ...(images.timeoutMs !== undefined ? { timeoutMs: images.timeoutMs as number } : {}) };
 }
 
-function parseAudit(value: unknown): AuditSettings {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.audit: expected object");
-  const audit = value as Record<string, unknown>;
-  if (Object.keys(audit).some(key => key !== "artifacts")) throw new RouteConfigError("config.audit: unknown field");
-  if (audit.artifacts === undefined) return {};
-  if (!Array.isArray(audit.artifacts)) throw new RouteConfigError("config.audit.artifacts: expected string array");
-  const artifacts = audit.artifacts.map((pattern, index) => {
-    if (!isArtifactPattern(pattern)) throw new RouteConfigError(`config.audit.artifacts[${index}]: expected a non-empty relative concrete path, dir/, dir/** or *.ext`);
-    return pattern;
-  });
-  return { artifacts };
-}
-
-function parseWorkers(value: unknown): Partial<TeamSettings> {
+/** `workers`: only `explorerRoles` still applies; the coordinator's `maxWorkers` and `answerAngles` are ignored (reported in `legacy`). */
+function parseWorkers(value: unknown, legacy: string[]): { explorerRoles?: readonly string[] } {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.workers: expected object");
   const workers = value as Record<string, unknown>;
-  if (Object.keys(workers).some(key => key !== "maxWorkers" && key !== "explorerRoles" && key !== "answerAngles")) throw new RouteConfigError("config.workers: unknown field");
-  const strings = (key: "explorerRoles" | "answerAngles", what: string): string[] | undefined => {
-    const list = workers[key];
-    if (list === undefined) return undefined;
-    if (!Array.isArray(list) || !list.length || list.length > MAX_WORKERS_LIMIT) throw new RouteConfigError(`config.workers.${key}: expected 1-${MAX_WORKERS_LIMIT} ${what}`);
-    const items = list.map((item, index) => {
-      if (typeof item !== "string" || !item.trim() || (key === "explorerRoles" && /\s/.test(item))) throw new RouteConfigError(`config.workers.${key}[${index}]: expected a non-empty ${key === "explorerRoles" ? "route role without whitespace" : "string"}`);
-      return item.trim();
-    });
-    if (new Set(items).size !== items.length) throw new RouteConfigError(`config.workers.${key}: duplicate entry`);
-    return items;
-  };
-  const maxWorkers = workers.maxWorkers;
-  if (maxWorkers !== undefined && (!Number.isInteger(maxWorkers) || (maxWorkers as number) < 1 || (maxWorkers as number) > MAX_WORKERS_LIMIT))
-    throw new RouteConfigError(`config.workers.maxWorkers: expected an integer 1-${MAX_WORKERS_LIMIT}`);
-  const explorerRoles = strings("explorerRoles", "route roles");
-  const answerAngles = strings("answerAngles", "angles");
-  return {
-    ...(maxWorkers !== undefined ? { maxWorkers: maxWorkers as number } : {}),
-    ...(explorerRoles ? { explorerRoles } : {}),
-    ...(answerAngles ? { answerAngles } : {}),
-  };
+  if (Object.keys(workers).some(key => key !== "explorerRoles" && !LEGACY_WORKERS_KEYS.includes(key))) throw new RouteConfigError("config.workers: unknown field");
+  legacy.push(...Object.keys(workers).filter(key => LEGACY_WORKERS_KEYS.includes(key)).map(key => `workers.${key}`));
+  const list = workers.explorerRoles;
+  if (list === undefined) return {};
+  if (!Array.isArray(list) || !list.length || list.length > MAX_EXPLORER_ROLES) throw new RouteConfigError(`config.workers.explorerRoles: expected 1-${MAX_EXPLORER_ROLES} route roles`);
+  const explorerRoles = list.map((item, index) => {
+    if (typeof item !== "string" || !item.trim() || /\s/.test(item)) throw new RouteConfigError(`config.workers.explorerRoles[${index}]: expected a non-empty route role without whitespace`);
+    return item;
+  });
+  if (new Set(explorerRoles).size !== explorerRoles.length) throw new RouteConfigError("config.workers.explorerRoles: duplicate entry");
+  return { explorerRoles };
 }
 export async function loadRouteConfig(path: string): Promise<RouteConfig> {
   let value: unknown;

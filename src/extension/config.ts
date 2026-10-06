@@ -202,7 +202,7 @@ export function parseSingleConfig(value: unknown, warnings?: string[]): SingleSe
 /**
  * Load one orche config file: the route settings (validated by `parseRouteConfig`) plus the extension-only
  * `concurrentSessions`, `records`, `taskContext`, `contextWarning` and `single` settings, validated here and removed before the route parser sees the file.
- * `warnings` lists settings that were ignored (removed `single` keys); the file still loads.
+ * `warnings` lists settings that were ignored (removed `single` keys, keys of the removed coordinator); the file still loads.
  */
 export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings; warnings: string[] }> {
   let value: unknown;
@@ -224,7 +224,7 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
     if (Object.hasOwn(value, "single")) single = parseSingleConfig(singleValue, warnings);
     routeValue = rest;
   }
-  return { routes: parseRouteConfig(routeValue), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single, warnings: warnings.map(warning => `${warning} (${path})`) };
+  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single, warnings: warnings.map(warning => `${warning} (${path})`) };
 }
 export class NoRouteError extends Error {
   override readonly name = "NoRouteError";

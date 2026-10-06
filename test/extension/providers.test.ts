@@ -7,7 +7,6 @@ import { fauxProvider, fauxAssistantMessage as reply, fauxToolCall as call, type
 import { loadProviderExtensions, ProviderExtensionError } from "../../src/pi/provider-extensions.js";
 import { MODEL_ID, PROVIDER_ID } from "../../src/pi/bundled-images.js";
 import { ensureBundledImageProvider } from "../../src/pi/register-bundled-image-provider.js";
-import { runOrchestrated } from "../../src/orchestration/coordinator.js";
 import { parseRouteConfig } from "../../src/orchestration/routing.js";
 import { fauxRuntime } from "../helpers/faux.js";
 
@@ -68,28 +67,6 @@ describe("provider extensions in orche's own runtime", () => {
     expect(f.runtime.getModel("ext-provider", shared.__orcheTestProvider.getModel().id)).toBeUndefined();
   });
 
-  it("runOrchestrated routes every role to an extension provider when providerExtensions is configured (and fails without it)", async () => {
-    const installed = await installProviderPackage();
-    const provider = fauxProvider({ provider: "ext-provider" });
-    shared.__orcheTestProvider = provider;
-    provider.setResponses([
-      tool("coordinator_decision", { decision: { type: "classify", taskClass: "answer", workerCount: 1, language: "en", reason: "explanation" } }),
-      tool("report_result", { kind: "answer", summary: "EXT_PROVIDER_ANSWER", data: { evidence: [] } }),
-      tool("coordinator_decision", { decision: { type: "answer_from_worker", sourceAgentId: "A1", summary: "done" } }),
-    ]);
-    const f = await fauxRuntime();
-    const route = { model: modelRef(provider) };
-    const without = await runOrchestrated({ problem: "explain", cwd: installed.root, routes: parseRouteConfig({ routes: {}, default: route }), modelRuntime: f.runtime });
-    expect(without.status).toBe("failed");
-    expect(without.summary).toContain("Unknown model: ext-provider/");
-
-    const withProviders = await runOrchestrated({
-      problem: "explain", cwd: installed.root, modelRuntime: f.runtime,
-      routes: { ...parseRouteConfig({ routes: {}, default: route }), providerExtensions: [installed.source] },
-    });
-    expect(withProviders).toMatchObject({ status: "done", answer: "EXT_PROVIDER_ANSWER" });
-    expect(provider.getPendingResponseCount()).toBe(0);
-  });
 
   it("validates the providerExtensions config field", () => {
     const base = { routes: {} };

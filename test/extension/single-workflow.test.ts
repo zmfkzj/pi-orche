@@ -133,20 +133,6 @@ describe("single-workflow task delegation", () => {
     expect(result.details.retired).toBeUndefined();
     expect(pool.list()[0]?.id).toBe("W1");
   });
-  it("upgrades a failed-run handed-over worker without losing history", async () => {
-    const { h, pool, execute } = await fixture([tool("report_result", { kind: "implement", summary: "first", data: {} }), report()]);
-    const source = new AgentManager(h.runtime);
-    opened.push({ dispose: async () => { await source.dispose(); } });
-    await source.spawn({ id: "A1", role: "implementer", cwd: h.cwd, instructions: "run worker", route: h.orche.route });
-    source.assign("A1", "implement", "previous run evidence");
-    await source.wait("A1", 10_000);
-    await pool.adoptFailedRun({ manager: source, workers: [{ id: "A1", role: "implementer" }], issues: [] }, h.cwd, 0);
-    await execute({ worker: "W1" });
-    const session = pool.session("W1");
-    expect(JSON.stringify(session.messages)).toContain("previous run evidence");
-    expect(session.getActiveToolNames()).toContain("task_plan");
-    expect(session.settingsManager.getCompactionEnabled()).toBe(true);
-  });
   it("resets the plan per assignment, validates the new coverage ids and never rejects a report for no DAG", async () => {
     const { h, execute, pool } = await fixture([tool("task_plan", plan), report(), report()], true);
     const first = await execute();

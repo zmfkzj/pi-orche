@@ -2,8 +2,6 @@ import { describe, expect, it } from "vitest";
 import { defaultRunLimits, parseRunLimits, resolveRunLimits, type RunLimits } from "../../src/orchestration/limits.js";
 import { DEFAULT_LIVENESS_WINDOW_MS } from "../../src/agent/liveness.js";
 import { parseRouteConfig, RouteConfigError } from "../../src/orchestration/routing.js";
-import { defaultRunLimits as exportedDefaults, runOrchestrated } from "../../src/orchestration/coordinator.js";
-import { runBaseline } from "../../src/eval/baseline.js";
 import { ExtendableDeadline } from "../../src/orchestration/run/extension.js";
 
 const invalid = [null, [], 42, "3600000", { typo: 1 }, { overallMs: "1" }, { overallMs: NaN }, { overallMs: Infinity }, { explorationMs: -1 }, { assignmentMs: null }, { decisionMs: false }, { maxFixRounds: 0.5 }, { decisionRepairs: 3 }, { decisionRepairs: 1.5 }, { assignmentRequests: 1.5 }, { assignmentRequests: Number.MAX_SAFE_INTEGER + 1 }, { overallMs: undefined },
@@ -25,7 +23,6 @@ describe("run limits", () => {
     expect(ExtendableDeadline.fromLimits(resolveRunLimits({ maxExtensions: 5, extensionMs: 600_000 })).hardLimitMs).toBe(1_800_000 + 5 * 600_000);
     // The default phase caps are the ones derived from the default base overall cap.
     expect(resolveRunLimits()).toEqual({ ...defaultRunLimits, explorationMs: defaultRunLimits.overallMs / 3, assignmentMs: defaultRunLimits.overallMs, decisionMs: defaultRunLimits.overallMs / 2 });
-    expect(exportedDefaults).toBe(defaultRunLimits);
   });
 
   it("merges explicit config and API limits before deriving missing phase caps", () => {
@@ -77,10 +74,4 @@ describe("run limits", () => {
     expect(() => parseRouteConfig({ routes: {}, limits: { seconds: 3600 } })).toThrow("config.limits.seconds");
   });
 
-  it("validates directly constructed configs/options before either API starts sessions", async () => {
-    for (const run of [runOrchestrated, runBaseline]) {
-      await expect(run({ problem: "test", cwd: "/nonexistent", routes: { routes: {}, limits: { decisionRepairs: 3 } } })).rejects.toThrow("config.limits.decisionRepairs");
-      await expect(run({ problem: "test", cwd: "/nonexistent", routes: { routes: {} }, limits: { assignmentRequests: -1 } })).rejects.toThrow("options.limits.assignmentRequests");
-    }
-  });
 });

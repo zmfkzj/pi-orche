@@ -7,6 +7,7 @@ import {
   resolveConcurrentSessions, resolveRecordsSettings,
 } from "../../src/extension/config.js";
 import { resolveRunLimits } from "../../src/orchestration/limits.js";
+import { parseRouteConfig } from "../../src/orchestration/routing.js";
 import { DEFAULT_SINGLE, DEFAULT_TASK_CONTEXT, parseSingleConfig, parseTaskContextConfig } from "../../src/extension/config.js";
 
 const roots: string[] = [];
@@ -101,11 +102,6 @@ describe("orche config discovery", () => {
     await expect(discoverOrcheConfig({ ...none, projectTrusted: true, session: {} })).rejects.toThrow(".pi/orche.config.json");
   });
 
-  it("carries advisors from the discovered file", async () => {
-    const withAdvisors = await layout({ user: { ...cfg("u/user"), advisors: [{ preset: "plan-review", enabled: true }] } });
-    const result = await discoverOrcheConfig({ ...withAdvisors, projectTrusted: true, session });
-    expect(result.routes.advisors?.map(advisor => advisor.name)).toEqual(["plan-review"]);
-  });
 
   it("defaults concurrentSessions to enabled with a 10 minute window, from every config source", async () => {
     expect(DEFAULT_CONCURRENT_SESSIONS).toEqual({ enabled: true, windowMinutes: 10 });
@@ -269,6 +265,25 @@ describe("orche config discovery", () => {
   });
 
   // The v2 pipeline, Workflow Policy and mainReview were removed (docs/orchestrator.md): old keys still load, are ignored and warned about.
+  it.each([
+    [{ advisors: [{ name: "x", model: "p/m" }] }, "advisors"],
+    [{ audit: { artifacts: ["dist/"] } }, "audit"],
+    [{ workers: { maxWorkers: 3, answerAngles: ["a"] } }, "workers.maxWorkers"],
+    [{ workers: { maxWorkers: 99, explorerRoles: ["explorer-x"] } }, "workers.maxWorkers"],
+  ])("ignores the removed coordinator setting %j with a warning and still loads", async (value, key) => {
+    const warnings: string[] = [];
+    const parsed = parseRouteConfig({ ...cfg("u/user"), ...value }, warnings);
+    expect(parsed.routes).toEqual(cfg("u/user").routes);
+    expect(warnings.join("\n")).toContain(key);
+    expect(warnings.join("\n")).toContain("removed with the multi-worker coordinator");
+    const explorerRoles = (value as { workers?: { explorerRoles?: string[] } }).workers?.explorerRoles;
+    expect(parsed.workers).toEqual(explorerRoles ? { explorerRoles } : undefined);
+    const files = await layout({ user: { ...cfg("u/user"), ...value } });
+    const loaded = await loadOrcheConfigFile(join(files.agentDir, "orche.config.json"));
+    expect(loaded.warnings.join("\n")).toContain(key);
+    const found = await discoverOrcheConfig({ ...files, projectTrusted: false, session });
+    expect(found.warnings?.join("\n")).toContain(key);
+  });
   it.each([{ pipeline: "v2" }, { pipeline: "v3" }, { frame: "spec" }, { checker: { gate: "always" } }, { nav: false }, { mainReview: "evidence" }, { investigation: { critic: "auto" } }, { creation: { divergence: "always", candidates: 2 } }])("ignores the removed single setting %j with a warning", async value => {
     const warnings: string[] = [];
     expect(parseSingleConfig({ ...value, ledger: true }, warnings)).toEqual({ ledger: true, spawn: true });

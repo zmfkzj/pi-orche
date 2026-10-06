@@ -297,15 +297,6 @@ describe("orche_task persistent session workers", () => {
     await expect(execute({ worker: "W1" })).rejects.toThrow("Unknown worker W1");
   });
 
-  it("refuses tasks while multi owns the shared session activity slot", async () => {
-    const entered = deferred();
-    const { controller, execute, h } = await fixture([blocked(entered)]);
-    const running = controller.run({ request: "Long multi", cwd: h.cwd, projectTrusted: false });
-    await entered.promise;
-    await expect(execute()).rejects.toThrow("An orche run is already active");
-    controller.cancel();
-    await running;
-  });
 
   it("/orche cancel during a task leaves its worker reusable", async () => {
     capturePool();

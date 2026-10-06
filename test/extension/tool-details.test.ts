@@ -1,12 +1,11 @@
+import type { DeadlineExtendedEvent } from "../../src/orchestration/run/extension.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage as reply, type FauxResponseStep } from "@earendil-works/pi-ai";
-import { OrcheController, formatOutcome } from "../../src/extension/controller.js";
-import type { RunEvent } from "../../src/orchestration/events.js";
-import type { RunOptions, RunReport } from "../../src/orchestration/coordinator.js";
+import { OrcheController } from "../../src/extension/controller.js";
 import { TaskFailedError, WorkerPool, type TaskParameters } from "../../src/extension/workers.js";
 import type { OrcheRunArgs } from "../../src/extension/controller.js";
 import { deadlineInfoOf, extendDeadline, initialDeadline, partialUpdate, timingDetails, type DeadlineInfo, type RunTiming } from "../../src/extension/progress.js";
@@ -83,18 +82,6 @@ describe("deadline info helpers", () => {
 // ---- the controller (orche_run) with scripted runs ----
 
 const T = 1_790_000_000_000;
-const report = (overrides: Partial<RunReport> = {}): RunReport => ({ status: "done", summary: "summary", tasks: [], startedAt: T + 40, finishedAt: T + 40 + 3000, taskClass: "change", answer: "final answer", ...overrides });
-async function controllerFor(run: (options: RunOptions) => Promise<RunReport>, options: { limits?: unknown } = {}) {
-  const f = await fauxRuntime();
-  const root = await mkdtemp(join(tmpdir(), "orche-tool-details-"));
-  dirs.push(root);
-  const agentDir = join(root, "agent");
-  await mkdir(agentDir, { recursive: true });
-  if (options.limits !== undefined) await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: f.route.model }, limits: options.limits }));
-  const [provider, id] = f.route.model.split("/");
-  const controller = new OrcheController({ agentDir, createRuntime: async () => f.runtime, run, detectConcurrentSessions: async () => ({ sessions: [] }) });
-  return { controller, args: (extra: Partial<OrcheRunArgs> = {}): OrcheRunArgs => ({ request: "do it", cwd: root, model: { provider: provider!, id: id! }, projectTrusted: false, ...extra }) };
-}
 /** What the callbacks of a run saw, in order. */
 function recorder() {
   const seen: Array<{ kind: "timing" | "progress"; lines: string[]; timing: RunTiming | undefined }> = [];
@@ -106,102 +93,11 @@ function recorder() {
     },
   };
 }
-const extended = (n: number, extra: Partial<Extract<RunEvent, { type: "deadline_extended" }>> = {}): RunEvent => ({
+const extended = (n: number, extra: Partial<DeadlineExtendedEvent> = {}): DeadlineExtendedEvent => ({
   type: "deadline_extended", timestamp: T + n * 1000, scope: "overall", stage: "implement backlog", extension: n, maxExtensions: 10, extensionMs: BASE,
   newDeadline: T + 40 + BASE * (n + 1), overallDeadline: T + 40 + BASE * (n + 1), reasons: ["W2 bash running 12m, cpu progressing"], ...extra,
 });
 
-describe("orche_run (controller): timing in every update and in the outcome", () => {
-  it("reports the start and the configured deadline once, before anything has run; the defaults give a 5h30m ceiling", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(T);
-    const c = await controllerFor(async () => report());
-    const rec = recorder();
-    const outcome = await c.controller.run(c.args(rec.callbacks));
-    expect(rec.seen).toEqual([{
-      kind: "timing", lines: [],
-      timing: { startedAt: T, deadline: { baseMs: BASE, capMs: BASE, deadlineAt: T + BASE, extensionMs: BASE, extensionsUsed: 0, maxExtensions: 10, hardLimitMs: 330 * MINUTE } },
-    }]);
-    expect(outcome.details).toMatchObject({ startedAt: T, finishedAt: T, durationMs: 3000, deadline: { capMs: BASE, extensionsUsed: 0, maxExtensions: 10 } });
-  });
-
-  it("takes the deadline from the config file's limits (maxExtensions 5, extensionMs 600000, a 15 min base)", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(T);
-    const c = await controllerFor(async () => report(), { limits: { overallMs: 15 * MINUTE, maxExtensions: 5, extensionMs: 600_000 } });
-    const rec = recorder();
-    const outcome = await c.controller.run(c.args(rec.callbacks));
-    expect(rec.seen[0]!.timing!.deadline).toEqual({ baseMs: 15 * MINUTE, capMs: 15 * MINUTE, deadlineAt: T + 15 * MINUTE, extensionMs: 600_000, extensionsUsed: 0, maxExtensions: 5, hardLimitMs: 15 * MINUTE + 5 * 600_000 });
-    expect(outcome.details.deadline).toEqual(rec.seen[0]!.timing!.deadline);
-  });
-
-  it("follows each deadline_extended event: the next updates show the new cap and the extensions used", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(T);
-    const c = await controllerFor(async options => {
-      options.sink?.({ type: "run_started", timestamp: T + 40, mode: "orchestrated", problem: "x" }); // the run's own clock starts a little after the call's
-      options.sink?.({ type: "phase_changed", timestamp: T + 41, from: "INIT", to: "EXPLORE" });
-      vi.setSystemTime(T + BASE);
-      options.sink?.(extended(1));
-      vi.setSystemTime(T + 2 * BASE);
-      options.sink?.(extended(2));
-      return report({ finishedAt: T + 2 * BASE });
-    });
-    const rec = recorder();
-    const outcome = await c.controller.run(c.args(rec.callbacks));
-    const deadlines = rec.seen.map(update => update.timing?.deadline);
-    // the cap is exact (the run's deadline counts from its run_started event: no stray 40 ms)
-    expect(deadlines.map(deadline => deadline && [deadline.capMs, deadline.deadlineAt, deadline.extensionsUsed, deadline.maxExtensions])).toEqual([
-      [BASE, T + BASE, 0, 10],                    // timing-only update at the start
-      [BASE, T + 40 + BASE, 0, 10],               // phase_changed: the deadline now counts from run_started
-      [2 * BASE, T + 40 + 2 * BASE, 1, 10],       // extension 1
-      [3 * BASE, T + 40 + 3 * BASE, 2, 10],       // extension 2
-    ]);
-    expect(rec.seen.map(update => update.timing?.startedAt)).toEqual([T, T, T, T]);
-    expect(rec.seen.at(-1)!.lines.at(-1)).toContain("timeout extended 2/10");
-    expect(outcome.details).toMatchObject({ startedAt: T, finishedAt: T + 2 * BASE, deadline: { capMs: 3 * BASE, extensionsUsed: 2, maxExtensions: 10, baseMs: BASE, hardLimitMs: 330 * MINUTE } });
-  });
-
-  it("copes with hand-made extension events (no overallDeadline), and a phase extension that did not move the overall deadline", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(T);
-    const c = await controllerFor(async options => {
-      options.sink?.(extended(1, { overallDeadline: undefined }));
-      options.sink?.(extended(2, { scope: "phase", overallDeadline: undefined }));
-      options.sink?.(extended(3, { overallDeadline: undefined }));
-      return report();
-    });
-    const rec = recorder();
-    await c.controller.run(c.args(rec.callbacks));
-    expect(rec.seen.slice(1).map(update => [update.timing!.deadline!.capMs / BASE, update.timing!.deadline!.extensionsUsed])).toEqual([[2, 1], [2, 2], [3, 3]]);
-  });
-
-  it("a report that lists extensions the events did not announce still ends with them in the final deadline", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(T);
-    const extension = { n: 2, max: 10, scope: "overall" as const, stage: "x", extensionMs: BASE, at: T + 2 * BASE, elapsedMs: 2 * BASE, previousDeadline: T + 2 * BASE, newDeadline: T + 3 * BASE, overallDeadline: T + 3 * BASE, overallExtended: true, reasons: [] };
-    const c = await controllerFor(async () => report({ extensions: [extension] }));
-    const outcome = await c.controller.run(c.args());
-    expect(outcome.details.deadline).toMatchObject({ extensionsUsed: 2, maxExtensions: 10, capMs: 3 * BASE, deadlineAt: T + 3 * BASE });
-  });
-
-  it("the final details carry the timing for a failed run too, and the model text is what it was", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(T);
-    const c = await controllerFor(async () => { vi.setSystemTime(T + 5000); return report({ status: "failed", summary: "Verification kept failing" }); });
-    const outcome = await c.controller.run(c.args());
-    expect(outcome.details).toMatchObject({ status: "failed", startedAt: T, finishedAt: T + 5000, deadline: { capMs: BASE } });
-    expectNoTimingText(formatOutcome(outcome));
-    expect(formatOutcome(outcome)).toMatch(/^orche FAILED \(change, 3s; [^)]+\)\n\nVerification kept failing$/);
-  });
-
-  it("the model text of a finished run is unchanged by the timing", async () => {
-    const c = await controllerFor(async () => report());
-    const text = formatOutcome(await c.controller.run(c.args()));
-    expect(text).toMatch(/^orche finished \(change, 3s, 0 model requests; [^)]+\)\n\nfinal answer$/);
-    expectNoTimingText(text);
-  });
-});
 
 function expectNoTimingText(text: string): void {
   expect(text).not.toMatch(/⏱|\btook\b|startedAt|finishedAt|elapsed/i);
@@ -250,22 +146,6 @@ async function harness(path: Path, limits?: Record<string, number>, steps: { mai
   return h;
 }
 
-describe("registration", () => {
-  it.each(["orche_task"])("%s has the TUI renderers, and its description states the default extension budget (10 × 30 min, 5h30m)", async name => {
-    const h = await createHarness({ mainSteps: [], orcheSteps: [] });
-    open.push(h);
-    const definition = h.session.getToolDefinition(name)!;
-    expect(definition.renderCall).toBeTypeOf("function");
-    expect(definition.renderResult).toBeTypeOf("function");
-    expect(defaultRunLimits.maxExtensions).toBe(10);
-    expect(definition.description).toContain("base 30 minutes");
-    expect(definition.description).toContain("extended by 30 minutes, at most 10 times (10×30 minutes at most, 5h30m in total;");
-    expect(definition.description).toContain("limits.maxExtensions / limits.extensionMs in orche.config.json");
-    // the old default is gone from everything the model reads about the tool
-    const everything = JSON.stringify([definition.description, definition.promptSnippet, definition.promptGuidelines]);
-    expect(everything).not.toMatch(/at most 3 times|3\s?[×x]\s?30|3 extensions/);
-  });
-});
 
 describe("the timing of calls that did not succeed", () => {
 

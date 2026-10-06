@@ -10,7 +10,6 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { AgentManager, type WorkerAdoptOptions } from "../agent/agent-manager.js";
-import type { FailedHandover, RunHandoverWorker } from "../orchestration/run/types.js";
 import type { AgentSnapshot } from "../agent/agent-handle.js";
 import { normalizeOwnedPath, type TaskItem } from "../orchestration/backlog.js";
 import { checkWriteRealPath, WRITE_TOOLS, WRITING_KINDS } from "../orchestration/ownership.js";
@@ -23,8 +22,7 @@ import { withExtendedContext } from "../pi/extended-context.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { resolveRoute, resolveSpecialistRoute, type MainMode } from "../orchestration/routing.js";
 import { WorkspaceAudit, type GitlinkChange, type WorkspaceChange } from "../orchestration/workspace.js";
-import { WorkspaceActivity } from "../orchestration/run/activity.js";
-import { CHANGED_WHILE_QUIET } from "../orchestration/run/audit.js";
+import { CHANGED_WHILE_QUIET, WorkspaceActivity } from "../orchestration/run/activity.js";
 import { WORKER_TOOL_NAMES } from "../tools/index.js";
 import { DEFAULT_LIVENESS_WINDOW_MS, KNOWN_TOOL_TIMEOUTS_MS, mergeLiveness, type Liveness, type SessionLiveness } from "../agent/liveness.js";
 import { createGenerateImageTool } from "../tools/generate-image.js";
@@ -589,27 +587,6 @@ export class WorkerPool {
   private disposal?: Promise<void>;
   constructor(private readonly options: WorkerPoolOptions) {
     if (!Number.isFinite(options.idleTtlMs ?? 1) || (options.idleTtlMs ?? 1) < 0) throw new Error("idleTtlMs must be finite and nonnegative");
-  }
-  /** Keep failed-run sessions intact; new W ids share the pool's collision-free sequence. */
-  async adoptFailedRun(handover: FailedHandover, cwd: string, assignmentRequests: number, signal?: AbortSignal): Promise<RunHandoverWorker[]> {
-    if (this.disposed || signal?.aborted) return [];
-    const runtime = await this.options.controller.modelRuntime(signal).catch(error => { if (signal?.aborted) return undefined; throw error; });
-    if (!runtime || this.disposed || signal?.aborted) return [];
-    this.manager ??= new AgentManager(runtime, { resultSchemas: orchestrationResultSchemas, stopTimeoutMs: this.options.stopTimeoutMs });
-    this.manager.setRequestBudget(assignmentRequests);
-    const roles = { implementer: "implement", verifier: "verify", explorer: "explore" } as const;
-    // Recovery may exceed the new-worker cap (3) to retain every offered session; idle TTL still applies.
-    return handover.workers.map(source => {
-      const id = `W${this.nextId++}`;
-      const session = handover.manager.session(source.id);
-      const worker: Worker = { id, role: roles[source.role], cwd,
-        ...(session.model ? { model: `${session.model.provider}/${session.model.id}` } : {}),
-        summary: source.lastTask?.description ?? "", lastUsed: Date.now(), latestInput: 0 };
-      this.manager!.adopt(handover.manager.detach(source.id), { id, role: worker.role, ...this.callbacks(worker) });
-      this.workers.set(id, worker);
-      this.idle(worker);
-      return { id, sourceId: source.id, role: worker.role, ...(source.lastTask ? { lastTask: source.lastTask } : {}) };
-    });
   }
   /**
    * Ledgers restored from the session (its start, a reload or a resume). Their workers are gone; an orche_task that names the

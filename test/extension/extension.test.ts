@@ -8,7 +8,6 @@ import { deferred, fauxRuntime } from "../helpers/faux.js";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ConcurrentSession, ConcurrentSessionsResult, DetectConcurrentSessionsOptions } from "../../src/extension/concurrent-sessions.js";
-import { runOrchestrated, type RunOptions } from "../../src/orchestration/coordinator.js";
 
 const open: Harness[] = [];
 afterEach(async () => {

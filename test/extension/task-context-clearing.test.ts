@@ -233,14 +233,6 @@ describe("persistent task assignment context projection", () => {
     }
   });
 
-  it("invalid taskContext also fails orche_run through shared config validation", async () => {
-    const { h, setting, controller } = await fixture([report()]);
-    for (const value of [{ typo: true }, { clearBetweenAssignments: "no" }, { minClearTokens: -1 }, { minClearTokens: 1.5 }]) {
-      await setting(value);
-      await expect(controller.run({ cwd: h.cwd, projectTrusted: false, request: "Question" })).rejects.toThrow("config.taskContext");
-      expect(h.orche.faux.state.callCount).toBe(0);
-    }
-  });
 
 
   it("default AgentManager sessions (the orche_run path) are unprojected even when reused", async () => {
@@ -258,20 +250,4 @@ describe("persistent task assignment context projection", () => {
     expect(JSON.stringify(requests[0])).toContain("L".repeat(2000));
   });
 
-  it("orche_run does not opt in and does not project the main or coordinator requests", async () => {
-    const spawned = vi.spyOn(AgentManager.prototype, "spawn");
-    const requests: AgentMessage[][] = [];
-    const h = await createHarness({ mainSteps: [], orcheSteps: [
-      capture(requests, tool("coordinator_decision", { decision: { type: "classify", taskClass: "answer", workerCount: 1, language: "en", reason: "question" } })),
-      tool("read", { path: "greeting.txt" }),
-      tool("report_result", { kind: "answer", summary: "Answer", data: { evidence: ["greeting.txt"] } }),
-      capture(requests, tool("coordinator_decision", { decision: { type: "answer_from_worker", sourceAgentId: "A1", summary: "done" } })),
-    ], taskContext: { minClearTokens: 0 } });
-    opened.push(h);
-    const controller = new OrcheController({ agentDir: h.agentDir, createRuntime: async () => h.runtime });
-    await controller.run({ cwd: h.cwd, projectTrusted: false, request: "Question" });
-    expect(spawned.mock.calls.length).toBeGreaterThan(0);
-    expect(spawned.mock.calls.every(([options]) => options.contextProjection === undefined)).toBe(true);
-    expect(JSON.stringify(requests)).not.toContain("Earlier");
-  });
 });

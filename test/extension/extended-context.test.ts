@@ -6,8 +6,6 @@ import { fauxProvider, fauxAssistantMessage as reply, fauxToolCall as call } fro
 import { EXTENDED_CONTEXT_WINDOWS, withExtendedContext } from "../../src/pi/extended-context.js";
 import { createSession } from "../../src/pi/session-factory.js";
 import { parseRouteConfig, resolveRoute } from "../../src/orchestration/routing.js";
-import { runOrchestrated } from "../../src/orchestration/coordinator.js";
-import type { RunEvent } from "../../src/orchestration/events.js";
 import { fauxRuntime } from "../helpers/faux.js";
 
 const roots: string[] = [];
@@ -90,31 +88,4 @@ describe("extended context application", () => {
     }
   });
 
-  it("a run records the effective window per actor: coordinator, workers and advisors", async () => {
-    const f = await runtimeWithGptModels();
-    const dir = await mkdtemp(join(tmpdir(), "orche-ctx-"));
-    roots.push(dir);
-    const events: RunEvent[] = [];
-    const tool = (name: string, args: Record<string, unknown>) => reply([call(name, args as never)], { stopReason: "toolUse" });
-    f.gpt.setResponses([
-      tool("coordinator_decision", { decision: { type: "classify", taskClass: "answer", workerCount: 1, language: "en", reason: "q" } }),
-      tool("report_result", { kind: "answer", summary: "A", data: { evidence: [] } }),
-      tool("advisor_verdict", { verdict: "ok", notes: [] }),
-      tool("coordinator_decision", { decision: { type: "answer_from_worker", sourceAgentId: "A1", summary: "done" } }),
-    ]);
-    const routes = parseRouteConfig({
-      extendedContext: true,
-      default: { model: "gateway/gpt-6.1-sol" },
-      routes: { analyst: { model: "gateway/gpt-6-luna" }, advisor: { model: "gateway/gpt-6-astra", extendedContext: false } },
-      advisors: [{ name: "watch", domains: ["correctness"], targets: ["coordinator"], triggers: [{ on: "assignment_result" }] }],
-    });
-    const report = await runOrchestrated({ problem: "explain", cwd: dir, routes, modelRuntime: f.runtime, sink: event => events.push(event) });
-    expect(report.status).toBe("done");
-    const windows = Object.fromEntries(events.flatMap(event => event.type === "context_window" ? [[event.actor, [event.model, event.contextWindow, event.extended]]] : []));
-    expect(windows).toEqual({
-      coordinator: ["gateway/gpt-6.1-sol", 922_000, true],
-      A1: ["gateway/gpt-6-luna", 272_000, false], // analyst route: luna has no curated maximum
-      "advisor:watch": ["gateway/gpt-6-astra", 1_000_000, false], // route says extendedContext:false
-    });
-  });
 });

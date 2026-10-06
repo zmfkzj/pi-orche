@@ -1,5 +1,4 @@
 import { formatDuration, type Liveness, type SessionLiveness } from "../../agent/liveness.js";
-import type { CoordinatorEvent } from "../events.js";
 import { defaultRunLimits, type RunLimits } from "../limits.js";
 
 /**
@@ -300,7 +299,7 @@ export function formatExtensionSummary(extensions: readonly DeadlineExtension[],
   ];
 }
 
-export type DeadlineExtendedEvent = Extract<CoordinatorEvent, { type: "deadline_extended" }>;
+export interface DeadlineExtendedEvent { type: "deadline_extended"; timestamp: number; scope: ExtensionScope; stage: string; extension: number; maxExtensions: number; extensionMs: number; newDeadline: number; overallDeadline?: number; reasons: readonly string[] }
 
 /** The `deadline_extended` run event of an extension. */
 export function extensionEvent(extension: DeadlineExtension): DeadlineExtendedEvent {

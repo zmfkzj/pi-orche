@@ -8,7 +8,6 @@ import {
 } from "../../src/extension/records.js";
 import { DEFAULT_RECORDS } from "../../src/extension/config.js";
 import { fauxAssistantMessage as reply, fauxToolCall as call, type ToolCall } from "@earendil-works/pi-ai";
-import { runOrchestrated } from "../../src/orchestration/coordinator.js";
 import { fauxRuntime } from "../helpers/faux.js";
 
 const roots: string[] = [];
@@ -464,42 +463,3 @@ describe("retention", () => {
   });
 });
 
-describe("a record wired to a real run (what the extension does)", () => {
-  const tool = (name: string, args: ToolCall["arguments"]) => reply([call(name, args)], { stopReason: "toolUse" });
-  const decision = (value: ToolCall["arguments"]) => tool("coordinator_decision", { decision: value });
-  const classify = decision({ type: "classify", taskClass: "answer", workerCount: 1, language: "en", reason: "read-only" });
-  const answer = tool("report_result", { kind: "answer", summary: "The value is 0.", data: { evidence: ["core.mjs"] } });
-
-  for (const outcome of ["done", "failed"] as const) it(`${outcome}: run.json start+final, events.jsonl, one 0600 session per agent, everything outside the workspace`, async () => {
-    const l = await layout();
-    const f = await fauxRuntime([classify, answer, decision(outcome === "done" ? { type: "answer_from_worker", sourceAgentId: "A1", summary: "explained" } : { type: "fail", reason: "gave up" })]);
-    const record = createRunRecord(l.resolved, { kind: "run", cwd: l.cwd, parentSession: { id: "parent-9" }, request: "what is the value?" })!;
-    expect(await json(record.runFile)).toMatchObject({ status: "running", agents: [] });
-    const report = await runOrchestrated({
-      problem: "what is the value?", cwd: l.cwd, routes: { routes: {}, default: { model: f.route.model, thinking: "low" } }, modelRuntime: f.runtime,
-      limits: { overallMs: 10_000, decisionMs: 2000, assignmentMs: 2000 }, sink: event => record.appendEvent(event), records: record.records,
-    });
-    record.finish({ status: report.status, summary: report.summary, taskClass: report.taskClass, cleanup: report.cleanup });
-    expect(report.status).toBe(outcome);
-    const manifest = await json(record.runFile);
-    expect(manifest).toMatchObject({ kind: "run", status: outcome, taskClass: "answer", cleanup: { incomplete: false } });
-    expect(manifest.durationMs).toBeGreaterThanOrEqual(0);
-    expect(manifest.agents.map((agent: { id: string }) => agent.id).sort()).toEqual(["A1", "coordinator"]);
-    for (const agent of manifest.agents as Array<{ id: string; sessionFile: string; model: string; requests: number }>) {
-      expect(agent.sessionFile).toBe(join(record.sessionsDir, `${agent.id}.jsonl`));
-      expect(agent.model).toBe(f.route.model);
-      expect(agent.requests).toBeGreaterThan(0);
-      const lines = (await readFile(agent.sessionFile, "utf8")).trim().split("\n").map(line => JSON.parse(line) as Record<string, any>);
-      expect(lines[0]).toMatchObject({ type: "session", cwd: l.cwd });
-      expect(lines.filter(entry => entry.type === "message" && entry.message.role === "assistant")).toHaveLength(agent.requests);
-      expect(await mode(agent.sessionFile), agent.id).toBe(0o600);
-    }
-    const events = (await readFile(record.eventsFile, "utf8")).trim().split("\n").map(line => JSON.parse(line) as { type: string });
-    expect(events[0]!.type).toBe("run_started");
-    expect(events.at(-1)!.type).toBe("run_finished");
-    expect(events.some(event => event.type === "usage")).toBe(true);
-    for (const dir of [l.resolved.root, join(l.resolved.root, "parent-9"), record.dir, record.sessionsDir]) expect(await mode(dir), dir).toBe(0o700);
-    expect(await readdir(l.cwd)).toEqual([]);
-    expect(manifest.agents.find((agent: { id: string }) => agent.id === "coordinator").status).toBe(outcome === "done" ? "completed" : "failed");
-  });
-});

@@ -58,6 +58,9 @@ const COORDINATION_TOOLS: ReadonlySet<string> = new Set(["report_result", "send_
 const PATH_WRITERS: ReadonlySet<string> = new Set(["edit", "write"]);
 
 /** True for any tool outside the read-only set (bash, edit, write, ast_rewrite, generate_image, …). */
+/** Why a changed path is not attributed to an orche_task worker: it changed while none of its tools was running. */
+export const CHANGED_WHILE_QUIET = "changed while no worker tool was running";
+
 export function isWriteCapable(toolName: string): boolean {
   return !READ_ONLY_TOOL_NAMES.includes(toolName) && !COORDINATION_TOOLS.has(toolName);
 }

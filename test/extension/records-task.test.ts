@@ -256,21 +256,6 @@ describe("the records root is kept out of concurrent-session detection", () => {
     for (const [options] of detect.mock.calls) expect(options.ignorePaths).toEqual([rootOf(h)]);
   });
 
-  it("orche_run hands it over too, and the detector is not asked to ignore anything when records are off", async () => {
-    const root = vi.fn();
-    const detect = none();
-    const { h, controller } = await fixture([], { controller: { detectConcurrentSessions: detect, run: async options => { root(options.detectConcurrentActivity ? "callback" : "none"); await options.detectConcurrentActivity?.(); return { status: "done", summary: "s", tasks: [], startedAt: 0, finishedAt: 1, taskClass: "answer", answer: "a" }; }, concurrentRecheckMs: 0 } });
-    const outcome = await controller.run({ request: "x", cwd: h.cwd, projectTrusted: false, currentSession: PARENT });
-    expect(root).toHaveBeenCalledWith("callback");
-    expect(detect).toHaveBeenCalledTimes(2); // the start, and the callback's re-check
-    for (const [options] of detect.mock.calls) expect(options.ignorePaths).toEqual([rootOf(h)]);
-    expect(outcome.details.record!.startsWith(join(rootOf(h), PARENT.id) + "/")).toBe(true);
-
-    const off = none();
-    const quiet = await fixture([explored()], { records: false, controller: { detectConcurrentSessions: off } });
-    await quiet.execute({ role: "explore", files: undefined });
-    expect(off.mock.calls[0]![0]).not.toHaveProperty("ignorePaths");
-  });
 });
 
 describe("through the registered orche_task tool", () => {
