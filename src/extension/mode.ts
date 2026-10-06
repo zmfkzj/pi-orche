@@ -44,10 +44,11 @@ const ORCHESTRATOR_RULE = "The implement or answer worker is an orchestrator: it
 export interface DelegationOptions {
   /** `single.spawn` (default true): the worker is an orchestrator that may spawn sub-workers. */
   spawn?: boolean;
-  /** `models.orchestrator` is configured: standard roles run on it instead of main's model (docs/orchestrator.md 12). */
+  /** `models.orchestrator` names a model of its own (not `{ "model": "main" }`): standard roles run on it instead of main's model
+   * (docs/orchestrator.md 12). */
   orchestratorModel?: boolean;
 }
-/** How standard roles get their model; without `models.orchestrator` the earlier sentence word for word. */
+/** How standard roles get their model; without a model of `models.orchestrator`'s own (unset or "main") the earlier sentence word for word. */
 const MODEL_SENTENCE = {
   inherited: "Standard roles inherit main's CURRENT model and thinking at hand-off",
   configured: "Standard roles run on the orchestrator model configured in the orche config (models.orchestrator), not on main's model,",

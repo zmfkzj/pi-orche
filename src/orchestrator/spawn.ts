@@ -13,6 +13,7 @@ import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-
 import { isAbsolute } from "node:path";
 import { normalizeOwnedPath, validateBacklog, type TaskItem } from "../orchestration/backlog.js";
 import { ownsPath, WRITING_KINDS } from "../orchestration/ownership.js";
+import type { SubWorkerModelSource } from "../orchestration/routing.js";
 import type { WorkspaceChange } from "../orchestration/workspace.js";
 import { MAX_SUB_WORKERS } from "./instructions.js";
 
@@ -97,8 +98,8 @@ export interface SubWorkerOutcome {
   files?: string[];
   model: string;
   thinking?: string;
-  /** Where the model came from: `models.worker` (config), the orchestrator's model (orchestrator), or a specialist's route (route). */
-  modelSource: "config" | "orchestrator" | "route";
+  /** Where the model came from (SubWorkerModelSource): `models.worker`'s model or main's named by it, the orchestrator's, or a route. */
+  modelSource: SubWorkerModelSource;
   requests: number;
   models: Record<string, number>;
   startedAt: number;

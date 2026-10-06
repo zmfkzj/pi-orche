@@ -30,6 +30,7 @@ export interface RouteConfig {
    * Models of the three tiers (docs/orchestrator.md 12), each a route without a role: `main` is applied to the Pi session at its
    * start, `orchestrator` replaces main's model for the single workflow's standard-role workers, `worker` replaces the
    * orchestrator's model for its sub-workers. Unset tiers inherit (main: Pi's model; orchestrator: main; worker: orchestrator).
+   * `{ "model": "main" }` (INHERIT_MAIN) in `orchestrator` or `worker` names main's current model explicitly.
    * Specialists (game-asset, video) keep their routes.
    */
   readonly models?: ModelTiers;
@@ -51,7 +52,23 @@ export function legacyConfigWarning(keys: readonly string[]): string {
 }
 export const MODEL_TIERS = ["main", "orchestrator", "worker"] as const;
 export type ModelTier = typeof MODEL_TIERS[number];
+/** A tier's route; in `orchestrator` and `worker` its model may be INHERIT_MAIN. */
 export type ModelTiers = Readonly<Partial<Record<ModelTier, RouteSettings>>>;
+/**
+ * `{ "model": "main" }` in `models.orchestrator` or `models.worker`: run on main's current model and, unless the tier sets
+ * `thinking`, main's current thinking, at each hand-off (what an unset `models.orchestrator` does). A model id is always
+ * `provider/id`, so `main` cannot name a real model; `models.main` and routes reject it.
+ */
+export const INHERIT_MAIN = "main";
+export const inheritsMain = (route: RouteSettings | undefined): boolean => route?.model === INHERIT_MAIN;
+/**
+ * Where an orche_task assignment's model comes from (details, run.json, split log): its `models` tier's model (`config`), main's
+ * model named by the tier with `"main"` (`config:main`) or inherited because the tier is unset (`main`), or a route (`route`).
+ */
+export type AssignmentModelSource = "config" | "config:main" | "main" | "route";
+/** Where a sub-worker's model comes from: `models.worker`'s model (`config`), main's model named by it with `"main"`
+ * (`config:main`), the orchestrator's model because it is unset (`orchestrator`), or a specialist's route (`route`). */
+export type SubWorkerModelSource = "config" | "config:main" | "orchestrator" | "route";
 export class RouteConfigError extends Error {
   override readonly name = "RouteConfigError";
 }
@@ -60,13 +77,17 @@ const MAX_PROVIDER_EXTENSIONS = 4;
 const MAX_VERIFY_COMMANDS = 8;
 /** The former MAX_WORKERS_LIMIT bound of `workers.explorerRoles`. */
 const MAX_EXPLORER_ROLES = 8;
+function parseThinking(value: unknown, location: string): ThinkingLevel | undefined {
+  if (value !== undefined && (typeof value !== "string" || !thinkingLevels.includes(value)))
+    throw new RouteConfigError(`${location}.thinking: expected ${thinkingLevels.join(", ")}`);
+  return value as ThinkingLevel | undefined;
+}
 function parseSettings(value: unknown, location: string): RouteSettings {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError(`${location}: expected route object`);
   const route = value as Record<string, unknown>;
   if (Object.keys(route).some(key => key !== "model" && key !== "thinking" && key !== "extendedContext")) throw new RouteConfigError(`${location}: unknown route field`);
   if (typeof route.model !== "string" || !/^[^\s/:]+\/[^\s:]+$/.test(route.model)) throw new RouteConfigError(`${location}.model: expected provider/modelId`);
-  if (route.thinking !== undefined && (typeof route.thinking !== "string" || !thinkingLevels.includes(route.thinking)))
-    throw new RouteConfigError(`${location}.thinking: expected ${thinkingLevels.join(", ")}`);
+  parseThinking(route.thinking, location);
   if (route.extendedContext !== undefined && typeof route.extendedContext !== "boolean") throw new RouteConfigError(`${location}.extendedContext: expected boolean`);
   return {
     model: route.model,
@@ -144,8 +165,20 @@ function parseModelTiers(value: unknown): ModelTiers {
   const unknown = Object.keys(tiers).find(key => !(MODEL_TIERS as readonly string[]).includes(key));
   if (unknown !== undefined) throw new RouteConfigError(`config.models.${unknown}: unknown tier (expected ${MODEL_TIERS.join(", ")})`);
   const parsed: Partial<Record<ModelTier, RouteSettings>> = {};
-  for (const tier of MODEL_TIERS) if (tiers[tier] !== undefined) parsed[tier] = parseSettings(tiers[tier], `config.models.${tier}`);
+  for (const tier of MODEL_TIERS) if (tiers[tier] !== undefined) parsed[tier] = parseTier(tier, tiers[tier]);
   return parsed;
+}
+/** One tier: a route, or in `orchestrator` and `worker` `{ "model": "main", "thinking"? }` (INHERIT_MAIN). */
+function parseTier(tier: ModelTier, value: unknown): RouteSettings {
+  const location = `config.models.${tier}`;
+  const route = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  if (value !== INHERIT_MAIN && route?.model !== INHERIT_MAIN) return parseSettings(value, location);
+  if (tier === "main") throw new RouteConfigError(`${location}: "main" (inherit main's model) is for models.orchestrator and models.worker; models.main is the Pi session's own model (omit it to keep Pi's model)`);
+  if (!route) throw new RouteConfigError(`${location}: expected route object; write { "model": "main" } to inherit main's model`);
+  if (Object.keys(route).some(key => key !== "model" && key !== "thinking" && key !== "extendedContext")) throw new RouteConfigError(`${location}: unknown route field`);
+  if (route.extendedContext !== undefined) throw new RouteConfigError(`${location}.extendedContext: not with model "main" (main's model is inherited with main's context window)`);
+  const thinking = parseThinking(route.thinking, location);
+  return { model: INHERIT_MAIN, ...(thinking !== undefined ? { thinking } : {}) };
 }
 /** `workers`: only `explorerRoles` still applies; the coordinator's `maxWorkers` and `answerAngles` are ignored (reported in `legacy`). */
 function parseWorkers(value: unknown, legacy: string[]): { explorerRoles?: readonly string[] } {

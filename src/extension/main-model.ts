@@ -12,7 +12,7 @@
  * nothing re-applies it later: a model or thinking level the user picks during the session (`/model`, the cycle keys) stays.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ModelTiers, RouteSettings } from "../orchestration/routing.js";
+import { inheritsMain, type ModelTiers, type RouteSettings } from "../orchestration/routing.js";
 import { withExtendedContext } from "../pi/extended-context.js";
 
 export const MAIN_MODEL_START_REASONS: readonly string[] = ["startup", "new"];
@@ -53,7 +53,11 @@ export async function applyMainModel(
   return { applied: { model: tier.model, thinking: pi.getThinkingLevel(), contextWindow: model.contextWindow }, warnings: [] };
 }
 
-const describe = (route: RouteSettings, inherited: string) => `${route.model} ${route.thinking ?? `(thinking: ${inherited})`}${route.extendedContext ? ", extended context" : ""}`;
+/** A configured orchestrator or worker tier: its own model, or main's model when it says `"main"` (INHERIT_MAIN). */
+const describe = (route: RouteSettings, inherited: string, main: { model?: string; current: string }) => inheritsMain(route)
+  ? route.thinking ? `main's model (${main.model ?? "no model selected"}) with thinking ${route.thinking}` : `main's model and thinking (${main.current})`
+  : `${route.model} ${route.thinking ?? `(thinking: ${inherited})`}${route.extendedContext ? ", extended context" : ""}`;
+const tierSource = (tier: string, route: RouteSettings) => `config models.${tier}${inheritsMain(route) ? ' "main"' : ""}`;
 
 /** What `/orche models` shows: the main session now, the config tiers, and what happened to `models.main` at session start. */
 export interface ModelTiersView {
@@ -79,11 +83,12 @@ export function formatModelTiers(view: ModelTiersView): string {
       : "Pi (no models.main)";
   const orchestrator = view.tiers?.orchestrator;
   const worker = view.tiers?.worker;
+  const main = { ...(view.main ? { model: view.main } : {}), current };
   return [
     `orche models (${view.path ?? "no orche config file"}${view.error ? `; config error: ${view.error}` : ""}; mode ${view.mode}):`,
     `- main: ${current} — ${mainSource}`,
-    `- orchestrator (orche_task explore/answer/implement/verify): ${orchestrator ? `${describe(orchestrator, "main's")} — config models.orchestrator` : `inherited from main (${current})`}`,
-    `- worker (orche_spawn sub-workers, the fresh verifier included): ${worker ? `${describe(worker, "the orchestrator's")} — config models.worker` : `inherited from the orchestrator (${orchestrator ? orchestrator.model : view.main ?? "main's model"})`}`,
+    `- orchestrator (orche_task explore/answer/implement/verify): ${orchestrator ? `${describe(orchestrator, "main's", main)} — ${tierSource("orchestrator", orchestrator)}` : `inherited from main (${current})`}`,
+    `- worker (orche_spawn sub-workers, the fresh verifier included): ${worker ? `${describe(worker, "the orchestrator's", main)} — ${tierSource("worker", worker)}` : `inherited from the orchestrator (${orchestrator && !inheritsMain(orchestrator) ? orchestrator.model : view.main ?? "main's model"})`}`,
     "- game-asset, video: their own routes (models does not apply)",
     ...(orchestrator || worker ? ["A configured model that orche's runtime cannot resolve is replaced by the inherited one, with a warning in the task result."] : []),
     ...(view.mode === "direct" ? ["Direct mode: main does the work itself; only models.main applies."] : []),

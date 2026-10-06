@@ -6,7 +6,7 @@
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { ModelRuntime, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { ModelRoute } from "../orchestration/routing.js";
+import type { ModelRoute, SubWorkerModelSource } from "../orchestration/routing.js";
 import type { TaskItem } from "../orchestration/backlog.js";
 import { checkWriteRealPath, WRITE_TOOLS } from "../orchestration/ownership.js";
 import { orchestrationResultSchemas } from "../orchestration/result-schemas.js";
@@ -22,8 +22,8 @@ export interface SubWorkerEnvironment {
   runtime: ModelRuntime;
   /** The route standard roles run on: `models.worker` when configured, else the orchestrator's current route. */
   route: ModelRoute;
-  /** Where `route` comes from (recorded per sub-worker). */
-  routeSource: "config" | "orchestrator";
+  /** Where `route` comes from (recorded per sub-worker): `models.worker`'s model, main's model named by it, or the orchestrator's. */
+  routeSource: Exclude<SubWorkerModelSource, "route">;
   inheritedContextWindow?: number;
   /** The route of a specialist role (its own configured route, as orche_task resolves it). */
   specialistRoute(role: "game-asset" | "video"): ModelRoute;

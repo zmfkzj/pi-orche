@@ -5,7 +5,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type Exte
 import { createOrcheTools } from "../tools/index.js";
 import { spillToolResult } from "../tools/spill.js";
 import { OrcheController, type OrcheControllerOptions } from "./controller.js";
-import type { MainMode } from "../orchestration/routing.js";
+import { inheritsMain, type MainMode, type ModelTiers } from "../orchestration/routing.js";
 import { delegationRules, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
 import { contextWarning, DEFAULT_CONTEXT_WARNING, type ContextWarningSettings, type ContextWarningState } from "./context-warning.js";
 import { CONFIG_FILE, DEFAULT_SINGLE, loadOrcheConfigFile } from "./config.js";
@@ -16,7 +16,6 @@ import { orcheTaskRenderers } from "./render.js";
 import { partialUpdate } from "./progress.js";
 import { formatSplitSummary, readSplitLog, summarizeSplits } from "../orchestrator/split-log.js";
 import { applyMainModel, formatModelTiers, type ModelTiersView } from "./main-model.js";
-import type { ModelTiers } from "../orchestration/routing.js";
 import { defaultRunLimits } from "../orchestration/limits.js";
 import { formatDuration } from "../agent/liveness.js";
 import { LEDGER_ENTRY_TYPE, LEDGER_SUMMARY_TYPE, latestLedgers, type TaskLedger } from "../single/ledger.js";
@@ -36,9 +35,10 @@ async function discoverConfiguredMainMode(options: { cwd: string; agentDir: stri
     try { await access(path); } catch { continue; }
     try {
       const { routes, contextWarning, single, warnings } = await loadOrcheConfigFile(path);
-      // The tiers with the top-level extendedContext filled in where a tier leaves it out, as routes resolve it (routing.ts).
+      // The tiers with the top-level extendedContext filled in where a tier leaves it out, as routes resolve it (routing.ts);
+      // not for `{ "model": "main" }`, which keeps main's own context window.
       const models = routes.models ? Object.fromEntries(Object.entries(routes.models).map(([tier, route]) => {
-        const extendedContext = route.extendedContext ?? routes.extendedContext;
+        const extendedContext = inheritsMain(route) ? undefined : route.extendedContext ?? routes.extendedContext;
         return [tier, { ...route, ...(extendedContext !== undefined ? { extendedContext } : {}) }];
       })) as ModelTiers : undefined;
       return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), ...(routes.legacyMainMode ? { legacyMode: routes.legacyMainMode } : {}), path, contextWarning, spawn: single.spawn, ...(warnings.length ? { warnings } : {}), ...(models ? { models } : {}) };
@@ -173,7 +173,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       warningSettings = found.contextWarning ?? { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
       warningState = { warnedLevel: 0 };
       spawn = found.spawn ?? DEFAULT_SINGLE.spawn;
-      orchestratorModel = !!found.models?.orchestrator;
+      // Only a model of its own changes main's hand-off rule; `{ "model": "main" }` keeps the earlier sentence.
+      orchestratorModel = !!found.models?.orchestrator && !inheritsMain(found.models.orchestrator);
       // Removed settings (e.g. single.pipeline, single.mainReview) are ignored: the file still loads; say so once per session start.
       for (const warning of found.warnings ?? []) ctx.ui.notify(warning, "warning");
       // models.main: the Pi session's model and thinking, once at a fresh session start; the user's own choices are kept.

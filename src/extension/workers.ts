@@ -20,7 +20,7 @@ import { createTaskPlanTool, renderTaskPlan, type TaskPlan } from "../tools/task
 import { configureTaskWorkflow, enableTaskWorkflow, taskCompactionSettings, type CompactionStats } from "../pi/session-factory.js";
 import { withExtendedContext } from "../pi/extended-context.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { resolveRoute, resolveSpecialistRoute, type MainMode, type ModelRoute } from "../orchestration/routing.js";
+import { inheritsMain, resolveRoute, resolveSpecialistRoute, type AssignmentModelSource, type MainMode, type ModelRoute, type SubWorkerModelSource } from "../orchestration/routing.js";
 import { WorkspaceAudit, type GitlinkChange, type WorkspaceChange } from "../orchestration/workspace.js";
 import { CHANGED_WHILE_QUIET, WorkspaceActivity } from "../orchestration/run/activity.js";
 import { WORKER_TOOL_NAMES } from "../tools/index.js";
@@ -125,8 +125,8 @@ export interface TaskDetails {
   task?: string;
   /** Present when the named worker was gone and the task continued with this new worker, briefed from its ledger. */
   continuedFrom?: string;
-  /** Where `model` came from: `models.orchestrator` (config), main's current model (main), or a configured route (route). */
-  modelSource?: "config" | "main" | "route";
+  /** Where `model` came from (AssignmentModelSource): `models.orchestrator`'s model, main's model named by it or inherited, or a route. */
+  modelSource?: AssignmentModelSource;
   /** The orchestrator's split decision (single workflow with `single.spawn`, implement/answer): none, or the criteria it split by and why. */
   split?: SplitDecision;
   /** The sub-workers its orche_spawn calls ran (docs/orchestrator.md), in order; their transcripts are in the record. */
@@ -878,9 +878,11 @@ export class WorkerPool {
     this.manager.setRequestBudget(limits.assignmentRequests);
     const routeRole = args.role === "answer" ? "analyst" : args.role === "explore" ? config.routes.workers?.explorerRoles?.[0] ?? "explorer-path" : args.role === "implement" ? "implementer" : args.role === "verify" ? "verifier" : args.role;
     // `models.orchestrator` (docs/orchestrator.md 12) replaces main's model for the standard roles; unresolvable: inherit main.
+    // `{ "model": "main" }` (INHERIT_MAIN) names main's model explicitly: the inheritance below, with the tier's thinking if it sets one.
     const tier = inheritMain ? config.routes.models?.orchestrator : undefined;
-    const tierModel = tier ? runtime.getModel(tier.model.slice(0, tier.model.indexOf("/")), tier.model.slice(tier.model.indexOf("/") + 1)) : undefined;
-    if (tier && !tierModel) modelWarnings.push(`Warning: models.orchestrator ${tier.model} is unresolvable in orche's runtime; inheriting main's model instead.`);
+    const tierMain = inheritsMain(tier);
+    const tierModel = tier && !tierMain ? runtime.getModel(tier.model.slice(0, tier.model.indexOf("/")), tier.model.slice(tier.model.indexOf("/") + 1)) : undefined;
+    if (tier && !tierMain && !tierModel) modelWarnings.push(`Warning: models.orchestrator ${tier.model} is unresolvable in orche's runtime; inheriting main's model instead.`);
     const configured = tier && tierModel ? tier : undefined;
     const mainModel = inheritMain && !configured && args.model ? runtime.getModel(args.model.provider, args.model.id) : undefined;
     const mainWindow = args.model?.contextWindow ?? mainModel?.contextWindow ?? 0;
@@ -888,13 +890,14 @@ export class WorkerPool {
     const route = configured
       ? { role: routeRole, model: configured.model, thinking: configured.thinking ?? args.thinking ?? "off", ...(tierExtended !== undefined ? { extendedContext: tierExtended } : {}) }
       : mainModel
-      ? { role: routeRole, model: sessionModel!, thinking: args.thinking ?? "off", extendedContext: false }
+      ? { role: routeRole, model: sessionModel!, thinking: (tierMain ? tier?.thinking : undefined) ?? args.thinking ?? "off", extendedContext: false }
       : worker && (!inheritMain || !args.model && this.manager.session(worker.id).model) ? this.manager.get(worker.id).route
       : args.role === "game-asset" || args.role === "video"
         ? resolveSpecialistRoute(config.routes, routeRole, (provider, id) => !!runtime.getModel(provider, id))
         : resolveRoute(config.routes, routeRole);
-    /** Where this assignment's model comes from (run.json, split log): config tier, main's model, or a configured route. */
-    const modelSource: "config" | "main" | "route" = configured ? "config" : mainModel ? "main" : "route";
+    /** Where this assignment's model comes from (run.json, split log): a config tier's model, main's model named by the tier
+     * (`config:main`) or inherited (`main`), or a configured route. */
+    const modelSource: AssignmentModelSource = configured ? "config" : mainModel ? (tierMain ? "config:main" : "main") : "route";
     if (inheritMain && !configured && args.model && !mainModel) modelWarnings.push(`Warning: main model ${sessionModel} is unresolvable in orche's runtime; falling back to configured route ${route.model}.`);
     if (inheritMain && !configured && !args.model) modelWarnings.push(worker && this.manager.session(worker.id).model
       ? "Warning: main model is absent; keeping this worker's current model and thinking."
@@ -985,17 +988,28 @@ export class WorkerPool {
     const spawned: SubWorkerOutcome[] = [];
     const spawnedReasons = new Set<SpawnReason>();
     const spawnWarnings: string[] = [];
-    // The orchestrator's sub-workers (docs/orchestrator.md 12): standard roles on `models.worker` when configured and resolvable,
-    // else on the orchestrator's current model and thinking; specialists on their own routes. Resolved before the run record
-    // is written, so that its warnings include an unresolvable models.worker.
+    // The orchestrator's sub-workers (docs/orchestrator.md 12): standard roles on `models.worker` when configured and resolvable
+    // (`{ "model": "main" }`: main's model at this hand-off, while main waits for the orchestrator), else on the orchestrator's
+    // current model and thinking; specialists on their own routes. Resolved before the run record is written, so that its
+    // warnings include an unresolvable models.worker.
     const current: ModelRoute = { role: routeRole, model: meta.model ?? route.model, ...(meta.thinking ?? route.thinking ? { thinking: (meta.thinking ?? route.thinking) as ThinkingLevel } : {}), ...(configured && tierExtended !== undefined ? { extendedContext: tierExtended } : {}) };
     const workerTier = orchestrating ? config.routes.models?.worker : undefined;
-    const workerTierModel = workerTier ? runtime.getModel(workerTier.model.slice(0, workerTier.model.indexOf("/")), workerTier.model.slice(workerTier.model.indexOf("/") + 1)) : undefined;
-    if (workerTier && !workerTierModel) modelWarnings.push(`Warning: models.worker ${workerTier.model} is unresolvable in orche's runtime; sub-workers inherit the orchestrator's model instead.`);
+    const workerMain = inheritsMain(workerTier);
+    const workerTierModel = !workerTier ? undefined
+      : workerMain ? (args.model ? runtime.getModel(args.model.provider, args.model.id) : undefined)
+      : runtime.getModel(workerTier.model.slice(0, workerTier.model.indexOf("/")), workerTier.model.slice(workerTier.model.indexOf("/") + 1));
+    if (workerTier && !workerTierModel) modelWarnings.push(workerMain
+      ? `Warning: models.worker "main": ${sessionModel ? `main's model ${sessionModel} is unresolvable in orche's runtime` : "main's model is absent"}; sub-workers inherit the orchestrator's model instead.`
+      : `Warning: models.worker ${workerTier.model} is unresolvable in orche's runtime; sub-workers inherit the orchestrator's model instead.`);
     const workerExtended = workerTier?.extendedContext ?? config.routes.extendedContext;
-    const subRoute: ModelRoute = workerTier && workerTierModel
-      ? { role: routeRole, model: workerTier.model, ...(workerTier.thinking ?? current.thinking ? { thinking: workerTier.thinking ?? current.thinking } : {}), ...(workerExtended !== undefined ? { extendedContext: workerExtended } : {}) }
+    const subSource: Exclude<SubWorkerModelSource, "route"> = workerTier && workerTierModel ? (workerMain ? "config:main" : "config") : "orchestrator";
+    const subRoute: ModelRoute = subSource === "config:main"
+      ? { role: routeRole, model: sessionModel!, thinking: workerTier?.thinking ?? args.thinking ?? "off", extendedContext: false }
+      : subSource === "config"
+      ? { role: routeRole, model: workerTier!.model, ...(workerTier!.thinking ?? current.thinking ? { thinking: workerTier!.thinking ?? current.thinking } : {}), ...(workerExtended !== undefined ? { extendedContext: workerExtended } : {}) }
       : current;
+    /** Sub-workers on main's model (inherited through the orchestrator, or named by `models.worker`) get main's context window. */
+    const subWindow = subSource === "config:main" || subSource === "orchestrator" && mainModel ? mainWindow : undefined;
     const definitions = requirementDefinitions(handoffRequest);
     meta.unmetStreak = new Map(singleWorkflow ? [...meta.unmetStreak ?? []].filter(([id]) => definitions.has(id) && definitions.get(id) === meta.requirementDefinitions?.get(id)) : []);
     meta.requirementDefinitions = definitions;
@@ -1196,7 +1210,7 @@ export class WorkerPool {
           orchestrator: meta.id, ...(files ? { scope: files } : {}), ...(readOnly ? { readOnly: true } : {}), signal,
           nextId: () => `${meta.id}.${++sub}`,
           runWorker: createSubWorkerRunner({
-            orchestrator: meta.id, cwd: args.cwd, runtime, route: subRoute, routeSource: subRoute === current ? "orchestrator" : "config", ...(subRoute === current && mainModel ? { inheritedContextWindow: mainWindow } : {}),
+            orchestrator: meta.id, cwd: args.cwd, runtime, route: subRoute, routeSource: subSource, ...(subWindow ? { inheritedContextWindow: subWindow } : {}),
             specialistRoute: role => resolveSpecialistRoute(config.routes, role, (provider, id) => !!runtime.getModel(provider, id)),
             imageTool: () => config.routes.images ? createGenerateImageTool({ cwd: args.cwd, runtime, images: config.routes.images }) : undefined,
             prompt: (planned, imagesAvailable) => subWorkerPrompt(planned, meta.id, config.routes.verifyCommands ?? [], imagesAvailable),

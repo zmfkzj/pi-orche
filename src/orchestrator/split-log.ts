@@ -15,6 +15,7 @@ import { renameSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { appendPrivate, ensurePrivateDir } from "../agent/private-files.js";
+import type { AssignmentModelSource, SubWorkerModelSource } from "../orchestration/routing.js";
 
 export const SPLIT_LOG = "split-log.jsonl";
 export const SPLIT_LOG_ROTATED = "split-log.1.jsonl";
@@ -40,10 +41,12 @@ export interface SplitLogEntry {
   costUSD: number | null;
   status: string;
   model?: string;
-  /** Where `model` came from: `models.orchestrator` (config), main's model (main) or a configured route (route). */
-  modelSource?: "config" | "main" | "route";
-  /** The distinct models the sub-workers ran on and where each came from (config: `models.worker`, orchestrator, route: specialist). */
-  workerModels?: { model: string; source: "config" | "orchestrator" | "route" }[];
+  /** Where `model` came from (AssignmentModelSource): `models.orchestrator` (config), main's model named by it (config:main) or
+   * inherited (main), or a route (route). */
+  modelSource?: AssignmentModelSource;
+  /** The distinct models the sub-workers ran on and where each came from (SubWorkerModelSource: config and config:main from
+   * `models.worker`, orchestrator, route: specialist). */
+  workerModels?: { model: string; source: SubWorkerModelSource }[];
   record?: string;
 }
 

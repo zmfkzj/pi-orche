@@ -588,14 +588,31 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
 - **키 위치와 근거**: 최상위 `models`.
   - 계층은 역할(role)이 아니다. 그래서 `routes`(역할 이름 → route) 안에 넣지 않았다. `routes`에 넣으면 `main` 같은 이름이 역할 route와 섞이고, fallback route(`analyst`, `implementer` 등)와도 헷갈린다.
   - 각 값은 route와 같은 모양(`model`, `thinking?`, `extendedContext?`)이고 같은 검증(`parseSettings`)을 거친다. 모르는 계층, 모르는 필드, `provider/` 없는 모델, 모르는 thinking은 설정 오류다(`src/orchestration/routing.ts`의 `parseModelTiers`).
+- **main 상속을 명시하는 값 `{ "model": "main" }`**(`INHERIT_MAIN`, `parseTier`):
+  - `orchestrator`와 `worker`에 쓸 수 있다. 그 계층은 hand-off 때 main의 **현재** 모델과 thinking을 쓴다. 예전의 상속과 같다.
+  - `{ "model": "main", "thinking": "medium" }`처럼 쓰면 모델은 main을 따르고 thinking만 따로 정한다.
+  - `worker`에 쓰면 orchestrator가 아니라 main을 상속한다. 예를 들어 orchestrator가 `provider/model-b`이고 worker가 `"main"`이면 sub-worker는 main 모델로 돈다. worker를 생략하면 지금처럼 orchestrator를 상속한다.
+
+    ```json
+    "models": {
+      "orchestrator": { "model": "provider/model-b", "thinking": "high" },
+      "worker": { "model": "main" }
+    }
+    ```
+
+  - 문법 근거: route의 `model` 자리에 예약 별칭을 두었다. 값 모양이 route와 같아서 검증 경로가 하나로 유지되고, thinking만 지정하는 조합이 자연스럽게 된다. 실제 모델 id는 언제나 `provider/id` 형태이므로 `main`(슬래시 없음)과 헷갈리지 않는다. 이 값은 예전에는 설정 오류(`expected provider/modelId`)였으므로, 예전에 유효하던 설정의 뜻이 바뀌지 않는다. 문자열 단축형(`"orchestrator": "main"`)은 두 번째 값 모양을 만들고 thinking을 담을 수 없어서 받지 않는다. 대신 오류 메시지가 `{ "model": "main" }`을 알려 준다.
+  - 설정 오류(기존 검증과 같은 `RouteConfigError`. 세션 시작 때 경고로 보이고 orche_task는 그 오류로 실패한다):
+    - `models.main`의 `"main"`: main은 Pi 세션 자신의 모델이라 상속할 대상이 없다. 경고만 내고 무시하는 대신 오류로 한 이유는 두 가지다. `models` 안의 잘못된 값은 모두 오류로 다루고, 이 값은 예전에도 오류였다.
+    - `"main"`과 `extendedContext`를 함께 쓴 경우: main 모델은 상속될 때처럼 main의 context window를 그대로 쓴다.
+    - `routes`나 `default`의 `"main"`.
 - **해석 규칙**:
 
-  | 계층 | 지정했을 때 | 지정하지 않았을 때 | 해석할 수 없을 때 |
-  |---|---|---|---|
-  | main (Pi 세션) | 새 세션 시작 때 적용(아래) | Pi 모델(settings.json 기본값, `/model`) | 경고(`ctx.ui.notify`) 후 세션 모델 유지 |
-  | orchestrator (표준 역할 explore/answer/implement/verify) | 그 모델. thinking이 없으면 main의 현재 thinking, extendedContext가 없으면 최상위 값 | main의 현재 모델·thinking 상속(예전과 같음) | 결과 첫 줄 바로 아래와 run.json에 경고 후 main 상속 |
-  | worker (orche_spawn sub-worker, 독립 verifier 포함) | 그 모델. thinking이 없으면 orchestrator의 thinking | orchestrator의 실제 모델·thinking 상속(예전과 같음) | 경고 후 orchestrator 상속 |
-  | game-asset, video | 영향 없음 | 자기 route | (예전과 같음) |
+  | 계층 | 모델을 지정했을 때 | `{ "model": "main" }` | 지정하지 않았을 때 | 해석할 수 없을 때 |
+  |---|---|---|---|---|
+  | main (Pi 세션) | 새 세션 시작 때 적용(아래) | 설정 오류 | Pi 모델(settings.json 기본값, `/model`) | 경고(`ctx.ui.notify`) 후 세션 모델 유지 |
+  | orchestrator (표준 역할 explore/answer/implement/verify) | 그 모델. thinking이 없으면 main의 현재 thinking, extendedContext가 없으면 최상위 값 | main의 현재 모델. thinking은 지정값, 없으면 main의 현재 thinking. context window는 main 것 | main의 현재 모델·thinking 상속(예전과 같음) | 결과 첫 줄 바로 아래와 run.json에 경고 후 main 상속(`"main"`이면 지정하지 않았을 때와 같은 경고와 route) |
+  | worker (orche_spawn sub-worker, 독립 verifier 포함) | 그 모델. thinking이 없으면 orchestrator의 thinking | orchestrator가 아니라 main의 현재 모델. thinking은 지정값, 없으면 main의 현재 thinking. context window는 main 것 | orchestrator의 실제 모델·thinking 상속(예전과 같음) | 경고 후 orchestrator 상속(`"main"`이면 main 모델을 해석할 수 없을 때) |
+  | game-asset, video | 영향 없음 | 영향 없음 | 자기 route | (예전과 같음) |
 
 - **main 적용**(`src/extension/main-model.ts`):
   - Pi 확장 API `pi.setModel(model)`과 `pi.setThinkingLevel(level)`을 쓴다. Pi 문서 `docs/extensions.md`의 "Change active tools, model, or thinking level: Session control methods on `pi`"와 `core/extensions/types.d.ts`의 선언을 따랐다. `setModel`은 현재 세션에만 적용되고 settings.json 기본값은 바꾸지 않으며, 자격 증명이 없으면 false를 돌려준다. 모델은 `ctx.modelRegistry.find`로 찾는다. Pi의 `examples/extensions/preset.ts`도 같은 방식이다.
@@ -604,11 +621,13 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
   - `extendedContext`를 켜면 worker와 같은 표(`src/pi/extended-context.ts`)로 창을 넓힌 모델을 넘긴다.
   - direct 모드에서는 main 설정만 의미가 있다.
 - **가시성**:
-  - `/orche models`가 세 계층의 모델과 출처를 보여 준다. 출처는 config, inherited, Pi 가운데 하나다.
-  - main의 인계 규칙 문장은 `models.orchestrator`가 있을 때만 "설정된 orchestrator 모델로 실행"으로 바뀐다. 없으면 예전 문장 그대로다.
+  - `/orche models`가 세 계층의 모델과 출처를 보여 준다. 출처는 config, inherited, Pi 가운데 하나다. `"main"`은 `main's model and thinking (지금 main 모델) — config models.orchestrator "main"`처럼 보인다.
+  - main의 인계 규칙 문장은 `models.orchestrator`가 실제 모델을 지정했을 때만 "설정된 orchestrator 모델로 실행"으로 바뀐다. 지정하지 않았거나 `"main"`이면 예전 문장 그대로다. `"main"`에 thinking을 따로 준 경우에도 예전 문장을 쓴다. 문장 속 "thinking"은 이때 맞지 않지만, main이 자기 thinking을 바꿀 수 없으므로 main의 행동에는 영향이 없다.
   - orchestrator와 sub-worker에게 주는 지시문에는 모델 상속을 말하는 문장이 없다. specialist가 자기 모델을 쓴다는 문장만 있어서 고칠 것이 없었다. 분할 판단 지시문의 비용 문장("약 두 배 비용")은 같은 모델 sub-worker로 잰 값이다. 평가로 고른 문장이라 그대로 두었다. `models.worker`로 더 싼 모델을 쓰면 실제 비용 비율은 달라진다(측정하지 않음).
 - **기록**:
-  - assignment의 모델과 `modelSource`(`config`/`main`/`route`)는 `details`, run.json의 `assignment`·`outcome`, split log에 남는다.
-  - sub-worker의 모델과 `modelSource`(`config`/`orchestrator`/`route`)는 `details.spawned`, run.json의 agent 항목, split log의 `workerModels`에 남는다.
-- **테스트**: `test/extension/model-tiers.test.ts`(faux provider만 사용). 다룬 경우는 설정 없음(회귀), orchestrator만, worker만, 셋 다(확장을 거친 end-to-end), 해석 불가, specialist, main 적용과 사용자 선택 존중, 기록이다.
+  - assignment의 모델과 `modelSource`는 `details`, run.json의 `assignment`·`outcome`, split log에 남는다. 값은 `config`(지정한 모델), `config:main`(`{ "model": "main" }`으로 명시한 main 모델), `main`(지정하지 않아 상속), `route` 가운데 하나다.
+  - sub-worker의 모델과 `modelSource`는 `details.spawned`, run.json의 agent 항목, split log의 `workerModels`에 남는다. 값은 `config`, `config:main`, `orchestrator`(지정하지 않아 상속), `route`(specialist) 가운데 하나다.
+- **테스트**: `test/extension/model-tiers.test.ts`(faux provider만 사용). 다룬 경우는 다음과 같다.
+  - 설정 없음(회귀), orchestrator만, worker만, 셋 다(확장을 거친 end-to-end), 해석 불가, specialist, main 적용과 사용자 선택 존중, 기록.
+  - `"main"`: orchestrator `"main"`(지정하지 않았을 때와 같은 모델·thinking, 다음 hand-off에서 main의 현재 모델을 따름), 다른 orchestrator 모델 옆의 worker `"main"`(확장을 거친 end-to-end 포함), thinking만 지정, main 모델을 해석할 수 없을 때, `models.main`·문자열·extendedContext·routes의 설정 오류, `/orche models`와 main 지시문.
 - **확인하지 못한 것**: 실제 Pi TUI에서 `/new`·`--model`·순환 키와 함께 쓰는 경우는 faux 세션과 단위 테스트로만 확인했다. 실제 provider 확장(cliproxyapi)이 `session_start` 전에 모델을 등록하는지는 Pi 문서("asynchronous factory ... register providers needed during startup")에 기댄 것이다.
