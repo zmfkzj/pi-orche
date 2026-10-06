@@ -6,12 +6,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fauxProvider, type AssistantMessage, type FauxResponseFactory, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { WorkerPool } from "../../src/extension/workers.js";
 import { OrcheController } from "../../src/extension/controller.js";
 import { ORCHESTRATOR_TEAM_LINE, SPLIT_JUDGMENT } from "../../src/orchestrator/instructions.js";
 import { SPAWN_TOOL } from "../../src/orchestrator/spawn.js";
+import { readSplitLog } from "../../src/orchestrator/split-log.js";
 import { createHarness, tool, type Harness } from "./harness.js";
 
 const opened: { dispose(): Promise<void> }[] = [];
@@ -180,6 +181,12 @@ describe("orchestrator: parallel split", () => {
     const run = JSON.parse(await readFile(join(record, "run.json"), "utf8")) as { agents: { id: string }[]; outcome: { split?: unknown } };
     expect(run.agents.map(agent => agent.id)).toEqual(expect.arrayContaining(["W1", "W1.1", "W1.2"]));
     expect(run.outcome.split).toEqual({ decision: "split", criteria: ["parallelism"], reason: "two independent files" });
+    // The split log (docs/orchestrator.md 11): one line for the assignment under the records root, outside the pruned run directories.
+    const log = await readSplitLog(dirname(dirname(record)));
+    expect(log).toHaveLength(1);
+    expect(log[0]).toMatchObject({ role: "implement", orchestrator: true, decision: "split", reported: true, criteria: ["parallelism"], subWorkers: 2, status: "done", model: "main-reasoning/big", record });
+    expect(log[0]!.subRequests).toBe(result.details.spawned!.reduce((sum, worker) => sum + worker.requests, 0));
+    expect(JSON.stringify(log[0])).not.toContain("alpha.txt");
   });
 
   it("refuses overlapping ownership before any sub-worker starts", async () => {

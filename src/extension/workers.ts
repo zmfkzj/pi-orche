@@ -37,6 +37,7 @@ import { createRunRecord, pruneRecordsOnce, resolveRecords, workerSessionFile } 
 import { ExtendableDeadline, extensionEvent, formatExtensionProgress, formatExtensionSummary, waitExtendable, withNotExtended, type DeadlineExtension } from "../orchestration/run/extension.js";
 import { createAssignmentProjector, type ContextClearedStats } from "../pi/context-projection.js";
 import { recordFailure, recordHandoff, recordResult, renderLedgerForWorker, renderLedgerSummary, renderResumeBriefing, startLedger, type LedgerEvent, type TaskLedger } from "../single/ledger.js";
+import { appendSplitLog } from "../orchestrator/split-log.js";
 import { ORCHESTRATOR_TEAM_LINE, orchestratorSection, SPLIT_FORMAT, splitError, splitOf, type SplitDecision } from "../orchestrator/instructions.js";
 import { createSpawnTool, scopePaths, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnReason, type SubWorkerOutcome } from "../orchestrator/spawn.js";
 import { createSubWorkerRunner } from "../orchestrator/sub-worker.js";
@@ -1045,6 +1046,8 @@ export class WorkerPool {
     const workflowDetails = () => ({ thinking: meta.thinking, ...(meta.plan ? { plan: structuredClone(meta.plan) } : {}),
       ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(meta.gui ? { gui: true as const } : {}), ...spawnedDetails() });
     let requests = 0;
+    /** Provider-reported cost of this assignment's own requests (the split log); undefined while none was reported. */
+    let ownCostUSD: number | undefined;
     let contextCleared: ContextClearedStats | undefined;
     const contextDetails = () => contextCleared ? { contextCleared } : {};
     const contextLine = () => contextCleared ? [`Context: cleared ${contextCleared.results} earlier tool results (~${Math.round(contextCleared.estTokens)} tokens est.) and ${contextCleared.thinkingBlocks} thinking blocks at assignment start; repeat a call to restore its output.`] : [];
@@ -1076,7 +1079,7 @@ export class WorkerPool {
         contextCleared = { ...event.contextCleared };
         record?.appendEvent(event);
       }
-      if (event.type === "usage") { requests++; meta.latestInput = event.input + event.cacheRead; }
+      if (event.type === "usage") { requests++; meta.latestInput = event.input + event.cacheRead; if (event.costUSD !== undefined) ownCostUSD = (ownCostUSD ?? 0) + event.costUSD; }
       progress();
     });
     /** The workspace and git part of a result, as of now: the worker is not running any more when this is called. */
@@ -1126,6 +1129,16 @@ export class WorkerPool {
         ...(retired.length ? { retired } : {}),
         ...(details.extensions ? { extensions: details.extensions } : {}), ...(details.notExtended ? { notExtended: details.notExtended } : {}),
         ...(concurrent ? { concurrentSessions: concurrent.activity } : {}),
+      });
+      // One line per finished assignment that outlives the records (docs/orchestrator.md 11).
+      const subCosts = spawned.map(outcome => outcome.costUSD);
+      if (resolved.enabled) appendSplitLog(resolved.root, {
+        ts: new Date().toISOString(), role: args.role, orchestrator: orchestrating,
+        decision: orchestrating ? (details.split?.decision ?? (spawned.length ? "split" : "none")) : null,
+        reported: !!details.split, criteria: [...(details.split?.criteria ?? [...spawnedReasons])],
+        subWorkers: spawned.length, requests: details.requests, subRequests: spawned.reduce((sum, outcome) => sum + outcome.requests, 0),
+        durationMs: details.durationMs, costUSD: ownCostUSD === undefined && !subCosts.length ? null : (ownCostUSD ?? 0) + subCosts.reduce((sum, cost) => sum + cost, 0),
+        status, ...(details.model ? { model: details.model } : {}), record: record.dir,
       });
     };
     try {

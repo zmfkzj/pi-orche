@@ -377,6 +377,7 @@ export class AgentManager {
             type: "usage", timestamp: Date.now(), agentId: options.id, assignmentId: assignment.id,
             model: `${event.message.provider}/${event.message.model}`,
             input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite,
+            ...(typeof u.cost?.total === "number" ? { costUSD: u.cost.total } : {}),
           });
         }
       } else if (

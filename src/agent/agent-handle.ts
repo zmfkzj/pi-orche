@@ -134,6 +134,8 @@ export type ManagerEvent = { timestamp: number } & (
       output: number;
       cacheRead: number;
       cacheWrite: number;
+      /** The provider-reported cost of this request, when the provider reports one. */
+      costUSD?: number;
     }
 );
 export type WaitResult =

@@ -14,6 +14,7 @@ import { orcheTaskParameters, WORKER_CAPABILITY_CHANNEL, WorkerPool, type Worker
 import { formatRecordList, listRecords } from "./records.js";
 import { orcheTaskRenderers } from "./render.js";
 import { partialUpdate } from "./progress.js";
+import { formatSplitSummary, readSplitLog, summarizeSplits } from "../orchestrator/split-log.js";
 import { defaultRunLimits } from "../orchestration/limits.js";
 import { formatDuration } from "../agent/liveness.js";
 import { LEDGER_ENTRY_TYPE, LEDGER_SUMMARY_TYPE, latestLedgers, type TaskLedger } from "../single/ledger.js";
@@ -56,12 +57,13 @@ function timeBudget(): string {
 /** How long a one-turn override waits for the session to start the turn it just queued before giving up. */
 const SINGLE_START_TIMEOUT_MS = 10_000;
 
-export const ORCHE_USAGE = "Usage: /orche single|direct <PROMPT> | /orche mode [single|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche cancel";
+export const ORCHE_USAGE = "Usage: /orche single|direct <PROMPT> | /orche mode [single|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche splits [DAYS] | /orche cancel";
 export type OrcheCommand =
   | { mode: "single" | "direct"; prompt: string }
   | { mode: "cancel" }
   | { mode: "workers" }
   | { mode: "records" }
+  | { mode: "splits"; days?: number }
   | { mode: "stop"; worker: string }
   | { mode: "mode"; value?: MainMode };
 /** Strict command grammar: extra tokens on control commands never start work. */
@@ -69,6 +71,8 @@ export function parseOrcheCommand(args: string): OrcheCommand | undefined {
   if (/^\s*cancel\s*$/.test(args)) return { mode: "cancel" };
   if (/^\s*workers\s*$/.test(args)) return { mode: "workers" };
   if (/^\s*records\s*$/.test(args)) return { mode: "records" };
+  const splits = /^\s*splits(?:\s+(\d+))?\s*$/.exec(args);
+  if (splits) return splits[1] !== undefined ? (Number(splits[1]) > 0 ? { mode: "splits", days: Number(splits[1]) } : undefined) : { mode: "splits" };
   const stop = /^\s*stop\s+(\S+)\s*$/.exec(args);
   if (stop?.[1]) return { mode: "stop", worker: stop[1] };
   const switchMode = /^\s*mode(?:\s+(\S+))?\s*$/.exec(args);
@@ -195,7 +199,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
 
     // (2) Delegation, one-turn overrides and worker/session controls.
     pi.registerCommand("orche", {
-      description: "/orche single <prompt>: delegate to one worker for one turn. /orche direct <prompt>: edit directly for one turn. /orche mode [single|direct]: show/set delegation. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche cancel: stop the active task.",
+      description: "/orche single <prompt>: delegate to one worker for one turn. /orche direct <prompt>: edit directly for one turn. /orche mode [single|direct]: show/set delegation. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche splits [days]: the orchestrator's split decisions over all sessions (split rate, criteria, cost and time), optionally of the last N days. /orche cancel: stop the active task.",
       handler: async (args, ctx: ExtensionCommandContext) => {
         const parsed = parseOrcheCommand(args);
         if (!parsed) {
@@ -225,6 +229,17 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           const sessionId = ctx.sessionManager.getSessionId() || undefined;
           const list = await listRecords(resolved, { ...(sessionId ? { parentSessionId: sessionId } : {}), limit: 10 });
           ctx.ui.notify(list.length ? `orche records (${resolved.root}):\n${formatRecordList(list)}` : formatRecordList(list), "info");
+          return;
+        }
+        if (parsed.mode === "splits") {
+          // The split log of every session (it outlives the 30-day records): split rate, criteria, cost and time by decision.
+          const resolved = await controller.recordsFor({ cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted(), ...(ctx.model ? { model: ctx.model } : {}), thinking: ctx.thinkingLevel ?? pi.getThinkingLevel() });
+          if (!resolved.enabled) {
+            ctx.ui.notify(`orche records are off, so there is no split log: ${resolved.reason}`, "info");
+            return;
+          }
+          const since = parsed.days !== undefined ? Date.now() - parsed.days * 86_400_000 : undefined;
+          ctx.ui.notify(formatSplitSummary(summarizeSplits(await readSplitLog(resolved.root), since), resolved.root), "info");
           return;
         }
         if (parsed.mode === "stop") {

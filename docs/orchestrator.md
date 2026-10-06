@@ -556,3 +556,18 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
   - 영상·이미지 산출물은 도구 호출이 아니라 산출물 파일 확장자로 isolation을 판정한다.
 
 **R21**: 10.5대로 실행하지 않았다(parallelism 라벨 0건, 당시 저장소 재현 근거 없음).
+
+## 11. 실사용 분할 판단 관찰 (split log)
+
+- **기록**: orche_task assignment가 끝날 때마다(성공·실패·취소) records 루트(기본 `~/.pi/agent/orche/records`)의 `split-log.jsonl`에 한 줄을 남긴다(`src/orchestrator/split-log.ts`, 호출 위치는 `src/extension/workers.ts`의 `finishRecord`).
+  - 남기는 항목: 시각, 역할, orchestrator 여부, 판단(`split`/`none`, 사유 유형, 보고 여부), sub-worker 수, 요청 수(자기 것과 sub-worker 것), 시간, provider가 보고한 비용, 상태, 모델, record 경로.
+  - 요청 원문과 요약은 넣지 않는다.
+  - records가 켜져 있으면(기본) 자동으로 쌓인다.
+  - records 정리(30일)는 run 디렉터리만 지우므로 이 파일은 남는다.
+- **상한**: 파일이 2MB를 넘으면 `split-log.1.jsonl`로 한 번 돌리고(이전 것은 덮어씀) 새 파일을 시작한다. 읽을 때는 두 파일을 합친다. 대략 assignment 2만 건 분량이다.
+- **보기**: `/orche splits [일수]`는 전체 세션을 대상으로 다음을 보여 준다.
+  - 분할률(orchestrator assignment 중 split 비율)
+  - 판단을 보고하지 않은 수
+  - 사유 분포
+  - split과 none 각각의 건수, 성공 수, 시간·비용 중앙값, 비용 합계, 평균 sub-worker 수
+- **재평가에 쓸 때**: 한 줄의 `record` 경로로 run.json(인계문, `outcome.split`, `spawned`)과 transcript를 찾을 수 있다. 다만 그것들은 30일 뒤 사라진다. 오래 볼 사례는 그 전에 보관한다.
