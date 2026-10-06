@@ -1,0 +1,246 @@
+{
+ "runs": [
+  "2026-10-06T12-26-13-025Z-real-gpt-6.1-sol",
+  "2026-10-06T12-26-13-033Z-real-claude-opus-5-5"
+ ],
+ "mainModel": "cliproxyapi/claude-opus-5-5",
+ "table": [
+  {
+   "model": "cliproxyapi/claude-opus-5-5",
+   "variant": "checklist",
+   "calls": 154,
+   "reps": 2,
+   "parseFailures": 0,
+   "accuracy": 0.9545454545454546,
+   "falseSplit": 0.02,
+   "unnecessaryParallel": 0,
+   "missedParallel": 0,
+   "falseIsolation": 0.012987012987012988,
+   "missedIsolation": 0,
+   "falseVerification": 0.006666666666666667,
+   "missedVerification": 1,
+   "unitCompatible": null,
+   "unitExact": null,
+   "unitCases": 0,
+   "consistency": 0.987012987012987,
+   "costUSD": 2.350089999999999,
+   "outputTokens": 40428,
+   "promptChars": 1878,
+   "errors": [
+    "r0025#1:none->verification",
+    "r0057#1:verification->none",
+    "r0992#1:none->isolation",
+    "r1178#1:verification->none",
+    "r0057#2:verification->none",
+    "r0992#2:none->isolation",
+    "r1178#2:verification->none"
+   ]
+  },
+  {
+   "model": "cliproxyapi/claude-opus-5-5",
+   "variant": "fewshot",
+   "calls": 154,
+   "reps": 2,
+   "parseFailures": 1,
+   "accuracy": 0.935064935064935,
+   "falseSplit": 0.04666666666666667,
+   "unnecessaryParallel": 0.032467532467532464,
+   "missedParallel": 0,
+   "falseIsolation": 0.006493506493506494,
+   "missedIsolation": 0,
+   "falseVerification": 0.013333333333333334,
+   "missedVerification": 0.5,
+   "unitCompatible": null,
+   "unitExact": null,
+   "unitCases": 0,
+   "consistency": 0.987012987012987,
+   "costUSD": 2.37566,
+   "outputTokens": 43365,
+   "promptChars": 1480,
+   "errors": [
+    "r0047#1:none->verification",
+    "r0766#1:none->parallelism",
+    "r0992#1:none->isolation+parallelism",
+    "r1064#1:none->parallelism",
+    "r1178#1:verification->none",
+    "r0047#2:none->verification",
+    "r0766#2:none->parallelism",
+    "r0992#2:none->parse-failure",
+    "r1064#2:none->parallelism",
+    "r1178#2:verification->none"
+   ]
+  },
+  {
+   "model": "cliproxyapi/claude-opus-5-5",
+   "variant": "checklist-sized",
+   "calls": 154,
+   "reps": 2,
+   "parseFailures": 0,
+   "accuracy": 0.948051948051948,
+   "falseSplit": 0.02666666666666667,
+   "unnecessaryParallel": 0,
+   "missedParallel": 0,
+   "falseIsolation": 0.012987012987012988,
+   "missedIsolation": 0,
+   "falseVerification": 0.013333333333333334,
+   "missedVerification": 1,
+   "unitCompatible": null,
+   "unitExact": null,
+   "unitCases": 0,
+   "consistency": 1,
+   "costUSD": 2.1900513999999993,
+   "outputTokens": 40912,
+   "promptChars": 2216,
+   "errors": [
+    "r0025#1:none->verification",
+    "r0057#1:verification->none",
+    "r0992#1:none->isolation",
+    "r1178#1:verification->none",
+    "r0025#2:none->verification",
+    "r0057#2:verification->none",
+    "r0992#2:none->isolation",
+    "r1178#2:verification->none"
+   ]
+  },
+  {
+   "model": "cliproxyapi/gpt-6.1-sol",
+   "variant": "checklist",
+   "calls": 154,
+   "reps": 2,
+   "parseFailures": 0,
+   "accuracy": 0.948051948051948,
+   "falseSplit": 0.02666666666666667,
+   "unnecessaryParallel": 0,
+   "missedParallel": 0,
+   "falseIsolation": 0.012987012987012988,
+   "missedIsolation": 0,
+   "falseVerification": 0.013333333333333334,
+   "missedVerification": 1,
+   "unitCompatible": null,
+   "unitExact": null,
+   "unitCases": 0,
+   "consistency": 1,
+   "costUSD": 0.7837615999999996,
+   "outputTokens": 20528,
+   "promptChars": 1878,
+   "errors": [
+    "r0057#1:verification->none",
+    "r0025#1:none->verification",
+    "r0992#1:none->isolation",
+    "r1178#1:verification->none",
+    "r0057#2:verification->none",
+    "r0025#2:none->verification",
+    "r0992#2:none->isolation",
+    "r1178#2:verification->none"
+   ]
+  },
+  {
+   "model": "cliproxyapi/gpt-6.1-sol",
+   "variant": "fewshot",
+   "calls": 154,
+   "reps": 2,
+   "parseFailures": 1,
+   "accuracy": 0.948051948051948,
+   "falseSplit": 0.04666666666666667,
+   "unnecessaryParallel": 0.01948051948051948,
+   "missedParallel": 0,
+   "falseIsolation": 0.006493506493506494,
+   "missedIsolation": 0,
+   "falseVerification": 0.02,
+   "missedVerification": 0,
+   "unitCompatible": null,
+   "unitExact": null,
+   "unitCases": 0,
+   "consistency": 0.961038961038961,
+   "costUSD": 0.7868500000000003,
+   "outputTokens": 22547,
+   "promptChars": 1480,
+   "errors": [
+    "r0047#1:none->verification",
+    "r1064#1:none->parallelism",
+    "r0992#1:none->isolation",
+    "r1359#1:none->verification",
+    "r0047#2:none->verification",
+    "r0663#2:none->parse-failure",
+    "r1064#2:none->parallelism",
+    "r0992#2:none->parallelism"
+   ]
+  },
+  {
+   "model": "cliproxyapi/gpt-6.1-sol",
+   "variant": "checklist-sized",
+   "calls": 154,
+   "reps": 2,
+   "parseFailures": 0,
+   "accuracy": 0.961038961038961,
+   "falseSplit": 0.013333333333333334,
+   "unnecessaryParallel": 0,
+   "missedParallel": 0,
+   "falseIsolation": 0.012987012987012988,
+   "missedIsolation": 0,
+   "falseVerification": 0,
+   "missedVerification": 1,
+   "unitCompatible": null,
+   "unitExact": null,
+   "unitCases": 0,
+   "consistency": 1,
+   "costUSD": 0.7993984000000003,
+   "outputTokens": 19806,
+   "promptChars": 2216,
+   "errors": [
+    "r0057#1:verification->none",
+    "r0992#1:none->isolation",
+    "r1178#1:verification->none",
+    "r0057#2:verification->none",
+    "r0992#2:none->isolation",
+    "r1178#2:verification->none"
+   ]
+  }
+ ],
+ "selection": {
+  "winner": "checklist",
+  "eligible": [
+   "checklist",
+   "fewshot",
+   "checklist-sized"
+  ],
+  "reason": "best accuracy 0.955; within one item: checklist, checklist-sized"
+ },
+ "causes": {
+  "cliproxyapi/claude-opus-5-5 checklist": {
+   "false verification (small)": 1,
+   "missed verification": 4,
+   "false isolation (several-modules)": 2
+  },
+  "cliproxyapi/claude-opus-5-5 fewshot": {
+   "false verification (several-modules)": 2,
+   "false parallelism (one-module)": 2,
+   "false parallelism (several-modules) + false isolation (several-modules)": 1,
+   "false parallelism (small)": 2,
+   "missed verification": 2,
+   "parse failure": 1
+  },
+  "cliproxyapi/claude-opus-5-5 checklist-sized": {
+   "false verification (small)": 2,
+   "missed verification": 4,
+   "false isolation (several-modules)": 2
+  },
+  "cliproxyapi/gpt-6.1-sol checklist": {
+   "missed verification": 4,
+   "false verification (small)": 2,
+   "false isolation (several-modules)": 2
+  },
+  "cliproxyapi/gpt-6.1-sol fewshot": {
+   "false verification (several-modules)": 2,
+   "false parallelism (small)": 2,
+   "false isolation (several-modules)": 1,
+   "false verification (one-module)": 1,
+   "parse failure": 1,
+   "false parallelism (several-modules)": 1
+  },
+  "cliproxyapi/gpt-6.1-sol checklist-sized": {
+   "missed verification": 4,
+   "false isolation (several-modules)": 2
+  }
+ }
+}
