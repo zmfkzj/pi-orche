@@ -1,5 +1,7 @@
 # Workflow Policy: Work Type → Policy → Capability → Primary
 
+> **역사 기록** — 2026-10-06 기준 제거됨: investigation critic, creation divergence, orche_task type/candidates/then. 현재 구조: [docs/orchestrator.md](orchestrator.md). 아래 본문은 당시 기록 그대로다.
+
 > **상태 (2026-10-05): 구현 완료, 모두 opt-in(기본 꺼짐). 오프라인 회귀 검사(G-E0)는 통과했고, 비용이 드는 비교 실험(G-E1·G-I2·G-C2)은 사전 등록만 했다(아직 실행하지 않음, 4장).**
 >
 > 목적은 "구상이 옳다"를 증명하는 게 아니다. 가설을 **틀리면 싸게 버릴 수 있는 형태로** 검증하는 것이다. 기본값은 측정 결과로만 바꾼다(지금까지 multi와 v2를 다룬 방식 그대로).

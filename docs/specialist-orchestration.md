@@ -1,5 +1,7 @@
 # 새 single 설계: 작업 유형 · topology · 컨텍스트 보존
 
+> **역사 기록** — 2026-10-06 기준 제거/대체됨: single pipeline v2(Framer, Verifier), multi coordinator. 현재 구조: [docs/orchestrator.md](orchestrator.md). 아래 본문은 당시 기록 그대로다.
+
 > **상태 (2026-10-05): Phase 1·2 완료. Phase 3(v2)은 opt-in으로 구현했고 G-X 1단계는 불합격(10.5). 그 분석에서 나온 `mainReview: "report"`(main이 결과를 다시 확인하지 않음)는 G-M·G-M2를 통과해 single 기본값이 되었다(10.6–10.7). 다음 할 일은 11.1에 있다.** 처음 기준은 HEAD `68f3624`였다(auto/multi 모드와 orche_run을 Pi 패키지에서 제거, multi 엔진은 라이브러리로만 유지). 진행 상황은 11장에 있다.
 >
 > **범위**

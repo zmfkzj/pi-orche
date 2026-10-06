@@ -1,5 +1,7 @@
 # Coordinator-planned DAG 실행 설계
 
+> **역사 기록** — 2026-10-06 기준 제거/대체됨: DAG 스케줄러 계획(Gate A NO-GO), multi coordinator. 현재 구조: [docs/orchestrator.md](orchestrator.md). 아래 본문은 당시 기록 그대로다.
+
 > **상태 (2026-10-04): Gate A NO-GO — 구현 보류.** parallel3(병렬 과제 3개 × 3회)에서 multi는 9/9 통과, 9/9 실행에서 구현 워커가 실제로 병렬(동시성 중앙값 1.68)이었고 coordinator 요청 비중은 6%였다. 그러나 single보다 9.5%만 빨랐고(기준 ≥20%), direct보다 17% 느렸으며, 비용은 direct의 2.9배(기준 ≤2배)였다. coordinator 왕복이 이미 작아 DAG로 줄일 몫이 거의 없다. 이 문서는 참고용으로 보관하며, 한 컨텍스트에 들어가지 않는 대형 코드베이스에서만 재검토한다. 근거: `results/compare/parallel3-2026-10-03/report.md` (로컬 전용).
 
 > 결론: coordinator가 실행·검증·수정 경로를 한 번 계획하고, 코드 runtime이 구조화된 edge handoff로 실행한다.

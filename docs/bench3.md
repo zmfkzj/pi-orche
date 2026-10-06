@@ -1,5 +1,7 @@
 # Three-system benchmark — 2026-10-02
 
+> **역사 기록** — 2026-10-06 기준 제거/대체됨: 비교 대상이던 multi coordinator와 src/eval 러너. 현재 구조: [docs/orchestrator.md](orchestrator.md). 아래 본문은 당시 기록 그대로다.
+
 **Status: full run launched; final results pending.** This extends the in-repo harness only: 28 tasks × 3 systems × 3 repeats = **252 executions**, global job concurrency 4. [Live/partial report](../results/compare/bench3-2026-10-02/summary.md), [JSON](../results/compare/bench3-2026-10-02/summary.json), [launch record](../results/compare/bench3-2026-10-02/launch.json).
 
 **Backend parity is achieved in the corrected pilot, including Pi's real main session:** all 314 captured solver requests used `https://chatgpt.com/backend-api/codex/responses`, `gpt-6.1-sol`, reasoning `high`. Unlike [the previous comparison](comparison.md), no Pi-versus-OMP API-host gap remains. This is observed request parity, not a claim about undisclosed server-side model versions.

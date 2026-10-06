@@ -1,5 +1,7 @@
 # omp + om-orche vs pi + pi-orche: final comparison
 
+> **역사 기록** — 2026-10-06 기준 제거/대체됨: multi coordinator와 src/eval 비교 러너. 현재 구조: [docs/orchestrator.md](orchestrator.md). 아래 본문은 당시 기록 그대로다.
+
 ## Scope and method
 
 Twenty diverse task instructions were executed once per system in fresh, visible-only workspaces on 2026-09-30 (40 original executions), plus one post-fix Pi rerun of a3-refactor-tax. No additional solver calls were made to finish this report. The suite uses three zero-dependency Node ESM JavaScript repositories: checkout/cart/auth (a), HTTP/router/static files (b), and log-processing CLI (c). “Language” below means **instruction language**, not programming language: 16 English and 4 Korean instructions. Categories are analysis, bugfix, docs, feature, migration, performance, refactor, review, robustness, tests, and trivial. Fixtures and reference overlays live in [fixtures/suite](../fixtures/suite).

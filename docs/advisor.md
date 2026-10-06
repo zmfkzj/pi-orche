@@ -1,5 +1,7 @@
 # Advisor
 
+> **역사 기록** — 2026-10-06 기준 제거됨: advisors(src/advisor)와 coordinator. 현재 구조: [docs/orchestrator.md](orchestrator.md). 아래 본문은 당시 기록 그대로다.
+
 A configurable, multi-advisor review layer. It merges what OMP does with its `orche-advisor` (plan review) and `verification-auditor` (claims vs evidence) into one mechanism: any number of advisors, each with its own trigger, period, advice domains and recipients. The two OMP roles are shipped as presets.
 
 Advisors are advisory only. They never redirect, stop, gate or cancel a tool; the coordinator decides what to do with a NOTE. Everything is off unless an enabled advisor is configured, in which case behaviour (and request counts) are exactly the same as before.

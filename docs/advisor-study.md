@@ -1,5 +1,7 @@
 # Advisor study: advisors ON vs OFF, and cheap vs high-end audit model
 
+> **역사 기록** — 2026-10-06 기준 제거됨: advisors(src/advisor)와 src/eval 러너. 현재 구조: [docs/orchestrator.md](orchestrator.md). 아래 본문은 당시 기록 그대로다.
+
 This descriptive experiment measures the effect of the [advisor layer](advisor.md) on result quality and cost, with the Pi default prompt held constant. The first 32 cells compare advisors OFF (A0) with the proposed high-end configuration (A1): A0 task pass 15/16, A1 16/16, advisor review added 126.1 s to mean wall time overall. A third arm A2 (16 cells, added afterwards) keeps `verification-audit` on the cheap route of the user's production config (`cliproxyapi/gpt-6-luna` / `low`) so A1 vs A2 isolates the audit model; see [A1 vs A2](#a1-vs-a2-high-end-vs-cheap-verification-audit-model). Runtime-version and source-drift caveats prevent a clean causal interpretation; see Results and the chunk appendix below.
 
 ## Method

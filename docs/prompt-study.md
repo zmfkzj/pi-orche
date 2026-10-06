@@ -1,5 +1,7 @@
 # Prompt study: does an OMP-style system prompt change pi-orche task success?
 
+> **역사 기록** — 2026-10-06 기준 제거/대체됨: 연구 대상이던 coordinator 프롬프트. 현재 구조: [docs/orchestrator.md](orchestrator.md). 아래 본문은 당시 기록 그대로다.
+
 This is a descriptive experiment, not a verdict. It measures pi-orche with three different **base system prompts** on a fixed subset of the 20-task suite and reports task success, finer pass fractions, and cost. No other part of the harness changes between arms.
 
 ## Arms

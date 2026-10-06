@@ -1,5 +1,7 @@
 # Problem A evaluation
 
+> **역사 기록** — 2026-10-06 기준 제거/대체됨: src/eval 벤치마크 러너(suite.ts만 남음). 현재 구조: [docs/orchestrator.md](orchestrator.md). 아래 본문은 당시 기록 그대로다.
+
 **Latest benchmarked-revision headline — R3 only:** orchestration completed and passed both grade suites in **3/3** trials; baseline completed and graded successfully in **1/3** (its workspaces passed hidden grading in 2/3). Mean recorded wall time was **142.254 s versus 165.104 s**, but two baseline failures make that aggregate an imperfect speed comparison. The one pair where both runners completed and graded successfully was **5.42% faster** orchestrated (148.716 s versus 157.234 s). Criterion 9 is met narrowly/descriptively by this latency observation on the provided live SDK task, **not** by an established significance claim or a demonstrated monetary-cost win.
 
 ## Post-R3 code changes (unbenchmarked)

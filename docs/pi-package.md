@@ -17,13 +17,14 @@
 The command grammar is strict. `single` and `direct` need a non-empty prompt; `mode` takes no argument or one of `single|direct`; `workers` and `cancel` take nothing after them; `stop` needs one worker id or `all`. Anything else (a bare `/orche <PROMPT>`, `/orche`, `/orche single`, `/orche stop`, `/orche mode turbo`, `/orche cancel now`) shows this usage and starts nothing:
 
 ```text
-Usage: /orche single|multi|direct <PROMPT> | /orche mode [auto|single|multi|direct] | /orche workers | /orche stop <id>|all | /orche cancel
+Usage: /orche single|direct <PROMPT> | /orche mode [single|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche splits [DAYS] | /orche cancel
 ```
 
 - **`/orche single <PROMPT>`**: hands the prompt to the **current Pi session as a normal user turn** (`pi.sendUserMessage`), with its model, thinking level and conversation, under a **one-turn override to `single`**: direct write tools off, `orche_task` on. The main chooses the worker role and supervises the result; this is not a direct-edit turn. After the turn settles the session mode's tool set returns. While busy, the prompt is queued as a follow-up only in session mode `single`; it keeps the session mode, not a one-turn override. In `multi` or `direct` it is refused: `orche single: refused. The agent is busy and this session is in mode <session mode>, where a queued turn could not delegate to one worker. Wait for the current turn, or switch with /orche mode single.`
 - **`/orche direct <PROMPT>`**: the former `/orche single` behaviour. It starts the current session's turn with a **one-turn override to `direct`** (direct edits allowed, both delegation tools off); no orchestrator or worker is started by the command. The session mode's tool set returns when the turn settles, is aborted or fails. While busy it queues a follow-up only when the session mode is already `direct`; otherwise it is refused: `orche direct: refused. The agent is busy and this session is in mode <session mode>, where a queued turn could not edit files. Wait for the current turn, or switch with /orche mode direct.` Compatible busy commands notify `orche single: the agent is busy; the prompt is queued as a follow-up turn.` or `orche direct: the agent is busy; the prompt is queued as a follow-up turn.` They never apply an override to someone else's turn or run the queued prompt concurrently.
-- **`/orche mode [auto|single|multi|direct]`**: without an argument prints the current session mode and where it comes from (`config <path>`, `set with /orche mode in this session`, or `default`). With one it switches the session's mode at once (tool set, status line) and records the choice with `pi.appendEntry`, so it survives `/reload` and resuming the session.
+- **`/orche mode [single|direct]`** (`auto`/`multi` are read as `single` with a warning): without an argument prints the current session mode and where it comes from (`config <path>`, `set with /orche mode in this session`, or `default`). With one it switches the session's mode at once (tool set, status line) and records the choice with `pi.appendEntry`, so it survives `/reload` and resuming the session.
 - **`/orche workers`**: shows one line per live worker, for example `W1 idle · implement · 2 assignments · last: … · idle 3m`, or `no workers`. The line contains status, latest role, completed assignment count, the first 80 characters of the last summary (or `no result yet`) and whole idle minutes.
+- **`/orche splits [DAYS]`**: the split log of every session (`docs/orchestrator.md` 11), optionally of the last DAYS days: assignments, orchestrator assignments, split rate, assignments without a reported decision, the criteria, and per decision the count, successes, median time and cost, total cost and mean sub-workers.
 - **`/orche stop W1` / `/orche stop all`**: stops and disposes the named worker or all live workers, with `Disposed workers: W1` (or a comma-separated list). An unknown id reports `unknown worker <id>`; an empty pool with `all` reports `no workers`. `/orche stop` without an id prints the usage.
 - **`/orche cancel`**: cancels the active `orche_task` assignment. The tool call ends with the error `cancelled by user`; the worker returns to idle and stays reusable rather than being disposed. The notice is `orche task cancelled` after cancellation completes, or `no active orche task` when nothing is active. To abort the main session's ordinary turn, including a one-turn override, use Pi's own Esc; an active delegation tool receives its abort signal.
 
@@ -135,7 +136,7 @@ The final Vitest report/provider probes used `--no-cache` and a physical tempora
 
 ## 4. `orche_run` tool (removed)
 
-The `orche_run` tool and `/orche multi` were removed from the Pi package; see the note at the top. Use `orche_task` (mode `single`) for delegation, or the CLI/`runOrchestrated` for the multi-agent engine.
+The `orche_run` tool and `/orche multi` were removed from the Pi package; see the note at the top. Use `orche_task` (mode `single`) for delegation. The multi-agent engine itself (coordinator, advisors, CLI, `runOrchestrated`) was removed in 0.2.0.
 
 ## 5. `orche_task` and the worker pool
 
@@ -229,15 +230,15 @@ The explicit artifact defaults are directories `coverage/`, `.nyc_output/`, `.py
 
 Config discovery, first match wins:
 
-1. `<cwd>/.pi/orche.config.json`, only if Pi trusts the project (a project file can choose models and enable advisors, so an untrusted project cannot). An untrusted project file is reported as ignored in multi-run result details.
+1. `<cwd>/.pi/orche.config.json`, only if Pi trusts the project (a project file can choose models, so an untrusted project cannot). An untrusted project file is reported as ignored in multi-run result details.
 2. `~/.pi/agent/orche.config.json` (`PI_CODING_AGENT_DIR` is honored).
 3. Otherwise every orche role uses the session's current model and thinking level.
 
-The file has the same format as the repository's `orche.config.json` (`routes`, `default`, optional `advisors`, `providerExtensions`, `extendedContext`, `verifyCommands`, `workers`, `mainMode` and `limits`; see [advisor.md](advisor.md)). `verifyCommands` is a list of 1–8 shell commands the verifier must run (for example `["npm test", "npm run lint"]`); without it the verifier discovers the project's own checks. An existing file that fails validation is an error; there is no silent fallback.
+The file has the same format as the repository's `orche.config.json` (`routes`, `default`, optional `providerExtensions`, `extendedContext`, `verifyCommands`, `workers`, `mainMode` and `limits`; see [advisor.md](advisor.md)). `verifyCommands` is a list of 1–8 shell commands the verifier must run (for example `["npm test", "npm run lint"]`); without it the verifier discovers the project's own checks. An existing file that fails validation is an error; there is no silent fallback.
 
 ### Run limits (`limits`)
 
-Library runs (`runOrchestrated` via the controller or CLI) use the discovered file's limits, passed through `routes` to the common run resolver; there is no separate fixed tool timeout. `orche_task` uses that same resolver's assignment wait and soft request budget, as described in §5. Add this top-level field to that file:
+`orche_task` uses the discovered file's limits through the common run resolver: its assignment wait and soft request budget, as described in §5. Add this top-level field to that file:
 
 ```json
 "limits": { "overallMs": 3600000 }
@@ -270,7 +271,6 @@ Consequences:
 - All extension files the package declares are loaded into that hidden session (package granularity), so its own hooks/commands exist there but not in your session.
 - Providers registered by an extension you did **not** list, and credentials that live only in memory, are not visible to orche runs.
 - If a route names a model that does not resolve, the run fails with `Unknown model: <provider>/<id>`. If no orche config exists and the session's current model cannot be resolved (rule 3), the run fails with a message naming `.pi/orche.config.json` and `providerExtensions`.
-- Library run result details include `models`: model requests per actor (`coordinator`, `A1`, `V1`, `advisor:<name>`), so you can check which model served which role.
 
 ### Extended context (`extendedContext`)
 
@@ -280,7 +280,7 @@ The catalog advertises a 272K context window for `gpt-6.1-sol` and `gpt-6-astra`
 {
   "extendedContext": true,
   "default": { "model": "cliproxyapi/gpt-6.1-sol", "extendedContext": true },
-  "routes": { "coordinator": { "model": "cliproxyapi/gpt-6-astra", "extendedContext": true },
+  "routes": { "implement": { "model": "cliproxyapi/gpt-6-astra", "extendedContext": true },
               "verifier": { "model": "cliproxyapi/claude-sonnet-5-5", "extendedContext": false } }
 }
 ```
@@ -288,7 +288,7 @@ The catalog advertises a 272K context window for `gpt-6.1-sol` and `gpt-6-astra`
 - `extendedContext` is a boolean at the top level (default for all routes) and per route/`default` (the route's own value wins; an unlisted role takes `default`'s value, then the top-level value; otherwise off).
 - When on, the session's model is a **copy of the catalog model with `contextWindow` raised to a curated per-model maximum** (a table in `src/pi/extended-context.ts`: `gpt-6.1-sol` and `gpt-6-astra` → 922,000). Nothing is sent to the provider differently (there is no request field for it, in omp either); only Pi's local limits change, and the window is never lowered.
 - **Models without a table entry are unchanged**: `gpt-6-luna`, `gpt-6-sol` and all Claude models keep their advertised window, even with `extendedContext: true`. The table is explicit on purpose; a wrong guess would turn into overflow errors.
-- Applies to every orche session on a matching route: coordinator, workers (implementers, explorers, analysts, verifier) and advisors.
+- Applies to every orche session on a matching route: `orche_task` workers and their sub-workers.
 - The effective window is recorded as a `context_window` event per actor (`{actor, model, contextWindow, advertisedContextWindow, extended}`) and in library run result details as `contextWindows`.
 - Cost: only requests whose input exceeds 272K tokens are affected, and they are billed at the 2x tier.
 
