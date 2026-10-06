@@ -38,6 +38,8 @@ export interface AgentRecordEntry {
   /** Configured route model (`provider/model`) and thinking level. */
   model: string;
   thinking?: string;
+  /** Sub-workers: where `model` came from (`models.worker` config, the orchestrator's model, or a specialist's route). */
+  modelSource?: "config" | "orchestrator" | "route";
   /** Model requests over the agent's whole life (every assignment; the request that was cut off by an abort counts). */
   requests: number;
   /** Models that actually answered, `provider/model` → requests (can differ from the configured route). */

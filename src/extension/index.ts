@@ -15,6 +15,8 @@ import { formatRecordList, listRecords } from "./records.js";
 import { orcheTaskRenderers } from "./render.js";
 import { partialUpdate } from "./progress.js";
 import { formatSplitSummary, readSplitLog, summarizeSplits } from "../orchestrator/split-log.js";
+import { applyMainModel, formatModelTiers, type ModelTiersView } from "./main-model.js";
+import type { ModelTiers } from "../orchestration/routing.js";
 import { defaultRunLimits } from "../orchestration/limits.js";
 import { formatDuration } from "../agent/liveness.js";
 import { LEDGER_ENTRY_TYPE, LEDGER_SUMMARY_TYPE, latestLedgers, type TaskLedger } from "../single/ledger.js";
@@ -28,13 +30,18 @@ const ACTIVATE_BUILTINS = ["grep", "find", "ls"];
  * extension-only keys (`concurrentSessions`, `records`) that the plain route parser behind `discoverMainMode` (mode.ts) rejects as unknown, which
  * made a config with `records` look invalid at session start and drop its `mainMode`.
  */
-async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup & { contextWarning?: ContextWarningSettings; spawn?: boolean; warnings?: string[] }> {
+async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup & { contextWarning?: ContextWarningSettings; spawn?: boolean; warnings?: string[]; models?: ModelTiers }> {
   const candidates = [...(options.projectTrusted ? [join(options.cwd, ".pi", CONFIG_FILE)] : []), join(options.agentDir, CONFIG_FILE)];
   for (const path of candidates) {
     try { await access(path); } catch { continue; }
     try {
       const { routes, contextWarning, single, warnings } = await loadOrcheConfigFile(path);
-      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), ...(routes.legacyMainMode ? { legacyMode: routes.legacyMainMode } : {}), path, contextWarning, spawn: single.spawn, ...(warnings.length ? { warnings } : {}) };
+      // The tiers with the top-level extendedContext filled in where a tier leaves it out, as routes resolve it (routing.ts).
+      const models = routes.models ? Object.fromEntries(Object.entries(routes.models).map(([tier, route]) => {
+        const extendedContext = route.extendedContext ?? routes.extendedContext;
+        return [tier, { ...route, ...(extendedContext !== undefined ? { extendedContext } : {}) }];
+      })) as ModelTiers : undefined;
+      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), ...(routes.legacyMainMode ? { legacyMode: routes.legacyMainMode } : {}), path, contextWarning, spawn: single.spawn, ...(warnings.length ? { warnings } : {}), ...(models ? { models } : {}) };
     } catch (error) {
       return { path, error: error instanceof Error ? error.message : String(error) };
     }
@@ -57,13 +64,14 @@ function timeBudget(): string {
 /** How long a one-turn override waits for the session to start the turn it just queued before giving up. */
 const SINGLE_START_TIMEOUT_MS = 10_000;
 
-export const ORCHE_USAGE = "Usage: /orche single|direct <PROMPT> | /orche mode [single|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche splits [DAYS] | /orche cancel";
+export const ORCHE_USAGE = "Usage: /orche single|direct <PROMPT> | /orche mode [single|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche splits [DAYS] | /orche models | /orche cancel";
 export type OrcheCommand =
   | { mode: "single" | "direct"; prompt: string }
   | { mode: "cancel" }
   | { mode: "workers" }
   | { mode: "records" }
   | { mode: "splits"; days?: number }
+  | { mode: "models" }
   | { mode: "stop"; worker: string }
   | { mode: "mode"; value?: MainMode };
 /** Strict command grammar: extra tokens on control commands never start work. */
@@ -71,6 +79,7 @@ export function parseOrcheCommand(args: string): OrcheCommand | undefined {
   if (/^\s*cancel\s*$/.test(args)) return { mode: "cancel" };
   if (/^\s*workers\s*$/.test(args)) return { mode: "workers" };
   if (/^\s*records\s*$/.test(args)) return { mode: "records" };
+  if (/^\s*models\s*$/.test(args)) return { mode: "models" };
   const splits = /^\s*splits(?:\s+(\d+))?\s*$/.exec(args);
   if (splits) return splits[1] !== undefined ? (Number(splits[1]) > 0 ? { mode: "splits", days: Number(splits[1]) } : undefined) : { mode: "splits" };
   const stop = /^\s*stop\s+(\S+)\s*$/.exec(args);
@@ -123,6 +132,10 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     let warningState: ContextWarningState = { warnedLevel: 0 };
     /** `single.spawn` of the config file read at session start: whether the single worker is an orchestrator (orche_spawn). */
     let spawn: boolean = DEFAULT_SINGLE.spawn;
+    /** `models.main` at the last session start: what the config set and what was applied (for /orche models). */
+    let mainModel: ModelTiersView["atStart"] = {};
+    /** `models.orchestrator` is set (main's hand-off rules then say so instead of "inherit main's model"). */
+    let orchestratorModel = false;
     const showMode = (ctx: Pick<ExtensionContext, "ui">) =>
       ctx.ui.setStatus("orche-mode", `orche: ${state.session}${state.overriding ? ` (one-turn ${state.effective})` : ""}`);
 
@@ -147,7 +160,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.on("tool_result", (event, ctx) => spillToolResult(
       event, ctx.cwd, process.env.PI_ORCHE_TOOL_EVENTS ? ctx.sessionManager.getSessionId() : undefined,
     ));
-    pi.on("session_start", async (_event, ctx) => {
+    pi.on("session_start", async (event, ctx) => {
       const active = pi.getActiveTools();
       // An explicit `--tools` / defaultTools selection that leaves out our tools is the user's choice: keep it.
       if (ours.every(name => active.includes(name))) {
@@ -160,8 +173,13 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       warningSettings = found.contextWarning ?? { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
       warningState = { warnedLevel: 0 };
       spawn = found.spawn ?? DEFAULT_SINGLE.spawn;
+      orchestratorModel = !!found.models?.orchestrator;
       // Removed settings (e.g. single.pipeline, single.mainReview) are ignored: the file still loads; say so once per session start.
       for (const warning of found.warnings ?? []) ctx.ui.notify(warning, "warning");
+      // models.main: the Pi session's model and thinking, once at a fresh session start; the user's own choices are kept.
+      const main = await applyMainModel(pi, ctx, event.reason, found.models?.main);
+      mainModel = { ...(found.models?.main ? { configured: found.models.main } : {}), ...(main.applied ? { applied: main.applied } : {}), ...(main.skipped ? { skipped: main.skipped } : {}) };
+      for (const warning of main.warnings) ctx.ui.notify(warning, "warning");
       state.restore(ctx.sessionManager.getBranch());
       restoredLedgers = latestLedgers(ctx.sessionManager.getBranch());
       workers?.restoreLedgers(restoredLedgers);
@@ -171,7 +189,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       if (found.legacyMode && !found.error) ctx.ui.notify(`orche: mainMode "${found.legacyMode}" in ${found.path} was removed (multi-agent orche_run delegation); using "single". Set mainMode to "single" or "direct".`, "warning");
     });
     pi.on("before_agent_start", event => {
-      event.systemPromptOptions.sections["orche-delegation"] = delegationRules(state.effective, { spawn });
+      event.systemPromptOptions.sections["orche-delegation"] = delegationRules(state.effective, { spawn, orchestratorModel });
     });
     // Direct mode keeps the whole task in the main window: advise the user (not the model) when it fills up.
     pi.on("turn_end", (_event, ctx) => {
@@ -199,7 +217,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
 
     // (2) Delegation, one-turn overrides and worker/session controls.
     pi.registerCommand("orche", {
-      description: "/orche single <prompt>: delegate to one worker for one turn. /orche direct <prompt>: edit directly for one turn. /orche mode [single|direct]: show/set delegation. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche splits [days]: the orchestrator's split decisions over all sessions (split rate, criteria, cost and time), optionally of the last N days. /orche cancel: stop the active task.",
+      description: "/orche single <prompt>: delegate to one worker for one turn. /orche direct <prompt>: edit directly for one turn. /orche mode [single|direct]: show/set delegation. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche splits [days]: the orchestrator's split decisions over all sessions (split rate, criteria, cost and time), optionally of the last N days. /orche models: the main, orchestrator and worker models now and where each comes from (config, inherited, Pi). /orche cancel: stop the active task.",
       handler: async (args, ctx: ExtensionCommandContext) => {
         const parsed = parseOrcheCommand(args);
         if (!parsed) {
@@ -229,6 +247,12 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           const sessionId = ctx.sessionManager.getSessionId() || undefined;
           const list = await listRecords(resolved, { ...(sessionId ? { parentSessionId: sessionId } : {}), limit: 10 });
           ctx.ui.notify(list.length ? `orche records (${resolved.root}):\n${formatRecordList(list)}` : formatRecordList(list), "info");
+          return;
+        }
+        if (parsed.mode === "models") {
+          // The three model tiers now and where each comes from (docs/orchestrator.md 12).
+          const found = await discoverConfiguredMainMode({ cwd: ctx.cwd, agentDir: options.agentDir ?? getAgentDir(), projectTrusted: ctx.isProjectTrusted() });
+          ctx.ui.notify(formatModelTiers({ main: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(), mode: state.effective, ...(found.path ? { path: found.path } : {}), ...(found.error ? { error: found.error } : {}), ...(found.models ? { tiers: found.models } : {}), atStart: mainModel }), "info");
           return;
         }
         if (parsed.mode === "splits") {

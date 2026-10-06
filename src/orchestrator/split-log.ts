@@ -5,8 +5,8 @@
  * - Where: `<records root>/split-log.jsonl` (the records root is `~/.pi/agent/orche/records` by default). Record pruning only
  *   removes run directories, so the log stays. It is written only when records are enabled (the same privacy switch).
  * - What: time, role, whether the assignment was an orchestrator, its decision (`split`/`none`, the criteria, whether it was
- *   reported), sub-worker count, requests, duration, provider-reported cost, status, model and the record directory. No request
- *   or summary text.
+ *   reported), sub-worker count, requests, duration, provider-reported cost, status, the models used and where they came from
+ *   (config tier, inherited, route) and the record directory. No request or summary text.
  * - Size: when the file would pass {@link SPLIT_LOG_MAX_BYTES} it is renamed to `split-log.1.jsonl` (replacing the previous one)
  *   and a new file starts; reading takes both, so at most about two files' worth (some 20,000 assignments) is kept.
  * - Reading: `/orche splits [days]` prints {@link formatSplitSummary} of {@link readSplitLog}.
@@ -40,6 +40,10 @@ export interface SplitLogEntry {
   costUSD: number | null;
   status: string;
   model?: string;
+  /** Where `model` came from: `models.orchestrator` (config), main's model (main) or a configured route (route). */
+  modelSource?: "config" | "main" | "route";
+  /** The distinct models the sub-workers ran on and where each came from (config: `models.worker`, orchestrator, route: specialist). */
+  workerModels?: { model: string; source: "config" | "orchestrator" | "route" }[];
   record?: string;
 }
 

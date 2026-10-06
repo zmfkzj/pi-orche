@@ -20,7 +20,7 @@ import { createTaskPlanTool, renderTaskPlan, type TaskPlan } from "../tools/task
 import { configureTaskWorkflow, enableTaskWorkflow, taskCompactionSettings, type CompactionStats } from "../pi/session-factory.js";
 import { withExtendedContext } from "../pi/extended-context.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { resolveRoute, resolveSpecialistRoute, type MainMode } from "../orchestration/routing.js";
+import { resolveRoute, resolveSpecialistRoute, type MainMode, type ModelRoute } from "../orchestration/routing.js";
 import { WorkspaceAudit, type GitlinkChange, type WorkspaceChange } from "../orchestration/workspace.js";
 import { CHANGED_WHILE_QUIET, WorkspaceActivity } from "../orchestration/run/activity.js";
 import { WORKER_TOOL_NAMES } from "../tools/index.js";
@@ -125,6 +125,8 @@ export interface TaskDetails {
   task?: string;
   /** Present when the named worker was gone and the task continued with this new worker, briefed from its ledger. */
   continuedFrom?: string;
+  /** Where `model` came from: `models.orchestrator` (config), main's current model (main), or a configured route (route). */
+  modelSource?: "config" | "main" | "route";
   /** The orchestrator's split decision (single workflow with `single.spawn`, implement/answer): none, or the criteria it split by and why. */
   split?: SplitDecision;
   /** The sub-workers its orche_spawn calls ran (docs/orchestrator.md), in order; their transcripts are in the record. */
@@ -875,22 +877,32 @@ export class WorkerPool {
     this.manager ??= new AgentManager(runtime, { resultSchemas: orchestrationResultSchemas, stopTimeoutMs: this.options.stopTimeoutMs });
     this.manager.setRequestBudget(limits.assignmentRequests);
     const routeRole = args.role === "answer" ? "analyst" : args.role === "explore" ? config.routes.workers?.explorerRoles?.[0] ?? "explorer-path" : args.role === "implement" ? "implementer" : args.role === "verify" ? "verifier" : args.role;
-    const mainModel = inheritMain && args.model ? runtime.getModel(args.model.provider, args.model.id) : undefined;
+    // `models.orchestrator` (docs/orchestrator.md 12) replaces main's model for the standard roles; unresolvable: inherit main.
+    const tier = inheritMain ? config.routes.models?.orchestrator : undefined;
+    const tierModel = tier ? runtime.getModel(tier.model.slice(0, tier.model.indexOf("/")), tier.model.slice(tier.model.indexOf("/") + 1)) : undefined;
+    if (tier && !tierModel) modelWarnings.push(`Warning: models.orchestrator ${tier.model} is unresolvable in orche's runtime; inheriting main's model instead.`);
+    const configured = tier && tierModel ? tier : undefined;
+    const mainModel = inheritMain && !configured && args.model ? runtime.getModel(args.model.provider, args.model.id) : undefined;
     const mainWindow = args.model?.contextWindow ?? mainModel?.contextWindow ?? 0;
-    const route = mainModel
+    const tierExtended = configured?.extendedContext ?? config.routes.extendedContext;
+    const route = configured
+      ? { role: routeRole, model: configured.model, thinking: configured.thinking ?? args.thinking ?? "off", ...(tierExtended !== undefined ? { extendedContext: tierExtended } : {}) }
+      : mainModel
       ? { role: routeRole, model: sessionModel!, thinking: args.thinking ?? "off", extendedContext: false }
       : worker && (!inheritMain || !args.model && this.manager.session(worker.id).model) ? this.manager.get(worker.id).route
       : args.role === "game-asset" || args.role === "video"
         ? resolveSpecialistRoute(config.routes, routeRole, (provider, id) => !!runtime.getModel(provider, id))
         : resolveRoute(config.routes, routeRole);
-    if (inheritMain && args.model && !mainModel) modelWarnings.push(`Warning: main model ${sessionModel} is unresolvable in orche's runtime; falling back to configured route ${route.model}.`);
-    if (inheritMain && !args.model) modelWarnings.push(worker && this.manager.session(worker.id).model
+    /** Where this assignment's model comes from (run.json, split log): config tier, main's model, or a configured route. */
+    const modelSource: "config" | "main" | "route" = configured ? "config" : mainModel ? "main" : "route";
+    if (inheritMain && !configured && args.model && !mainModel) modelWarnings.push(`Warning: main model ${sessionModel} is unresolvable in orche's runtime; falling back to configured route ${route.model}.`);
+    if (inheritMain && !configured && !args.model) modelWarnings.push(worker && this.manager.session(worker.id).model
       ? "Warning: main model is absent; keeping this worker's current model and thinking."
       : `Warning: main model is absent; using configured route ${route.model}.`);
     if (config.source.kind === "session" && args.model && !runtime.getModel(args.model.provider, args.model.id)) throw new NoRouteError(
       `The session model ${sessionModel} cannot be resolved by orche's own model runtime (it does not see providers that other Pi extensions register, nor in-memory credentials). Route orche explicitly in ${args.cwd}/.pi/orche.config.json, and list the provider's Pi package in "providerExtensions" if the provider comes from an extension (see docs/pi-package.md).`,
     );
-    if (worker && inheritMain && (args.model || !this.manager.session(worker.id).model)) {
+    if (worker && inheritMain && (configured || args.model || !this.manager.session(worker.id).model)) {
       const session = this.manager.session(worker.id);
       const catalog = runtime.getModel(route.model.slice(0, route.model.indexOf("/")), route.model.slice(route.model.indexOf("/") + 1));
       if (!catalog) throw new Error(`Cannot switch ${worker.id}: model ${route.model} is unavailable; omit worker to start a new worker.`);
@@ -973,6 +985,17 @@ export class WorkerPool {
     const spawned: SubWorkerOutcome[] = [];
     const spawnedReasons = new Set<SpawnReason>();
     const spawnWarnings: string[] = [];
+    // The orchestrator's sub-workers (docs/orchestrator.md 12): standard roles on `models.worker` when configured and resolvable,
+    // else on the orchestrator's current model and thinking; specialists on their own routes. Resolved before the run record
+    // is written, so that its warnings include an unresolvable models.worker.
+    const current: ModelRoute = { role: routeRole, model: meta.model ?? route.model, ...(meta.thinking ?? route.thinking ? { thinking: (meta.thinking ?? route.thinking) as ThinkingLevel } : {}), ...(configured && tierExtended !== undefined ? { extendedContext: tierExtended } : {}) };
+    const workerTier = orchestrating ? config.routes.models?.worker : undefined;
+    const workerTierModel = workerTier ? runtime.getModel(workerTier.model.slice(0, workerTier.model.indexOf("/")), workerTier.model.slice(workerTier.model.indexOf("/") + 1)) : undefined;
+    if (workerTier && !workerTierModel) modelWarnings.push(`Warning: models.worker ${workerTier.model} is unresolvable in orche's runtime; sub-workers inherit the orchestrator's model instead.`);
+    const workerExtended = workerTier?.extendedContext ?? config.routes.extendedContext;
+    const subRoute: ModelRoute = workerTier && workerTierModel
+      ? { role: routeRole, model: workerTier.model, ...(workerTier.thinking ?? current.thinking ? { thinking: workerTier.thinking ?? current.thinking } : {}), ...(workerExtended !== undefined ? { extendedContext: workerExtended } : {}) }
+      : current;
     const definitions = requirementDefinitions(handoffRequest);
     meta.unmetStreak = new Map(singleWorkflow ? [...meta.unmetStreak ?? []].filter(([id]) => definitions.has(id) && definitions.get(id) === meta.requirementDefinitions?.get(id)) : []);
     meta.requirementDefinitions = definitions;
@@ -1021,7 +1044,7 @@ export class WorkerPool {
       manifest: {
         config: describeSource(config.source), routes: routesSummary(config.routes),
         worker: { id: meta.id, role: args.role, ...(workerFile ? { sessionFile: workerFile } : {}) },
-        assignment: { role: args.role, reusedWorker: reusedContext, model: meta.model, thinking: meta.thinking, ...(files ? { files } : {}), ...(grant ? { git: grant } : {}), ...(meta.gui ? { gui: true } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}) },
+        assignment: { role: args.role, reusedWorker: reusedContext, model: meta.model, thinking: meta.thinking, modelSource, ...(files ? { files } : {}), ...(grant ? { git: grant } : {}), ...(meta.gui ? { gui: true } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}) },
         ...(concurrent ? { concurrentSessions: concurrent.activity } : {}),
       },
     });
@@ -1029,7 +1052,7 @@ export class WorkerPool {
     /** Sub-workers in the record (`run.json` agents, their transcripts under the records' workers/), next to the orchestrator's own entry. */
     const recordSpawned = () => {
       for (const outcome of spawned) record?.addAgent({
-        id: outcome.id, role: outcome.role, kind: "worker", model: outcome.model, ...(outcome.thinking ? { thinking: outcome.thinking } : {}),
+        id: outcome.id, role: outcome.role, kind: "worker", model: outcome.model, ...(outcome.thinking ? { thinking: outcome.thinking } : {}), modelSource: outcome.modelSource,
         requests: outcome.requests, models: outcome.models, durationMs: outcome.durationMs, startedAt: outcome.startedAt, status: outcome.status === "failed" || outcome.status === "cancelled" ? outcome.status : "completed",
         ...(outcome.sessionFile ? { sessionFile: outcome.sessionFile } : {}), ...(outcome.error ? { error: outcome.error } : {}),
       });
@@ -1107,7 +1130,7 @@ export class WorkerPool {
       try { ({ changeReport: report, gitReport } = await collect()); } catch { /* keep the empty lists */ }
       const finishedAt = Date.now();
       return {
-        worker: meta.id, role: args.role, status, ...(meta.model ? { model: meta.model } : {}), ...workflowDetails(), durationMs: finishedAt - started, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...report, roster: this.roster(),
+        worker: meta.id, role: args.role, status, ...(meta.model ? { model: meta.model, modelSource } : {}), ...workflowDetails(), durationMs: finishedAt - started, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...report, roster: this.roster(),
         ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(),
         ...(record ? { record: record.dir } : {}),
         ...contextDetails(), ...ledgerDetails(),
@@ -1123,7 +1146,7 @@ export class WorkerPool {
         ...(extra.summary ? { summary: extra.summary } : {}),
         ...(extra.failure ? { failure: extra.failure } : {}),
         ...(status === "cancelled" && this.options.controller.cancelledByUser ? { cancelledByUser: true } : {}),
-        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs, model: details.model, thinking: details.thinking, checklist: details.checklist, plan: details.plan, compactions: details.compactions, warnings: details.warnings, ...(details.split ? { split: details.split } : {}) },
+        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs, model: details.model, thinking: details.thinking, modelSource, checklist: details.checklist, plan: details.plan, compactions: details.compactions, warnings: details.warnings, ...(details.split ? { split: details.split } : {}) },
         workspace: { changes: details.changes, otherChanges: details.otherChanges, ...(details.submodules ? { submodules: details.submodules } : {}), ...(details.headMoved ? { headMoved: details.headMoved } : {}) },
         ...(details.git ? { git: details.git } : {}),
         ...(retired.length ? { retired } : {}),
@@ -1132,13 +1155,15 @@ export class WorkerPool {
       });
       // One line per finished assignment that outlives the records (docs/orchestrator.md 11).
       const subCosts = spawned.map(outcome => outcome.costUSD);
+      const subModels = [...new Map(spawned.map(outcome => [`${outcome.model} ${outcome.modelSource}`, { model: outcome.model, source: outcome.modelSource }])).values()];
       if (resolved.enabled) appendSplitLog(resolved.root, {
         ts: new Date().toISOString(), role: args.role, orchestrator: orchestrating,
         decision: orchestrating ? (details.split?.decision ?? (spawned.length ? "split" : "none")) : null,
         reported: !!details.split, criteria: [...(details.split?.criteria ?? [...spawnedReasons])],
         subWorkers: spawned.length, requests: details.requests, subRequests: spawned.reduce((sum, outcome) => sum + outcome.requests, 0),
         durationMs: details.durationMs, costUSD: ownCostUSD === undefined && !subCosts.length ? null : (ownCostUSD ?? 0) + subCosts.reduce((sum, cost) => sum + cost, 0),
-        status, ...(details.model ? { model: details.model } : {}), record: record.dir,
+        status, ...(details.model ? { model: details.model } : {}), modelSource,
+        ...(subModels.length ? { workerModels: subModels } : {}), record: record.dir,
       });
     };
     try {
@@ -1165,15 +1190,13 @@ export class WorkerPool {
       }
       signal.throwIfAborted();
       if (orchestrating) {
-        // The orchestrator's sub-workers: standard roles on its current model and thinking, specialists on their own routes.
-        const current = { role: routeRole, model: meta.model ?? route.model, ...(meta.thinking ?? route.thinking ? { thinking: meta.thinking ?? route.thinking } : {}) };
         const tracked = audit;
         let sub = 0;
         meta.spawn = {
           orchestrator: meta.id, ...(files ? { scope: files } : {}), ...(readOnly ? { readOnly: true } : {}), signal,
           nextId: () => `${meta.id}.${++sub}`,
           runWorker: createSubWorkerRunner({
-            orchestrator: meta.id, cwd: args.cwd, runtime, route: current, ...(mainModel ? { inheritedContextWindow: mainWindow } : {}),
+            orchestrator: meta.id, cwd: args.cwd, runtime, route: subRoute, routeSource: subRoute === current ? "orchestrator" : "config", ...(subRoute === current && mainModel ? { inheritedContextWindow: mainWindow } : {}),
             specialistRoute: role => resolveSpecialistRoute(config.routes, role, (provider, id) => !!runtime.getModel(provider, id)),
             imageTool: () => config.routes.images ? createGenerateImageTool({ cwd: args.cwd, runtime, images: config.routes.images }) : undefined,
             prompt: (planned, imagesAvailable) => subWorkerPrompt(planned, meta.id, config.routes.verifyCommands ?? [], imagesAvailable),
@@ -1271,7 +1294,7 @@ export class WorkerPool {
       const roster = this.roster();
       const gitLines = gitReport ? formatGitReport(gitReport) : [];
       const details: TaskDetails = {
-        worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, ...(meta.model ? { model: meta.model } : {}), ...workflowDetails(), ...(orchestrating && splitOf(data) ? { split: splitOf(data)! } : {}), ...(checklist ? { checklist } : {}), ...(Array.isArray(data.ambiguities) && data.ambiguities.length ? { ambiguities: data.ambiguities as Ambiguity[] } : {}), durationMs, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...changeReport, roster,
+        worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, ...(meta.model ? { model: meta.model, modelSource } : {}), ...workflowDetails(), ...(orchestrating && splitOf(data) ? { split: splitOf(data)! } : {}), ...(checklist ? { checklist } : {}), ...(Array.isArray(data.ambiguities) && data.ambiguities.length ? { ambiguities: data.ambiguities as Ambiguity[] } : {}), durationMs, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...changeReport, roster,
         ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(), ...(record ? { record: record.dir } : {}),
         ...contextDetails(), ...ledgerDetails(),
       };

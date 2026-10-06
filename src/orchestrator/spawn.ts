@@ -97,6 +97,8 @@ export interface SubWorkerOutcome {
   files?: string[];
   model: string;
   thinking?: string;
+  /** Where the model came from: `models.worker` (config), the orchestrator's model (orchestrator), or a specialist's route (route). */
+  modelSource: "config" | "orchestrator" | "route";
   requests: number;
   models: Record<string, number>;
   startedAt: number;

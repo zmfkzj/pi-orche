@@ -26,6 +26,13 @@ export interface RouteConfig {
   readonly verifyCommands?: readonly string[];
   /** `workers.explorerRoles[0]`: the route role of orche_task explore workers (default `explorer-path`). */
   readonly workers?: { readonly explorerRoles?: readonly string[] };
+  /**
+   * Models of the three tiers (docs/orchestrator.md 12), each a route without a role: `main` is applied to the Pi session at its
+   * start, `orchestrator` replaces main's model for the single workflow's standard-role workers, `worker` replaces the
+   * orchestrator's model for its sub-workers. Unset tiers inherit (main: Pi's model; orchestrator: main; worker: orchestrator).
+   * Specialists (game-asset, video) keep their routes.
+   */
+  readonly models?: ModelTiers;
   /** Behavior of the main session in the Pi package. Default `single`. */
   readonly mainMode?: MainMode;
   /** A removed mode (`auto`/`multi`) found in the file; it is read as `single` and the Pi package warns about it. */
@@ -42,6 +49,9 @@ export const LEGACY_WORKERS_KEYS: readonly string[] = ["maxWorkers", "answerAngl
 export function legacyConfigWarning(keys: readonly string[]): string {
   return `config.${keys.length === 1 ? keys[0] : `{${keys.join(", ")}}`} ${keys.length === 1 ? "was" : "were"} removed with the multi-worker coordinator and ${keys.length === 1 ? "is" : "are"} ignored`;
 }
+export const MODEL_TIERS = ["main", "orchestrator", "worker"] as const;
+export type ModelTier = typeof MODEL_TIERS[number];
+export type ModelTiers = Readonly<Partial<Record<ModelTier, RouteSettings>>>;
 export class RouteConfigError extends Error {
   override readonly name = "RouteConfigError";
 }
@@ -69,7 +79,7 @@ export function parseRouteConfig(value: unknown, warnings?: string[]): RouteConf
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config: expected object");
   const config = value as Record<string, unknown>;
   const legacy = Object.keys(config).filter(key => LEGACY_CONFIG_KEYS.includes(key));
-  if (Object.keys(config).some(key => !LEGACY_CONFIG_KEYS.includes(key) && key !== "routes" && key !== "default" && key !== "providerExtensions" && key !== "extendedContext" && key !== "verifyCommands" && key !== "mainMode" && key !== "workers" && key !== "limits" && key !== "images")) throw new RouteConfigError("config: unknown field");
+  if (Object.keys(config).some(key => !LEGACY_CONFIG_KEYS.includes(key) && key !== "routes" && key !== "default" && key !== "providerExtensions" && key !== "extendedContext" && key !== "verifyCommands" && key !== "mainMode" && key !== "workers" && key !== "limits" && key !== "images" && key !== "models")) throw new RouteConfigError("config: unknown field");
   let limits: Partial<RunLimits> | undefined;
   if (config.limits !== undefined) {
     try { limits = parseRunLimits(config.limits, "config.limits"); }
@@ -114,6 +124,7 @@ export function parseRouteConfig(value: unknown, warnings?: string[]): RouteConf
     ...(config.extendedContext !== undefined ? { extendedContext: config.extendedContext } : {}),
     ...(verifyCommands ? { verifyCommands } : {}),
     ...(workers?.explorerRoles ? { workers } : {}),
+    ...(config.models !== undefined ? { models: parseModelTiers(config.models) } : {}),
     ...(legacyMainMode ? { mainMode: "single" as const, legacyMainMode } : config.mainMode !== undefined ? { mainMode: config.mainMode as MainMode } : {}),
   };
 }
@@ -126,6 +137,16 @@ function parseImages(value: unknown): ImageSettings {
   return { model: images.model, ...(images.timeoutMs !== undefined ? { timeoutMs: images.timeoutMs as number } : {}) };
 }
 
+/** `models`: `main`, `orchestrator` and `worker`, each `{model, thinking?, extendedContext?}` validated like a route. */
+function parseModelTiers(value: unknown): ModelTiers {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.models: expected object");
+  const tiers = value as Record<string, unknown>;
+  const unknown = Object.keys(tiers).find(key => !(MODEL_TIERS as readonly string[]).includes(key));
+  if (unknown !== undefined) throw new RouteConfigError(`config.models.${unknown}: unknown tier (expected ${MODEL_TIERS.join(", ")})`);
+  const parsed: Partial<Record<ModelTier, RouteSettings>> = {};
+  for (const tier of MODEL_TIERS) if (tiers[tier] !== undefined) parsed[tier] = parseSettings(tiers[tier], `config.models.${tier}`);
+  return parsed;
+}
 /** `workers`: only `explorerRoles` still applies; the coordinator's `maxWorkers` and `answerAngles` are ignored (reported in `legacy`). */
 function parseWorkers(value: unknown, legacy: string[]): { explorerRoles?: readonly string[] } {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.workers: expected object");

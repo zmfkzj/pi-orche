@@ -15,7 +15,7 @@ let ids = 0;
 const nextId = () => `W1.${++ids}`;
 const outcome = (worker: PlannedWorker, extra: Partial<SubWorkerOutcome> = {}): SubWorkerOutcome => ({
   id: worker.id, name: worker.name, role: worker.role, reason: worker.reason, status: worker.role === "verify" ? "passed" : "done", summary: `${worker.name} done`,
-  ...(worker.files ? { files: worker.files } : {}), model: "p/m", requests: 1, models: { "p/m": 1 }, startedAt: Date.now(), durationMs: 1, costUSD: 0, changes: [], ...extra,
+  ...(worker.files ? { files: worker.files } : {}), model: "p/m", modelSource: "orchestrator", requests: 1, models: { "p/m": 1 }, startedAt: Date.now(), durationMs: 1, costUSD: 0, changes: [], ...extra,
 });
 const context = (overrides: Partial<SpawnContext> = {}): SpawnContext => ({ orchestrator: "W1", nextId, runWorker: async worker => outcome(worker), ...overrides });
 

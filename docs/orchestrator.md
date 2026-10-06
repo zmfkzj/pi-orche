@@ -19,7 +19,7 @@
 User ⇄ main (single 모드: 대화·요구사항 정리·보고서 검토, 편집 불가)
           │ orche_task {role, request(Intent, R1..Rn, 제약, 가정, 원문)}
           ▼
-       orchestrator (예전 single worker 자리, persistent, main 모델 상속, 50% compaction)
+       orchestrator (예전 single worker 자리, persistent, main 모델 상속 또는 models.orchestrator, 50% compaction)
           │ 분할 판단: Parallelism / Isolation / Independent verification. 기본은 분할하지 않고 직접 작업
           │ orche_spawn {reason, workers[]}  ← 필요할 때만
           ▼
@@ -27,6 +27,7 @@ User ⇄ main (single 모드: 대화·요구사항 정리·보고서 검토, 편
           - parallel: 서로 겹치지 않는 소유 파일, 동시에 실행
           - isolation: game-asset/video specialist(원래 route와 이미지 도구)
           - verification: 구현 context 없이 새로 띄운 읽기 전용 verifier
+          (표준 역할 sub-worker의 모델: models.worker, 없으면 orchestrator 모델 상속. §12)
 ```
 
 - **main**: 사용자의 요구사항을 구체화하고 명확하게 정리해 orchestrator 하나에게 넘긴다(인계 형식은 지금 single 그대로). 단순 응답은 직접 답한다. 결과는 보고서로 검토한다(코드 재확인·check 재실행 없음).
@@ -560,7 +561,7 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
 ## 11. 실사용 분할 판단 관찰 (split log)
 
 - **기록**: orche_task assignment가 끝날 때마다(성공·실패·취소) records 루트(기본 `~/.pi/agent/orche/records`)의 `split-log.jsonl`에 한 줄을 남긴다(`src/orchestrator/split-log.ts`, 호출 위치는 `src/extension/workers.ts`의 `finishRecord`).
-  - 남기는 항목: 시각, 역할, orchestrator 여부, 판단(`split`/`none`, 사유 유형, 보고 여부), sub-worker 수, 요청 수(자기 것과 sub-worker 것), 시간, provider가 보고한 비용, 상태, 모델, record 경로.
+  - 남기는 항목: 시각, 역할, orchestrator 여부, 판단(`split`/`none`, 사유 유형, 보고 여부), sub-worker 수, 요청 수(자기 것과 sub-worker 것), 시간, provider가 보고한 비용, 상태, 모델과 그 출처(`modelSource`), sub-worker 모델과 출처(`workerModels`, §12), record 경로.
   - 요청 원문과 요약은 넣지 않는다.
   - records가 켜져 있으면(기본) 자동으로 쌓인다.
   - records 정리(30일)는 run 디렉터리만 지우므로 이 파일은 남는다.
@@ -571,3 +572,43 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
   - 사유 분포
   - split과 none 각각의 건수, 성공 수, 시간·비용 중앙값, 비용 합계, 평균 sub-worker 수
 - **재평가에 쓸 때**: 한 줄의 `record` 경로로 run.json(인계문, `outcome.split`, `spawned`)과 transcript를 찾을 수 있다. 다만 그것들은 30일 뒤 사라진다. 오래 볼 사례는 그 전에 보관한다.
+
+## 12. 모델 계층 (`models`: main / orchestrator / worker)
+
+세 계층의 모델을 따로 정할 수 있다. 설정하지 않은 계층은 예전처럼 위 계층을 상속한다. 그래서 `models`가 없는 설정은 예전과 똑같이 동작한다.
+
+```json
+"models": {
+  "main": { "model": "provider/model-a", "thinking": "high" },
+  "orchestrator": { "model": "provider/model-b", "thinking": "high", "extendedContext": true },
+  "worker": { "model": "provider/model-c", "thinking": "medium" }
+}
+```
+
+- **키 위치와 근거**: 최상위 `models`.
+  - 계층은 역할(role)이 아니다. 그래서 `routes`(역할 이름 → route) 안에 넣지 않았다. `routes`에 넣으면 `main` 같은 이름이 역할 route와 섞이고, fallback route(`analyst`, `implementer` 등)와도 헷갈린다.
+  - 각 값은 route와 같은 모양(`model`, `thinking?`, `extendedContext?`)이고 같은 검증(`parseSettings`)을 거친다. 모르는 계층, 모르는 필드, `provider/` 없는 모델, 모르는 thinking은 설정 오류다(`src/orchestration/routing.ts`의 `parseModelTiers`).
+- **해석 규칙**:
+
+  | 계층 | 지정했을 때 | 지정하지 않았을 때 | 해석할 수 없을 때 |
+  |---|---|---|---|
+  | main (Pi 세션) | 새 세션 시작 때 적용(아래) | Pi 모델(settings.json 기본값, `/model`) | 경고(`ctx.ui.notify`) 후 세션 모델 유지 |
+  | orchestrator (표준 역할 explore/answer/implement/verify) | 그 모델. thinking이 없으면 main의 현재 thinking, extendedContext가 없으면 최상위 값 | main의 현재 모델·thinking 상속(예전과 같음) | 결과 첫 줄 바로 아래와 run.json에 경고 후 main 상속 |
+  | worker (orche_spawn sub-worker, 독립 verifier 포함) | 그 모델. thinking이 없으면 orchestrator의 thinking | orchestrator의 실제 모델·thinking 상속(예전과 같음) | 경고 후 orchestrator 상속 |
+  | game-asset, video | 영향 없음 | 자기 route | (예전과 같음) |
+
+- **main 적용**(`src/extension/main-model.ts`):
+  - Pi 확장 API `pi.setModel(model)`과 `pi.setThinkingLevel(level)`을 쓴다. Pi 문서 `docs/extensions.md`의 "Change active tools, model, or thinking level: Session control methods on `pi`"와 `core/extensions/types.d.ts`의 선언을 따랐다. `setModel`은 현재 세션에만 적용되고 settings.json 기본값은 바꾸지 않으며, 자격 증명이 없으면 false를 돌려준다. 모델은 `ctx.modelRegistry.find`로 찾는다. Pi의 `examples/extensions/preset.ts`도 같은 방식이다.
+  - 적용 시점: `session_start`의 reason이 `startup`(Pi 시작)이나 `new`(`/new`)이고, 세션에 메시지가 없고, Pi가 처음 남기는 모델·thinking 항목 말고 다른 변경이 없을 때만 적용한다. `/new`일 때는 Pi도 기본 모델로 다시 시작하므로 같은 규칙을 따른다.
+  - 적용하지 않는 경우: resume·fork·reload한 세션은 자기 모델을 유지한다. 명령줄에 `--model`, `--models`, `--provider`, `--thinking`이 있으면 그 선택이 이긴다. 세션 중에 사용자가 `/model`이나 순환 키로 바꾼 모델은 다시 덮어쓰지 않는다. 적용은 시작 때 한 번뿐이다.
+  - `extendedContext`를 켜면 worker와 같은 표(`src/pi/extended-context.ts`)로 창을 넓힌 모델을 넘긴다.
+  - direct 모드에서는 main 설정만 의미가 있다.
+- **가시성**:
+  - `/orche models`가 세 계층의 모델과 출처를 보여 준다. 출처는 config, inherited, Pi 가운데 하나다.
+  - main의 인계 규칙 문장은 `models.orchestrator`가 있을 때만 "설정된 orchestrator 모델로 실행"으로 바뀐다. 없으면 예전 문장 그대로다.
+  - orchestrator와 sub-worker에게 주는 지시문에는 모델 상속을 말하는 문장이 없다. specialist가 자기 모델을 쓴다는 문장만 있어서 고칠 것이 없었다. 분할 판단 지시문의 비용 문장("약 두 배 비용")은 같은 모델 sub-worker로 잰 값이다. 평가로 고른 문장이라 그대로 두었다. `models.worker`로 더 싼 모델을 쓰면 실제 비용 비율은 달라진다(측정하지 않음).
+- **기록**:
+  - assignment의 모델과 `modelSource`(`config`/`main`/`route`)는 `details`, run.json의 `assignment`·`outcome`, split log에 남는다.
+  - sub-worker의 모델과 `modelSource`(`config`/`orchestrator`/`route`)는 `details.spawned`, run.json의 agent 항목, split log의 `workerModels`에 남는다.
+- **테스트**: `test/extension/model-tiers.test.ts`(faux provider만 사용). 다룬 경우는 설정 없음(회귀), orchestrator만, worker만, 셋 다(확장을 거친 end-to-end), 해석 불가, specialist, main 적용과 사용자 선택 존중, 기록이다.
+- **확인하지 못한 것**: 실제 Pi TUI에서 `/new`·`--model`·순환 키와 함께 쓰는 경우는 faux 세션과 단위 테스트로만 확인했다. 실제 provider 확장(cliproxyapi)이 `session_start` 전에 모델을 등록하는지는 Pi 문서("asynchronous factory ... register providers needed during startup")에 기댄 것이다.

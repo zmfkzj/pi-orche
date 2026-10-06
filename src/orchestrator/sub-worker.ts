@@ -1,7 +1,7 @@
 /**
  * One sub-worker of an orche_spawn call: a fresh one-shot session (src/specialists/session.ts) that sees only its own request, works
  * with the worker tool set, may write only its own files, cannot spawn, and ends with one report_result. Standard roles inherit the
- * orchestrator's model and thinking; game-asset and video use their specialist routes (and generate_image when images are set up).
+ * orchestrator's model and thinking unless the config sets `models.worker`; game-asset and video use their specialist routes (and generate_image when images are set up).
  */
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -20,8 +20,10 @@ export interface SubWorkerEnvironment {
   orchestrator: string;
   cwd: string;
   runtime: ModelRuntime;
-  /** The orchestrator's current route: standard roles run on it. */
+  /** The route standard roles run on: `models.worker` when configured, else the orchestrator's current route. */
   route: ModelRoute;
+  /** Where `route` comes from (recorded per sub-worker). */
+  routeSource: "config" | "orchestrator";
   inheritedContextWindow?: number;
   /** The route of a specialist role (its own configured route, as orche_task resolves it). */
   specialistRoute(role: "game-asset" | "video"): ModelRoute;
@@ -77,7 +79,7 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
     const image = specialist ? env.imageTool?.() : undefined;
     const guard = subWorkerGuard(worker, siblings, env.cwd);
     const sessionFile = env.sessionFile?.(worker.id);
-    const base = { id: worker.id, name: worker.name, role: worker.role, reason: worker.reason, ...(worker.files ? { files: [...worker.files] } : {}), changes: [] as string[] };
+    const base = { id: worker.id, name: worker.name, role: worker.role, reason: worker.reason, ...(worker.files ? { files: [...worker.files] } : {}), changes: [] as string[], modelSource: specialist ? "route" as const : env.routeSource };
     const fromStats = (stats: SpecialistStats) => ({ model: stats.model, ...(stats.thinking ? { thinking: stats.thinking } : {}), requests: stats.requests, models: { ...stats.models }, startedAt: stats.startedAt, durationMs: stats.durationMs, costUSD: stats.usage.cost, ...(stats.sessionFile ? { sessionFile: stats.sessionFile } : {}) });
     try {
       const { value, stats } = await runSpecialistSession({
