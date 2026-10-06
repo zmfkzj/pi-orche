@@ -5,7 +5,7 @@
  * executeTool() is execute() as a tool result, with such a failure returned as an isError result that keeps the details.
  * formatWorkers(), stop(id|"all") and roster() implement the pool slash commands. */
 import { Type, type Static } from "@sinclair/typebox";
-import { getAgentDir, type AgentToolResult } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type AgentToolResult, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -50,6 +50,7 @@ export const orcheTaskParameters = Type.Object({
   worker: Type.Optional(Type.String()),
   files: Type.Optional(Type.Array(Type.String())),
   task: Type.Optional(Type.String({ pattern: "^T[1-9][0-9]*$", description: "Task ledger id (T1, T2, …) named in an earlier result. Pass it for a follow-up of that same task, also when another or a new worker takes it over; omit it for a different user task, even when reusing a worker. Used only when single.ledger is on." })),
+  gui: Type.Optional(Type.Boolean({ description: "true: the worker gets its own private GUI desktop (computer use: launch apps, screenshots, click, type), which the user does not see; needs the pi-gui package. Set it only when the task needs GUI applications. false: no desktop. Omitted: a new worker gets none, a reused worker keeps its setting. Changing it on a reused worker starts a fresh worker." })),
   git: Type.Optional(Type.Object({
     commit: Type.Optional(Type.Boolean({ description: "Authorize git commit for this assignment." })),
     push: Type.Optional(Type.Boolean({ description: "Authorize git push (implies commit). Never force-push." })),
@@ -129,11 +130,35 @@ export interface TaskDetails {
   split?: SplitDecision;
   /** The sub-workers its orche_spawn calls ran (docs/orchestrator.md), in order; their transcripts are in the record. */
   spawned?: SpawnedWorker[];
+  /** Present (true) when the worker has its own private GUI desktop (`gui`, provided by pi-gui). */
+  gui?: boolean;
 }
 /** One sub-worker in a task result: what it was for, how it ended and what it cost (the full report went to the orchestrator). */
 export type SpawnedWorker = Omit<SubWorkerOutcome, "data" | "summary"> & { summary: string };
 /** The workspace/git part of a task's details. */
 type ChangeReport = Pick<TaskDetails, "changes" | "otherChanges" | "submodules" | "headMoved">;
+
+/**
+ * An opt-in worker capability that another Pi extension provides (pi-gui answers `gui`). Orche asks on `pi.events`
+ * channel {@link WORKER_CAPABILITY_CHANNEL} with a {@link WorkerCapabilityRequest} plus `provide(answer)`; the provider
+ * answers synchronously. The answer's extension factories are loaded into that worker's own session only, so whatever
+ * they start (e.g. an MCP server process) belongs to that worker and stops with its session. Orche knows no specifics.
+ */
+export interface WorkerCapabilityProvider {
+  /** Stable description of the configuration: a reused worker whose key differs is replaced by a fresh one. */
+  key: string;
+  /** Exact tool names the factories register, added to the worker's tool allowlist. */
+  tools: string[];
+  extensionFactories: ExtensionFactory[];
+  /** Appended to the worker's instructions. */
+  instructions?: string;
+  /** Own timeouts of those tools, for liveness (see KNOWN_TOOL_TIMEOUTS_MS). */
+  toolTimeoutsMs?: Record<string, number>;
+}
+export interface WorkerCapabilityRequest { capability: string; cwd: string; workerId?: string }
+/** Undefined: nobody provides the capability. */
+export type WorkerCapabilityAnswer = WorkerCapabilityProvider | { error: string } | undefined;
+export const WORKER_CAPABILITY_CHANNEL = "orche:worker-capability";
 
 /**
  * A task whose worker ran but did not complete its assignment: the worker failed or ended without a result, the
@@ -187,6 +212,8 @@ interface Worker {
   tree?: string;
   contextWindow?: number;
   imageConfig?: string;
+  /** {@link WorkerCapabilityProvider.key} of the worker's GUI capability; absent without one. */
+  gui?: string;
   latestInput: number;
   timer?: ReturnType<typeof setTimeout>;
   /** The task ledger of this worker's task (single workflow with `single.ledger`), read when the worker compacts. */
@@ -217,6 +244,8 @@ export interface WorkerPoolOptions {
   stopTimeoutMs?: number;
   /** Receives every task-ledger event (the extension persists each as a session entry). Best effort: a throwing callback is ignored. */
   onLedgerEvent?: (event: LedgerEvent) => void;
+  /** Ask the session's extensions for an opt-in worker capability (the extension wires it to `pi.events`). */
+  capability?: (request: WorkerCapabilityRequest) => WorkerCapabilityAnswer;
 }
 
 // ---- git grant: validation, the line every assignment prompt carries, and the read-only commit/push report ----
@@ -840,12 +869,28 @@ export class WorkerPool {
     // The bundled cliproxyapi-images provider is registered lazily: only for game-asset/video with images configured,
     // after providerExtensions (which may already provide it); otherwise no provider config or credential file is read.
     ensureBundledImageProvider({ runtime, images, agentDir: this.options.agentDir ?? getAgentDir() });
+    // GUI desktop (pi-gui): omitted keeps a reused worker's setting. Asked before any worker is touched, so an unavailable
+    // GUI fails the task without retiring anything; the provider's factories load only into a newly spawned session.
+    const wantGui = args.gui ?? !!worker?.gui;
+    let gui: WorkerCapabilityProvider | undefined;
+    if (wantGui) {
+      const answer = this.options.capability?.({ capability: "gui", cwd: args.cwd, workerId: worker?.id ?? `W${this.nextId}` });
+      if (!answer) throw new Error("gui: true needs the pi-gui package (no extension provides the GUI capability in this session).");
+      if ("error" in answer) throw new Error(`gui: ${answer.error}`);
+      gui = answer;
+    }
     // Tools cannot be unregistered from a session. Recreate only when this optional
     // capability changes, so neither tool registration nor old instructions leak roles.
     if (worker && worker.imageConfig !== imageConfig) {
       await this.retire(worker.id);
       retired.push(worker.id);
       retirementLines.push(`${worker.id} retired: image tool configuration changed; starting a fresh worker.`);
+      worker = undefined;
+    }
+    if (worker && worker.gui !== gui?.key) {
+      await this.retire(worker.id);
+      retired.push(worker.id);
+      retirementLines.push(`${worker.id} retired: GUI desktop ${gui ? (worker.gui ? "configuration changed" : "requested") : "no longer requested"}; starting a fresh worker.`);
       worker = undefined;
     }
     const reusedContext = !!worker;
@@ -895,7 +940,7 @@ export class WorkerPool {
       const sessionFile = workerSessionFile(resolved, { ...(args.currentSession?.id ? { parentSessionId: args.currentSession.id } : {}), workerId: id, spawnedAt: Date.now() });
       // orche_spawn only with `single.spawn` on: `single.spawn: false` keeps the earlier single worker's tool set exactly.
       const spawnTool = singleWorkflow && config.single.spawn;
-      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool };
+      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool, ...(gui ? { gui: gui.key } : {}) };
       const meta = worker;
       meta.model = route.model;
       meta.thinking = route.thinking ?? "off";
@@ -906,12 +951,16 @@ export class WorkerPool {
       // orche_spawn: registered once per session; usable only while an orchestrator assignment set `meta.spawn` (the guard refuses it otherwise).
       ...(spawnTool ? [createSpawnTool(() => meta.spawn ?? SPAWN_UNAVAILABLE)] : [])];
       // generate_image has its own timeout (images.timeoutMs, 180 s by default): liveness bounds a silent call by it, not by the generic tool bound.
-      await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, signal: startupSignal, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name)], customTools, peerMessaging: false, ...(sessionFile ? { sessionFile } : {}),
-        ...(images ? { toolTimeoutsMs: { generate_image: images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } } : {}),
+      // GUI tools likewise (the first call of a desktop starts it).
+      const toolTimeoutsMs = { ...(images ? { generate_image: images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } : {}), ...gui?.toolTimeoutsMs };
+      await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, signal: startupSignal, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name), ...(gui?.tools ?? [])], customTools, peerMessaging: false, ...(sessionFile ? { sessionFile } : {}),
+        ...(Object.keys(toolTimeoutsMs).length ? { toolTimeoutsMs } : {}),
+        // The GUI capability's own extensions (Pi's MCP + the desktop server) live in this worker's session only.
+        ...(gui ? { extensionFactories: gui.extensionFactories } : {}),
         contextProjection: createAssignmentProjector(),
         ...(mainModel ? { inheritedContextWindow: mainWindow } : {}),
         ...(singleWorkflow ? { taskCompaction: taskCompactionFor(meta) } : {}),
-        instructions: workerSystemInstructions(!!spawnTool),
+        instructions: `${workerSystemInstructions(!!spawnTool)}${gui?.instructions ? `\n${gui.instructions}` : ""}`,
         ...this.callbacks(meta),
       });
       if (this.disposed) { await this.manager.dispose(id); throw new Error("Worker pool is disposed"); }
@@ -994,7 +1043,7 @@ export class WorkerPool {
       manifest: {
         config: describeSource(config.source), routes: routesSummary(config.routes),
         worker: { id: meta.id, role: args.role, ...(workerFile ? { sessionFile: workerFile } : {}) },
-        assignment: { role: args.role, reusedWorker: reusedContext, model: meta.model, thinking: meta.thinking, ...(files ? { files } : {}), ...(grant ? { git: grant } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}) },
+        assignment: { role: args.role, reusedWorker: reusedContext, model: meta.model, thinking: meta.thinking, ...(files ? { files } : {}), ...(grant ? { git: grant } : {}), ...(meta.gui ? { gui: true } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}) },
         ...(concurrent ? { concurrentSessions: concurrent.activity } : {}),
       },
     });
@@ -1017,7 +1066,7 @@ export class WorkerPool {
       return [head, `Sub-workers: ${spawned.map(outcome => `${outcome.id} ${outcome.name} (${outcome.role}, ${outcome.reason}): ${outcome.status}`).join("; ")} — ${spawned.reduce((sum, outcome) => sum + outcome.requests, 0)} requests${cost ? `, $${cost.toFixed(2)}` : ""}`, ...spawnWarnings.map(warning => `Warning (orche_spawn): ${warning}`)];
     };
     const workflowDetails = () => ({ thinking: meta.thinking, ...(meta.plan ? { plan: structuredClone(meta.plan) } : {}),
-      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...spawnedDetails() });
+      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(meta.gui ? { gui: true as const } : {}), ...spawnedDetails() });
     let requests = 0;
     let contextCleared: ContextClearedStats | undefined;
     const contextDetails = () => contextCleared ? { contextCleared } : {};

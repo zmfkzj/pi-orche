@@ -9,7 +9,7 @@ import type { MainMode } from "../orchestration/routing.js";
 import { delegationRules, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
 import { contextWarning, DEFAULT_CONTEXT_WARNING, type ContextWarningSettings, type ContextWarningState } from "./context-warning.js";
 import { CONFIG_FILE, DEFAULT_SINGLE, loadOrcheConfigFile } from "./config.js";
-import { orcheTaskParameters, WorkerPool } from "./workers.js";
+import { orcheTaskParameters, WORKER_CAPABILITY_CHANNEL, WorkerPool, type WorkerCapabilityAnswer } from "./workers.js";
 
 import { formatRecordList, listRecords } from "./records.js";
 import { orcheTaskRenderers } from "./render.js";
@@ -97,6 +97,12 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           controller, ...(options.agentDir ? { agentDir: options.agentDir } : {}), ...(options.workerIdleTtlMs !== undefined ? { idleTtlMs: options.workerIdleTtlMs } : {}),
           // One small entry per ledger event, not part of the model context: it follows the session branch and survives reloads.
           onLedgerEvent: event => pi.appendEntry(LEDGER_ENTRY_TYPE, event),
+          // Opt-in capabilities other extensions provide for a worker's own session (pi-gui: `gui`). The first answer wins.
+          capability: request => {
+            let answer: WorkerCapabilityAnswer;
+            pi.events.emit(WORKER_CAPABILITY_CHANNEL, { ...request, provide: (value: WorkerCapabilityAnswer) => { answer ??= value; } });
+            return answer;
+          },
         });
         if (restoredLedgers.length) workers.restoreLedgers(restoredLedgers);
       }
@@ -285,6 +291,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       promptGuidelines: [
         "orche_task workers never git commit or push on their own. Pass `git` ({commit:true} or {push:true, remote?, branch?}) only when the user explicitly asked in this conversation to commit or push; never on your own initiative. Only implement, game-asset and video accept it; explore, answer and verify reject it.",
         "The `git` grant covers that one assignment only: a reused worker's next assignment without it may not commit. Scope the commit to the task's files where possible (pass `files`, name the paths in `request`), and check the commits listed in the result before reporting.",
+        "Pass `gui: true` only when the task needs GUI applications (needs pi-gui): the worker then gets its own private desktop that the user does not see, separate from yours and from other workers'. Omit it otherwise.",
       ],
       parameters: orcheTaskParameters,
       ...orcheTaskRenderers,

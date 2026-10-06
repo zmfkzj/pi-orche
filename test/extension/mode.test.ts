@@ -28,14 +28,15 @@ const systemOf = (context: { messages: { role: string }[] }) => JSON.stringify(c
 const EXTERNAL_PERMISSION = "You may edit user-requested paths outside the cwd/workspace";
 
 describe("mainMode: tool sets", () => {
-  it("defaults to direct: mutators and inspection are on, delegation tools are off", async () => {
+  it("defaults to single: delegation and inspection are on, mutators are off", async () => {
     const h = await harness({ mainSteps: [], orcheSteps: [], mainMode: "unset" });
     const active = h.session.getActiveToolNames();
-    for (const name of ["edit", "write"]) expect(active).toContain(name);
-    for (const name of ["orche_run", "orche_task"]) expect(active).not.toContain(name);
+    for (const name of MUTATORS) expect(active).not.toContain(name);
+    expect(active).toContain("orche_task");
+    expect(active).not.toContain("orche_run");
     expect(active).toEqual(expect.arrayContaining(["read", "grep", "find", "ls", "ast_search", "diagnostics", "bash"]));
     await h.session.prompt("/orche mode");
-    expect(notes(h).at(-1)).toBe("orche mode: direct (default)");
+    expect(notes(h).at(-1)).toBe("orche mode: single (default)");
     expect(h.session.getToolDefinition("read")?.description).toContain("LINE#TAG");
   });
 
@@ -473,13 +474,14 @@ describe("mainMode config discovery", () => {
     expect(() => parseRouteConfig({ routes: { analyst: { model: "p/m", thinking: "ultra" } } })).toThrow("thinking");
   });
 
-  it("an invalid config file leaves the default (direct) and tells the user", async () => {
+  it("an invalid config file leaves the default (single) and tells the user", async () => {
     const h = await harness({ mainSteps: [], orcheSteps: [], writeUserConfig: false });
     const { agentDir } = h;
     await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, mainMode: "turbo" }));
     await h.session.reload();
-    expect(notes(h).join("\n")).toContain("using the default mode direct");
-    for (const name of ["orche_run", "orche_task"]) expect(h.session.getActiveToolNames()).not.toContain(name);
+    expect(notes(h).join("\n")).toContain("using the default mode single");
+    expect(h.session.getActiveToolNames()).toContain("orche_task");
+    expect(h.session.getActiveToolNames()).not.toContain("orche_run");
   });
 
   it("a removed mainMode (auto/multi) in the config runs as single and warns once at session start", async () => {

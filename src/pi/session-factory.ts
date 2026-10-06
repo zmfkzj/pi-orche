@@ -2,6 +2,8 @@ import {
   createSyntheticSourceInfo,
   createAgentSession,
   createExtensionRuntime,
+  DefaultResourceLoader,
+  getAgentDir,
   ModelRuntime,
   SessionManager,
   SettingsManager,
@@ -10,6 +12,8 @@ import {
   DEFAULT_COMPACTION_SETTINGS,
   type SessionCompactEvent,
   type Extension,
+  type ExtensionFactory,
+  type LoadExtensionsResult,
   type ResourceLoader,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
@@ -70,6 +74,13 @@ export interface SessionOptions {
   taskCompaction?: { essentials: () => string; onCompact?: (stats: CompactionStats) => void };
   /** Effective main window, including extended context, when inheriting its model. */
   inheritedContextWindow?: number;
+  /**
+   * Pi extension factories of opt-in worker capabilities (see WorkerCapabilityProvider in src/extension/workers.ts), loaded
+   * into this session only. The session is then bound (`session_start`, e.g. MCP servers connect) and its `dispose()`
+   * emits `session_shutdown` first, as Pi's own runtime does on quit, so the extensions release what they started.
+   * Their tools still need to be listed in `tools`.
+   */
+  extensionFactories?: readonly ExtensionFactory[];
 }
 export type ToolGuard = (toolName: string, input: Record<string, unknown>) => string | undefined | Promise<string | undefined>;
 export interface CompactionStats { tokensBefore: number; tokensAfter: number }
@@ -154,6 +165,41 @@ export function configureTaskWorkflow(session: AgentSession, taskCompaction: Ses
   session.settingsManager.applyOverrides({ compaction: taskCompaction && session.model ? taskCompactionSettings(session.model.contextWindow) : { enabled: false } });
 }
 
+/**
+ * Load capability extension factories the way Pi's SDK loads inline extensions, with nothing else: no settings packages
+ * (in-memory settings), no user/project extensions, skills, prompts, themes or context files. A factory that throws fails
+ * the session creation with its message.
+ */
+async function loadFactoryExtensions(cwd: string, factories: readonly ExtensionFactory[]): Promise<LoadExtensionsResult> {
+  const loader = new DefaultResourceLoader({
+    cwd, agentDir: getAgentDir(), settingsManager: SettingsManager.inMemory({}),
+    noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+    extensionFactories: [...factories],
+  });
+  await loader.reload();
+  const result = loader.getExtensions();
+  if (result.errors.length) throw new Error(`Worker capability extensions failed to load: ${result.errors.map(error => `${error.path}: ${error.error}`).join("; ")}`);
+  return result;
+}
+
+/**
+ * Start the capability extensions (`session_start`) and make `dispose()` emit `session_shutdown` first, like Pi's runtime
+ * host on quit. Disposal stays synchronous: handlers start at once (Pi's MCP extension begins closing its servers, whose
+ * transports finish with their own SIGTERM/SIGKILL timers) and are not awaited.
+ */
+async function bindFactoryExtensions(session: AgentSession): Promise<void> {
+  await session.bindExtensions({});
+  const dispose = session.dispose.bind(session);
+  let shutdown = false;
+  session.dispose = () => {
+    if (!shutdown) {
+      shutdown = true;
+      session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }).catch(() => undefined);
+    }
+    dispose();
+  };
+}
+
 let defaultRuntime: Promise<ModelRuntime> | undefined;
 export async function createSession(
   options: SessionOptions,
@@ -172,11 +218,14 @@ export async function createSession(
   let createdSession: AgentSession;
   const compactionExtension = createCompactionExtension(options, () => createdSession);
   options.onContextWindow?.(info);
+  // Capability extensions (e.g. pi-gui's MCP server for a GUI worker) load once, with their own extension runtime, which
+  // the session then uses: their `pi.*` calls (tools, MCP registrations) must reach the runner of this session.
+  const factoryExtensions = options.extensionFactories?.length ? await loadFactoryExtensions(options.cwd, options.extensionFactories) : undefined;
   const loader: ResourceLoader = {
     getExtensions: () => ({
-      extensions: [createSpillExtension(options.cwd), ...(options.toolGuard ? [createGuardExtension(options.toolGuard)] : []), createContextProjectionExtension(() => options.contextProjection), compactionExtension],
+      extensions: [createSpillExtension(options.cwd), ...(options.toolGuard ? [createGuardExtension(options.toolGuard)] : []), createContextProjectionExtension(() => options.contextProjection), compactionExtension, ...(factoryExtensions?.extensions ?? [])],
       errors: [],
-      runtime: createExtensionRuntime(),
+      runtime: factoryExtensions?.runtime ?? createExtensionRuntime(),
     }),
     getSkills: () => ({ skills: [], diagnostics: [] }),
     getPrompts: () => ({ prompts: [], diagnostics: [] }),
@@ -213,6 +262,7 @@ export async function createSession(
   });
   createdSession = session;
   taskSessions.set(session, { options, tools: compactionExtension.tools });
+  if (factoryExtensions) await bindFactoryExtensions(session);
   if (sessionManager.isPersisted()) markDisposal(session, sessionManager);
   return session;
 }

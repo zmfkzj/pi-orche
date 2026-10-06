@@ -11,8 +11,8 @@ export type MainMode = (typeof MAIN_MODES)[number];
 /** Removed modes (multi-agent orche_run delegation): still accepted in config and session history, read as `single`. */
 export const LEGACY_MAIN_MODES = ["auto", "multi"] as const;
 export type LegacyMainMode = (typeof LEGACY_MAIN_MODES)[number];
-/** Direct by default: benchmarks showed single agents match delegation quality at lower cost; switch with /orche mode or `mainMode`. */
-export const DEFAULT_MAIN_MODE: MainMode = "direct";
+/** Single by default: the main delegates each task to one orche_task worker; switch with /orche mode or `mainMode`. */
+export const DEFAULT_MAIN_MODE: MainMode = "single";
 export interface ModelRoute { role: string; model: string; thinking?: ThinkingLevel; extendedContext?: boolean }
 export interface RouteSettings { readonly model: string; readonly thinking?: ThinkingLevel; readonly extendedContext?: boolean }
 export interface ImageSettings { readonly model: string; readonly timeoutMs?: number }
@@ -30,7 +30,7 @@ export interface RouteConfig {
   readonly verifyCommands?: readonly string[];
   /** Worker team shape: maximum workers, explorer route roles and analyst angles (defaults in ./team.ts). */
   readonly workers?: Partial<TeamSettings>;
-  /** Behavior of the main session in the Pi package (ignored by the standalone CLI). Default `direct`. */
+  /** Behavior of the main session in the Pi package (ignored by the standalone CLI). Default `single`. */
   readonly mainMode?: MainMode;
   /** A removed mode (`auto`/`multi`) found in the file; it is read as `single` and the Pi package warns about it. */
   readonly legacyMainMode?: LegacyMainMode;
