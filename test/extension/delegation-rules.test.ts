@@ -26,11 +26,16 @@ const EXPECTED_EVIDENCE_RULES = EXPECTED_SINGLE_RULES
   .replace(REUSE, REUSE_EVIDENCE).replace(SUPERVISION, SUPERVISION_EVIDENCE);
 
 describe("explicit single delegation rule snapshot", () => {
-  it("single hand-off, DAG and checklist review loop", () => expect(delegationRules("single")).toBe(EXPECTED_SINGLE_RULES));
-  it("mainReview evidence keeps main's own re-verification", () => {
-    expect(delegationRules("single", { mainReview: "evidence" })).toBe(EXPECTED_EVIDENCE_RULES);
-    expect(delegationRules("single", { mainReview: "report" })).toBe(EXPECTED_SINGLE_RULES);
+  it("single.spawn false keeps the earlier single hand-off, DAG and checklist review loop word for word", () => expect(delegationRules("single", { spawn: false })).toBe(EXPECTED_SINGLE_RULES));
+  it("default (single.spawn on): the worker is an orchestrator that decides whether to split; main still hands off once", () => {
+    const rules = delegationRules("single");
+    expect(rules).not.toBe(EXPECTED_SINGLE_RULES);
+    expect(rules).toContain(HANDOFF);
+    expect(rules).toContain(REFERENCE);
+    expect(rules).toMatch(/orchestrator/i);
+    expect(rules).not.toMatch(/Framer|Verifier \(|critic|divergence|mainReview/);
   });
+  it("the removed evidence review mode is gone", () => expect(EXPECTED_EVIDENCE_RULES).not.toBe(delegationRules("single")));
   it("no longer mentions the removed multi-agent delegation", () => {
     const rules = delegationRules("single");
     for (const removed of ["orche_run", "multi", "auto"]) expect(rules).not.toContain(removed);

@@ -1,13 +1,14 @@
 /**
- * One-shot specialist sessions of the single workflow (docs/specialist-orchestration.md 4.1): a fresh session with a narrow tool
- * set, one prompt and one structured report, always disposed. The Framer and the Verifier run through here; the persistent
- * Primary worker does not. Generalizes `runAdvisorSession` (src/advisor/session.ts): any report schema, an invalid report is
- * sent back to the model to repair instead of ending the call, and usage is returned for the caller's record.
+ * One-shot sessions of the single workflow: a fresh session with a narrow tool set, one prompt and one structured report, always
+ * disposed. The orchestrator's sub-workers (src/orchestrator/sub-worker.ts) run through here; the persistent orche_task worker does
+ * not. Generalizes `runAdvisorSession` (src/advisor/session.ts): any report schema, an invalid report is sent back to the model to
+ * repair instead of ending the call, and usage is returned for the caller's record.
  */
 import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { ModelRuntime, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createSession, type ToolGuard } from "../pi/session-factory.js";
+import type { AstRewriteFileGuard } from "../tools/ast.js";
 import { abortable } from "../orchestration/run/deadline.js";
 import type { ModelRoute } from "../orchestration/routing.js";
 
@@ -33,6 +34,10 @@ export interface SpecialistRun<S extends TSchema> {
   customTools?: readonly ToolDefinition[];
   report: SpecialistReport<S>;
   toolGuard?: ToolGuard;
+  /** Per-file ownership check of directory ast_rewrite writes (see SessionOptions.writeFileGuard); guarded sessions refuse them without it. */
+  writeFileGuard?: AstRewriteFileGuard;
+  /** Follow-up prompts when the model ends its turn without the report (default 0: the call fails at once). */
+  nudges?: number;
   /** Turns (model responses) before the call fails without a report. */
   maxTurns: number;
   timeoutMs: number;
@@ -107,6 +112,7 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
       customTools: [...(run.customTools ?? []), reportTool(run.report, value => { if (!controller.signal.aborted) captured.value ??= value; })],
       instructions: run.instructions,
       ...(run.toolGuard ? { toolGuard: run.toolGuard } : {}),
+      ...(run.writeFileGuard ? { writeFileGuard: run.writeFileGuard } : {}),
       ...(run.sessionFile ? { sessionFile: run.sessionFile } : {}),
       ...(run.inheritedContextWindow ? { inheritedContextWindow: run.inheritedContextWindow } : {}),
     }).then(created => {
@@ -131,8 +137,12 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
         modelError = event.message.stopReason === "error" ? (event.message.errorMessage ?? "model error") : undefined;
       }
     });
-    try { await abortable(session.prompt(run.prompt), controller.signal); }
-    finally { controller.signal.removeEventListener("abort", stop); }
+    try {
+      await abortable(session.prompt(run.prompt), controller.signal);
+      // A model that ends its turn without the report gets the bounded follow-ups (never after a model error or the turn cap).
+      for (let nudge = 0; nudge < (run.nudges ?? 0) && captured.value === undefined && !modelError && !controller.signal.aborted; nudge++)
+        await abortable(session.prompt(`You ended without calling ${run.report.name}. Call ${run.report.name} alone now with your result; partial results are fine.`), controller.signal);
+    } finally { controller.signal.removeEventListener("abort", stop); }
     if (captured.value === undefined) throw new Error(modelError ?? `ended without calling ${run.report.name}`);
     return { value: captured.value, stats: finish() };
   } catch (error) {

@@ -35,14 +35,14 @@ describe("single mode does the work", () => {
       "The worker owns the whole task end to end",
       "problems and user follow-ups go to the SAME worker (pass its id in `worker`)",
       "Read the report: its checklist, the checks it names and the readings it chose; do not re-read the changed code or re-run the project checks to verify it yourself",
-      "Send a separate verify assignment only when the user explicitly asks for independent verification",
+      "Send a separate verify assignment only when the user",
       "This workflow is the same with and without a UI",
     ]) expect(rules).toContain(instruction);
     // Role listings and prohibitions are not instructions to dispatch exploration or verification.
     const withoutProhibitions = rules
       .replace("Never stop to ask the user to switch modes in order to proceed", "")
       .replaceAll("Do not split the task into explore/implement/verify phases, and never send an explore before an implement for the same request.", "")
-      .replace("Send a separate verify assignment only when the user explicitly asks for independent verification", "");
+      .replace(/Send a separate verify assignment only when the user[^.]*\./, "");
     expect(withoutProhibitions).not.toMatch(/ask the user to switch|prefer multi|never split|Multi criteria:|Judgment before Production|start with explore|explore first|explore before|dispatch.*verify/);
     expect(rules).toContain("creates a Task DAG with task_plan and executes nodes sequentially without main intervention");
     expect(delegationRules("single")).toBe(rules);

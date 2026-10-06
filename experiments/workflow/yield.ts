@@ -12,9 +12,31 @@
  */
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { WorkflowDetails } from "../../src/extension/workers.js";
-import { critiqueYielded } from "../../src/workflow/critique.js";
-import { divergenceYielded } from "../../src/workflow/divergence.js";
+
+// The workflow policies were removed from the product (docs/orchestrator.md 4); the record shapes and the two yield predicates are
+// kept here so this script still reads the records written while they existed.
+interface CritiqueFinding { id: string; severity: "material" | "minor"; kind: string; issue: string }
+interface CritiqueOutcome {
+  trigger: { run: boolean; reason: string };
+  critique?: { verdict: string; findings: CritiqueFinding[] };
+  responses?: { id: string; response: "accepted" | "rebutted" | "partly"; reason?: string }[];
+  conclusionChanged?: boolean;
+  synthesisRounds: number;
+}
+interface DivergenceOutcome {
+  candidates: number; scratch: string; order?: string[];
+  generated?: { id: string; direction: string; summary: string; outputs: string[] }[];
+  selection?: { selected: number; acceptable: boolean; rationale: string; candidates: { label: number; compliance: number; quality: number; fit: number }[] };
+  selected?: string; refineRounds: number;
+}
+interface WorkflowDetails {
+  type: "investigation" | "execution" | "creation"; policy: string; critique?: CritiqueOutcome; divergence?: DivergenceOutcome; next?: "execution";
+  specialists: { actor: string; requests: number; usage: { cost: number } }[]; notes?: string[];
+}
+/** critic_yield numerator: a material finding the Primary accepted (fully or partly). */
+const critiqueYielded = (outcome: CritiqueOutcome): boolean => !!outcome.responses?.some(item => item.response !== "rebutted");
+/** divergence_yield numerator: the refined deliverable came from a candidate other than A (the conventional direction). */
+const divergenceYielded = (outcome: DivergenceOutcome): boolean => !!outcome.selected && outcome.selected !== "A" && outcome.selected !== "self";
 
 export interface Found { dir: string; workflow?: WorkflowDetails & { status?: string }; frame?: { requirements: { kind: string }[] } }
 

@@ -2,7 +2,7 @@
  * Risk score of an implement result (docs/specialist-orchestration.md 5.3): decides whether the Verifier runs. A pure function of
  * the change (files, line counts, diff text), the worker's checklist and the Framer's contract; no LLM call.
  */
-import type { ChecklistItem } from "../orchestration/result-schemas.js";
+import type { ChecklistItem } from "../../src/orchestration/result-schemas.ts";
 
 export interface RiskSignal { name: string; points: number; detail?: string }
 export interface RiskFile { path: string; added: number; removed: number; binary?: boolean }

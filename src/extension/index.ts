@@ -27,13 +27,13 @@ const ACTIVATE_BUILTINS = ["grep", "find", "ls"];
  * extension-only keys (`concurrentSessions`, `records`) that the plain route parser behind `discoverMainMode` (mode.ts) rejects as unknown, which
  * made a config with `records` look invalid at session start and drop its `mainMode`.
  */
-async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup & { contextWarning?: ContextWarningSettings; pipeline?: "v1" | "v2"; mainReview?: "evidence" | "report"; critic?: "off" | "auto" | "always"; divergence?: "off" | "auto" | "always" }> {
+async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup & { contextWarning?: ContextWarningSettings; spawn?: boolean; warnings?: string[] }> {
   const candidates = [...(options.projectTrusted ? [join(options.cwd, ".pi", CONFIG_FILE)] : []), join(options.agentDir, CONFIG_FILE)];
   for (const path of candidates) {
     try { await access(path); } catch { continue; }
     try {
-      const { routes, contextWarning, single } = await loadOrcheConfigFile(path);
-      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), ...(routes.legacyMainMode ? { legacyMode: routes.legacyMainMode } : {}), path, contextWarning, pipeline: single.pipeline, mainReview: single.mainReview, critic: single.investigation.critic, divergence: single.creation.divergence };
+      const { routes, contextWarning, single, warnings } = await loadOrcheConfigFile(path);
+      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), ...(routes.legacyMainMode ? { legacyMode: routes.legacyMainMode } : {}), path, contextWarning, spawn: single.spawn, ...(warnings.length ? { warnings } : {}) };
     } catch (error) {
       return { path, error: error instanceof Error ? error.message : String(error) };
     }
@@ -111,13 +111,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     const state = new MainModeState(pi);
     let warningSettings: ContextWarningSettings = { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
     let warningState: ContextWarningState = { warnedLevel: 0 };
-    /** `single.pipeline` of the config file read at session start: the single-mode rules differ for v2 (the Framer writes implement contracts). */
-    let pipeline: "v1" | "v2" = "v1";
-    /** `single.mainReview` of the same file: `report` (default) drops main's own re-verification from the v1 rules. */
-    let mainReview: "evidence" | "report" = DEFAULT_SINGLE.mainReview;
-    /** `single.investigation.critic` / `single.creation.divergence` of the same file: each adds its workflow-policy rule when on. */
-    let critic: "off" | "auto" | "always" = "off";
-    let divergence: "off" | "auto" | "always" = "off";
+    /** `single.spawn` of the config file read at session start: whether the single worker is an orchestrator (orche_spawn). */
+    let spawn: boolean = DEFAULT_SINGLE.spawn;
     const showMode = (ctx: Pick<ExtensionContext, "ui">) =>
       ctx.ui.setStatus("orche-mode", `orche: ${state.session}${state.overriding ? ` (one-turn ${state.effective})` : ""}`);
 
@@ -154,10 +149,9 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       state.setConfig(found.mode, found.path);
       warningSettings = found.contextWarning ?? { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
       warningState = { warnedLevel: 0 };
-      pipeline = found.pipeline ?? "v1";
-      mainReview = found.mainReview ?? DEFAULT_SINGLE.mainReview;
-      critic = found.critic ?? "off";
-      divergence = found.divergence ?? "off";
+      spawn = found.spawn ?? DEFAULT_SINGLE.spawn;
+      // Removed settings (e.g. single.pipeline, single.mainReview) are ignored: the file still loads; say so once per session start.
+      for (const warning of found.warnings ?? []) ctx.ui.notify(warning, "warning");
       state.restore(ctx.sessionManager.getBranch());
       restoredLedgers = latestLedgers(ctx.sessionManager.getBranch());
       workers?.restoreLedgers(restoredLedgers);
@@ -167,7 +161,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       if (found.legacyMode && !found.error) ctx.ui.notify(`orche: mainMode "${found.legacyMode}" in ${found.path} was removed (multi-agent orche_run delegation); using "single". Set mainMode to "single" or "direct".`, "warning");
     });
     pi.on("before_agent_start", event => {
-      event.systemPromptOptions.sections["orche-delegation"] = delegationRules(state.effective, { pipeline, mainReview, critic, divergence });
+      event.systemPromptOptions.sections["orche-delegation"] = delegationRules(state.effective, { spawn });
     });
     // Direct mode keeps the whole task in the main window: advise the user (not the model) when it fills up.
     pi.on("turn_end", (_event, ctx) => {

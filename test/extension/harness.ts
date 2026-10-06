@@ -53,8 +53,8 @@ export async function createHarness(options: {
    */
   records?: boolean | { enabled?: boolean; dir?: string; retentionDays?: number; maxBytes?: number };
   taskContext?: { clearBetweenAssignments?: boolean; minClearTokens?: number };
-  /** `single` in the user config (single-workflow options such as the task ledger); omitted when unset. */
-  single?: { ledger?: boolean };
+  /** `single` in the user config (single-workflow options such as the task ledger or spawn; removed keys load with a warning); omitted when unset. */
+  single?: { ledger?: boolean; spawn?: boolean } & Record<string, unknown>;
   /** `ctx.mode` the extension sees (default: the SDK default, i.e. not "tui"). */
   mode?: "tui" | "rpc" | "print" | "json";
 }): Promise<Harness> {

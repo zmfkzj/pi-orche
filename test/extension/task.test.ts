@@ -1,3 +1,4 @@
+import { SPLIT_FORMAT, SPLIT_JUDGMENT } from "../../src/orchestrator/instructions.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
@@ -118,16 +119,19 @@ describe("orche_task persistent session workers", () => {
         const assignment = context.messages.findLast(message => message.role === "user");
         if (!assignment || assignment.role !== "user") throw new Error("Missing worker assignment");
         const text = typeof assignment.content === "string" ? assignment.content : assignment.content.filter(part => part.type === "text").map(part => part.text).join("\n");
-        instruction = text.match(/(?:Own the task end to end:|Implement completely,)[\s\S]*?(?=\nStart summary)/)?.[0] ?? "";
+        instruction = text.match(/(?:Own the task end to end|Implement completely,)[\s\S]*?(?=\nStart summary)/)?.[0] ?? "";
         return result("implement", "Done", { status: "done" });
       }],
     });
     await h.session.prompt(prompt);
     expect(taskResults(h)).toHaveLength(1);
     expect(taskResults(h)[0]).toMatchObject({ isError: false });
-    expect(instruction).toBe(endToEnd
-      ? `Own the task end to end: first analyse the requirements and create the Task DAG with task_plan, covering every requirement id. If a requirement can be read more than one way with observably different behaviour, choose the reading closest to the Original request text, implement it, and report it in data.ambiguities. Then execute nodes sequentially in dependency order, updating statuses, implementing completely, adding or updating tests, running the project's relevant checks and iterating until they pass, preserving unrelated changes. Main does not intervene while you run. Write scope: ${JSON.stringify(files)}. Finish with report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks],checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence",verifiedBy:"test name or check command that asserts this requirement's acceptance and passed"}],ambiguities:[{id:"R2",readings:["reading A","reading B"],chosen:"reading A"}]}}. Checklist is required when the request contains R-ids; every met item needs verifiedBy, otherwise report it partial. ambiguities may be omitted when there are none.`
-      : HEAD_IMPLEMENT.replace("${scope}", JSON.stringify(files)));
+    // single.spawn is on by default: the single worker is the task's orchestrator (docs/orchestrator.md).
+    if (endToEnd) {
+      expect(instruction).toContain("Own the task end to end as its orchestrator: first decide whether to split it (Orchestration below), then analyse the requirements and create the Task DAG with task_plan, covering every requirement id.");
+      expect(instruction).toContain(`ambiguities:[{id:"R2",readings:["reading A","reading B"],chosen:"reading A"}],${SPLIT_FORMAT}}}`);
+      expect(instruction).toContain(SPLIT_JUDGMENT);
+    } else expect(instruction).toBe(HEAD_IMPLEMENT.replace("${scope}", JSON.stringify(files)));
     expect(h.orche.faux.getPendingResponseCount()).toBe(0);
   });
 

@@ -4,7 +4,6 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parseRouteConfig, RouteConfigError, type RouteConfig } from "../orchestration/routing.js";
 import { DEFAULT_WINDOW_MS } from "./concurrent-sessions.js";
 import { DEFAULT_CONTEXT_WARNING, type ContextWarningSettings } from "./context-warning.js";
-import type { CreationSettings, InvestigationSettings } from "../workflow/policy.js";
 
 export const CONFIG_FILE = "orche.config.json";
 
@@ -27,8 +26,10 @@ export interface DiscoveredConfig {
   taskContext: TaskContextSettings;
   /** Main-session context advisory in direct mode, with defaults applied. */
   contextWarning?: ContextWarningSettings;
-  /** Single-workflow options (task ledger), with defaults applied. */
+  /** Single-workflow options (task ledger, orchestrator spawning), with defaults applied. */
   single: SingleSettings;
+  /** Settings of the selected file that were ignored (removed `single` keys); absent without a file. */
+  warnings?: string[];
   source: ConfigSource;
   /** Config files that exist but were not used, with the reason. */
   ignored: string[];
@@ -163,97 +164,47 @@ export function parseContextWarningConfig(value: unknown): ContextWarningSetting
  * `single` in orche.config.json: options of the single workflow. `ledger` keeps a per-task ledger outside every LLM context (original
  * requests, requirement statuses, chosen readings, history): workers get it back when they compact, the main session after its own
  * compaction, and a task whose worker is gone (reload, idle expiry, eviction) continues with a new worker briefed from it. Off by
- * default until measured (docs/specialist-orchestration.md, gate G-L).
+ * default (docs/specialist-orchestration.md, gate G-L).
  *
- * `pipeline: "v2"` (docs/specialist-orchestration.md, Phase 3; implies the ledger) frames every implement assignment before the worker
- * starts and can verify results after it: `frame` is the Framer's access (`grounded`: read-only repository tools, `spec`: the
- * request only, `off`), `checker.gate` when the Verifier runs (`review`, the default: only when the user's words ask for a review or
- * verification; `auto`: also at risk score ≥ `threshold`; `always`; `off`; G-X stage 1 found its threshold findings costly and exotic),
- * `checker.maxFixRounds` how often its blocking findings go back to the same worker before orche re-runs the probes itself, and `nav`
- * whether v2 sessions (worker, Framer, Verifier) get the code_nav tool.
+ * `spawn` (default true, docs/orchestrator.md): the implement/answer worker is an orchestrator that may start sub-workers with
+ * `orche_spawn` (parallel parts with disjoint files, an isolated game-asset/video specialist, a fresh independent verifier) and
+ * reports its split decision. `false` is the earlier single worker (no orche_spawn, no split decision).
  *
- * `investigation.critic` and `creation.divergence` are the workflow policies of docs/workflow-policy.md (src/workflow/policy.ts), off by
- * default until measured: an independent critic of answers (`auto`: on an explicit review request or when the Primary reports open
- * hypotheses or uncertainty; `always`), and `creation.candidates` divergent candidates → critic selection → refinement (`auto`: when
- * the front passes `candidates` ≥ 2; `always`).
+ * The keys of the removed v2 pipeline and workflow policies (`pipeline`, `frame`, `checker`, `nav`, `mainReview`, `investigation`,
+ * `creation`) are ignored with a warning, whatever their value, so an old config still loads.
  */
-export interface CheckerSettings { gate: "auto" | "always" | "review" | "off"; threshold: number; maxFixRounds: number }
 export interface SingleSettings {
   ledger: boolean;
-  pipeline: "v1" | "v2";
-  frame: "grounded" | "spec" | "off";
-  checker: CheckerSettings;
-  nav: boolean;
-  /**
-   * v1 only: how main reviews a result. `report` (the default since G-M/G-M2) reviews the report alone and checks readings against the
-   * user's wording; `evidence` also re-reads the changed code and re-runs trusted checks itself (the earlier behaviour).
-   */
-  mainReview: "evidence" | "report";
-  investigation: InvestigationSettings;
-  creation: CreationSettings;
+  spawn: boolean;
 }
-/** threshold 7: calibrated on 90 stored v1 single results (experiments/risk/calibrate.ts): all 7 failed ones score 8 or more, 66% of all are verified (74% at 5). */
-export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false, pipeline: "v1", frame: "grounded", checker: { gate: "review", threshold: 7, maxFixRounds: 1 }, nav: true, mainReview: "report", investigation: { critic: "off" }, creation: { divergence: "off", candidates: 3 } };
-const SINGLE_KEYS = new Set(["ledger", "pipeline", "frame", "checker", "nav", "mainReview", "investigation", "creation"]);
-const GATES = ["off", "auto", "always"];
-function parseInvestigation(value: unknown): InvestigationSettings {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.single.investigation: expected object");
-  const fields = value as Record<string, unknown>;
-  if (Object.keys(fields).some(key => key !== "critic")) throw new RouteConfigError("config.single.investigation: unknown field");
-  if (fields.critic !== undefined && !GATES.includes(fields.critic as string)) throw new RouteConfigError('config.single.investigation.critic: expected "off", "auto" or "always"');
-  return { critic: (fields.critic as InvestigationSettings["critic"] | undefined) ?? DEFAULT_SINGLE.investigation.critic };
+export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false, spawn: true };
+const SINGLE_KEYS = new Set(["ledger", "spawn"]);
+/** Keys of the removed single pipeline v2, `mainReview` and workflow policies (docs/orchestrator.md 4): ignored with a warning. */
+export const LEGACY_SINGLE_KEYS: ReadonlySet<string> = new Set(["pipeline", "frame", "checker", "nav", "mainReview", "investigation", "creation"]);
+export function legacySingleWarning(keys: readonly string[]): string {
+  return `config.single.${keys.length === 1 ? keys[0] : `{${keys.join(", ")}}`} ${keys.length === 1 ? "was" : "were"} removed with the single pipeline v2 and workflow policies and ${keys.length === 1 ? "is" : "are"} ignored (see docs/orchestrator.md); delete ${keys.length === 1 ? "it" : "them"} from the config.`;
 }
-function parseCreation(value: unknown): CreationSettings {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.single.creation: expected object");
-  const fields = value as Record<string, unknown>;
-  if (Object.keys(fields).some(key => key !== "divergence" && key !== "candidates")) throw new RouteConfigError("config.single.creation: unknown field");
-  if (fields.divergence !== undefined && !GATES.includes(fields.divergence as string)) throw new RouteConfigError('config.single.creation.divergence: expected "off", "auto" or "always"');
-  if (fields.candidates !== undefined && fields.candidates !== 2 && fields.candidates !== 3) throw new RouteConfigError("config.single.creation.candidates: expected 2 or 3");
-  return {
-    divergence: (fields.divergence as CreationSettings["divergence"] | undefined) ?? DEFAULT_SINGLE.creation.divergence,
-    candidates: (fields.candidates as CreationSettings["candidates"] | undefined) ?? DEFAULT_SINGLE.creation.candidates,
-  };
-}
-const CHECKER_KEYS = new Set(["gate", "threshold", "maxFixRounds"]);
-export function parseSingleConfig(value: unknown): SingleSettings {
+/** Parse `single`; removed keys are ignored and reported in `warnings` (when given). */
+export function parseSingleConfig(value: unknown, warnings?: string[]): SingleSettings {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.single: expected object");
   const settings = value as Record<string, unknown>;
-  if (Object.keys(settings).some(key => !SINGLE_KEYS.has(key))) throw new RouteConfigError("config.single: unknown field");
+  const legacy = Object.keys(settings).filter(key => LEGACY_SINGLE_KEYS.has(key));
+  if (Object.keys(settings).some(key => !SINGLE_KEYS.has(key) && !LEGACY_SINGLE_KEYS.has(key))) throw new RouteConfigError("config.single: unknown field");
   if (settings.ledger !== undefined && typeof settings.ledger !== "boolean") throw new RouteConfigError("config.single.ledger: expected boolean");
-  if (settings.pipeline !== undefined && settings.pipeline !== "v1" && settings.pipeline !== "v2") throw new RouteConfigError('config.single.pipeline: expected "v1" or "v2"');
-  if (settings.nav !== undefined && typeof settings.nav !== "boolean") throw new RouteConfigError("config.single.nav: expected boolean");
-  if (settings.mainReview !== undefined && settings.mainReview !== "evidence" && settings.mainReview !== "report") throw new RouteConfigError('config.single.mainReview: expected "evidence" or "report"');
-  if (settings.frame !== undefined && !["grounded", "spec", "off"].includes(settings.frame as string)) throw new RouteConfigError('config.single.frame: expected "grounded", "spec" or "off"');
-  const checker = { ...DEFAULT_SINGLE.checker };
-  if (settings.checker !== undefined) {
-    const raw = settings.checker;
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new RouteConfigError("config.single.checker: expected object");
-    const fields = raw as Record<string, unknown>;
-    if (Object.keys(fields).some(key => !CHECKER_KEYS.has(key))) throw new RouteConfigError("config.single.checker: unknown field");
-    if (fields.gate !== undefined && !["auto", "always", "review", "off"].includes(fields.gate as string)) throw new RouteConfigError('config.single.checker.gate: expected "review", "auto", "always" or "off"');
-    if (fields.threshold !== undefined && (typeof fields.threshold !== "number" || !Number.isInteger(fields.threshold) || fields.threshold < 0 || fields.threshold > 30)) throw new RouteConfigError("config.single.checker.threshold: expected an integer from 0 to 30");
-    if (fields.maxFixRounds !== undefined && (typeof fields.maxFixRounds !== "number" || !Number.isInteger(fields.maxFixRounds) || fields.maxFixRounds < 0 || fields.maxFixRounds > 2)) throw new RouteConfigError("config.single.checker.maxFixRounds: expected 0, 1 or 2");
-    Object.assign(checker, fields);
-  }
-  const pipeline = (settings.pipeline as SingleSettings["pipeline"] | undefined) ?? DEFAULT_SINGLE.pipeline;
+  if (settings.spawn !== undefined && typeof settings.spawn !== "boolean") throw new RouteConfigError("config.single.spawn: expected boolean");
+  if (legacy.length) warnings?.push(legacySingleWarning(legacy));
   return {
-    // The v2 pipeline keeps its contract, checks and findings in the task ledger.
-    ledger: pipeline === "v2" || ((settings.ledger as boolean | undefined) ?? DEFAULT_SINGLE.ledger),
-    pipeline,
-    frame: (settings.frame as SingleSettings["frame"] | undefined) ?? DEFAULT_SINGLE.frame,
-    checker,
-    nav: (settings.nav as boolean | undefined) ?? DEFAULT_SINGLE.nav,
-    mainReview: (settings.mainReview as SingleSettings["mainReview"] | undefined) ?? DEFAULT_SINGLE.mainReview,
-    investigation: settings.investigation === undefined ? { ...DEFAULT_SINGLE.investigation } : parseInvestigation(settings.investigation),
-    creation: settings.creation === undefined ? { ...DEFAULT_SINGLE.creation } : parseCreation(settings.creation),
+    ledger: (settings.ledger as boolean | undefined) ?? DEFAULT_SINGLE.ledger,
+    spawn: (settings.spawn as boolean | undefined) ?? DEFAULT_SINGLE.spawn,
   };
 }
 
 /**
  * Load one orche config file: the route settings (validated by `parseRouteConfig`) plus the extension-only
  * `concurrentSessions`, `records`, `taskContext`, `contextWarning` and `single` settings, validated here and removed before the route parser sees the file.
+ * `warnings` lists settings that were ignored (removed `single` keys); the file still loads.
  */
-export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings }> {
+export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings; warnings: string[] }> {
   let value: unknown;
   try { value = JSON.parse(await readFile(path, "utf8")); }
   catch (error) { throw new RouteConfigError(`Cannot load route config ${path}: ${error instanceof Error ? error.message : String(error)}`); }
@@ -263,16 +214,17 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
   let taskContext = { ...DEFAULT_TASK_CONTEXT };
   let contextWarning: ContextWarningSettings = { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
   let single: SingleSettings = { ...DEFAULT_SINGLE };
+  const warnings: string[] = [];
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, single: singleValue, ...rest } = value as Record<string, unknown>;
     if (Object.hasOwn(value, "concurrentSessions")) concurrent = parseConcurrentSessionsConfig(concurrentSessions);
     if (Object.hasOwn(value, "records")) records = parseRecordsConfig(recordsValue);
     if (Object.hasOwn(value, "taskContext")) taskContext = parseTaskContextConfig(taskContextValue);
     if (Object.hasOwn(value, "contextWarning")) contextWarning = parseContextWarningConfig(contextWarningValue);
-    if (Object.hasOwn(value, "single")) single = parseSingleConfig(singleValue);
+    if (Object.hasOwn(value, "single")) single = parseSingleConfig(singleValue, warnings);
     routeValue = rest;
   }
-  return { routes: parseRouteConfig(routeValue), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single };
+  return { routes: parseRouteConfig(routeValue), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single, warnings: warnings.map(warning => `${warning} (${path})`) };
 }
 export class NoRouteError extends Error {
   override readonly name = "NoRouteError";
