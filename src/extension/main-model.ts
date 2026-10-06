@@ -12,7 +12,7 @@
  * nothing re-applies it later: a model or thinking level the user picks during the session (`/model`, the cycle keys) stays.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { inheritsMain, type ModelTiers, type RouteSettings } from "../orchestration/routing.js";
+import { INHERIT_MAIN, inheritsMain, inheritsMainThinking, tierThinking, type ModelTiers, type RouteSettings, type TierSettings } from "../orchestration/routing.js";
 import { withExtendedContext } from "../pi/extended-context.js";
 
 export const MAIN_MODEL_START_REASONS: readonly string[] = ["startup", "new"];
@@ -53,11 +53,26 @@ export async function applyMainModel(
   return { applied: { model: tier.model, thinking: pi.getThinkingLevel(), contextWindow: model.contextWindow }, warnings: [] };
 }
 
-/** A configured orchestrator or worker tier: its own model, or main's model when it says `"main"` (INHERIT_MAIN). */
-const describe = (route: RouteSettings, inherited: string, main: { model?: string; current: string }) => inheritsMain(route)
-  ? route.thinking ? `main's model (${main.model ?? "no model selected"}) with thinking ${route.thinking}` : `main's model and thinking (${main.current})`
-  : `${route.model} ${route.thinking ?? `(thinking: ${inherited})`}${route.extendedContext ? ", extended context" : ""}`;
-const tierSource = (tier: string, route: RouteSettings) => `config models.${tier}${inheritsMain(route) ? ' "main"' : ""}`;
+/**
+ * A configured orchestrator or worker tier: its own model, or main's model when it says `"main"` (INHERIT_MAIN); its own thinking
+ * level, main's current thinking (`thinking: "main"`, shown with the level main has now), or the inherited one when it sets none.
+ */
+const describe = (route: TierSettings, inherited: string, main: { model?: string; current: string; thinking: string }) => inheritsMain(route)
+  ? tierThinking(route) ? `main's model (${main.model ?? "no model selected"}) with thinking ${route.thinking}` : `main's model and thinking (${main.current})`
+  : `${route.model} ${route.thinking === INHERIT_MAIN ? `with main's thinking (${main.thinking})` : route.thinking ?? `(thinking: ${inherited})`}${route.extendedContext ? ", extended context" : ""}`;
+const tierSource = (tier: string, route: TierSettings) => `config models.${tier}${inheritsMain(route) ? ' "main"' : route.thinking === INHERIT_MAIN ? ' (thinking "main")' : ""}`;
+/**
+ * The tiers main's current thinking reaches at the next hand-off: the orchestrator unless it sets a level of its own; the worker
+ * directly when it names main's thinking, else through the orchestrator when it sets no level and the orchestrator takes main's.
+ */
+export function mainThinkingReach(tiers: ModelTiers | undefined): string[] {
+  const orchestrator = !tierThinking(tiers?.orchestrator);
+  const worker = tiers?.worker;
+  return [
+    ...(orchestrator ? ["orchestrator"] : []),
+    ...(inheritsMainThinking(worker) ? ["worker"] : !tierThinking(worker) && orchestrator ? ["worker (through the orchestrator)"] : []),
+  ];
+}
 
 /** What `/orche models` shows: the main session now, the config tiers, and what happened to `models.main` at session start. */
 export interface ModelTiersView {
@@ -83,12 +98,14 @@ export function formatModelTiers(view: ModelTiersView): string {
       : "Pi (no models.main)";
   const orchestrator = view.tiers?.orchestrator;
   const worker = view.tiers?.worker;
-  const main = { ...(view.main ? { model: view.main } : {}), current };
+  const main = { ...(view.main ? { model: view.main } : {}), current, thinking: view.thinking ?? "off" };
+  const reach = mainThinkingReach(view.tiers);
   return [
     `orche models (${view.path ?? "no orche config file"}${view.error ? `; config error: ${view.error}` : ""}; mode ${view.mode}):`,
     `- main: ${current} — ${mainSource}`,
     `- orchestrator (orche_task explore/answer/implement/verify): ${orchestrator ? `${describe(orchestrator, "main's", main)} — ${tierSource("orchestrator", orchestrator)}` : `inherited from main (${current})`}`,
     `- worker (orche_spawn sub-workers, the fresh verifier included): ${worker ? `${describe(worker, "the orchestrator's", main)} — ${tierSource("worker", worker)}` : `inherited from the orchestrator (${orchestrator && !inheritsMain(orchestrator) ? orchestrator.model : view.main ?? "main's model"})`}`,
+    ...(view.mode === "direct" ? [] : [`- main's thinking (${view.thinking ?? "off"}) reaches at each hand-off: ${reach.length ? reach.join(", ") : "no tier (each sets its own level)"}${reach.length ? "; a model that lacks the level runs the nearest one it supports (Pi's clamp; the task result and run.json record the level used)" : ""}`]),
     "- game-asset, video: their own routes (models does not apply)",
     ...(orchestrator || worker ? ["A configured model that orche's runtime cannot resolve is replaced by the inherited one, with a warning in the task result."] : []),
     ...(view.mode === "direct" ? ["Direct mode: main does the work itself; only models.main applies."] : []),

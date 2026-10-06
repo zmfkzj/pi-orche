@@ -52,23 +52,42 @@ export function legacyConfigWarning(keys: readonly string[]): string {
 }
 export const MODEL_TIERS = ["main", "orchestrator", "worker"] as const;
 export type ModelTier = typeof MODEL_TIERS[number];
-/** A tier's route; in `orchestrator` and `worker` its model may be INHERIT_MAIN. */
-export type ModelTiers = Readonly<Partial<Record<ModelTier, RouteSettings>>>;
+/** A tier of `orchestrator` or `worker`: a route whose model and whose thinking may each be INHERIT_MAIN. */
+export interface TierSettings { readonly model: string; readonly thinking?: ThinkingLevel | typeof INHERIT_MAIN; readonly extendedContext?: boolean }
+/** `main` is a plain route (the Pi session's own model); `orchestrator` and `worker` may name main's model or thinking. */
+export interface ModelTiers { readonly main?: RouteSettings; readonly orchestrator?: TierSettings; readonly worker?: TierSettings }
 /**
  * `{ "model": "main" }` in `models.orchestrator` or `models.worker`: run on main's current model and, unless the tier sets
  * `thinking`, main's current thinking, at each hand-off (what an unset `models.orchestrator` does). A model id is always
  * `provider/id`, so `main` cannot name a real model; `models.main` and routes reject it.
+ * `{ "model": "provider/id", "thinking": "main" }` in the same tiers: that model with main's CURRENT thinking at each hand-off
+ * (orchestrator) or spawn (worker), clamped to what the model supports as Pi clamps any level; `models.main`, routes and
+ * `default` reject `thinking: "main"`.
  */
 export const INHERIT_MAIN = "main";
-export const inheritsMain = (route: RouteSettings | undefined): boolean => route?.model === INHERIT_MAIN;
+export const inheritsMain = (route: TierSettings | undefined): boolean => route?.model === INHERIT_MAIN;
+/** The tier takes main's current thinking by name: `thinking: "main"`, or `model: "main"` without a thinking of its own. */
+export const inheritsMainThinking = (route: TierSettings | undefined): boolean => route?.thinking === INHERIT_MAIN || inheritsMain(route) && route?.thinking === undefined;
+/** The tier's own thinking level, when it sets one (not `"main"`). */
+export const tierThinking = (route: TierSettings | undefined): ThinkingLevel | undefined => route?.thinking === INHERIT_MAIN ? undefined : route?.thinking;
 /**
  * Where an orche_task assignment's model comes from (details, run.json, split log): its `models` tier's model (`config`), main's
  * model named by the tier with `"main"` (`config:main`) or inherited because the tier is unset (`main`), or a route (`route`).
  */
 export type AssignmentModelSource = "config" | "config:main" | "main" | "route";
+/**
+ * Where its thinking level comes from, in the same terms: the tier's own level (`config`), main's current thinking named by the
+ * tier (`config:main`: `thinking: "main"`, or `model: "main"` without a level), main's thinking inherited because the tier does
+ * not say (`main`), or a route or the reused worker's own (`route`). The level recorded next to it is the one the session runs
+ * on, after Pi clamped it to the model.
+ */
+export type AssignmentThinkingSource = AssignmentModelSource;
 /** Where a sub-worker's model comes from: `models.worker`'s model (`config`), main's model named by it with `"main"`
  * (`config:main`), the orchestrator's model because it is unset (`orchestrator`), or a specialist's route (`route`). */
 export type SubWorkerModelSource = "config" | "config:main" | "orchestrator" | "route";
+/** Where a sub-worker's thinking comes from: `models.worker`'s own level (`config`), main's current thinking named by it
+ * (`config:main`), the orchestrator's current thinking (`orchestrator`), or a specialist's route (`route`). */
+export type SubWorkerThinkingSource = SubWorkerModelSource;
 export class RouteConfigError extends Error {
   override readonly name = "RouteConfigError";
 }
@@ -77,7 +96,10 @@ const MAX_PROVIDER_EXTENSIONS = 4;
 const MAX_VERIFY_COMMANDS = 8;
 /** The former MAX_WORKERS_LIMIT bound of `workers.explorerRoles`. */
 const MAX_EXPLORER_ROLES = 8;
+/** `"main"` outside `models.orchestrator`/`models.worker` (routes, default, models.main): nothing to inherit from there. */
+const thinkingMainError = (location: string) => new RouteConfigError(`${location}.thinking: "main" (inherit main's thinking) is for models.orchestrator and models.worker; expected ${thinkingLevels.join(", ")}`);
 function parseThinking(value: unknown, location: string): ThinkingLevel | undefined {
+  if (value === INHERIT_MAIN) throw thinkingMainError(location);
   if (value !== undefined && (typeof value !== "string" || !thinkingLevels.includes(value)))
     throw new RouteConfigError(`${location}.thinking: expected ${thinkingLevels.join(", ")}`);
   return value as ThinkingLevel | undefined;
@@ -164,20 +186,29 @@ function parseModelTiers(value: unknown): ModelTiers {
   const tiers = value as Record<string, unknown>;
   const unknown = Object.keys(tiers).find(key => !(MODEL_TIERS as readonly string[]).includes(key));
   if (unknown !== undefined) throw new RouteConfigError(`config.models.${unknown}: unknown tier (expected ${MODEL_TIERS.join(", ")})`);
-  const parsed: Partial<Record<ModelTier, RouteSettings>> = {};
-  for (const tier of MODEL_TIERS) if (tiers[tier] !== undefined) parsed[tier] = parseTier(tier, tiers[tier]);
+  const parsed: { -readonly [T in ModelTier]?: ModelTiers[T] } = {};
+  for (const tier of MODEL_TIERS) if (tiers[tier] !== undefined) (parsed as Record<ModelTier, TierSettings>)[tier] = parseTier(tier, tiers[tier]);
   return parsed;
 }
-/** One tier: a route, or in `orchestrator` and `worker` `{ "model": "main", "thinking"? }` (INHERIT_MAIN). */
-function parseTier(tier: ModelTier, value: unknown): RouteSettings {
+/**
+ * One tier: a route; in `orchestrator` and `worker` the model may be `"main"` (`{ "model": "main", "thinking"? }`) and the
+ * thinking may be `"main"` (INHERIT_MAIN). `{ "model": "main", "thinking": "main" }` means `{ "model": "main" }` and is read as it.
+ */
+function parseTier(tier: ModelTier, value: unknown): TierSettings {
   const location = `config.models.${tier}`;
   const route = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-  if (value !== INHERIT_MAIN && route?.model !== INHERIT_MAIN) return parseSettings(value, location);
+  const thinkingMain = route?.thinking === INHERIT_MAIN;
+  if (thinkingMain && tier === "main") throw thinkingMainError(location);
+  if (value !== INHERIT_MAIN && route?.model !== INHERIT_MAIN) {
+    if (!thinkingMain) return parseSettings(value, location);
+    const { thinking: _main, ...rest } = route!;
+    return { ...parseSettings(rest, location), thinking: INHERIT_MAIN };
+  }
   if (tier === "main") throw new RouteConfigError(`${location}: "main" (inherit main's model) is for models.orchestrator and models.worker; models.main is the Pi session's own model (omit it to keep Pi's model)`);
   if (!route) throw new RouteConfigError(`${location}: expected route object; write { "model": "main" } to inherit main's model`);
   if (Object.keys(route).some(key => key !== "model" && key !== "thinking" && key !== "extendedContext")) throw new RouteConfigError(`${location}: unknown route field`);
   if (route.extendedContext !== undefined) throw new RouteConfigError(`${location}.extendedContext: not with model "main" (main's model is inherited with main's context window)`);
-  const thinking = parseThinking(route.thinking, location);
+  const thinking = thinkingMain ? undefined : parseThinking(route.thinking, location);
   return { model: INHERIT_MAIN, ...(thinking !== undefined ? { thinking } : {}) };
 }
 /** `workers`: only `explorerRoles` still applies; the coordinator's `maxWorkers` and `answerAngles` are ignored (reported in `legacy`). */

@@ -13,7 +13,7 @@ import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-
 import { isAbsolute } from "node:path";
 import { normalizeOwnedPath, validateBacklog, type TaskItem } from "../orchestration/backlog.js";
 import { ownsPath, WRITING_KINDS } from "../orchestration/ownership.js";
-import type { SubWorkerModelSource } from "../orchestration/routing.js";
+import type { SubWorkerModelSource, SubWorkerThinkingSource } from "../orchestration/routing.js";
 import type { WorkspaceChange } from "../orchestration/workspace.js";
 import { MAX_SUB_WORKERS } from "./instructions.js";
 
@@ -100,6 +100,8 @@ export interface SubWorkerOutcome {
   thinking?: string;
   /** Where the model came from (SubWorkerModelSource): `models.worker`'s model or main's named by it, the orchestrator's, or a route. */
   modelSource: SubWorkerModelSource;
+  /** Where `thinking` came from (SubWorkerThinkingSource); `thinking` is the level the session ran on, after Pi's clamp. */
+  thinkingSource?: SubWorkerThinkingSource;
   requests: number;
   models: Record<string, number>;
   startedAt: number;

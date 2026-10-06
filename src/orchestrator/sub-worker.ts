@@ -6,7 +6,7 @@
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { ModelRuntime, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { ModelRoute, SubWorkerModelSource } from "../orchestration/routing.js";
+import type { ModelRoute, SubWorkerModelSource, SubWorkerThinkingSource } from "../orchestration/routing.js";
 import type { TaskItem } from "../orchestration/backlog.js";
 import { checkWriteRealPath, WRITE_TOOLS } from "../orchestration/ownership.js";
 import { orchestrationResultSchemas } from "../orchestration/result-schemas.js";
@@ -24,6 +24,8 @@ export interface SubWorkerEnvironment {
   route: ModelRoute;
   /** Where `route` comes from (recorded per sub-worker): `models.worker`'s model, main's model named by it, or the orchestrator's. */
   routeSource: Exclude<SubWorkerModelSource, "route">;
+  /** Where `route.thinking` comes from: `models.worker`'s level, main's current thinking named by it, or the orchestrator's. */
+  thinkingSource: Exclude<SubWorkerThinkingSource, "route">;
   inheritedContextWindow?: number;
   /** The route of a specialist role (its own configured route, as orche_task resolves it). */
   specialistRoute(role: "game-asset" | "video"): ModelRoute;
@@ -79,7 +81,7 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
     const image = specialist ? env.imageTool?.() : undefined;
     const guard = subWorkerGuard(worker, siblings, env.cwd);
     const sessionFile = env.sessionFile?.(worker.id);
-    const base = { id: worker.id, name: worker.name, role: worker.role, reason: worker.reason, ...(worker.files ? { files: [...worker.files] } : {}), changes: [] as string[], modelSource: specialist ? "route" as const : env.routeSource };
+    const base = { id: worker.id, name: worker.name, role: worker.role, reason: worker.reason, ...(worker.files ? { files: [...worker.files] } : {}), changes: [] as string[], modelSource: specialist ? "route" as const : env.routeSource, thinkingSource: specialist ? "route" as const : env.thinkingSource };
     const fromStats = (stats: SpecialistStats) => ({ model: stats.model, ...(stats.thinking ? { thinking: stats.thinking } : {}), requests: stats.requests, models: { ...stats.models }, startedAt: stats.startedAt, durationMs: stats.durationMs, costUSD: stats.usage.cost, ...(stats.sessionFile ? { sessionFile: stats.sessionFile } : {}) });
     try {
       const { value, stats } = await runSpecialistSession({

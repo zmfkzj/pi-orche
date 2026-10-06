@@ -15,7 +15,7 @@ import { renameSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { appendPrivate, ensurePrivateDir } from "../agent/private-files.js";
-import type { AssignmentModelSource, SubWorkerModelSource } from "../orchestration/routing.js";
+import type { AssignmentModelSource, AssignmentThinkingSource, SubWorkerModelSource, SubWorkerThinkingSource } from "../orchestration/routing.js";
 
 export const SPLIT_LOG = "split-log.jsonl";
 export const SPLIT_LOG_ROTATED = "split-log.1.jsonl";
@@ -44,9 +44,13 @@ export interface SplitLogEntry {
   /** Where `model` came from (AssignmentModelSource): `models.orchestrator` (config), main's model named by it (config:main) or
    * inherited (main), or a route (route). */
   modelSource?: AssignmentModelSource;
-  /** The distinct models the sub-workers ran on and where each came from (SubWorkerModelSource: config and config:main from
-   * `models.worker`, orchestrator, route: specialist). */
-  workerModels?: { model: string; source: SubWorkerModelSource }[];
+  /** The thinking level the worker ran on (after Pi's clamp to the model) and where it came from (AssignmentThinkingSource:
+   * `models.orchestrator`'s level (config), main's current thinking named by it (config:main) or inherited (main), a route). */
+  thinking?: string;
+  thinkingSource?: AssignmentThinkingSource;
+  /** The distinct models and thinking levels the sub-workers ran on and where each came from (SubWorkerModelSource and
+   * SubWorkerThinkingSource: config and config:main from `models.worker`, orchestrator, route: specialist). */
+  workerModels?: { model: string; source: SubWorkerModelSource; thinking?: string; thinkingSource?: SubWorkerThinkingSource }[];
   record?: string;
 }
 

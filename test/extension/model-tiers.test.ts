@@ -66,7 +66,7 @@ describe("model tiers: config", () => {
       expect(delegationRules("single", { spawn })).toContain("Standard roles inherit main's CURRENT model and thinking at hand-off and compact above 50% context");
     }
     const configured = delegationRules("single", { orchestratorModel: true });
-    expect(configured).toContain("Standard roles run on the orchestrator model configured in the orche config (models.orchestrator), not on main's model, and compact above 50% context");
+    expect(configured).toContain("Standard roles run on the orchestrator model configured in the orche config (models.orchestrator), not on main's model, with main's CURRENT thinking at hand-off, and compact above 50% context");
     expect(configured).not.toContain("inherit main's CURRENT model");
     expect(delegationRules("direct", { orchestratorModel: true })).toBe(delegationRules("direct"));
   });
@@ -84,7 +84,7 @@ describe("model tiers: orchestrator and worker", () => {
     expect(run.assignment).toMatchObject({ model: main, thinking: "high", modelSource: "main" });
     expect(run.outcome).toMatchObject({ model: main, thinking: "high", modelSource: "main" });
     expect((run as unknown as { agents: Record<string, unknown>[] }).agents).toContainEqual(expect.objectContaining({ id: "W1.1", model: main, modelSource: "orchestrator" }));
-    expect(await readSplitLog(recordsRoot(h))).toEqual([expect.objectContaining({ model: main, modelSource: "main", workerModels: [{ model: main, source: "orchestrator" }] })]);
+    expect(await readSplitLog(recordsRoot(h))).toEqual([expect.objectContaining({ model: main, modelSource: "main", workerModels: [{ model: main, source: "orchestrator", thinking: "high", thinkingSource: "orchestrator" }] })]);
   });
   it("models.orchestrator only: the orchestrator runs on it with its thinking; sub-workers inherit it", async () => {
     const orchestrator = tierProvider("tier-orch", "o1");
@@ -128,7 +128,7 @@ describe("model tiers: orchestrator and worker", () => {
     const run = await runJson(result.details.record!);
     expect(run.assignment).toMatchObject({ model: main, modelSource: "main" });
     expect(run.outcome).toMatchObject({ model: main, modelSource: "main", warnings });
-    expect(await readSplitLog(recordsRoot(h))).toEqual([expect.objectContaining({ model: main, modelSource: "main", workerModels: [{ model: main, source: "orchestrator" }] })]);
+    expect(await readSplitLog(recordsRoot(h))).toEqual([expect.objectContaining({ model: main, modelSource: "main", workerModels: [{ model: main, source: "orchestrator", thinking: "high", thinkingSource: "orchestrator" }] })]);
   });
   it("specialists keep their routes: an orche_task video worker and a game-asset sub-worker ignore models", async () => {
     const orchestrator = tierProvider("tier-orch", "o1");
@@ -233,7 +233,7 @@ describe("model tiers: through the extension", () => {
     for (const tier of Object.values(tiers)) expect(tier.getPendingResponseCount()).toBe(0);
     const result = h.session.messages.find(message => message.role === "toolResult" && message.toolName === "orche_task");
     expect(result).toMatchObject({ details: { model: "tier-orch/o1", thinking: "low", modelSource: "config", spawned: [expect.objectContaining({ model: "tier-worker/w1", thinking: "minimal", modelSource: "config" })] } });
-    expect(await readSplitLog(join(h.agentDir, "orche", "records"))).toEqual([expect.objectContaining({ model: "tier-orch/o1", modelSource: "config", workerModels: [{ model: "tier-worker/w1", source: "config" }] })]);
+    expect(await readSplitLog(join(h.agentDir, "orche", "records"))).toEqual([expect.objectContaining({ model: "tier-orch/o1", modelSource: "config", workerModels: [{ model: "tier-worker/w1", source: "config", thinking: "minimal", thinkingSource: "config" }] })]);
     const run = await runJson((result as unknown as { details: { record: string } }).details.record);
     expect(run.assignment).toMatchObject({ model: "tier-orch/o1", thinking: "low", modelSource: "config" });
     expect(run.outcome).toMatchObject({ model: "tier-orch/o1", modelSource: "config" });
@@ -307,7 +307,7 @@ describe('model tiers: { "model": "main" } (main\'s model, named in the config)'
     const run = await runJson(result.details.record!);
     expect(run.assignment).toMatchObject({ model: main, thinking: "high", modelSource: "config:main" });
     expect(run.outcome).toMatchObject({ model: main, thinking: "high", modelSource: "config:main" });
-    expect(await readSplitLog(recordsRoot(h))).toEqual([expect.objectContaining({ model: main, modelSource: "config:main", workerModels: [{ model: main, source: "orchestrator" }] })]);
+    expect(await readSplitLog(recordsRoot(h))).toEqual([expect.objectContaining({ model: main, modelSource: "config:main", workerModels: [{ model: main, source: "orchestrator", thinking: "high", thinkingSource: "orchestrator" }] })]);
     // main's CURRENT model and thinking: the next hand-off moves the same worker to what main runs on then.
     const next = tierProvider("main-next", "later");
     h.runtime.registerNativeProvider(next.provider);
@@ -329,7 +329,7 @@ describe('model tiers: { "model": "main" } (main\'s model, named in the config)'
     expect(result.details.spawned?.map(item => [item.model, item.thinking, item.modelSource])).toEqual([[main, "high", "config:main"]]);
     const run = await runJson(result.details.record!) as Awaited<ReturnType<typeof runJson>> & { agents: Record<string, unknown>[] };
     expect(run.agents).toContainEqual(expect.objectContaining({ id: "W1.1", role: "verify", model: main, thinking: "high", modelSource: "config:main" }));
-    expect(await readSplitLog(recordsRoot(h))).toEqual([expect.objectContaining({ model: "tier-orch/o1", modelSource: "config", workerModels: [{ model: main, source: "config:main" }] })]);
+    expect(await readSplitLog(recordsRoot(h))).toEqual([expect.objectContaining({ model: "tier-orch/o1", modelSource: "config", workerModels: [{ model: main, source: "config:main", thinking: "high", thinkingSource: "config:main" }] })]);
   });
   it('"main" with thinking: main\'s model with the tier\'s thinking, for the orchestrator and its sub-workers, whatever main\'s thinking is', async () => {
     const { execute, main, mainFaux } = await fixture({ models: { orchestrator: { model: "main", thinking: "low" }, worker: { model: "main", thinking: "minimal" } } });
@@ -394,10 +394,10 @@ describe('model tiers: { "model": "main" } through the extension', () => {
     for (const tier of Object.values(tiers)) expect(tier.getPendingResponseCount()).toBe(0);
     const result = h.session.messages.find(message => message.role === "toolResult" && message.toolName === "orche_task");
     expect(result).toMatchObject({ details: { model: "tier-orch/o1", thinking: "low", modelSource: "config", spawned: [expect.objectContaining({ model: "tier-main/m1", thinking: "medium", modelSource: "config:main" })] } });
-    expect(await readSplitLog(join(h.agentDir, "orche", "records"))).toEqual([expect.objectContaining({ model: "tier-orch/o1", modelSource: "config", workerModels: [{ model: "tier-main/m1", source: "config:main" }] })]);
+    expect(await readSplitLog(join(h.agentDir, "orche", "records"))).toEqual([expect.objectContaining({ model: "tier-orch/o1", modelSource: "config", workerModels: [{ model: "tier-main/m1", source: "config:main", thinking: "medium", thinkingSource: "config:main" }] })]);
     expect(await modelsText(h)).toContain('- worker (orche_spawn sub-workers, the fresh verifier included): main\'s model and thinking (tier-main/m1 medium) — config models.worker "main"');
-    // A model of the orchestrator's own: main's hand-off rule says so.
-    expect(system).toContain("Standard roles run on the orchestrator model configured in the orche config (models.orchestrator), not on main's model,");
+    // A model and a thinking level of the orchestrator's own: main's hand-off rule says so.
+    expect(system).toContain("Standard roles run on the orchestrator model and thinking level configured in the orche config (models.orchestrator), not on main's, and compact above 50% context");
     expect(system).not.toContain("Standard roles inherit main's CURRENT model");
   });
   it('orchestrator "main": /orche models shows it from the config and main keeps the earlier hand-off sentence', async () => {
@@ -423,3 +423,161 @@ describe('model tiers: { "model": "main" } through the extension', () => {
   });
 });
 
+
+const thinkingMainError = (location: string) => `${location}.thinking: "main" (inherit main's thinking) is for models.orchestrator and models.worker; expected off, minimal, low, medium, high, xhigh, max`;
+describe('model tiers: { "thinking": "main" } (another model, main\'s current thinking)', () => {
+  it('parses in models.orchestrator and models.worker; { "model": "main", "thinking": "main" } reads as { "model": "main" }; routes, default and models.main reject it', () => {
+    expect(parseRouteConfig({ routes: {}, models: { orchestrator: { model: "tier-orch/o1", thinking: "main" }, worker: { model: "c/w", thinking: "main", extendedContext: true } } }).models)
+      .toEqual({ orchestrator: { model: "tier-orch/o1", thinking: "main" }, worker: { model: "c/w", thinking: "main", extendedContext: true } });
+    expect(parseRouteConfig({ routes: {}, models: { orchestrator: { model: "main", thinking: "main" }, worker: { model: "main", thinking: "main" } } }).models)
+      .toEqual(parseRouteConfig({ routes: {}, models: { orchestrator: { model: "main" }, worker: { model: "main" } } }).models);
+    expect(() => parseRouteConfig({ routes: { analyst: { model: "a/b", thinking: "main" } } })).toThrow(thinkingMainError("config.routes.analyst"));
+    expect(() => parseRouteConfig({ routes: {}, default: { model: "a/b", thinking: "main" } })).toThrow(thinkingMainError("config.default"));
+    for (const main of [{ model: "a/b", thinking: "main" }, { model: "main", thinking: "main" }]) expect(() => parseRouteConfig({ routes: {}, models: { main } })).toThrow(thinkingMainError("config.models.main"));
+    expect(() => parseRouteConfig({ routes: {}, models: { orchestrator: { model: "a/b", thinking: "Main" } } })).toThrow("config.models.orchestrator.thinking: expected off, minimal, low, medium, high, xhigh, max");
+    expect(() => parseRouteConfig({ routes: {}, models: { worker: { model: "no-slash", thinking: "main" } } })).toThrow("config.models.worker.model: expected provider/modelId");
+    expect(() => parseRouteConfig({ routes: {}, models: { worker: { model: "main", thinking: "main", extendedContext: true } } })).toThrow('config.models.worker.extendedContext: not with model "main"');
+  });
+  it("orchestrator on another model with thinking \"main\": main's thinking at each hand-off, so a change in main reaches the next one; recorded as config:main", async () => {
+    const orchestrator = tierProvider("tier-orch", "o1");
+    const { h, execute } = await fixture({ records: true, models: { orchestrator: { model: "tier-orch/o1", thinking: "main" } } });
+    h.runtime.registerNativeProvider(orchestrator.provider);
+    orchestrator.setResponses([spawnVerifier(), verified(), implemented()]);
+    const result = await execute();
+    expect(orchestrator.getPendingResponseCount()).toBe(0);
+    expect(result.details).toMatchObject({ model: "tier-orch/o1", thinking: "high", modelSource: "config", thinkingSource: "config:main" });
+    expect(result.details.spawned?.map(item => [item.model, item.thinking, item.modelSource, item.thinkingSource])).toEqual([["tier-orch/o1", "high", "orchestrator", "orchestrator"]]);
+    const run = await runJson(result.details.record!);
+    expect(run.assignment).toMatchObject({ model: "tier-orch/o1", thinking: "high", modelSource: "config", thinkingSource: "config:main" });
+    expect(run.outcome).toMatchObject({ thinking: "high", thinkingSource: "config:main" });
+    expect(await readSplitLog(recordsRoot(h))).toEqual([expect.objectContaining({ model: "tier-orch/o1", modelSource: "config", thinking: "high", thinkingSource: "config:main" })]);
+    // The user changes main's thinking (/thinking, the cycle keys): the next hand-off to the same worker runs on it.
+    orchestrator.setResponses([implemented(false)]);
+    const next = await execute({ worker: "W1", thinking: "minimal" });
+    expect(next.details).toMatchObject({ worker: "W1", model: "tier-orch/o1", thinking: "minimal", thinkingSource: "config:main" });
+    expect((await runJson(next.details.record!)).assignment).toMatchObject({ thinking: "minimal", thinkingSource: "config:main" });
+  });
+  it("regression: no thinking on the orchestrator's own model also follows main (recorded as main); a level of its own stays (config)", async () => {
+    const orchestrator = tierProvider("tier-orch", "o1");
+    const omitted = await fixture({ models: { orchestrator: { model: "tier-orch/o1" } } });
+    omitted.h.runtime.registerNativeProvider(orchestrator.provider);
+    orchestrator.setResponses([implemented(false), implemented(false)]);
+    expect((await omitted.execute()).details).toMatchObject({ model: "tier-orch/o1", thinking: "high", modelSource: "config", thinkingSource: "main" });
+    expect((await omitted.execute({ worker: "W1", thinking: "low" })).details).toMatchObject({ thinking: "low", thinkingSource: "main" });
+    const fixed = tierProvider("tier-orch", "o1");
+    const own = await fixture({ models: { orchestrator: { model: "tier-orch/o1", thinking: "medium" } } });
+    own.h.runtime.registerNativeProvider(fixed.provider);
+    fixed.setResponses([implemented(false), implemented(false)]);
+    expect((await own.execute()).details).toMatchObject({ thinking: "medium", thinkingSource: "config" });
+    expect((await own.execute({ worker: "W1", thinking: "low" })).details).toMatchObject({ thinking: "medium", thinkingSource: "config" });
+    // No models at all: main's model and thinking, recorded as main.
+    const none = await fixture();
+    none.mainFaux.setResponses([implemented(false)]);
+    expect((await none.execute()).details).toMatchObject({ thinking: "high", modelSource: "main", thinkingSource: "main" });
+  });
+  it("worker with thinking \"main\": sub-workers run on main's thinking, not the orchestrator's; without it they keep the orchestrator's (regression)", async () => {
+    for (const [workerThinking, expected] of [["main", ["tier-worker/w1", "high", "config", "config:main"]], [undefined, ["tier-worker/w1", "low", "config", "orchestrator"]]] as const) {
+      const orchestrator = tierProvider("tier-orch", "o1");
+      const worker = tierProvider("tier-worker", "w1");
+      const { h, execute } = await fixture({ records: true, models: { orchestrator: { model: "tier-orch/o1", thinking: "low" }, worker: { model: "tier-worker/w1", ...(workerThinking ? { thinking: workerThinking } : {}) } } });
+      for (const provider of [orchestrator, worker]) h.runtime.registerNativeProvider(provider.provider);
+      orchestrator.setResponses([spawnVerifier(), implemented()]);
+      worker.setResponses([verified()]);
+      const result = await execute();
+      expect(worker.getPendingResponseCount()).toBe(0);
+      expect(result.details).toMatchObject({ model: "tier-orch/o1", thinking: "low", thinkingSource: "config" });
+      expect(result.details.spawned?.map(item => [item.model, item.thinking, item.modelSource, item.thinkingSource])).toEqual([expected]);
+      const run = await runJson(result.details.record!) as Awaited<ReturnType<typeof runJson>> & { agents: Record<string, unknown>[] };
+      expect(run.agents).toContainEqual(expect.objectContaining({ id: "W1.1", model: expected[0], thinking: expected[1], modelSource: expected[2], thinkingSource: expected[3] }));
+      expect(await readSplitLog(recordsRoot(h))).toEqual([expect.objectContaining({ workerModels: [{ model: expected[0], source: expected[2], thinking: expected[1], thinkingSource: expected[3] }] })]);
+    }
+  });
+  it('{ "model": "main", "thinking": "main" } runs exactly like { "model": "main" } for the orchestrator and its sub-workers', async () => {
+    const outcomes = [];
+    for (const tier of [{ model: "main" }, { model: "main", thinking: "main" }]) {
+      const { execute, mainFaux } = await fixture({ models: { orchestrator: tier, worker: tier } });
+      mainFaux.setResponses([spawnVerifier(), verified(), implemented(), implemented(false)]);
+      const first = await execute();
+      const second = await execute({ worker: "W1", thinking: "low" });
+      const pick = (details: typeof first.details) => ({ model: details.model, thinking: details.thinking, modelSource: details.modelSource, thinkingSource: details.thinkingSource, spawned: details.spawned?.map(item => [item.model, item.thinking, item.modelSource, item.thinkingSource]) });
+      outcomes.push([pick(first.details), pick(second.details)]);
+    }
+    expect(outcomes[0]).toEqual(outcomes[1]);
+    expect(outcomes[0]![0]).toMatchObject({ thinking: "high", modelSource: "config:main", thinkingSource: "config:main", spawned: [[expect.any(String), "high", "config:main", "config:main"]] });
+    expect(outcomes[0]![1]).toMatchObject({ thinking: "low", thinkingSource: "config:main" });
+  });
+  it("clamp: a model without main's level runs the nearest one Pi allows, and that level is what is recorded", async () => {
+    const plain = fauxProvider({ provider: "plain", models: [{ id: "p1" }] }); // no reasoning: Pi runs it off
+    const worker = tierProvider("tier-worker", "w1");
+    const { h, execute } = await fixture({ records: true, models: { orchestrator: { model: "plain/p1", thinking: "main" }, worker: { model: "tier-worker/w1", thinking: "main" } } });
+    for (const provider of [plain, worker]) h.runtime.registerNativeProvider(provider.provider);
+    plain.setResponses([spawnVerifier(), implemented()]);
+    worker.setResponses([verified()]);
+    const result = await execute();
+    // The orchestrator runs off; its sub-worker still gets main's high (from main, not the orchestrator's clamped level).
+    expect(result.details).toMatchObject({ model: "plain/p1", thinking: "off", thinkingSource: "config:main" });
+    expect(result.details.spawned?.map(item => [item.model, item.thinking, item.thinkingSource])).toEqual([["tier-worker/w1", "high", "config:main"]]);
+    expect((await runJson(result.details.record!)).assignment).toMatchObject({ thinking: "off", thinkingSource: "config:main" });
+    // xhigh on a reasoning model without that level: high (Pi's clamp), for the orchestrator and for a sub-worker.
+    const orchestrator = tierProvider("tier-orch", "o1");
+    const second = await fixture({ models: { orchestrator: { model: "tier-orch/o1", thinking: "main" }, worker: { model: "plain/p1", thinking: "main" } } });
+    const plainWorker = fauxProvider({ provider: "plain", models: [{ id: "p1" }] });
+    for (const provider of [orchestrator, plainWorker]) second.h.runtime.registerNativeProvider(provider.provider);
+    orchestrator.setResponses([spawnVerifier(), implemented()]);
+    plainWorker.setResponses([verified()]);
+    const clamped = await second.execute({ thinking: "xhigh" });
+    expect(clamped.details).toMatchObject({ model: "tier-orch/o1", thinking: "high", thinkingSource: "config:main" });
+    expect(clamped.details.spawned?.map(item => [item.model, item.thinking, item.thinkingSource])).toEqual([["plain/p1", "off", "config:main"]]);
+  });
+  it("formatModelTiers: thinking \"main\" shows main's level now, and the line of main's thinking names the tiers it reaches", () => {
+    const text = formatModelTiers({ main: "p/m", thinking: "high", mode: "single", tiers: { orchestrator: { model: "o/x", thinking: "main" }, worker: { model: "c/w", thinking: "main" } }, atStart: {} });
+    expect(text).toContain("- orchestrator (orche_task explore/answer/implement/verify): o/x with main's thinking (high) — config models.orchestrator (thinking \"main\")");
+    expect(text).toContain("- worker (orche_spawn sub-workers, the fresh verifier included): c/w with main's thinking (high) — config models.worker (thinking \"main\")");
+    expect(text).toContain("- main's thinking (high) reaches at each hand-off: orchestrator, worker; a model that lacks the level runs the nearest one it supports");
+    const own = formatModelTiers({ main: "p/m", thinking: "low", mode: "single", tiers: { orchestrator: { model: "o/x", thinking: "medium" }, worker: { model: "c/w", thinking: "main" } }, atStart: {} });
+    expect(own).toContain("- main's thinking (low) reaches at each hand-off: worker;");
+    const through = formatModelTiers({ main: "p/m", thinking: "low", mode: "single", tiers: { orchestrator: { model: "o/x" } }, atStart: {} });
+    expect(through).toContain("- main's thinking (low) reaches at each hand-off: orchestrator, worker (through the orchestrator);");
+    const none = formatModelTiers({ main: "p/m", thinking: "low", mode: "single", tiers: { orchestrator: { model: "main", thinking: "high" }, worker: { model: "c/w", thinking: "low" } }, atStart: {} });
+    expect(none).toContain("- main's thinking (low) reaches at each hand-off: no tier (each sets its own level)");
+    expect(formatModelTiers({ main: "p/m", thinking: "low", mode: "direct", atStart: {} })).not.toContain("reaches at each hand-off");
+  });
+  it("main's hand-off sentence says main's CURRENT only for what the orchestrator really inherits", () => {
+    expect(delegationRules("single", { orchestratorModel: false, orchestratorThinking: false })).toBe(delegationRules("single"));
+    // { "model": "main", "thinking": "low" } (0407075 said "model and thinking" here): the model only.
+    const fixedThinking = delegationRules("single", { orchestratorThinking: true });
+    expect(fixedThinking).toContain("Standard roles inherit main's CURRENT model at hand-off, with the thinking level configured in the orche config (models.orchestrator), and compact above 50% context");
+    expect(fixedThinking).not.toContain("CURRENT model and thinking");
+    expect(delegationRules("single", { orchestratorModel: true })).toContain("not on main's model, with main's CURRENT thinking at hand-off, and compact");
+    expect(delegationRules("single", { orchestratorModel: true, orchestratorThinking: true })).toContain("Standard roles run on the orchestrator model and thinking level configured in the orche config (models.orchestrator), not on main's, and compact");
+  });
+});
+
+describe('model tiers: { "thinking": "main" } through the extension', () => {
+  it("main changes its thinking during the session: the next hand-off and its sub-workers run on it; /orche models and main's rule say so", async () => {
+    const tiers = { main: tierProvider("tier-main", "m1"), orchestrator: tierProvider("tier-orch", "o1"), worker: tierProvider("tier-worker", "w1") };
+    const h = await createHarness({ mainSteps: [], orcheSteps: [], inheritMainModel: true, records: true, models: { main: { model: "tier-main/m1", thinking: "medium" }, orchestrator: { model: "tier-orch/o1", thinking: "main" }, worker: { model: "tier-worker/w1", thinking: "main" } }, providers: Object.values(tiers).map(item => ({ provider: item.provider })) });
+    opened.push(h);
+    execFileSync("git", ["init", "-q"], { cwd: h.cwd });
+    let system = "";
+    tiers.main.setResponses([context => { system = systemOf(context); return tool("orche_task", { role: "implement", request }); }, reply("reviewed")]);
+    tiers.orchestrator.setResponses([spawnVerifier(), implemented()]);
+    tiers.worker.setResponses([verified()]);
+    await h.session.prompt("fix the greeting and check it independently");
+    const results = () => h.session.messages.filter(message => message.role === "toolResult" && message.toolName === "orche_task");
+    expect(results()[0]).toMatchObject({ details: { model: "tier-orch/o1", thinking: "medium", thinkingSource: "config:main", spawned: [expect.objectContaining({ model: "tier-worker/w1", thinking: "medium", thinkingSource: "config:main" })] } });
+    expect(system).toContain("not on main's model, with main's CURRENT thinking at hand-off,");
+    h.session.setThinkingLevel("high"); // the user's /thinking or cycle key
+    const before = h.notifications.length;
+    await h.session.prompt("/orche models");
+    const text = h.notifications.slice(before).map(item => item.message).join("\n");
+    expect(text).toContain("- orchestrator (orche_task explore/answer/implement/verify): tier-orch/o1 with main's thinking (high) — config models.orchestrator (thinking \"main\")");
+    expect(text).toContain("- main's thinking (high) reaches at each hand-off: orchestrator, worker;");
+    tiers.main.setResponses([tool("orche_task", { role: "implement", request, worker: "W1" }), reply("reviewed again")]);
+    tiers.orchestrator.setResponses([spawnVerifier(), implemented()]);
+    tiers.worker.setResponses([verified()]);
+    await h.session.prompt("once more, independently checked");
+    for (const tier of Object.values(tiers)) expect(tier.getPendingResponseCount()).toBe(0);
+    expect(results()[1]).toMatchObject({ details: { worker: "W1", model: "tier-orch/o1", thinking: "high", thinkingSource: "config:main", spawned: [expect.objectContaining({ model: "tier-worker/w1", thinking: "high", thinkingSource: "config:main" })] } });
+  });
+});

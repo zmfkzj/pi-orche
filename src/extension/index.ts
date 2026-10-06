@@ -5,7 +5,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type Exte
 import { createOrcheTools } from "../tools/index.js";
 import { spillToolResult } from "../tools/spill.js";
 import { OrcheController, type OrcheControllerOptions } from "./controller.js";
-import { inheritsMain, type MainMode, type ModelTiers } from "../orchestration/routing.js";
+import { inheritsMain, tierThinking, type MainMode, type ModelTiers } from "../orchestration/routing.js";
 import { delegationRules, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
 import { contextWarning, DEFAULT_CONTEXT_WARNING, type ContextWarningSettings, type ContextWarningState } from "./context-warning.js";
 import { CONFIG_FILE, DEFAULT_SINGLE, loadOrcheConfigFile } from "./config.js";
@@ -134,8 +134,9 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     let spawn: boolean = DEFAULT_SINGLE.spawn;
     /** `models.main` at the last session start: what the config set and what was applied (for /orche models). */
     let mainModel: ModelTiersView["atStart"] = {};
-    /** `models.orchestrator` is set (main's hand-off rules then say so instead of "inherit main's model"). */
+    /** `models.orchestrator` names a model / a thinking level of its own (main's hand-off rule then says so instead of "inherit main's"). */
     let orchestratorModel = false;
+    let orchestratorThinking = false;
     const showMode = (ctx: Pick<ExtensionContext, "ui">) =>
       ctx.ui.setStatus("orche-mode", `orche: ${state.session}${state.overriding ? ` (one-turn ${state.effective})` : ""}`);
 
@@ -173,8 +174,10 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       warningSettings = found.contextWarning ?? { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
       warningState = { warnedLevel: 0 };
       spawn = found.spawn ?? DEFAULT_SINGLE.spawn;
-      // Only a model of its own changes main's hand-off rule; `{ "model": "main" }` keeps the earlier sentence.
+      // Only a model or a thinking level of its own changes main's hand-off rule; `{ "model": "main" }` and `thinking: "main"` keep
+      // the earlier sentence's "main's CURRENT" for what they inherit.
       orchestratorModel = !!found.models?.orchestrator && !inheritsMain(found.models.orchestrator);
+      orchestratorThinking = !!tierThinking(found.models?.orchestrator);
       // Removed settings (e.g. single.pipeline, single.mainReview) are ignored: the file still loads; say so once per session start.
       for (const warning of found.warnings ?? []) ctx.ui.notify(warning, "warning");
       // models.main: the Pi session's model and thinking, once at a fresh session start; the user's own choices are kept.
@@ -190,7 +193,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       if (found.legacyMode && !found.error) ctx.ui.notify(`orche: mainMode "${found.legacyMode}" in ${found.path} was removed (multi-agent orche_run delegation); using "single". Set mainMode to "single" or "direct".`, "warning");
     });
     pi.on("before_agent_start", event => {
-      event.systemPromptOptions.sections["orche-delegation"] = delegationRules(state.effective, { spawn, orchestratorModel });
+      event.systemPromptOptions.sections["orche-delegation"] = delegationRules(state.effective, { spawn, orchestratorModel, orchestratorThinking });
     });
     // Direct mode keeps the whole task in the main window: advise the user (not the model) when it fills up.
     pi.on("turn_end", (_event, ctx) => {

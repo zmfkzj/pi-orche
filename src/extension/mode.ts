@@ -47,12 +47,22 @@ export interface DelegationOptions {
   /** `models.orchestrator` names a model of its own (not `{ "model": "main" }`): standard roles run on it instead of main's model
    * (docs/orchestrator.md 12). */
   orchestratorModel?: boolean;
+  /** `models.orchestrator` sets a thinking level of its own (not `"main"`, not omitted): standard roles do not take main's thinking. */
+  orchestratorThinking?: boolean;
 }
-/** How standard roles get their model; without a model of `models.orchestrator`'s own (unset or "main") the earlier sentence word for word. */
+/**
+ * How standard roles get their model and thinking. Without a model or level of `models.orchestrator`'s own (unset, `"main"`, or
+ * no thinking) the earlier sentence word for word; each part names main's CURRENT value only where it is really inherited.
+ */
 const MODEL_SENTENCE = {
   inherited: "Standard roles inherit main's CURRENT model and thinking at hand-off",
-  configured: "Standard roles run on the orchestrator model configured in the orche config (models.orchestrator), not on main's model,",
+  inheritedModel: "Standard roles inherit main's CURRENT model at hand-off, with the thinking level configured in the orche config (models.orchestrator),",
+  configured: "Standard roles run on the orchestrator model configured in the orche config (models.orchestrator), not on main's model, with main's CURRENT thinking at hand-off,",
+  configuredBoth: "Standard roles run on the orchestrator model and thinking level configured in the orche config (models.orchestrator), not on main's,",
 };
+const modelSentence = (options: DelegationOptions) => options.orchestratorModel
+  ? options.orchestratorThinking ? MODEL_SENTENCE.configuredBoth : MODEL_SENTENCE.configured
+  : options.orchestratorThinking ? MODEL_SENTENCE.inheritedModel : MODEL_SENTENCE.inherited;
 /** Stable per effective mode and config: never include session state or a worker roster here. */
 export function delegationRules(mode: MainMode, options: DelegationOptions = {}): string {
   if (mode === "direct")
@@ -65,7 +75,7 @@ export function delegationRules(mode: MainMode, options: DelegationOptions = {})
     "Git: workers never commit or push on their own, and this session cannot run commits itself. Only when the user explicitly asked in this conversation to commit or push, pass `git` ({commit:true} or {push:true, remote?, branch?}) to an implement, game-asset or video orche_task; explore, answer and verify reject it. The grant covers that assignment only, so scope the commit to the task's files where possible (pass `files` and name the paths in `request`) and check the commits listed in the result before reporting.",
     "Single workflow: refine the requirements with the user: goal, constraints and acceptance criteria. Inspect only what is needed to state the task precisely. Ask the user only about decisions you cannot reasonably make; without a UI, make a reasonable assumption and state it in the request and final report. Hand the whole task to ONE orche_task in ONE end-to-end assignment, even when it is large or risky: role implement for changes, answer for read-only questions. Do not split the task into explore/implement/verify phases, and never send an explore before an implement for the same request. Never stop to ask the user to switch modes in order to proceed, and never end a turn without attempting the requested change because of its size or risk. This workflow is the same with and without a UI.",
     ...(spawn ? [ORCHESTRATOR_RULE] : []),
-    `Single hand-off: main analyses the user's intent, purpose and requirements. Write \`request\` as: Intent/Purpose; numbered requirements checklist R1..Rn as lines \`R1: …\`, each testable with acceptance criteria; Constraints and non-goals; Assumptions (explicit when there is no UI); and a final Original request section containing the user's ORIGINAL request text verbatim. Put relevant background and file/evidence references in \`context\`. One end-to-end assignment per round: implement for changes, answer for read-only questions. The worker analyses requirements, creates a Task DAG with task_plan and executes nodes sequentially without main intervention while it runs. ${options.orchestratorModel ? MODEL_SENTENCE.configured : MODEL_SENTENCE.inherited} and compact above 50% context, preserving requirements, original request and the assignment's plan. Specialists keep their routes and do not receive task_plan or 50% compaction.`,
+    `Single hand-off: main analyses the user's intent, purpose and requirements. Write \`request\` as: Intent/Purpose; numbered requirements checklist R1..Rn as lines \`R1: …\`, each testable with acceptance criteria; Constraints and non-goals; Assumptions (explicit when there is no UI); and a final Original request section containing the user's ORIGINAL request text verbatim. Put relevant background and file/evidence references in \`context\`. One end-to-end assignment per round: implement for changes, answer for read-only questions. The worker analyses requirements, creates a Task DAG with task_plan and executes nodes sequentially without main intervention while it runs. ${modelSentence(options)} and compact above 50% context, preserving requirements, original request and the assignment's plan. Specialists keep their routes and do not receive task_plan or 50% compaction.`,
     "Reuse: problems and user follow-ups go to the SAME worker (pass its id in `worker`). Review the result, its evidence and checklist. Restate additional or corrected requirements in the same hand-off format with new R-ids or revised ones and repeat. When a requirement remains unmet or partial for 2 consecutive assignments of that worker, hand ONLY the unmet items to a NEW worker (omit worker), with their requirements, relevant file references and the previous worker's evidence; do not resend the whole task. When a result names a task ledger (`Task ledger T…`), pass that id in `task` for every follow-up of the same task, including the new worker that takes over unmet items; omit `task` for a different user task, even when you reuse the worker. Never claim a reuse that did not happen (unknown ids are errors; workers are gone after a reload, and only a task id continues their work).",
     spawn ? ORCHESTRATOR_SUPERVISION : SUPERVISION,
     REFERENCE_RULE,

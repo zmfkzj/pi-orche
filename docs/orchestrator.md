@@ -605,14 +605,23 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
     - `models.main`의 `"main"`: main은 Pi 세션 자신의 모델이라 상속할 대상이 없다. 경고만 내고 무시하는 대신 오류로 한 이유는 두 가지다. `models` 안의 잘못된 값은 모두 오류로 다루고, 이 값은 예전에도 오류였다.
     - `"main"`과 `extendedContext`를 함께 쓴 경우: main 모델은 상속될 때처럼 main의 context window를 그대로 쓴다.
     - `routes`나 `default`의 `"main"`.
+- **thinking만 main에서 상속하는 값 `"thinking": "main"`**(`tierThinking`, `inheritsMainThinking`):
+  - `orchestrator`와 `worker`에 쓸 수 있다. 예: `{ "model": "cliproxyapi/gpt-6.1-sol", "thinking": "main" }`. 모델은 지정한 값을 쓰고, thinking은 그 hand-off(orchestrator)나 spawn(worker) 시점의 main **현재** thinking(`pi.getThinkingLevel()`)을 쓴다. 사용자가 main에서 `/thinking`이나 순환 키로 바꾸면 다음 hand-off부터 반영된다.
+  - `worker`에 쓰면 orchestrator의 thinking이 아니라 main의 thinking이다. orchestrator가 자기 thinking을 지정했거나 orchestrator 모델이 main의 단계를 낮춰(clamp) 쓰는 경우에 둘이 달라진다.
+  - 모델이 그 단계를 지원하지 않으면 Pi의 clamp를 따른다(`clampThinkingLevel`: 가장 가까운 지원 단계, 추론 미지원 모델은 `off`). 기록되는 `thinking`은 실제로 쓴 단계다. orchestrator는 세션의 `thinkingLevel`, sub-worker는 이번에 세션 생성 뒤 `thinkingLevel`을 읽도록 고쳤다(`src/specialists/session.ts`). 전에는 sub-worker가 요청한 단계를 기록했다.
+  - `{ "model": "main", "thinking": "main" }`은 `{ "model": "main" }`과 같다. 파싱할 때 `{ "model": "main" }`으로 읽는다.
+  - 문법 근거: `model: "main"`과 같은 방식으로, 상속할 값의 자리에 같은 예약값 `"main"`을 둔다. 필드마다 같은 규칙("그 필드에 main이라고 쓰면 main의 현재 값")이라 새 키(`inheritThinking` 같은 것)나 두 번째 값 모양이 필요 없다. thinking 단계 이름에 `main`이 없고 예전에는 설정 오류였으므로, 예전에 유효하던 설정의 뜻이 바뀌지 않는다. 다른 필드(`extendedContext`)에는 상속 예약값을 두지 않는다.
+  - thinking을 생략한 기존 의미는 그대로다. orchestrator는 자기 모델이어도 생략하면 main의 현재 thinking을 쓴다(b42684a부터). 그래서 orchestrator에서 `"thinking": "main"`은 동작이 생략과 같고, 출처만 `config:main`(명시)과 `main`(생략)으로 다르게 기록된다. worker는 생략하면 orchestrator의 thinking을 따른다.
+  - 설정 오류: `routes`, `default`, `models.main`의 `"thinking": "main"`(상속할 main이 없거나 main 자신이다).
+
 - **해석 규칙**:
 
-  | 계층 | 모델을 지정했을 때 | `{ "model": "main" }` | 지정하지 않았을 때 | 해석할 수 없을 때 |
-  |---|---|---|---|---|
-  | main (Pi 세션) | 새 세션 시작 때 적용(아래) | 설정 오류 | Pi 모델(settings.json 기본값, `/model`) | 경고(`ctx.ui.notify`) 후 세션 모델 유지 |
-  | orchestrator (표준 역할 explore/answer/implement/verify) | 그 모델. thinking이 없으면 main의 현재 thinking, extendedContext가 없으면 최상위 값 | main의 현재 모델. thinking은 지정값, 없으면 main의 현재 thinking. context window는 main 것 | main의 현재 모델·thinking 상속(예전과 같음) | 결과 첫 줄 바로 아래와 run.json에 경고 후 main 상속(`"main"`이면 지정하지 않았을 때와 같은 경고와 route) |
-  | worker (orche_spawn sub-worker, 독립 verifier 포함) | 그 모델. thinking이 없으면 orchestrator의 thinking | orchestrator가 아니라 main의 현재 모델. thinking은 지정값, 없으면 main의 현재 thinking. context window는 main 것 | orchestrator의 실제 모델·thinking 상속(예전과 같음) | 경고 후 orchestrator 상속(`"main"`이면 main 모델을 해석할 수 없을 때) |
-  | game-asset, video | 영향 없음 | 영향 없음 | 자기 route | (예전과 같음) |
+  | 계층 | 모델을 지정했을 때 | `{ "model": "main" }` | `"thinking": "main"` | 지정하지 않았을 때 | 해석할 수 없을 때 |
+  |---|---|---|---|---|---|
+  | main (Pi 세션) | 새 세션 시작 때 적용(아래) | 설정 오류 | 설정 오류 | Pi 모델(settings.json 기본값, `/model`) | 경고(`ctx.ui.notify`) 후 세션 모델 유지 |
+  | orchestrator (표준 역할 explore/answer/implement/verify) | 그 모델. thinking이 없으면 main의 현재 thinking, extendedContext가 없으면 최상위 값 | main의 현재 모델. thinking은 지정값, 없으면 main의 현재 thinking. context window는 main 것 | main의 현재 thinking(모델에 맞게 clamp) | main의 현재 모델·thinking 상속(예전과 같음) | 결과 첫 줄 바로 아래와 run.json에 경고 후 main 상속(`"main"`이면 지정하지 않았을 때와 같은 경고와 route) |
+  | worker (orche_spawn sub-worker, 독립 verifier 포함) | 그 모델. thinking이 없으면 orchestrator의 thinking | orchestrator가 아니라 main의 현재 모델. thinking은 지정값, 없으면 main의 현재 thinking. context window는 main 것 | orchestrator가 아니라 main의 현재 thinking(모델에 맞게 clamp) | orchestrator의 실제 모델·thinking 상속(예전과 같음) | 경고 후 orchestrator의 모델·thinking 상속(`"main"`이면 main 모델을 해석할 수 없을 때) |
+  | game-asset, video | 영향 없음 | 영향 없음 | 영향 없음 | 자기 route | (예전과 같음) |
 
 - **main 적용**(`src/extension/main-model.ts`):
   - Pi 확장 API `pi.setModel(model)`과 `pi.setThinkingLevel(level)`을 쓴다. Pi 문서 `docs/extensions.md`의 "Change active tools, model, or thinking level: Session control methods on `pi`"와 `core/extensions/types.d.ts`의 선언을 따랐다. `setModel`은 현재 세션에만 적용되고 settings.json 기본값은 바꾸지 않으며, 자격 증명이 없으면 false를 돌려준다. 모델은 `ctx.modelRegistry.find`로 찾는다. Pi의 `examples/extensions/preset.ts`도 같은 방식이다.
@@ -621,13 +630,15 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
   - `extendedContext`를 켜면 worker와 같은 표(`src/pi/extended-context.ts`)로 창을 넓힌 모델을 넘긴다.
   - direct 모드에서는 main 설정만 의미가 있다.
 - **가시성**:
-  - `/orche models`가 세 계층의 모델과 출처를 보여 준다. 출처는 config, inherited, Pi 가운데 하나다. `"main"`은 `main's model and thinking (지금 main 모델) — config models.orchestrator "main"`처럼 보인다.
-  - main의 인계 규칙 문장은 `models.orchestrator`가 실제 모델을 지정했을 때만 "설정된 orchestrator 모델로 실행"으로 바뀐다. 지정하지 않았거나 `"main"`이면 예전 문장 그대로다. `"main"`에 thinking을 따로 준 경우에도 예전 문장을 쓴다. 문장 속 "thinking"은 이때 맞지 않지만, main이 자기 thinking을 바꿀 수 없으므로 main의 행동에는 영향이 없다.
+  - `/orche models`가 세 계층의 모델과 출처를 보여 준다. 출처는 config, inherited, Pi 가운데 하나다. `"main"`은 `main's model and thinking (지금 main 모델) — config models.orchestrator "main"`처럼 보인다. `"thinking": "main"`은 `provider/model-b with main's thinking (high) — config models.orchestrator (thinking "main")`처럼 지금 main의 단계와 함께 보인다. 그 아래 `main's thinking (high) reaches at each hand-off: orchestrator, worker` 줄이 main의 지금 thinking이 닿는 계층을 보여 준다(worker가 orchestrator를 거쳐 받으면 `worker (through the orchestrator)`, 아무 계층에도 닿지 않으면 `no tier`).
+  - main의 인계 규칙 문장은 orchestrator가 실제로 상속하는 것에만 "main's CURRENT"를 쓴다(`src/extension/mode.ts`의 `modelSentence`). 지정하지 않았거나 `"main"`(단계 없음)이면 예전 문장 그대로 "inherit main's CURRENT model and thinking"이다. `"main"`에 단계를 주면 "main's CURRENT model ... with the thinking level configured"이다. 0407075에서는 이 경우에도 "model and thinking" 문장이 나와 부정확했는데 이번에 바로잡았다. 자기 모델이면 단계가 없거나 `"main"`일 때 "... not on main's model, with main's CURRENT thinking at hand-off", 단계를 주면 "orchestrator model and thinking level configured ..., not on main's"이다.
   - orchestrator와 sub-worker에게 주는 지시문에는 모델 상속을 말하는 문장이 없다. specialist가 자기 모델을 쓴다는 문장만 있어서 고칠 것이 없었다. 분할 판단 지시문의 비용 문장("약 두 배 비용")은 같은 모델 sub-worker로 잰 값이다. 평가로 고른 문장이라 그대로 두었다. `models.worker`로 더 싼 모델을 쓰면 실제 비용 비율은 달라진다(측정하지 않음).
 - **기록**:
   - assignment의 모델과 `modelSource`는 `details`, run.json의 `assignment`·`outcome`, split log에 남는다. 값은 `config`(지정한 모델), `config:main`(`{ "model": "main" }`으로 명시한 main 모델), `main`(지정하지 않아 상속), `route` 가운데 하나다.
   - sub-worker의 모델과 `modelSource`는 `details.spawned`, run.json의 agent 항목, split log의 `workerModels`에 남는다. 값은 `config`, `config:main`, `orchestrator`(지정하지 않아 상속), `route`(specialist) 가운데 하나다.
+  - thinking도 같은 자리에 `thinking`(Pi가 clamp한 뒤 실제로 쓴 단계)과 `thinkingSource`로 남는다. split log는 assignment의 `thinking`·`thinkingSource`와 `workerModels` 항목마다 `thinking`·`thinkingSource`를 더 적는다. 값은 `modelSource`와 같은 이름이다: `config`(계층에 지정한 단계), `config:main`(`"thinking": "main"`이나 단계 없는 `{ "model": "main" }`으로 명시한 main의 현재 thinking), `main`(assignment: 단계를 지정하지 않아 main에서 상속), `orchestrator`(sub-worker: 단계를 지정하지 않아 orchestrator에서 상속), `route`.
 - **테스트**: `test/extension/model-tiers.test.ts`(faux provider만 사용). 다룬 경우는 다음과 같다.
   - 설정 없음(회귀), orchestrator만, worker만, 셋 다(확장을 거친 end-to-end), 해석 불가, specialist, main 적용과 사용자 선택 존중, 기록.
   - `"main"`: orchestrator `"main"`(지정하지 않았을 때와 같은 모델·thinking, 다음 hand-off에서 main의 현재 모델을 따름), 다른 orchestrator 모델 옆의 worker `"main"`(확장을 거친 end-to-end 포함), thinking만 지정, main 모델을 해석할 수 없을 때, `models.main`·문자열·extendedContext·routes의 설정 오류, `/orche models`와 main 지시문.
+  - `"thinking": "main"`: 다른 모델 orchestrator에서 main thinking을 바꾼 뒤 다음 hand-off 반영(run.json·split log 포함), worker는 orchestrator가 아니라 main의 thinking, `{ "model": "main", "thinking": "main" }` = `{ "model": "main" }`(파싱과 실행 결과), clamp(추론 미지원 모델 `off`, `xhigh` → `high`, orchestrator가 clamp돼도 worker는 main 단계), routes·default·models.main 설정 오류, 생략 시 기존 의미(회귀), `/orche models`, main 지시문, 확장을 거친 end-to-end(세션 중 `setThinkingLevel` 뒤 다음 hand-off와 sub-worker).
 - **확인하지 못한 것**: 실제 Pi TUI에서 `/new`·`--model`·순환 키와 함께 쓰는 경우는 faux 세션과 단위 테스트로만 확인했다. 실제 provider 확장(cliproxyapi)이 `session_start` 전에 모델을 등록하는지는 Pi 문서("asynchronous factory ... register providers needed during startup")에 기댄 것이다.

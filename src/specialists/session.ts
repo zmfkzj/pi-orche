@@ -121,6 +121,8 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
     });
     session = await abortable(creation, controller.signal);
     if (session.sessionFile) stats.sessionFile = session.sessionFile;
+    // The level the session really runs on: Pi clamps the route's thinking to the model (a non-reasoning model runs off).
+    if (session.thinkingLevel) stats.thinking = session.thinkingLevel;
     const active = session;
     const stop = () => { void active.abort().catch(() => undefined); };
     controller.signal.addEventListener("abort", stop, { once: true });

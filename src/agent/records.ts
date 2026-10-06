@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { SubWorkerModelSource } from "../orchestration/routing.js";
+import type { SubWorkerModelSource, SubWorkerThinkingSource } from "../orchestration/routing.js";
 
 /**
  * Session records: opt-in persistence of orche's sub-sessions (coordinator, workers, verifiers, advisors) as regular
@@ -41,6 +41,8 @@ export interface AgentRecordEntry {
   thinking?: string;
   /** Sub-workers: where `model` came from (SubWorkerModelSource: `models.worker`, main's model named by it, the orchestrator's, a route). */
   modelSource?: SubWorkerModelSource;
+  /** Sub-workers: where `thinking` came from (SubWorkerThinkingSource); `thinking` is the level the session ran on (clamped by Pi). */
+  thinkingSource?: SubWorkerThinkingSource;
   /** Model requests over the agent's whole life (every assignment; the request that was cut off by an abort counts). */
   requests: number;
   /** Models that actually answered, `provider/model` → requests (can differ from the configured route). */
