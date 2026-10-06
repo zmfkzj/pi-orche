@@ -1,0 +1,381 @@
+[
+ {
+  "id": "B-d3-money-migration-ko",
+  "arm": "baseline-ac1bbf1",
+  "task": "d3-money-migration-ko",
+  "status": "done",
+  "passed": true,
+  "wallClockMs": 256177,
+  "delegated": "implement",
+  "split": "n/a",
+  "tasks": [
+   {
+    "role": "implement",
+    "requests": 15,
+    "durationMs": 216573
+   }
+  ],
+  "usage": {
+   "main": {
+    "requests": 3,
+    "input": 14094,
+    "output": 4405,
+    "cacheRead": 17198,
+    "cacheWrite": 0,
+    "cost": 0.086348,
+    "unknownUsage": 0,
+    "models": {
+     "cliproxyapi/claude-opus-5-5": 3
+    },
+    "maxInput": 14090
+   },
+   "orche": {
+    "requests": 15,
+    "input": 34075,
+    "output": 27114,
+    "cacheRead": 360735,
+    "cacheWrite": 0,
+    "cost": 0,
+    "unknownUsage": 0,
+    "models": {
+     "cliproxyapi/claude-opus-5-5": 15
+    },
+    "maxInput": 38292
+   }
+  },
+  "total": {
+   "requests": 18,
+   "input": 48169,
+   "output": 31519,
+   "cacheRead": 377933,
+   "cacheWrite": 0
+  },
+  "providerCost": 0.086348,
+  "catalogCost": 0.8986426000000001,
+  "unknownUsage": 0,
+  "parity": true
+ },
+ {
+  "id": "B-p1-ticket-batch",
+  "arm": "baseline-ac1bbf1",
+  "task": "p1-ticket-batch",
+  "status": "done",
+  "passed": true,
+  "wallClockMs": 557956,
+  "delegated": "implement",
+  "split": "n/a",
+  "tasks": [
+   {
+    "role": "implement",
+    "requests": 28,
+    "durationMs": 489702
+   }
+  ],
+  "usage": {
+   "main": {
+    "requests": 4,
+    "input": 20376,
+    "output": 9101,
+    "cacheRead": 33946,
+    "cacheWrite": 0,
+    "cost": 0.096931,
+    "unknownUsage": 0,
+    "models": {
+     "cliproxyapi/claude-opus-5-5": 4
+    },
+    "maxInput": 20370
+   },
+   "orche": {
+    "requests": 28,
+    "input": 64765,
+    "output": 52514,
+    "cacheRead": 1157184,
+    "cacheWrite": 0,
+    "cost": 0,
+    "unknownUsage": 0,
+    "models": {
+     "cliproxyapi/claude-opus-5-5": 28
+    },
+    "maxInput": 68956
+   }
+  },
+  "total": {
+   "requests": 32,
+   "input": 85141,
+   "output": 61615,
+   "cacheRead": 1191130,
+   "cacheWrite": 0
+  },
+  "providerCost": 0.096931,
+  "catalogCost": 1.81109,
+  "unknownUsage": 0,
+  "parity": true
+ },
+ {
+  "id": "B-v1-static-traversal-verify",
+  "arm": "baseline-ac1bbf1",
+  "task": "v1-static-traversal-verify",
+  "status": "done",
+  "passed": true,
+  "wallClockMs": 389491,
+  "delegated": "implement, verify",
+  "split": "n/a",
+  "tasks": [
+   {
+    "role": "implement",
+    "requests": 14,
+    "durationMs": 120874
+   },
+   {
+    "role": "verify",
+    "requests": 18,
+    "durationMs": 225905
+   }
+  ],
+  "usage": {
+   "main": {
+    "requests": 4,
+    "input": 15599,
+    "output": 3998,
+    "cacheRead": 26678,
+    "cacheWrite": 0,
+    "cost": 0.084837,
+    "unknownUsage": 0,
+    "models": {
+     "cliproxyapi/claude-opus-5-5": 4
+    },
+    "maxInput": 15593
+   },
+   "orche": {
+    "requests": 32,
+    "input": 59957,
+    "output": 35457,
+    "cacheRead": 655435,
+    "cacheWrite": 0,
+    "cost": 0.735854,
+    "unknownUsage": 0,
+    "models": {
+     "cliproxyapi/claude-opus-5-5": 32
+    },
+    "maxInput": 45875
+   }
+  },
+  "total": {
+   "requests": 36,
+   "input": 75556,
+   "output": 39455,
+   "cacheRead": 682113,
+   "cacheWrite": 0
+  },
+  "providerCost": 0.8206910000000001,
+  "catalogCost": 1.2277466,
+  "unknownUsage": 0,
+  "parity": true
+ },
+ {
+  "id": "O-d3-money-migration-ko",
+  "arm": "orchestrator",
+  "task": "d3-money-migration-ko",
+  "status": "done",
+  "passed": true,
+  "wallClockMs": 221934,
+  "delegated": "implement",
+  "split": "none",
+  "tasks": [
+   {
+    "role": "implement",
+    "split": {
+     "decision": "none",
+     "criteria": [],
+     "reason": "Small, tightly coupled package where every module depends on the new Money contract; there were no independent substantial parts."
+    },
+    "requests": 11,
+    "durationMs": 184483
+   }
+  ],
+  "usage": {
+   "main": {
+    "requests": 3,
+    "input": 13383,
+    "output": 4204,
+    "cacheRead": 17047,
+    "cacheWrite": 0,
+    "cost": 0.046644,
+    "unknownUsage": 0,
+    "models": {
+     "cliproxyapi/claude-opus-5-5": 3
+    },
+    "maxInput": 13379
+   },
+   "orche": {
+    "requests": 11,
+    "input": 28635,
+    "output": 21750,
+    "cacheRead": 238053,
+    "cacheWrite": 0,
+    "cost": 0,
+    "unknownUsage": 0,
+    "models": {
+     "cliproxyapi/claude-opus-5-5": 11
+    },
+    "maxInput": 33642
+   }
+  },
+  "total": {
+   "requests": 14,
+   "input": 42018,
+   "output": 25954,
+   "cacheRead": 255100,
+   "cacheWrite": 0
+  },
+  "providerCost": 0.046644,
+  "catalogCost": 0.7381719999999999,
+  "unknownUsage": 0,
+  "parity": true
+ },
+ {
+  "id": "O-p1-ticket-batch",
+  "arm": "orchestrator",
+  "task": "p1-ticket-batch",
+  "status": "done",
+  "passed": true,
+  "wallClockMs": 496463,
+  "delegated": "implement",
+  "split": "none",
+  "tasks": [
+   {
+    "role": "implement",
+    "split": {
+     "decision": "none",
+     "criteria": [],
+     "reason": "Each ticket is a single small file plus tests, so loading context and integrating would cost more than doing them in sequence; there was no isolation or independent-verification need."
+    },
+    "requests": 27,
+    "durationMs": 447805
+   }
+  ],
+  "usage": {
+   "main": {
+    "requests": 3,
+    "input": 15680,
+    "output": 4891,
+    "cacheRead": 19369,
+    "cacheWrite": 0,
+    "cost": 0.047723,
+    "unknownUsage": 0,
+    "models": {
+     "cliproxyapi/claude-opus-5-5": 3
+    },
+    "maxInput": 15676
+   },
+   "orche": {
+    "requests": 27,
+    "input": 62440,
+    "output": 49881,
+    "cacheRead": 958182,
+    "cacheWrite": 0,
+    "cost": 0,
+    "unknownUsage": 0,
+    "models": {
+     "cliproxyapi/claude-opus-5-5": 27
+    },
+    "maxInput": 67415
+   }
+  },
+  "total": {
+   "requests": 30,
+   "input": 78120,
+   "output": 54772,
+   "cacheRead": 977551,
+   "cacheWrite": 0
+  },
+  "providerCost": 0.047723,
+  "catalogCost": 1.6034301999999998,
+  "unknownUsage": 0,
+  "parity": true
+ },
+ {
+  "id": "O-v1-static-traversal-verify",
+  "arm": "orchestrator",
+  "task": "v1-static-traversal-verify",
+  "status": "done",
+  "passed": true,
+  "wallClockMs": 278865,
+  "delegated": "implement",
+  "split": "verification [verify:verify/passed 7req 104s]",
+  "tasks": [
+   {
+    "role": "implement",
+    "split": {
+     "decision": "split",
+     "criteria": [
+      "verification"
+     ],
+     "reason": "I did the implementation myself because it is a single small coupled change. The user explicitly asked for an independent review of this security fix, so I spawned one fresh read-only verifier."
+    },
+    "spawned": [
+     {
+      "id": "W1.1",
+      "name": "verify",
+      "role": "verify",
+      "reason": "verification",
+      "changes": [],
+      "status": "passed",
+      "model": "cliproxyapi/claude-opus-5-5",
+      "thinking": "high",
+      "requests": 7,
+      "models": {
+       "cliproxyapi/claude-opus-5-5": 7
+      },
+      "startedAt": 1791282188718,
+      "durationMs": 103564,
+      "costUSD": 0.313437,
+      "sessionFile": "/home/arthur/Code/oh-my-pi-extensions/.worktrees/orche-orchestrator-redesign/results/orchestrator-smoke-2026-10-06/runs/sessions/O-v1-static-traversal-verify/orche-records/01a110ba-eb63-7362-b6ee-7754cb7742e6/workers/W1.1-2026-10-06T10-23-08-718Z.jsonl",
+      "summary": "Verdict: PASS WITH NOTES. I found no way to bypass containment. Across more than 230 attack requests, nothing from outside public/ was ever served, every blocked request got a 4xx, nothing crashed or returned 5xx, legitimate files still serve correctly, and `npm test` passes 37/37. The notes are low-severity: small, deliberate behaviour changes and a theoretical race.\n\n**What changed**\n- `git status` shows only `src/static.js` modified and `test/static.test.js` added. `app.js`, `response.js`, `…"
+     }
+    ],
+    "requests": 19,
+    "durationMs": 256740
+   }
+  ],
+  "usage": {
+   "main": {
+    "requests": 3,
+    "input": 10381,
+    "output": 2015,
+    "cacheRead": 14893,
+    "cacheWrite": 0,
+    "cost": 0.028762,
+    "unknownUsage": 0,
+    "models": {
+     "cliproxyapi/claude-opus-5-5": 3
+    },
+    "maxInput": 10377
+   },
+   "orche": {
+    "requests": 26,
+    "input": 57324,
+    "output": 23059,
+    "cacheRead": 432469,
+    "cacheWrite": 0,
+    "cost": 0.313437,
+    "unknownUsage": 0,
+    "models": {
+     "cliproxyapi/claude-opus-5-5": 26
+    },
+    "maxInput": 30246
+   }
+  },
+  "total": {
+   "requests": 29,
+   "input": 67705,
+   "output": 25074,
+   "cacheRead": 447362,
+   "cacheWrite": 0
+  },
+  "providerCost": 0.34219900000000003,
+  "catalogCost": 0.8617724,
+  "unknownUsage": 0,
+  "parity": true
+ }
+]

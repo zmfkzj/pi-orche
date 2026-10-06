@@ -1,0 +1,3717 @@
+{
+"python": "3.14.4",
+"seed": 20261006,
+"cases": [
+{
+"module": "textwrap",
+"fn": "wrap",
+"args": [
+"gamma\te-mail  日本語  Stop! delta re-enter gamma\tend. \n ",
+{
+"width": 8,
+"initialIndent": "  ",
+"expandTabs": true,
+"fixSentenceEndings": false,
+"dropWhitespace": false,
+"breakOnHyphens": false,
+"maxLines": 2,
+"placeholder": " ~"
+}
+],
+"value": [
+"  gamma",
+"~"
+]
+},
+{
+"module": "textwrap",
+"fn": "wrap",
+"args": [
+"3.14 a-b-c-d to \n end.\t--option\tx e-mail foo-\nalpha  delta  gamma end. ",
+{
+"width": 12,
+"subsequentIndent": "| ",
+"expandTabs": true,
+"tabsize": 4,
+"dropWhitespace": true
+}
+],
+"value": [
+"3.14 a-b-c-d",
+"| to   end.",
+"| --option",
+"| x e-mail",
+"| foo- alpha",
+"| delta",
+"| gamma end."
+]
+},
+{
+"module": "textwrap",
+"fn": "wrap",
+"args": [
+"\ndelta\nbeta 3.14   Stop! 1,000 Why?   ",
+{
+"width": 40,
+"subsequentIndent": "    ",
+"fixSentenceEndings": false
+}
+],
+"value": [
+" delta beta 3.14   Stop! 1,000 Why?"
+]
+},
+{
+"module": "textwrap",
+"fn": "wrap",
+"args": [
+"e-mail \n Stop!\t3.14   alpha --option be gamma 'quoted' gamma \n to  日本語\nWhy?\t",
+{
+"width": 1,
+"expandTabs": false,
+"tabsize": 8,
+"replaceWhitespace": true,
+"breakLongWords": true,
+"breakOnHyphens": true
+}
+],
+"value": [
+"e",
+"-",
+"m",
+"a",
+"i",
+"l",
+"S",
+"t",
+"o",
+"p",
+"!",
+"3",
+".",
+"1",
+"4",
+"a",
+"l",
+"p",
+"h",
+"a",
+"-",
+"-",
+"o",
+"p",
+"t",
+"i",
+"o",
+"n",
+"b",
+"e",
+"g",
+"a",
+"m",
+"m",
+"a",
+"'",
+"q",
+"u",
+"o",
+"t",
+"e",
+"d",
+"'",
+"g",
+"a",
+"m",
+"m",
+"a",
+"t",
+"o",
+"日",
+"本",
+"語",
+"W",
+"h",
+"y",
+"?"
+]
+},
+{
+"module": "textwrap",
+"fn": "fill",
+"args": [
+"日本語 ",
+{
+"width": 15,
+"subsequentIndent": "",
+"placeholder": "..."
+}
+],
+"value": "日本語"
+},
+{
+"module": "textwrap",
+"fn": "wrap",
+"args": [
+"日本語\ndelta naïve x--y ",
+{
+"width": 10,
+"expandTabs": true,
+"replaceWhitespace": true,
+"placeholder": " ~"
+}
+],
+"value": [
+"日本語 delta",
+"naïve x--y"
+]
+},
+{
+"module": "textwrap",
+"fn": "fill",
+"args": [
+"3.14\netc. \n Stop! 日本語 \n ",
+{
+"width": 12,
+"subsequentIndent": "    ",
+"expandTabs": true,
+"tabsize": 2
+}
+],
+"value": "3.14 etc.\n    Stop!\n    日本語"
+},
+{
+"module": "textwrap",
+"fn": "fill",
+"args": [
+"re-enter -bar\tfoo-\tre-enter  alpha\tx\nbeta\nnaïve  to  ",
+{
+"width": 12,
+"initialIndent": "  ",
+"replaceWhitespace": false,
+"fixSentenceEndings": true,
+"breakLongWords": true,
+"dropWhitespace": false,
+"breakOnHyphens": true
+}
+],
+"value": "  re-enter \n-bar   foo-\n    re-enter\n  alpha x\n\nbeta\nnaïve  \nto  "
+},
+{
+"module": "textwrap",
+"fn": "wrap",
+"args": [
+"supercalifragilisticexpialidocious Mr.\tx--y beta  ",
+{
+"width": 15,
+"initialIndent": "",
+"placeholder": " [...]"
+}
+],
+"value": [
+"supercalifragil",
+"isticexpialidoc",
+"ious Mr.  x--y",
+"beta"
+]
+},
+{
+"module": "textwrap",
+"fn": "fill",
+"args": [
+"delta re-enter \n ",
+{
+"width": 10,
+"expandTabs": false,
+"replaceWhitespace": false
+}
+],
+"value": "delta re-\nenter"
+},
+{
+"module": "textwrap",
+"fn": "wrap",
+"args": [
+"be alpha\nfoo- well-known  'quoted'\t1,000 supercalifragilisticexpialidocious  (paren) ",
+{
+"width": 20,
+"subsequentIndent": "    ",
+"expandTabs": true,
+"dropWhitespace": false,
+"maxLines": 1
+}
+],
+"value": [
+"be alpha foo- [...]"
+]
+},
+{
+"module": "textwrap",
+"fn": "wrap",
+"args": [
+"日本語\nbe\nStop!   Stop!\n",
+{
+"width": 30,
+"fixSentenceEndings": false
+}
+],
+"value": [
+"日本語 be Stop!   Stop!"
+]
+},
+{
+"module": "textwrap",
+"fn": "fill",
+"args": [
+"--option\nnaïve etc.\na-b-c-d Why? \n supercalifragilisticexpialidocious  'quoted' ",
+{
+"width": 20,
+"subsequentIndent": "    ",
+"expandTabs": true,
+"replaceWhitespace": true,
+"fixSentenceEndings": false,
+"breakLongWords": false,
+"dropWhitespace": true,
+"breakOnHyphens": false
+}
+],
+"value": "--option naïve etc.\n    a-b-c-d Why?\n    supercalifragilisticexpialidocious\n    'quoted'"
+},
+{
+"module": "textwrap",
+"fn": "wrap",
+"args": [
+"\ndelta re-enter\t--option   Why?\t-bar\te-mail\na-b-c-d  beta --option  ",
+{
+"width": 20,
+"expandTabs": false,
+"breakLongWords": false,
+"placeholder": " [...]"
+}
+],
+"value": [
+" delta re-enter",
+"--option   Why? -bar",
+"e-mail a-b-c-d  beta",
+"--option"
+]
+},
+{
+"module": "textwrap",
+"fn": "wrap",
+"args": [
+"1,000\nStop! re-enter \n über   to   ",
+{
+"width": 40,
+"initialIndent": ">>> ",
+"expandTabs": false,
+"replaceWhitespace": true,
+"fixSentenceEndings": true,
+"maxLines": 2
+}
+],
+"value": [
+">>> 1,000 Stop!  re-enter   über   to"
+]
+},
+{
+"module": "textwrap",
+"fn": "fill",
+"args": [
+"1,000  Mr.   end.   a-b-c-d\nx -bar Mr. ",
+{
+"width": 12,
+"initialIndent": "* ",
+"expandTabs": false,
+"dropWhitespace": true,
+"maxLines": 2
+}
+],
+"value": "* 1,000  Mr.\nend. [...]"
+},
+{
+"module": "textwrap",
+"fn": "wrap",
+"args": [
+"end.  Stop!  well-known über (paren) 'quoted'   be 'quoted' über \n ",
+{
+"width": 8,
+"subsequentIndent": "  ",
+"replaceWhitespace": true,
+"breakLongWords": true,
+"dropWhitespace": false
+}
+],
+"value": [
+"end.  ",
+"  Stop!",
+"    ",
+"  well-",
+"  known ",
+"  über (",
+"  paren)",
+"   'quot",
+"  ed'   ",
+"  be 'qu",
+"  oted' ",
+"  über",
+"     "
+]
+},
+{
+"module": "textwrap",
+"fn": "wrap",
+"args": [
+"\tStop!\tStop!  x--y naïve   ",
+{
+"width": 15,
+"subsequentIndent": "    ",
+"replaceWhitespace": false,
+"fixSentenceEndings": true,
+"maxLines": 2,
+"placeholder": " ~"
+}
+],
+"value": [
+"        Stop!",
+"    Stop!  x ~"
+]
+},
+{
+"module": "textwrap",
+"fn": "fill",
+"args": [
+"(paren)  etc.\t",
+{
+"width": 10,
+"placeholder": "..."
+}
+],
+"value": "(paren)\netc."
+},
+{
+"module": "textwrap",
+"fn": "shorten",
+"args": [
+"supercalifragilisticexpialidocious 3.14 e-mail\t(paren) beta  Mr.\tx \n 1,000\n'quoted'  end.\t3.14 \n to\t日本語 naïve   ",
+50,
+{
+"expandTabs": false,
+"tabsize": 4,
+"breakLongWords": false,
+"breakOnHyphens": false,
+"placeholder": " ~"
+}
+],
+"value": "supercalifragilisticexpialidocious 3.14 e-mail ~"
+},
+{
+"module": "textwrap",
+"fn": "shorten",
+"args": [
+"\tx--y   3.14 Stop!\n1,000  alpha\n日本語\nx supercalifragilisticexpialidocious\tto\t3.14 --option foo- \n be\t",
+20,
+{
+"initialIndent": "  ",
+"subsequentIndent": "",
+"tabsize": 4,
+"replaceWhitespace": true,
+"fixSentenceEndings": false,
+"breakLongWords": false,
+"dropWhitespace": true,
+"breakOnHyphens": false
+}
+],
+"value": "  x--y 3.14 [...]"
+},
+{
+"module": "textwrap",
+"fn": "shorten",
+"args": [
+"x \n well-known to  alpha  alpha\t1,000   re-enter supercalifragilisticexpialidocious\ne-mail (paren)  3.14 delta alpha 'quoted' ",
+20,
+{
+"initialIndent": "",
+"tabsize": 4
+}
+],
+"value": "x well-known [...]"
+},
+{
+"module": "textwrap",
+"fn": "shorten",
+"args": [
+"gamma x--y\ngamma \n 3.14   日本語   supercalifragilisticexpialidocious e-mail etc. foo- alpha\te-mail\n日本語   delta -bar  -bar foo-\t",
+15,
+{
+"expandTabs": true,
+"tabsize": 2,
+"replaceWhitespace": false,
+"fixSentenceEndings": false,
+"breakLongWords": true
+}
+],
+"value": "gamma x-- [...]"
+},
+{
+"module": "textwrap",
+"fn": "dedent",
+"args": [
+"    \t\n   \n  \n        alpha beta\n   \n \t  \n"
+],
+"value": "\n\n\nalpha beta\n\n\n"
+},
+{
+"module": "textwrap",
+"fn": "dedent",
+"args": [
+"  alpha beta\n   \n        alpha beta\n \tx\n \t\t\n    x"
+],
+"value": " alpha beta\n\n       alpha beta\n\tx\n\n   x"
+},
+{
+"module": "textwrap",
+"fn": "dedent",
+"args": [
+"    x\n "
+],
+"value": "x\n"
+},
+{
+"module": "textwrap",
+"fn": "dedent",
+"args": [
+"    x\n  \n \n x\n    \t\n"
+],
+"value": "   x\n\n\nx\n\n"
+},
+{
+"module": "textwrap",
+"fn": "indent",
+"args": [
+"\t\n",
+"  "
+],
+"value": "\t\n"
+},
+{
+"module": "textwrap",
+"fn": "indent",
+"args": [
+"  \n",
+"#"
+],
+"value": "  \n"
+},
+{
+"module": "shlex",
+"fn": "split",
+"args": [
+"*.txt back\\ slash b c",
+{}
+],
+"value": [
+"*.txt",
+"back slash",
+"b",
+"c"
+]
+},
+{
+"module": "shlex",
+"fn": "split",
+"args": [
+"\\ x#y --flag=1 \\ \"esc \\\" q\"",
+{}
+],
+"value": [
+" x#y",
+"--flag=1",
+" esc \" q"
+]
+},
+{
+"module": "shlex",
+"fn": "split",
+"args": [
+"--flag=1 back\\ slash 'a'\"b\"c",
+{}
+],
+"value": [
+"--flag=1",
+"back slash",
+"abc"
+]
+},
+{
+"module": "shlex",
+"fn": "split",
+"args": [
+"--flag=1 'a'\"b\"c",
+{}
+],
+"value": [
+"--flag=1",
+"abc"
+]
+},
+{
+"module": "shlex",
+"fn": "split",
+"args": [
+"'single quoted' back\\ slash \"esc \\\" q\" \" \"\\$x\"",
+{}
+],
+"error": "ValueError"
+},
+{
+"module": "shlex",
+"fn": "split",
+"args": [
+"\"double quoted\" $HOME \\ b c b c",
+{}
+],
+"value": [
+"double quoted",
+"$HOME",
+" b",
+"c",
+"b",
+"c"
+]
+},
+{
+"module": "shlex",
+"fn": "split",
+"args": [
+"\\ --flag=1 \"esc \\\" q\" b c a",
+{
+"posix": false
+}
+],
+"value": [
+"\\",
+"--flag=1",
+"\"esc \\\"",
+"q\"",
+"b",
+"c",
+"a"
+]
+},
+{
+"module": "shlex",
+"fn": "split",
+"args": [
+"\"\\$x\" x#y ü 'a'\"b\"c",
+{}
+],
+"value": [
+"\\$x",
+"x#y",
+"ü",
+"abc"
+]
+},
+{
+"module": "shlex",
+"fn": "quote",
+"args": [
+"safe-chars_.:/+@%=,"
+],
+"value": "safe-chars_.:/+@%=,"
+},
+{
+"module": "shlex",
+"fn": "join",
+"args": [
+[
+"--o=1",
+"--o=1",
+"$x",
+""
+]
+],
+"value": "--o=1 --o=1 '$x' ''"
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getMatchingBlocks",
+"args": [],
+"value": [
+[
+0,
+0,
+8
+],
+[
+8,
+10,
+1
+],
+[
+12,
+12,
+2
+],
+[
+14,
+14,
+0
+]
+],
+"ctor": [
+" ede dcbdbdec ",
+" ede dcbeedcc ",
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getGroupedOpcodes",
+"args": [
+3
+],
+"value": [
+[
+[
+"replace",
+0,
+1,
+0,
+1
+],
+[
+"equal",
+1,
+6,
+1,
+6
+],
+[
+"delete",
+6,
+7,
+6,
+6
+],
+[
+"equal",
+7,
+11,
+6,
+10
+],
+[
+"insert",
+11,
+11,
+10,
+11
+]
+]
+],
+"ctor": [
+[
+"# comment\n",
+"    return 0\n",
+"def main():\n",
+"print(x)\n",
+"    main()\n",
+"    return 0\n",
+"y = x + 1\n",
+"    main()\n",
+"# comment\n",
+"if __name__ == '__main__':\n",
+"x = 1\n"
+],
+[
+"# commentx\n",
+"    return 0\n",
+"def main():\n",
+"print(x)\n",
+"    main()\n",
+"    return 0\n",
+"    main()\n",
+"# comment\n",
+"if __name__ == '__main__':\n",
+"x = 1\n",
+"# comment\n"
+],
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.quickRatio",
+"args": [],
+"value": 0.0,
+"ctor": [
+"",
+"bb",
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.ratio",
+"args": [],
+"value": 0.9090909090909091,
+"ctor": [
+[
+"def main():\n",
+"x = 1\n",
+"    return 0\n",
+"    def f(self):\n",
+"x = 1\n",
+"print(x)\n"
+],
+[
+"x = 1\n",
+"    return 0\n",
+"    def f(self):\n",
+"x = 1\n",
+"print(x)\n"
+],
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getOpcodes",
+"args": [],
+"value": [
+[
+"equal",
+0,
+3,
+0,
+3
+],
+[
+"insert",
+3,
+3,
+3,
+6
+],
+[
+"equal",
+3,
+5,
+6,
+8
+],
+[
+"delete",
+5,
+8,
+8,
+8
+],
+[
+"equal",
+8,
+15,
+8,
+15
+],
+[
+"insert",
+15,
+15,
+15,
+16
+]
+],
+"ctor": [
+"cdadabdbdbace e",
+"cdabeedadbace eb",
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getMatchingBlocks",
+"args": [],
+"value": [
+[
+0,
+0,
+8
+],
+[
+9,
+8,
+4
+],
+[
+13,
+13,
+1
+],
+[
+14,
+14,
+0
+]
+],
+"ctor": [
+[
+"print(y)\n",
+"y = x + 1\n",
+"y = x + 1\n",
+"y = x + 1\n",
+"        return 1\n",
+"import sys\n",
+"x = 1\n",
+"        return 1\n",
+"print(x)\n",
+"    return 0\n",
+"import os\n",
+"x = 1\n",
+"    return 0\n",
+"        return 1\n"
+],
+[
+"print(y)\n",
+"y = x + 1\n",
+"y = x + 1\n",
+"y = x + 1\n",
+"        return 1\n",
+"import sys\n",
+"x = 1\n",
+"        return 1\n",
+"    return 0\n",
+"import os\n",
+"x = 1\n",
+"    return 0\n",
+"    main()\n",
+"        return 1\n"
+],
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getGroupedOpcodes",
+"args": [
+1
+],
+"value": [
+[
+[
+"insert",
+0,
+0,
+0,
+1
+]
+]
+],
+"ctor": [
+[],
+[
+"    main()\n"
+],
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.quickRatio",
+"args": [],
+"value": 0.9411764705882353,
+"ctor": [
+" ee becb",
+" ee becbe",
+{
+"autojunk": false
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.ratio",
+"args": [],
+"value": 0.8695652173913043,
+"ctor": [
+"cceba a ea cee acadae",
+"cceba a ea cee aeadaee bb",
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getOpcodes",
+"args": [],
+"value": [
+[
+"equal",
+0,
+1,
+0,
+1
+],
+[
+"delete",
+1,
+2,
+1,
+1
+]
+],
+"ctor": [
+[
+"    main()\n",
+"if __name__ == '__main__':\n"
+],
+[
+"    main()\n"
+],
+{
+"autojunk": false
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getMatchingBlocks",
+"args": [],
+"value": [
+[
+0,
+0,
+6
+],
+[
+7,
+7,
+1
+],
+[
+8,
+8,
+0
+]
+],
+"ctor": [
+"ecdd eac",
+"ecdd efc",
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getGroupedOpcodes",
+"args": [
+3
+],
+"value": [
+[
+[
+"equal",
+0,
+1,
+0,
+1
+],
+[
+"replace",
+1,
+2,
+1,
+2
+],
+[
+"equal",
+2,
+6,
+2,
+6
+],
+[
+"replace",
+6,
+7,
+6,
+7
+]
+]
+],
+"ctor": [
+[
+"    pass\n",
+"    return 0\n",
+"class A:\n",
+"print(x)\n",
+"    def f(self):\n",
+"x = 1\n",
+"print(y)\n"
+],
+[
+"    pass\n",
+"    pass\n",
+"class A:\n",
+"print(x)\n",
+"    def f(self):\n",
+"x = 1\n",
+"print(y)  \n"
+],
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.quickRatio",
+"args": [],
+"value": 1.0,
+"ctor": [
+[
+"x = 1\n",
+"import sys\n",
+"def main():\n",
+"import os\n",
+"# comment\n",
+"# comment\n",
+"    return 0\n"
+],
+[
+"x = 1\n",
+"import sys\n",
+"def main():\n",
+"import os\n",
+"# comment\n",
+"# comment\n",
+"    return 0\n"
+],
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.ratio",
+"args": [],
+"value": 0.8666666666666667,
+"ctor": [
+"e bbebaa daaebb",
+"e bbeeab daaebb",
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getOpcodes",
+"args": [],
+"value": [
+[
+"equal",
+0,
+13,
+0,
+13
+],
+[
+"replace",
+13,
+15,
+13,
+15
+],
+[
+"equal",
+15,
+23,
+15,
+23
+],
+[
+"insert",
+23,
+23,
+23,
+27
+]
+],
+"ctor": [
+"dabaab  eebcdcaae e c  ",
+"dabaab  eebcddbae e c  aaab",
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getMatchingBlocks",
+"args": [],
+"value": [
+[
+0,
+0,
+1
+],
+[
+3,
+1,
+0
+]
+],
+"ctor": [
+[
+"if __name__ == '__main__':\n",
+"def main():\n",
+"print(x)\n"
+],
+[
+"if __name__ == '__main__':\n"
+],
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getGroupedOpcodes",
+"args": [
+0
+],
+"value": [
+[
+[
+"equal",
+2,
+2,
+2,
+2
+],
+[
+"insert",
+2,
+2,
+2,
+3
+],
+[
+"equal",
+2,
+2,
+3,
+3
+]
+],
+[
+[
+"equal",
+3,
+3,
+4,
+4
+],
+[
+"delete",
+3,
+4,
+4,
+4
+],
+[
+"equal",
+4,
+4,
+4,
+4
+]
+]
+],
+"ctor": [
+[
+"print(y)\n",
+"    pass\n",
+"print(x)\n",
+"def main():\n",
+"x = 2\n",
+"class A:\n",
+"# comment\n"
+],
+[
+"print(y)\n",
+"    pass\n",
+"class A:\n",
+"print(x)\n",
+"x = 2\n",
+"class A:\n",
+"# comment\n"
+],
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.quickRatio",
+"args": [],
+"value": 0.8235294117647058,
+"ctor": [
+"bdae be ddb ceacbeebeb dd",
+"bdae bebadbebeaebeefeb ddd",
+{
+"autojunk": false
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.ratio",
+"args": [],
+"value": 0.8,
+"ctor": [
+"d da b",
+"d dafb eb",
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getOpcodes",
+"args": [],
+"value": [
+[
+"equal",
+0,
+3,
+0,
+3
+],
+[
+"replace",
+3,
+5,
+3,
+4
+],
+[
+"equal",
+5,
+6,
+4,
+5
+],
+[
+"insert",
+6,
+6,
+5,
+6
+],
+[
+"equal",
+6,
+7,
+6,
+7
+],
+[
+"replace",
+7,
+8,
+7,
+8
+],
+[
+"equal",
+8,
+13,
+8,
+13
+],
+[
+"replace",
+13,
+14,
+13,
+14
+],
+[
+"equal",
+14,
+15,
+14,
+15
+],
+[
+"delete",
+15,
+16,
+15,
+15
+],
+[
+"equal",
+16,
+17,
+15,
+16
+],
+[
+"insert",
+17,
+17,
+16,
+18
+],
+[
+"equal",
+17,
+20,
+18,
+21
+],
+[
+"insert",
+20,
+20,
+21,
+22
+]
+],
+"ctor": [
+"aeb  bee bcbad cabdd",
+"aebdbfea bcbaa aabbdda",
+{
+"autojunk": false
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getMatchingBlocks",
+"args": [],
+"value": [
+[
+0,
+1,
+2
+],
+[
+2,
+4,
+0
+]
+],
+"ctor": [
+[
+"    def f(self):\n",
+"        return 1\n"
+],
+[
+"x = 1\n",
+"    def f(self):\n",
+"        return 1\n",
+"        return 1\n"
+],
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getGroupedOpcodes",
+"args": [
+1
+],
+"value": [
+[
+[
+"equal",
+0,
+1,
+0,
+1
+],
+[
+"insert",
+1,
+1,
+1,
+6
+],
+[
+"equal",
+1,
+3,
+6,
+8
+],
+[
+"delete",
+3,
+4,
+8,
+8
+],
+[
+"equal",
+4,
+5,
+8,
+9
+],
+[
+"replace",
+5,
+10,
+9,
+10
+],
+[
+"equal",
+10,
+11,
+10,
+11
+]
+],
+[
+[
+"equal",
+13,
+14,
+13,
+14
+],
+[
+"insert",
+14,
+14,
+14,
+16
+],
+[
+"equal",
+14,
+15,
+16,
+17
+],
+[
+"delete",
+15,
+17,
+17,
+17
+],
+[
+"equal",
+17,
+19,
+17,
+19
+],
+[
+"insert",
+19,
+19,
+19,
+21
+]
+]
+],
+"ctor": [
+"aee cedac  debc aeb",
+"abbbcdeecb debb cebdd",
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.quickRatio",
+"args": [],
+"value": 0.8648648648648649,
+"ctor": [
+"ceceeeeeaccddcd cd",
+"cecdeebeaceddcd cdb",
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.ratio",
+"args": [],
+"value": 0.8260869565217391,
+"ctor": [
+"aceaabeaecacbeaeda d ed",
+"aceaebeaecacbecdca dbed",
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getOpcodes",
+"args": [],
+"value": [
+[
+"equal",
+0,
+2,
+0,
+2
+],
+[
+"replace",
+2,
+3,
+2,
+3
+],
+[
+"equal",
+3,
+6,
+3,
+6
+],
+[
+"insert",
+6,
+6,
+6,
+7
+]
+],
+"ctor": [
+"cadaac",
+"cafaacd",
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getMatchingBlocks",
+"args": [],
+"value": [
+[
+0,
+0,
+11
+],
+[
+11,
+11,
+0
+]
+],
+"ctor": [
+[
+"x = 1\n",
+"x = 1\n",
+"    return 0\n",
+"x = 1\n",
+"if __name__ == '__main__':\n",
+"if __name__ == '__main__':\n",
+"x = 2\n",
+"if __name__ == '__main__':\n",
+"class A:\n",
+"    pass\n",
+"# comment\n"
+],
+[
+"x = 1\n",
+"x = 1\n",
+"    return 0\n",
+"x = 1\n",
+"if __name__ == '__main__':\n",
+"if __name__ == '__main__':\n",
+"x = 2\n",
+"if __name__ == '__main__':\n",
+"class A:\n",
+"    pass\n",
+"# comment\n"
+],
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getGroupedOpcodes",
+"args": [
+3
+],
+"value": [
+[
+[
+"equal",
+8,
+11,
+8,
+11
+],
+[
+"replace",
+11,
+12,
+11,
+12
+],
+[
+"equal",
+12,
+15,
+12,
+15
+]
+],
+[
+[
+"equal",
+18,
+21,
+18,
+21
+],
+[
+"replace",
+21,
+22,
+21,
+22
+],
+[
+"equal",
+22,
+24,
+22,
+24
+],
+[
+"insert",
+24,
+24,
+24,
+25
+]
+]
+],
+"ctor": [
+" dc eacdacbce cad bde a ",
+" dc eacdacbbe cad bdeba d",
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.quickRatio",
+"args": [],
+"value": 1.0,
+"ctor": [
+"db",
+"db",
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.ratio",
+"args": [],
+"value": 0.8333333333333334,
+"ctor": [
+[
+"x = 1\n",
+"import os\n",
+"import os\n",
+"x = 2\n",
+"x = 2\n",
+"    pass\n",
+"    main()\n",
+"x = 1\n",
+"\n",
+"    main()\n",
+"    def f(self):\n"
+],
+[
+"x = 1\n",
+"import os  # changed\n",
+"import os\n",
+"x = 2\n",
+"x = 2\n",
+"    pass\n",
+"print(x)\n",
+"    main()\n",
+"import os\n",
+"x = 1\n",
+"\n",
+"    main()\n",
+"    def f(self):\n"
+],
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getOpcodes",
+"args": [],
+"value": [
+[
+"replace",
+0,
+1,
+0,
+1
+],
+[
+"equal",
+1,
+2,
+1,
+2
+],
+[
+"insert",
+2,
+2,
+2,
+3
+],
+[
+"equal",
+2,
+4,
+3,
+5
+],
+[
+"insert",
+4,
+4,
+5,
+6
+],
+[
+"equal",
+4,
+7,
+6,
+9
+]
+],
+"ctor": [
+[
+"if __name__ == '__main__':\n",
+"x = 1\n",
+"y = x + 1\n",
+"x = 2\n",
+"\n",
+"        return 1\n",
+"print(y)\n"
+],
+[
+"if __name__ == '__main__':  # changed\n",
+"x = 1\n",
+"print(x)\n",
+"y = x + 1\n",
+"x = 2\n",
+"y = x + 1\n",
+"\n",
+"        return 1\n",
+"print(y)\n"
+],
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getMatchingBlocks",
+"args": [],
+"value": [
+[
+0,
+0,
+2
+],
+[
+3,
+3,
+1
+],
+[
+4,
+4,
+0
+]
+],
+"ctor": [
+[
+"    return 0\n",
+"import sys\n",
+"        return 1\n",
+"x = 2\n"
+],
+[
+"    return 0\n",
+"import sys\n",
+"        return 1  # changed\n",
+"x = 2\n"
+],
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getGroupedOpcodes",
+"args": [
+0
+],
+"value": [
+[
+[
+"equal",
+4,
+4,
+4,
+4
+],
+[
+"insert",
+4,
+4,
+4,
+5
+],
+[
+"equal",
+4,
+4,
+5,
+5
+]
+],
+[
+[
+"equal",
+5,
+5,
+6,
+6
+],
+[
+"replace",
+5,
+6,
+6,
+7
+],
+[
+"equal",
+6,
+6,
+7,
+7
+]
+],
+[
+[
+"equal",
+7,
+7,
+8,
+8
+],
+[
+"replace",
+7,
+9,
+8,
+9
+],
+[
+"equal",
+9,
+9,
+9,
+9
+]
+],
+[
+[
+"equal",
+13,
+13,
+13,
+13
+],
+[
+"replace",
+13,
+14,
+13,
+15
+]
+]
+],
+"ctor": [
+" edb  dab e  b",
+" edbc cde e  ac",
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.quickRatio",
+"args": [],
+"value": 0.88,
+"ctor": [
+"a caebcc  cd",
+"a caebbcc cdc",
+{
+"autojunk": false
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.ratio",
+"args": [],
+"value": 0.7777777777777778,
+"ctor": [
+"b  dabaaebda de ",
+"a  dabaaefda de cced",
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.getOpcodes",
+"args": [],
+"value": [
+[
+"equal",
+0,
+129,
+0,
+129
+],
+[
+"replace",
+129,
+209,
+129,
+208
+],
+[
+"equal",
+209,
+213,
+208,
+212
+]
+],
+"ctor": [
+[
+"z\n",
+"y\n",
+"y\n",
+"z\n",
+"x\n",
+"x\n",
+"x\n",
+"x\n",
+"z\n",
+"y\n",
+"x\n",
+"y\n",
+"x\n",
+"z\n",
+"z\n",
+"z\n",
+"y\n",
+"x\n",
+"x\n",
+"y\n",
+"x\n",
+"z\n",
+"x\n",
+"x\n",
+"y\n",
+"z\n",
+"x\n",
+"x\n",
+"z\n",
+"z\n",
+"x\n",
+"y\n",
+"z\n",
+"y\n",
+"z\n",
+"y\n",
+"x\n",
+"x\n",
+"y\n",
+"y\n",
+"z\n",
+"y\n",
+"y\n",
+"z\n",
+"x\n",
+"x\n",
+"y\n",
+"y\n",
+"y\n",
+"y\n",
+"z\n",
+"y\n",
+"z\n",
+"z\n",
+"z\n",
+"z\n",
+"z\n",
+"x\n",
+"x\n",
+"y\n",
+"y\n",
+"z\n",
+"y\n",
+"x\n",
+"x\n",
+"x\n",
+"x\n",
+"y\n",
+"z\n",
+"x\n",
+"z\n",
+"z\n",
+"z\n",
+"x\n",
+"y\n",
+"y\n",
+"y\n",
+"x\n",
+"x\n",
+"y\n",
+"y\n",
+"x\n",
+"z\n",
+"z\n",
+"x\n",
+"x\n",
+"x\n",
+"x\n",
+"z\n",
+"y\n",
+"y\n",
+"y\n",
+"x\n",
+"y\n",
+"z\n",
+"y\n",
+"y\n",
+"z\n",
+"y\n",
+"y\n",
+"z\n",
+"z\n",
+"y\n",
+"x\n",
+"y\n",
+"y\n",
+"y\n",
+"y\n",
+"x\n",
+"y\n",
+"y\n",
+"x\n",
+"z\n",
+"z\n",
+"y\n",
+"y\n",
+"x\n",
+"z\n",
+"y\n",
+"y\n",
+"z\n",
+"z\n",
+"z\n",
+"x\n",
+"y\n",
+"y\n",
+"z\n",
+"y\n",
+"x\n",
+"y\n",
+"x\n",
+"y\n",
+"x\n",
+"y\n",
+"x\n",
+"x\n",
+"x\n",
+"y\n",
+"y\n",
+"z\n",
+"z\n",
+"x\n",
+"x\n",
+"z\n",
+"z\n",
+"y\n",
+"x\n",
+"z\n",
+"z\n",
+"z\n",
+"y\n",
+"z\n",
+"x\n",
+"z\n",
+"z\n",
+"x\n",
+"z\n",
+"x\n",
+"z\n",
+"x\n",
+"z\n",
+"y\n",
+"z\n",
+"z\n",
+"x\n",
+"z\n",
+"z\n",
+"z\n",
+"x\n",
+"x\n",
+"x\n",
+"z\n",
+"z\n",
+"x\n",
+"z\n",
+"z\n",
+"x\n",
+"y\n",
+"z\n",
+"y\n",
+"y\n",
+"z\n",
+"y\n",
+"z\n",
+"x\n",
+"z\n",
+"z\n",
+"y\n",
+"x\n",
+"x\n",
+"x\n",
+"y\n",
+"y\n",
+"x\n",
+"x\n",
+"y\n",
+"z\n",
+"z\n",
+"z\n",
+"z\n",
+"y\n",
+"z\n",
+"x\n",
+"x\n",
+"x\n",
+"y\n",
+"y\n",
+"x\n",
+"    return 0\n",
+"\n",
+"import sys\n",
+"    def f(self):\n",
+"if __name__ == '__main__':\n"
+],
+[
+"z\n",
+"y\n",
+"y\n",
+"z\n",
+"x\n",
+"x\n",
+"x\n",
+"x\n",
+"z\n",
+"y\n",
+"x\n",
+"y\n",
+"x\n",
+"z\n",
+"z\n",
+"z\n",
+"y\n",
+"x\n",
+"x\n",
+"y\n",
+"x\n",
+"z\n",
+"x\n",
+"x\n",
+"y\n",
+"z\n",
+"x\n",
+"x\n",
+"z\n",
+"z\n",
+"x\n",
+"y\n",
+"z\n",
+"y\n",
+"z\n",
+"y\n",
+"x\n",
+"x\n",
+"y\n",
+"y\n",
+"z\n",
+"y\n",
+"y\n",
+"z\n",
+"x\n",
+"x\n",
+"y\n",
+"y\n",
+"y\n",
+"y\n",
+"z\n",
+"y\n",
+"z\n",
+"z\n",
+"z\n",
+"z\n",
+"z\n",
+"x\n",
+"x\n",
+"y\n",
+"y\n",
+"z\n",
+"y\n",
+"x\n",
+"x\n",
+"x\n",
+"x\n",
+"y\n",
+"z\n",
+"x\n",
+"z\n",
+"z\n",
+"z\n",
+"x\n",
+"y\n",
+"y\n",
+"y\n",
+"x\n",
+"x\n",
+"y\n",
+"y\n",
+"x\n",
+"z\n",
+"z\n",
+"x\n",
+"x\n",
+"x\n",
+"x\n",
+"z\n",
+"y\n",
+"y\n",
+"y\n",
+"x\n",
+"y\n",
+"z\n",
+"y\n",
+"y\n",
+"z\n",
+"y\n",
+"y\n",
+"z\n",
+"z\n",
+"y\n",
+"x\n",
+"y\n",
+"y\n",
+"y\n",
+"y\n",
+"x\n",
+"y\n",
+"y\n",
+"x\n",
+"z\n",
+"z\n",
+"y\n",
+"y\n",
+"x\n",
+"z\n",
+"y\n",
+"y\n",
+"z\n",
+"z\n",
+"z\n",
+"x\n",
+"y\n",
+"y\n",
+"z\n",
+"y\n",
+"x\n",
+"y  # changed\n",
+"x\n",
+"y\n",
+"x\n",
+"y\n",
+"x\n",
+"x\n",
+"x\n",
+"y\n",
+"y\n",
+"z\n",
+"z\n",
+"x\n",
+"x\n",
+"z\n",
+"z\n",
+"y\n",
+"x\n",
+"z\n",
+"z\n",
+"z\n",
+"y\n",
+"z  \n",
+"x\n",
+"z\n",
+"z\n",
+"x\n",
+"z\n",
+"x\n",
+"z\n",
+"x\n",
+"z\n",
+"y\n",
+"z\n",
+"z\n",
+"x\n",
+"z\n",
+"z\n",
+"z\n",
+"x\n",
+"x\n",
+"x\n",
+"z\n",
+"z\n",
+"x\n",
+"z\n",
+"z\n",
+"x\n",
+"y\n",
+"z\n",
+"y\n",
+"y\n",
+"z\n",
+"y\n",
+"z\n",
+"x\n",
+"z\n",
+"z\n",
+"y\n",
+"x\n",
+"x\n",
+"x\n",
+"y\n",
+"y\n",
+"x\n",
+"x\n",
+"y\n",
+"z\n",
+"z\n",
+"z\n",
+"z\n",
+"y\n",
+"z\n",
+"x\n",
+"x\n",
+"x\n",
+"y\n",
+"y\n",
+"x\n",
+"\n",
+"import sys\n",
+"    def f(self):\n",
+"if __name__ == '__main__':\n"
+],
+{
+"autojunk": true
+}
+]
+},
+{
+"module": "difflib",
+"fn": "SequenceMatcher.findLongestMatch",
+"args": [
+8,
+10,
+5,
+7
+],
+"value": [
+8,
+5,
+0
+],
+"ctor": [
+"cc cb dbeccabad beaa aedaa",
+"b cecb caddaaad ",
+{}
+]
+},
+{
+"module": "difflib",
+"fn": "contextDiff",
+"args": [
+[
+"x = 1\n",
+"    return 0\n",
+"    return 0\n",
+"# comment\n",
+"    def f(self):\n",
+"import sys\n",
+"    return 0\n",
+"    main()\n",
+"        return 1\n",
+"    pass\n",
+"    pass\n"
+],
+[
+"x = 1\n",
+"    return 0\n",
+"    return 0\n",
+"# commentx\n",
+"y = x + 1\n",
+"    def f(self):\n",
+"import sys\n",
+"    return 0\n",
+"    main()\n",
+"        return 1\n",
+"    pass  # changed\n",
+"    pass\n"
+],
+{
+"fromfile": "a/x.py",
+"tofile": "b/x.py",
+"fromfiledate": "2026-10-01",
+"tofiledate": "2026-10-02",
+"n": 0
+}
+],
+"value": [
+"*** a/x.py\t2026-10-01\n",
+"--- b/x.py\t2026-10-02\n",
+"***************\n",
+"*** 4 ****\n",
+"! # comment\n",
+"--- 4,5 ----\n",
+"! # commentx\n",
+"! y = x + 1\n",
+"***************\n",
+"*** 9 ****\n",
+"--- 11 ----\n",
+"+     pass  # changed\n",
+"***************\n",
+"*** 11 ****\n",
+"-     pass\n",
+"--- 12 ----\n"
+]
+},
+{
+"module": "difflib",
+"fn": "unifiedDiff",
+"args": [
+[
+"x = 1\n",
+"class A:\n",
+"print(y)\n",
+"if __name__ == '__main__':\n",
+"\n"
+],
+[
+"x = 1\n",
+"if __name__ == '__main__':  # changed\n",
+"\n",
+"    main()\n"
+],
+{
+"n": 5,
+"lineterm": ""
+}
+],
+"value": [
+"--- ",
+"+++ ",
+"@@ -1,5 +1,4 @@",
+" x = 1\n",
+"-class A:\n",
+"-print(y)\n",
+"-if __name__ == '__main__':\n",
+"+if __name__ == '__main__':  # changed\n",
+" \n",
+"+    main()\n"
+]
+},
+{
+"module": "difflib",
+"fn": "unifiedDiff",
+"args": [
+[
+"import os\n",
+"print(x)\n",
+"import sys\n",
+"y = x + 1\n",
+"    def f(self):\n",
+"y = x + 1\n",
+"y = x + 1\n",
+"        return 1\n",
+"import os\n",
+"print(x)\n"
+],
+[
+"import os  \n",
+"print(x)\n",
+"import sys\n",
+"y = x + 1\n",
+"    def f(self):\n",
+"y = x + 1\n",
+"y = x + 1\n",
+"        return 1\n",
+"import os\n",
+"print(x)\n"
+],
+{
+"fromfile": "a/x.py",
+"tofile": "b/x.py",
+"fromfiledate": "2026-10-01",
+"tofiledate": "2026-10-02",
+"n": 2,
+"lineterm": ""
+}
+],
+"value": [
+"--- a/x.py\t2026-10-01",
+"+++ b/x.py\t2026-10-02",
+"@@ -1,3 +1,3 @@",
+"-import os\n",
+"+import os  \n",
+" print(x)\n",
+" import sys\n"
+]
+},
+{
+"module": "difflib",
+"fn": "unifiedDiff",
+"args": [
+[
+"if __name__ == '__main__':\n",
+"# comment\n",
+"        return 1\n",
+"        return 1\n",
+"def main():\n",
+"x = 1\n",
+"    main()\n",
+"# comment\n",
+"def main():\n",
+"x = 1\n",
+"x = 2\n"
+],
+[
+"if __name__ == '__main__':\n",
+"    pass\n",
+"# comment\n",
+"        return 1\n",
+"        return 1\n",
+"def main():\n",
+"x = 1\n",
+"    main()\n",
+"# comment\n",
+"x = 1  \n",
+"x = 2\n"
+],
+{
+"lineterm": ""
+}
+],
+"value": [
+"--- ",
+"+++ ",
+"@@ -1,4 +1,5 @@",
+" if __name__ == '__main__':\n",
+"+    pass\n",
+" # comment\n",
+"         return 1\n",
+"         return 1\n",
+"@@ -6,6 +7,5 @@",
+" x = 1\n",
+"     main()\n",
+" # comment\n",
+"-def main():\n",
+"-x = 1\n",
+"+x = 1  \n",
+" x = 2\n"
+]
+},
+{
+"module": "difflib",
+"fn": "contextDiff",
+"args": [
+[
+"import sys\n",
+"        return 1\n",
+"y = x + 1\n",
+"\n",
+"class A:\n",
+"print(x)\n",
+"        return 1\n",
+"import sys\n",
+"\n",
+"import os\n",
+"import os\n",
+"x = 1\n",
+"    def f(self):\n",
+"class A:\n",
+"    def f(self):\n"
+],
+[
+"import sys\n",
+"        return 1\n",
+"y = x + 1\n",
+"\n",
+"class A:\n",
+"print(x)  \n",
+"        return 1\n",
+"import sys\n",
+"\n",
+"import os\n",
+"x = 1\n",
+"    def f(self):\n",
+"class A:\n",
+"    def f(self):\n"
+],
+{
+"n": 0
+}
+],
+"value": [
+"*** \n",
+"--- \n",
+"***************\n",
+"*** 6 ****\n",
+"! print(x)\n",
+"--- 6 ----\n",
+"! print(x)  \n",
+"***************\n",
+"*** 10 ****\n",
+"- import os\n",
+"--- 9 ----\n"
+]
+},
+{
+"module": "difflib",
+"fn": "ndiff",
+"args": [
+[
+"if __name__ == '__main__':\n"
+],
+[
+"if __name__ == '__main__':  # changedx\n"
+]
+],
+"value": [
+"- if __name__ == '__main__':\n",
+"+ if __name__ == '__main__':  # changedx\n",
+"?                           ++++++++++++\n"
+]
+},
+{
+"module": "difflib",
+"fn": "ndiff",
+"args": [
+[
+"    main()\n",
+"# comment\n"
+],
+[
+"import os\n"
+]
+],
+"value": [
+"+ import os\n",
+"-     main()\n",
+"- # comment\n"
+]
+},
+{
+"module": "difflib",
+"fn": "ndiff",
+"args": [
+[
+"def main():\n",
+"    main()\n",
+"    main()\n",
+"y = x + 1\n",
+"if __name__ == '__main__':\n",
+"class A:\n"
+],
+[
+"def main():\n",
+"    main()\n",
+"    main()\n",
+"y = x + 1\n",
+"class A:\n",
+"y = x + 1\n"
+]
+],
+"value": [
+"  def main():\n",
+"      main()\n",
+"      main()\n",
+"  y = x + 1\n",
+"- if __name__ == '__main__':\n",
+"  class A:\n",
+"+ y = x + 1\n"
+]
+},
+{
+"module": "difflib",
+"fn": "getCloseMatches",
+"args": [
+"appel",
+[
+"peach",
+"puppy",
+"while",
+"exec",
+"except",
+"fork",
+"lambda",
+"ape"
+],
+1,
+0.8
+],
+"value": []
+},
+{
+"module": "difflib",
+"fn": "getCloseMatches",
+"args": [
+"except",
+[
+"peach",
+"puppy",
+"import",
+"fork",
+"for",
+"wheel",
+"apple",
+"ape"
+],
+3,
+0.0
+],
+"value": [
+"wheel",
+"import",
+"ape"
+]
+},
+{
+"module": "difflib",
+"fn": "restore",
+"args": [
+[
+"- # comment\n",
+"  class A:\n"
+],
+2
+],
+"value": [
+"class A:\n"
+]
+},
+{
+"module": "urlparse",
+"fn": "urlsplit",
+"args": [
+"https://user:pw@Host.Example:8080/p?x#y",
+"",
+false
+],
+"value": {
+"scheme": "https",
+"netloc": "user:pw@Host.Example:8080",
+"path": "/p",
+"query": "x#y",
+"fragment": "",
+"username": "user",
+"password": "pw",
+"hostname": "host.example",
+"port": 8080
+}
+},
+{
+"module": "urlparse",
+"fn": "urlsplit",
+"args": [
+"mailto:someone@example.com",
+"",
+true
+],
+"value": {
+"scheme": "mailto",
+"netloc": "",
+"path": "someone@example.com",
+"query": "",
+"fragment": "",
+"username": null,
+"password": null,
+"hostname": null,
+"port": null
+}
+},
+{
+"module": "urlparse",
+"fn": "urldefrag",
+"args": [
+"file:///etc/hosts"
+],
+"value": [
+"file:///etc/hosts",
+""
+]
+},
+{
+"module": "urlparse",
+"fn": "urlsplit",
+"args": [
+"http://[fe80::1%25eth0]/zone",
+"ftp",
+true
+],
+"value": [
+"http",
+"[fe80::1%25eth0]",
+"/zone",
+"",
+""
+]
+},
+{
+"module": "urlparse",
+"fn": "urlparse",
+"args": [
+"http://host:notaport/"
+],
+"error": "ValueError"
+},
+{
+"module": "urlparse",
+"fn": "urlsplit",
+"args": [
+"http://host:/empty-port",
+"",
+false
+],
+"value": {
+"scheme": "http",
+"netloc": "host:",
+"path": "/empty-port",
+"query": "",
+"fragment": "",
+"username": null,
+"password": null,
+"hostname": "host",
+"port": null
+}
+},
+{
+"module": "urlparse",
+"fn": "urlsplit",
+"args": [
+"ht\ttp://tab.example/",
+"",
+true
+],
+"value": {
+"scheme": "http",
+"netloc": "tab.example",
+"path": "/",
+"query": "",
+"fragment": "",
+"username": null,
+"password": null,
+"hostname": "tab.example",
+"port": null
+}
+},
+{
+"module": "urlparse",
+"fn": "urldefrag",
+"args": [
+"relative/path?q"
+],
+"value": [
+"relative/path?q",
+""
+]
+},
+{
+"module": "urlparse",
+"fn": "urlsplit",
+"args": [
+"?only-query",
+"ftp",
+true
+],
+"value": [
+"ftp",
+"",
+"",
+"only-query",
+""
+]
+},
+{
+"module": "urlparse",
+"fn": "urlparse",
+"args": [
+""
+],
+"value": [
+"",
+"",
+"",
+"",
+"",
+""
+]
+},
+{
+"module": "urlparse",
+"fn": "urlsplit",
+"args": [
+"a1+-.:x",
+"",
+false
+],
+"value": {
+"scheme": "a1+-.",
+"netloc": "",
+"path": "x",
+"query": "",
+"fragment": "",
+"username": null,
+"password": null,
+"hostname": null,
+"port": null
+}
+},
+{
+"module": "urlparse",
+"fn": "urlsplit",
+"args": [
+"path:with:colons",
+"",
+true
+],
+"value": {
+"scheme": "path",
+"netloc": "",
+"path": "with:colons",
+"query": "",
+"fragment": "",
+"username": null,
+"password": null,
+"hostname": null,
+"port": null
+}
+},
+{
+"module": "urlparse",
+"fn": "urldefrag",
+"args": [
+"HTTP://UPPER.case/"
+],
+"value": [
+"HTTP://UPPER.case/",
+""
+]
+},
+{
+"module": "urlparse",
+"fn": "urlsplit",
+"args": [
+"http://h/p?q=a+b%20c#f#g",
+"ftp",
+true
+],
+"value": [
+"http",
+"h",
+"/p",
+"q=a+b%20c",
+"f#g"
+]
+},
+{
+"module": "urlparse",
+"fn": "urlparse",
+"args": [
+"http://u@h"
+],
+"value": [
+"http",
+"u@h",
+"",
+"",
+"",
+""
+]
+},
+{
+"module": "urlparse",
+"fn": "urlsplit",
+"args": [
+"http://:p@h",
+"",
+false
+],
+"value": {
+"scheme": "http",
+"netloc": ":p@h",
+"path": "",
+"query": "",
+"fragment": "",
+"username": "",
+"password": "p",
+"hostname": "h",
+"port": null
+}
+},
+{
+"module": "urlparse",
+"fn": "urlsplit",
+"args": [
+"http://h#f",
+"",
+true
+],
+"value": {
+"scheme": "http",
+"netloc": "h",
+"path": "",
+"query": "",
+"fragment": "f",
+"username": null,
+"password": null,
+"hostname": "h",
+"port": null
+}
+},
+{
+"module": "urlparse",
+"fn": "urldefrag",
+"args": [
+"data:text/plain;base64,SGk="
+],
+"value": [
+"data:text/plain;base64,SGk=",
+""
+]
+},
+{
+"module": "urlparse",
+"fn": "urlsplit",
+"args": [
+"javascript:alert(1)",
+"ftp",
+true
+],
+"value": [
+"javascript",
+"",
+"alert(1)",
+"",
+""
+]
+},
+{
+"module": "urlparse",
+"fn": "urlparse",
+"args": [
+"http://h\nx/"
+],
+"value": [
+"http",
+"hx",
+"/",
+"",
+"",
+""
+]
+},
+{
+"module": "urlparse",
+"fn": "urlunsplit",
+"args": [
+[
+"mailto",
+"",
+"someone@example.com",
+"",
+""
+]
+],
+"value": "mailto:someone@example.com"
+},
+{
+"module": "urlparse",
+"fn": "urlunparse",
+"args": [
+[
+"http",
+"host:notaport",
+"/",
+"",
+"",
+""
+]
+],
+"value": "http://host:notaport/"
+},
+{
+"module": "urlparse",
+"fn": "urlunsplit",
+"args": [
+[
+"",
+"",
+"relative/path",
+"q",
+""
+]
+],
+"value": "relative/path?q"
+},
+{
+"module": "urlparse",
+"fn": "urlunparse",
+"args": [
+[
+"",
+"",
+"",
+"",
+"",
+""
+]
+],
+"value": ""
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"http://a/b/c/d;p?q",
+"/g",
+true
+],
+"value": "http://a/g"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"http://a/b/c/d;p?q",
+"",
+true
+],
+"value": "http://a/b/c/d;p?q"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"http://a/b/c/d;p?q",
+"../../../g",
+true
+],
+"value": "http://a/g"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"http://a/b/c/d;p?q",
+"./g/.",
+true
+],
+"value": "http://a/b/c/g/"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"http://a/b/c/d;p?q",
+"https://other/x",
+true
+],
+"value": "https://other/x"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"http://a/b/c/d",
+"?y",
+true
+],
+"value": "http://a/b/c/d?y"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"http://a/b/c/d",
+"./",
+true
+],
+"value": "http://a/b/c/"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"http://a/b/c/d",
+"/./g",
+true
+],
+"value": "http://a/g"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"http://a/b/c/d",
+"g/../h",
+true
+],
+"value": "http://a/b/c/h"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"http://a/b/c/d",
+"mailto:z",
+true
+],
+"value": "mailto:z"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"https://h/dir/",
+"/./g",
+true
+],
+"value": "https://h/g"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"file:///tmp/x",
+"g/",
+true
+],
+"value": "file:///tmp/g/"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"file:///tmp/x",
+"/./g",
+true
+],
+"value": "file:///g"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"",
+"g#s",
+true
+],
+"value": "g#s"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"",
+"../../../../g",
+true
+],
+"value": "../../../../g"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"http://a",
+"/g",
+true
+],
+"value": "http://a/g"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"http://a",
+"g#s/./x",
+true
+],
+"value": "http://a/g#s/./x"
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"mailto:x@y",
+".",
+true
+],
+"value": "."
+},
+{
+"module": "urlparse",
+"fn": "urljoin",
+"args": [
+"mailto:x@y",
+"//other",
+true
+],
+"value": "//other"
+},
+{
+"module": "urlparse",
+"fn": "quotePlus",
+"args": [
+"abc",
+""
+],
+"value": "abc"
+},
+{
+"module": "urlparse",
+"fn": "quote",
+"args": [
+"a/b",
+"/"
+],
+"value": "a/b"
+},
+{
+"module": "urlparse",
+"fn": "quote",
+"args": [
+"100%",
+""
+],
+"value": "100%25"
+},
+{
+"module": "urlparse",
+"fn": "quote",
+"args": [
+"日本",
+":/?=&"
+],
+"value": "%E6%97%A5%E6%9C%AC"
+},
+{
+"module": "urlparse",
+"fn": "quotePlus",
+"args": [
+"!*'();:@&=+$,/?#[]",
+""
+],
+"value": "%21%2A%27%28%29%3B%3A%40%26%3D%2B%24%2C%2F%3F%23%5B%5D"
+},
+{
+"module": "urlparse",
+"fn": "unquote",
+"args": [
+""
+],
+"value": ""
+},
+{
+"module": "urlparse",
+"fn": "unquotePlus",
+"args": [
+"%7e"
+],
+"value": "~"
+},
+{
+"module": "urlparse",
+"fn": "unquote",
+"args": [
+"%4"
+],
+"value": "%4"
+},
+{
+"module": "urlparse",
+"fn": "unquotePlus",
+"args": [
+"%ED%A0%80"
+],
+"value": "���"
+},
+{
+"module": "urlparse",
+"fn": "parseQsl",
+"args": [
+"a=1&a=2&b",
+{
+"keepBlankValues": false,
+"strictParsing": false
+}
+],
+"value": [
+[
+"a",
+"1"
+],
+[
+"a",
+"2"
+]
+]
+},
+{
+"module": "urlparse",
+"fn": "parseQsl",
+"args": [
+"a=&b=",
+{
+"keepBlankValues": true,
+"strictParsing": true
+}
+],
+"value": [
+[
+"a",
+""
+],
+[
+"b",
+""
+]
+]
+},
+{
+"module": "urlparse",
+"fn": "parseQsl",
+"args": [
+"a=1;b=2",
+{
+"keepBlankValues": false,
+"strictParsing": false
+}
+],
+"value": [
+[
+"a",
+"1;b=2"
+]
+]
+},
+{
+"module": "urlparse",
+"fn": "parseQsl",
+"args": [
+"a%20b=c+d",
+{
+"keepBlankValues": true,
+"strictParsing": true
+}
+],
+"value": [
+[
+"a b",
+"c d"
+]
+]
+},
+{
+"module": "urlparse",
+"fn": "parseQsl",
+"args": [
+"a=%E6%97%A5",
+{
+"keepBlankValues": false,
+"strictParsing": false
+}
+],
+"value": [
+[
+"a",
+"日"
+]
+]
+},
+{
+"module": "urlparse",
+"fn": "parseQsl",
+"args": [
+"a",
+{
+"keepBlankValues": true,
+"strictParsing": true
+}
+],
+"error": "ValueError"
+},
+{
+"module": "urlparse",
+"fn": "parseQsl",
+"args": [
+"x=%zz",
+{
+"keepBlankValues": false,
+"strictParsing": false
+}
+],
+"value": [
+[
+"x",
+"%zz"
+]
+]
+},
+{
+"module": "urlparse",
+"fn": "parseQsl",
+"args": [
+"a=b=c",
+{
+"keepBlankValues": true,
+"strictParsing": true
+}
+],
+"value": [
+[
+"a",
+"b=c"
+]
+]
+},
+{
+"module": "urlparse",
+"fn": "parseQsl",
+"args": [
+"k=v&k2=v2&k3=v3",
+{
+"keepBlankValues": false,
+"strictParsing": false
+}
+],
+"value": [
+[
+"k",
+"v"
+],
+[
+"k2",
+"v2"
+],
+[
+"k3",
+"v3"
+]
+]
+},
+{
+"module": "urlparse",
+"fn": "urlencode",
+"args": [
+[
+[
+"a",
+[
+"1",
+"2"
+]
+]
+],
+{
+"doseq": false
+}
+],
+"value": "a=%5B%271%27%2C+%272%27%5D"
+}
+]
+}

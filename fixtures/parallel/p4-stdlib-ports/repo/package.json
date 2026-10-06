@@ -1,0 +1,7 @@
+{
+  "name": "release-tooling",
+  "private": true,
+  "type": "module",
+  "description": "Release tooling (changelog, diff reports, link checks) moving from Python helper scripts to Node.",
+  "scripts": { "test": "node --test" }
+}

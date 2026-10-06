@@ -1,0 +1,16 @@
+{
+  "id": "p4-stdlib-ports",
+  "title": "Three independent standard-library ports",
+  "category": "feature",
+  "language": "en",
+  "instruction": "Port the three Python standard-library modules our release scripts depend on to dependency-free JavaScript (Node ESM), so the scripts in scripts/ can be retired:\n\n1. src/text/: textwrap (wrap, fill, shorten, dedent, indent with every TextWrapper option) and shlex (split, quote, join), as specified in docs/text.md.\n2. src/difflib/: difflib (SequenceMatcher, unifiedDiff, contextDiff, ndiff with intraline hints, restore, getCloseMatches, the junk helpers), as specified in docs/difflib.md.\n3. src/urlparse/: urllib.parse (urlsplit/urlparse with username/password/hostname/port, urlunsplit/urlunparse, urljoin, urldefrag, quote/quotePlus/unquote/unquotePlus, urlencode, parseQsl/parseQs), as specified in docs/urlparse.md.\n\nThe three ports are independent of each other: each lives in its own directory, none imports another, and no shared file needs to change. CPython (python3 on PATH) is the reference: for every input the result must be exactly what CPython returns, including edge cases and the errors it raises (thrown as Error with name set to the Python exception class). Keep the existing module paths and export names. Add tests for each port under test/ (test/smoke-cases.json has CPython-generated samples; a hidden suite checks many more cases). Run node --test.",
+  "expectsChanges": true,
+  "timeoutSec": 3600,
+  "grading": {
+    "visibleTests": true,
+    "hiddenTests": true,
+    "rubric": false,
+    "mustNotModify": false,
+    "custom": false
+  }
+}

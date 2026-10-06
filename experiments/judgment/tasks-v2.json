@@ -1,0 +1,838 @@
+{
+ "version": 2,
+ "note": "Split-judgment evaluation v2 (docs/orchestrator.md 8). Labels by work size and coupling, not by the length of the request: parallelism needs parts that one worker would spend roughly ten minutes or more on each, that share no files or interfaces, and whose split saves more than it costs (calibration: p1 measured 1-3 minutes per ticket, same wall time and 1.6-1.8x cost when split). v1Labels keep the v1 label; condition 'agentic' items are judged after reading the fixture with read-only tools, 'one-turn' items from the hand-off with a file listing and the scope line. Fixed before the first v2 model call.",
+ "items": [
+  {
+   "id": "p1",
+   "fixture": "suite/p1-ticket-batch",
+   "role": "implement",
+   "labels": [],
+   "rationale": "Four disjoint tickets, but each took one worker 1-3 minutes (R6: two e2e runs, task_plan timestamps); split on request it took the same wall time (412 s vs 416/496 s) at 1.6-1.8x the cost; parallel3: multi 1.96x single cost. Gain < cost: none.",
+   "v1Labels": [
+    "parallelism"
+   ],
+   "condition": "agentic"
+  },
+  {
+   "id": "p2",
+   "fixture": "suite/p2-handler-migration",
+   "role": "implement",
+   "labels": [],
+   "rationale": "Six handler migrations of about 1.5 minutes each (parallel3 pi-solo 567 s for all six); multi was slower than single here. Gain < cost: none.",
+   "v1Labels": [
+    "parallelism"
+   ],
+   "v1AlsoAccept": [
+    []
+   ],
+   "condition": "agentic"
+  },
+  {
+   "id": "p3",
+   "fixture": "suite/p3-library-features-ko",
+   "role": "implement",
+   "labels": [],
+   "rationale": "Three disjoint libraries, about 2.5 minutes each (parallel3 pi-solo 432 s for all three). Gain < cost: none.",
+   "v1Labels": [
+    "parallelism"
+   ],
+   "condition": "agentic"
+  },
+  {
+   "id": "p4",
+   "fixture": "parallel/p4-stdlib-ports",
+   "role": "implement",
+   "labels": [
+    "parallelism"
+   ],
+   "condition": "agentic",
+   "units": [
+    [
+     "src/text",
+     "textwrap",
+     "shlex"
+    ],
+    [
+     "src/difflib",
+     "difflib"
+    ],
+    [
+     "src/urlparse",
+     "urlparse"
+    ]
+   ],
+   "rationale": "Three disjoint ports (own directory, no imports between them, no shared file); each translates 350-1,000 lines of CPython and must match it exactly on 250-560 hidden cases, estimated well over ten minutes each for one worker. New in v2 (R11 measures the real part times)."
+  },
+  {
+   "id": "d1",
+   "fixture": "suite/d1-transactional-outbox",
+   "role": "implement",
+   "labels": [],
+   "rationale": "One feature across service/storage/repository/worker whose contracts interlock (idempotency, outbox, delivery).",
+   "v1Labels": [],
+   "condition": "one-turn"
+  },
+  {
+   "id": "d2",
+   "fixture": "suite/d2-keyed-queue",
+   "role": "implement",
+   "labels": [],
+   "rationale": "One intermittent bug: root-cause investigation then a fix; the suspects are not independent work items.",
+   "v1Labels": [],
+   "condition": "one-turn"
+  },
+  {
+   "id": "d3",
+   "fixture": "suite/d3-money-migration-ko",
+   "role": "implement",
+   "labels": [],
+   "rationale": "Trap: many modules, but every call path depends on the new Money type being introduced (shared interface change). Money domain but covered by tests and no request for independent review.",
+   "v1Labels": [],
+   "condition": "agentic"
+  },
+  {
+   "id": "d4",
+   "fixture": "suite/d4-cache-fencing",
+   "role": "implement",
+   "labels": [],
+   "rationale": "Incident investigation with interacting causes in one cache path.",
+   "v1Labels": [],
+   "condition": "one-turn"
+  },
+  {
+   "id": "d5",
+   "fixture": "suite/d5-streaming-ingest-ko",
+   "role": "implement",
+   "labels": [],
+   "rationale": "Trap: decoder/parser/validator/aggregation/CLI are stages of one pipeline sharing contracts.",
+   "v1Labels": [],
+   "condition": "agentic"
+  },
+  {
+   "id": "d6",
+   "fixture": "suite/d6-snapshot-pagination",
+   "role": "implement",
+   "labels": [],
+   "rationale": "Trap: storage, query, cursor, validation and HTTP must agree on one pagination contract.",
+   "v1Labels": [],
+   "condition": "one-turn"
+  },
+  {
+   "id": "d7",
+   "fixture": "suite/d7-config-reload",
+   "role": "implement",
+   "labels": [],
+   "rationale": "Loader, validation, snapshots and consumers must work together (one feature).",
+   "v1Labels": [],
+   "condition": "one-turn"
+  },
+  {
+   "id": "d8",
+   "fixture": "suite/d8-build-graph",
+   "role": "implement",
+   "labels": [],
+   "rationale": "One incident (stale bundles, repeated compiles, no recovery) across coupled engine modules.",
+   "v1Labels": [],
+   "condition": "one-turn"
+  },
+  {
+   "id": "a6",
+   "fixture": "suite/a6-typo-message",
+   "role": "implement",
+   "labels": [],
+   "rationale": "Trivial one-line fix.",
+   "v1Labels": [],
+   "condition": "one-turn"
+  },
+  {
+   "id": "b5",
+   "fixture": "suite/b5-ctx-migration",
+   "role": "implement",
+   "labels": [],
+   "rationale": "Trap: handlers across modules look splittable, but the router dispatch signature change couples them and each handler edit is small and mechanical.",
+   "v1Labels": [],
+   "condition": "agentic"
+  },
+  {
+   "id": "a3",
+   "fixture": "suite/a3-refactor-tax",
+   "role": "implement",
+   "labels": [],
+   "rationale": "Consolidation into one shared module that three paths then use: sequential and coupled.",
+   "v1Labels": [],
+   "condition": "one-turn"
+  },
+  {
+   "id": "c5",
+   "fixture": "suite/c5-aggregate-perf",
+   "role": "implement",
+   "labels": [],
+   "rationale": "One performance fix in one aggregation path.",
+   "v1Labels": [],
+   "condition": "one-turn"
+  },
+  {
+   "id": "i01",
+   "fixture": "investigation/i01-rootcause-report-ko",
+   "role": "answer",
+   "labels": [],
+   "rationale": "One root-cause investigation, read-only.",
+   "v1Labels": [],
+   "condition": "one-turn"
+  },
+  {
+   "id": "i13",
+   "fixture": "investigation/i13-lru-compare",
+   "role": "answer",
+   "labels": [],
+   "rationale": "Trap: two implementations to compare, but the comparison needs both in one head and the files are small.",
+   "v1Labels": [],
+   "condition": "one-turn"
+  },
+  {
+   "id": "i20",
+   "fixture": "investigation/i20-median-claim",
+   "role": "answer",
+   "labels": [],
+   "rationale": "Checking a claim IS the investigation; nothing of ours needs independent verification.",
+   "v1Labels": [],
+   "condition": "one-turn"
+  },
+  {
+   "id": "c09",
+   "fixture": "creation/c09-stamina-icon",
+   "role": "implement",
+   "labels": [
+    "isolation"
+   ],
+   "rationale": "A raster game asset: needs the game-asset specialist (image generation route and tools) that the orchestrator does not have.",
+   "v1Labels": [
+    "isolation"
+   ],
+   "condition": "one-turn"
+  },
+  {
+   "id": "c01",
+   "fixture": "creation/c01-boss-concept",
+   "role": "implement",
+   "labels": [
+    "isolation"
+   ],
+   "rationale": "Concept illustration needs the game-asset specialist; the design note can be written by the orchestrator or the specialist.",
+   "v1Labels": [
+    "isolation"
+   ],
+   "condition": "one-turn"
+  },
+  {
+   "id": "c05",
+   "fixture": "creation/c05-mode-names",
+   "role": "implement",
+   "labels": [],
+   "rationale": "Text-only creative doc; the orchestrator writes it itself.",
+   "v1Labels": [],
+   "condition": "one-turn"
+  },
+  {
+   "id": "n01",
+   "role": "implement",
+   "labels": [
+    "parallelism"
+   ],
+   "units": [
+    [
+     "packages/parser"
+    ],
+    [
+     "packages/exporter"
+    ],
+    [
+     "packages/auth"
+    ]
+   ],
+   "title": "Three independent package features",
+   "instruction": "Implement three independent backlog items in this monorepo. Packages do not depend on each other and no shared code needs to change.\n1. packages/parser: add a streaming JSON Lines parser (async iterator over byte chunks) with per-line error recovery, a max line length option and tests.\n2. packages/exporter: add a CSV/TSV exporter with RFC 4180 quoting, configurable delimiter and header ordering, streaming output and tests.\n3. packages/auth: add TOTP verification (RFC 6238, SHA-1/SHA-256, 30 s step) with a configurable clock-skew window, replay protection and tests.\nRun each package's tests (npm test -w <package>).",
+   "files": [
+    "package.json (workspaces)",
+    "packages/parser/src/*.ts (5 files, ~600 lines)",
+    "packages/parser/test/*.test.ts (3 files)",
+    "packages/exporter/src/*.ts (4 files, ~500 lines)",
+    "packages/exporter/test/*.test.ts (2 files)",
+    "packages/auth/src/*.ts (6 files, ~700 lines)",
+    "packages/auth/test/*.test.ts (3 files)"
+   ],
+   "rationale": "Three disjoint packages, each a substantial feature with its own tests and no shared change.",
+   "v1Labels": [
+    "parallelism"
+   ],
+   "scope": "Size: each item needs roughly 500-700 lines of new code and 40-60 tests; the packages share no code.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n02",
+   "role": "implement",
+   "labels": [],
+   "title": "Path validation in five subcommands",
+   "instruction": "Add argument validation to the five subcommands in src/commands/add.ts, rm.ts, ls.ts, mv.ts and cp.ts: each must reject an empty or missing path argument with exit code 2 and the message \"path required\". Add one test per command in test/commands.test.ts.",
+   "files": [
+    "src/cli.ts (80 lines)",
+    "src/commands/add.ts (60 lines)",
+    "src/commands/rm.ts (55 lines)",
+    "src/commands/ls.ts (70 lines)",
+    "src/commands/mv.ts (65 lines)",
+    "src/commands/cp.ts (75 lines)",
+    "test/commands.test.ts (140 lines)"
+   ],
+   "rationale": "Trap: five independent but tiny edits plus one shared test file; spawning costs more than the work.",
+   "v1Labels": [],
+   "scope": "Size: each subcommand change is 3-5 lines; the five tests go into the one shared test file.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n03",
+   "role": "implement",
+   "labels": [],
+   "title": "Rename fetchUser",
+   "instruction": "Rename the function fetchUser to loadUser everywhere (definition in src/users/api.ts, about 40 call sites in 25 files), keeping behaviour. Run the tests.",
+   "files": [
+    "src/users/api.ts",
+    "src/**/*.ts (120 files)",
+    "test/**/*.test.ts (45 files)"
+   ],
+   "rationale": "Mechanical rename: one ast_rewrite and a test run.",
+   "v1Labels": [],
+   "scope": "Size: about 40 call sites, mechanical.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n04",
+   "role": "implement",
+   "labels": [],
+   "title": "Split User.name",
+   "instruction": "Split User.name into firstName and lastName in src/models/user.ts and update every consumer: the REST API serializers (src/api/), the database mapping (src/db/users.ts), the email templates (src/mail/) and the UI formatting helpers (src/ui/format.ts). Add a migration helper for existing records and update the tests.",
+   "files": [
+    "src/models/user.ts (90 lines)",
+    "src/api/*.ts (8 files)",
+    "src/db/users.ts (210 lines)",
+    "src/mail/*.ts (5 files)",
+    "src/ui/format.ts (120 lines)",
+    "test/**/*.test.ts (30 files)"
+   ],
+   "rationale": "Interface change: every part depends on the new User shape.",
+   "v1Labels": [],
+   "scope": "Size: about 30 files touch User.name; every consumer needs the new shape.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n05",
+   "role": "implement",
+   "labels": [
+    "verification"
+   ],
+   "title": "Production backfill migration",
+   "instruction": "Write a migration (migrations/2026_10_backfill_currency.sql plus the runner script scripts/backfill-currency.ts) that backfills orders.currency from accounts.default_currency for about 12 million rows in production Postgres, in batches of 10,000 with resumable progress and no table lock. The user: \"This runs once against production. Before I run it, I want it reviewed independently by someone who has not seen your reasoning.\"",
+   "files": [
+    "migrations/*.sql (40 files)",
+    "scripts/*.ts (6 files)",
+    "src/db/schema.ts (300 lines)",
+    "test/migrations/*.test.ts (4 files)"
+   ],
+   "rationale": "Explicit request for an independent review of an irreversible production operation.",
+   "v1Labels": [
+    "verification"
+   ],
+   "scope": "Size: about 150 lines (SQL plus runner) and 6 tests.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n06",
+   "role": "implement",
+   "labels": [
+    "verification"
+   ],
+   "title": "Path traversal fix with independent check",
+   "instruction": "Fix the path traversal vulnerability in src/static.ts reported in SECURITY-REPORT.md (encoded ../ sequences and symlinks escape the public root) and add regression tests. The user: \"I want an independent check that the fix really closes the hole, not just your own tests.\"",
+   "files": [
+    "src/static.ts (140 lines)",
+    "src/server.ts (90 lines)",
+    "SECURITY-REPORT.md",
+    "public/** (30 files)",
+    "test/static.test.ts (120 lines)"
+   ],
+   "rationale": "Security fix with an explicit request for independent verification.",
+   "v1Labels": [
+    "verification"
+   ],
+   "scope": "Size: about 40 lines in src/static.ts and 8 regression tests.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n07",
+   "role": "implement",
+   "labels": [],
+   "title": "Flaky queue test",
+   "instruction": "test/queue.test.ts fails about 1 in 20 runs on CI with \"expected 3 events, got 2\". Find the cause and fix it (the test or the code, whichever is wrong).",
+   "files": [
+    "src/queue.ts (260 lines)",
+    "src/timer.ts (80 lines)",
+    "test/queue.test.ts (310 lines)",
+    ".github/workflows/ci.yml"
+   ],
+   "rationale": "One bug investigation.",
+   "v1Labels": [],
+   "scope": "Size: unknown until the cause is found; the fix is probably small.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n08",
+   "role": "implement",
+   "labels": [
+    "isolation"
+   ],
+   "title": "Player walk animation",
+   "instruction": "Add a walking animation for the player: create an 8-frame 32x32 sprite sheet at assets/player/walk.png in the existing pixel-art style (see assets/player/idle.png), and play it in src/player.ts while the player moves (frame time 100 ms).",
+   "files": [
+    "assets/player/idle.png",
+    "assets/player/jump.png",
+    "src/player.ts (240 lines)",
+    "src/animation.ts (120 lines)",
+    "docs/art-style.md"
+   ],
+   "rationale": "The sprite sheet needs the game-asset specialist; the orchestrator integrates it in code.",
+   "v1Labels": [
+    "isolation"
+   ],
+   "scope": "Size: one 8-frame sprite sheet and about 20 lines in src/player.ts.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n09",
+   "role": "implement",
+   "labels": [
+    "isolation"
+   ],
+   "title": "Promo video",
+   "instruction": "Produce a 30-second promo video (1920x1080, H.264, AAC) from the screenshots in media/screens/ with short captions, save it as media/promo.mp4, and add a link to it in README.md.",
+   "files": [
+    "media/screens/*.png (12 files)",
+    "README.md",
+    "docs/brand.md"
+   ],
+   "rationale": "Video production needs the video specialist; the README link is trivial.",
+   "v1Labels": [
+    "isolation"
+   ],
+   "scope": "Size: one 30-second edit from 12 screenshots and one README line.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n10",
+   "role": "implement",
+   "labels": [
+    "parallelism"
+   ],
+   "alsoAccept": [
+    [
+     "parallelism",
+     "isolation"
+    ]
+   ],
+   "units": [
+    [
+     "1.4"
+    ],
+    [
+     "1.5"
+    ],
+    [
+     "1.6"
+    ]
+   ],
+   "title": "Backport to three release worktrees",
+   "instruction": "Backport the fix from commit 3f9c2ab (session expiry race in src/session.ts) to the release branches checked out as worktrees inside this workspace: wt/release-1.4/, wt/release-1.5/ and wt/release-1.6/. The session code diverged on each branch, so adapt the fix to each branch's code, add the regression test there, and run that branch's full test suite (about 10 minutes each).",
+   "files": [
+    "src/session.ts (main branch, 400 lines)",
+    "wt/release-1.4/** (branch checkout)",
+    "wt/release-1.5/** (branch checkout)",
+    "wt/release-1.6/** (branch checkout)"
+   ],
+   "rationale": "Three independent branch checkouts, each with its own adaptation and a long test run. Whether separate checkouts also count as isolation is debatable.",
+   "v1Labels": [
+    "parallelism"
+   ],
+   "v1AlsoAccept": [
+    [
+     "parallelism",
+     "isolation"
+    ]
+   ],
+   "scope": "Size: each adaptation is 20-60 lines plus one test, and each branch's suite runs about 10 minutes.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n11",
+   "role": "answer",
+   "labels": [],
+   "title": "Slow build investigation",
+   "instruction": "npm run build takes about 9 minutes. Investigate why and propose the top three fixes with evidence (measurements or config references). Do not change files.",
+   "files": [
+    "package.json",
+    "tsconfig.json",
+    "webpack.config.js",
+    "src/** (600 files)",
+    "scripts/build/*.js (5 files)"
+   ],
+   "rationale": "One read-only investigation.",
+   "v1Labels": [],
+   "scope": "Size: one investigation; nothing to write.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n12",
+   "role": "implement",
+   "labels": [
+    "parallelism"
+   ],
+   "units": [
+    [
+     "billing"
+    ],
+    [
+     "search"
+    ],
+    [
+     "notifications"
+    ],
+    [
+     "export"
+    ]
+   ],
+   "title": "Tests for four untested modules",
+   "instruction": "Add thorough unit tests for four untested modules: src/billing/ (~900 lines), src/search/ (~700 lines), src/notifications/ (~600 lines) and src/export/ (~800 lines). Put them in test/billing/, test/search/, test/notifications/ and test/export/. Do not change source files; report any bugs you find.",
+   "files": [
+    "src/billing/*.ts (7 files)",
+    "src/search/*.ts (6 files)",
+    "src/notifications/*.ts (5 files)",
+    "src/export/*.ts (6 files)",
+    "test/helpers.ts",
+    "vitest.config.ts"
+   ],
+   "rationale": "Four independent, substantial test-writing units with disjoint output directories.",
+   "v1Labels": [
+    "parallelism"
+   ],
+   "scope": "Size: each module needs about 40-70 tests to cover it (600-900 lines of source each).",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n13",
+   "role": "implement",
+   "labels": [
+    "parallelism"
+   ],
+   "units": [
+    [
+     "server"
+    ],
+    [
+     "web"
+    ]
+   ],
+   "title": "Saved searches with a final contract",
+   "instruction": "Implement the saved-searches feature. The API contract is final and documented in docs/api/saved-searches.md. Backend in server/: Express routes, persistence in server/db/, validation and tests. Frontend in web/: React list, create and delete UI using the documented endpoints, with tests against a mocked API. Both parts are substantial.",
+   "files": [
+    "docs/api/saved-searches.md",
+    "server/routes/*.ts (12 files)",
+    "server/db/*.ts (8 files)",
+    "server/test/** (20 files)",
+    "web/src/** (90 files)",
+    "web/test/** (25 files)"
+   ],
+   "rationale": "Two substantial parts in disjoint trees with the contract already fixed.",
+   "v1Labels": [
+    "parallelism"
+   ],
+   "scope": "Size: backend about 500 lines and 30 tests; frontend about 600 lines and 25 tests; only the documented contract is shared.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n14",
+   "role": "implement",
+   "labels": [],
+   "title": "Slow search page",
+   "instruction": "The search page takes 4 seconds to show results. Profile the backend query (server/search/) and the frontend rendering (web/src/search/), find the bottleneck and fix it.",
+   "files": [
+    "server/search/*.ts (6 files)",
+    "server/db/*.ts (8 files)",
+    "web/src/search/*.tsx (9 files)",
+    "web/src/api.ts"
+   ],
+   "rationale": "Trap: two areas, but the diagnosis decides where the fix goes; one investigation first.",
+   "v1Labels": [],
+   "scope": "Size: one diagnosis; the fix lands in one of the two areas.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n15",
+   "role": "implement",
+   "labels": [],
+   "units": [
+    [
+     "install"
+    ],
+    [
+     "config"
+    ],
+    [
+     "usage"
+    ],
+    [
+     "api"
+    ],
+    [
+     "faq"
+    ]
+   ],
+   "title": "Translate five guides",
+   "instruction": "Translate docs/guide/install.md, config.md, usage.md, api.md and faq.md (about 300 lines each) into Korean as docs/ko/guide/<same name>.md, keeping code blocks, anchors and links working.",
+   "files": [
+    "docs/guide/install.md (310 lines)",
+    "docs/guide/config.md (290 lines)",
+    "docs/guide/usage.md (330 lines)",
+    "docs/guide/api.md (300 lines)",
+    "docs/guide/faq.md (260 lines)",
+    "docs/glossary.md"
+   ],
+   "rationale": "Five independent translations of about 300 lines: output-bound, a few minutes each; gain < cost: none.",
+   "v1Labels": [
+    "parallelism"
+   ],
+   "v1AlsoAccept": [
+    []
+   ],
+   "scope": "Size: five translations of about 300 lines each.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n16",
+   "role": "implement",
+   "labels": [],
+   "title": "TypeScript upgrade",
+   "instruction": "Upgrade typescript from 5.4 to 5.9 and fix the type errors that appear. Keep runtime behaviour unchanged.",
+   "files": [
+    "package.json",
+    "tsconfig.json",
+    "src/** (300 files)",
+    "test/** (120 files)"
+   ],
+   "rationale": "Unknown, cascading errors; one worker iterates on the type checker.",
+   "v1Labels": [],
+   "scope": "Size: unknown number of type errors (a first check showed 60 in 25 files), each fix usually small.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n17",
+   "role": "implement",
+   "labels": [
+    "parallelism",
+    "verification"
+   ],
+   "units": [
+    [
+     "adapters/s3"
+    ],
+    [
+     "adapters/gcs"
+    ],
+    [
+     "adapters/azure"
+    ]
+   ],
+   "title": "Three storage adapters plus independent review",
+   "instruction": "Implement three independent storage adapters in src/adapters/s3/, src/adapters/gcs/ and src/adapters/azure/, each implementing the StorageAdapter interface in src/adapters/types.ts (which must not change) with retries, exponential backoff, multipart upload and tests. The user: \"When all three are done, have an independent reviewer check them against docs/storage-spec.md before you report.\"",
+   "files": [
+    "src/adapters/types.ts (120 lines)",
+    "src/adapters/local/*.ts (reference, 4 files)",
+    "docs/storage-spec.md",
+    "test/adapters/local.test.ts"
+   ],
+   "rationale": "Three disjoint substantial adapters behind a fixed interface, plus an explicit request for independent review.",
+   "v1Labels": [
+    "parallelism",
+    "verification"
+   ],
+   "scope": "Size: each adapter about 400-600 lines and 25-40 tests; types.ts stays fixed.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n18",
+   "role": "implement",
+   "labels": [
+    "verification"
+   ],
+   "title": "Banker's rounding with an independent check",
+   "instruction": "Change invoice rounding from half-up to banker's rounding (half-even) in src/billing/round.ts and update the tests. The user: \"This affects real invoices. I want a second, independent check that totals in fixtures/invoices-10k.json change only where they should.\"",
+   "files": [
+    "src/billing/round.ts (60 lines)",
+    "src/billing/invoice.ts (220 lines)",
+    "fixtures/invoices-10k.json",
+    "test/billing/*.test.ts (5 files)"
+   ],
+   "rationale": "Explicit request for independent verification of a money change.",
+   "v1Labels": [
+    "verification"
+   ],
+   "scope": "Size: about 10 lines in round.ts plus test updates.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n19",
+   "role": "implement",
+   "labels": [],
+   "alsoAccept": [
+    [
+     "parallelism"
+    ],
+    [
+     "parallelism",
+     "isolation"
+    ]
+   ],
+   "units": [
+    [
+     "ajv"
+    ],
+    [
+     "zod"
+    ],
+    [
+     "valibot"
+    ]
+   ],
+   "title": "Benchmark three validators",
+   "instruction": "Evaluate three JSON schema validators (ajv, zod, valibot) for our API layer. For each, create bench/<library>/ with its own package.json and a benchmark that validates every payload in fixtures/payloads/ (2,000 files) against schemas/api.json, run it, and write a recommendation with the numbers to docs/validator-choice.md.",
+   "files": [
+    "schemas/api.json (1,400 lines)",
+    "fixtures/payloads/*.json (2,000 files)",
+    "src/api/validate.ts (90 lines)",
+    "docs/"
+   ],
+   "rationale": "Three setups, but concurrent benchmark runs distort each other's numbers and each setup is modest; none preferred, a parallel split of the setups (runs in sequence) also defensible.",
+   "v1Labels": [
+    "parallelism"
+   ],
+   "v1AlsoAccept": [
+    [
+     "parallelism",
+     "isolation"
+    ]
+   ],
+   "scope": "Size: each setup is a package.json and a 50-100 line benchmark script; each run takes 2-4 minutes.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n20",
+   "role": "implement",
+   "labels": [
+    "verification"
+   ],
+   "title": "Rate limiting with a fresh reviewer",
+   "instruction": "Implement the rate limiting middleware in src/middleware/rate-limit.ts as specified in docs/rate-limit.md (sliding window per API key, Redis store, 429 with Retry-After) and add tests. After you finish, the user wants a fresh reviewer who has not seen your work to check it against the spec.",
+   "files": [
+    "src/middleware/*.ts (6 files)",
+    "src/redis.ts (80 lines)",
+    "docs/rate-limit.md",
+    "test/middleware/*.test.ts (4 files)"
+   ],
+   "rationale": "Explicit request for an independent reviewer.",
+   "v1Labels": [
+    "verification"
+   ],
+   "scope": "Size: about 150 lines and 12 tests.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n21",
+   "role": "implement",
+   "labels": [],
+   "title": "Cache module then three endpoints",
+   "instruction": "Add response caching to the three slowest endpoints (GET /reports, GET /stats, GET /search). There is no cache yet: create src/cache/ with TTL and invalidation hooks first, then use it in the three handlers (about 10 lines each) and add tests.",
+   "files": [
+    "src/routes/reports.ts (180 lines)",
+    "src/routes/stats.ts (140 lines)",
+    "src/routes/search.ts (210 lines)",
+    "src/app.ts",
+    "test/routes/*.test.ts (6 files)"
+   ],
+   "rationale": "Trap: the three endpoint changes are small and all depend on the cache module built first.",
+   "v1Labels": [],
+   "scope": "Size: the cache module about 120 lines; each endpoint change about 10 lines.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n22",
+   "role": "implement",
+   "labels": [],
+   "title": "Four config flags",
+   "instruction": "Complete four tickets: add the config options maxRetries, timeoutMs, logLevel and region. Each needs validation in src/config/schema.ts, a default in src/config/defaults.ts, an entry in docs/config.md and a test in test/config.test.ts.",
+   "files": [
+    "src/config/schema.ts (260 lines)",
+    "src/config/defaults.ts (70 lines)",
+    "docs/config.md (180 lines)",
+    "test/config.test.ts (230 lines)"
+   ],
+   "rationale": "Trap: four 'tickets', but every one edits the same four files.",
+   "v1Labels": [],
+   "scope": "Size: each option is 5-10 lines across the same four files.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n23",
+   "role": "implement",
+   "labels": [],
+   "title": "Plugin registry, plugin and command",
+   "instruction": "Implement (1) a plugin registry in src/plugins/registry.ts, (2) a markdown plugin in src/plugins/markdown.ts that registers through the registry, and (3) a CLI command `plugins list` in src/commands/plugins.ts that prints the registered plugins. Add tests for each.",
+   "files": [
+    "src/cli.ts (120 lines)",
+    "src/commands/*.ts (7 files)",
+    "src/plugins/ (empty)",
+    "test/*.test.ts (9 files)"
+   ],
+   "rationale": "Trap: three files, but (2) and (3) depend on the registry API created in (1).",
+   "v1Labels": [],
+   "scope": "Size: about 80 + 40 + 30 lines; (2) and (3) need the registry API from (1).",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n24",
+   "role": "implement",
+   "labels": [],
+   "title": "README typo",
+   "instruction": "Fix the typo \"recieve\" in README.md (two occurrences).",
+   "files": [
+    "README.md (210 lines)"
+   ],
+   "rationale": "Trivial.",
+   "v1Labels": [],
+   "scope": "Size: two words.",
+   "condition": "one-turn"
+  },
+  {
+   "id": "n25",
+   "role": "implement",
+   "labels": [],
+   "condition": "one-turn",
+   "title": "Four small tickets in four modules",
+   "instruction": "Complete four independent tickets; each stays in its own module and needs a regression test. 1. src/csv/: accept a custom delimiter option. 2. src/ratelimit/: reject non-positive limits with RangeError. 3. src/cache/: make clear() also reset the hit counters. 4. src/semver/: treat a leading 'v' as optional in parse().",
+   "files": [
+    "src/csv/index.mjs (120 lines)",
+    "src/ratelimit/index.mjs (90 lines)",
+    "src/cache/index.mjs (140 lines)",
+    "src/semver/index.mjs (110 lines)",
+    "test/*.test.mjs (4 files)"
+   ],
+   "scope": "Size: each ticket is 5-20 lines plus 2-4 tests.",
+   "rationale": "The p1 lesson in the one-turn condition: four disjoint tickets of a few minutes each; gain < cost: none."
+  }
+ ]
+}

@@ -1,0 +1,26 @@
+{
+  "startedAt": "2026-10-06T11:11:26.678Z",
+  "model": "cliproxyapi/claude-opus-5-5",
+  "thinking": "high",
+  "reps": 1,
+  "repStart": 1,
+  "variants": [
+    "checklist"
+  ],
+  "conditions": [
+    "agentic"
+  ],
+  "items": [
+    "p4",
+    "d3"
+  ],
+  "sha256": {
+    "tasks-v2.json": "26acf08215544fa1903457883d1808ba7b86ec7ca4384f4d3289729b1f2c1d85",
+    "variants-v2.ts": "a02239d35f632023e7f42a6ad64f1f9b5be706a91186a4bd00fbbbcf5193ba70",
+    "variants.ts": "1e160f3bd1d1885b969620ca56e4770edd45e8b07d11482a74661126efc51667",
+    "eval.ts": "8f5988bd7daad3f5ec7d30828979fbbeb7a783226f0682e78c7a32a606529ed5",
+    "run-v2.ts": "9387a99d25473250506504f5bf5bb14a146c34facbb580deb2d87a58edccda44",
+    "src/orchestrator/instructions.ts": "d05b552c91483bfa18c8e495fd1a012c5f850be17adc42fe5d871667d384f645",
+    "src/extension/workers.ts": "720ebfe5d96df67115a82b1c7dcca1f31f05fb74200ac5d7e8e229139c94a7ae"
+  }
+}

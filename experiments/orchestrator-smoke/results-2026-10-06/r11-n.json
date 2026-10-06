@@ -1,0 +1,58 @@
+[
+ {
+  "id": "N-p4-stdlib-ports",
+  "arm": "no-split (single.spawn false)",
+  "task": "p4-stdlib-ports",
+  "status": "done",
+  "passed": true,
+  "wallClockMs": 1884841,
+  "delegated": "implement",
+  "split": "none (not reported)",
+  "tasks": [
+   {
+    "role": "implement",
+    "requests": 70,
+    "durationMs": 1846445
+   }
+  ],
+  "usage": {
+   "main": {
+    "requests": 3,
+    "input": 9218,
+    "output": 3754,
+    "cacheRead": 19176,
+    "cacheWrite": 0,
+    "cost": 0.115787,
+    "unknownUsage": 0,
+    "models": {
+     "cliproxyapi/claude-opus-5-5": 3
+    },
+    "maxInput": 12945
+   },
+   "orche": {
+    "requests": 70,
+    "input": 243132,
+    "output": 156491,
+    "cacheRead": 8355390,
+    "cacheWrite": 0,
+    "cost": 5.773426,
+    "unknownUsage": 0,
+    "models": {
+     "cliproxyapi/claude-opus-5-5": 70
+    },
+    "maxInput": 247239
+   }
+  },
+  "total": {
+   "requests": 73,
+   "input": 252350,
+   "output": 160245,
+   "cacheRead": 8374566,
+   "cacheWrite": 0
+  },
+  "providerCost": 5.889213,
+  "catalogCost": 5.8892131999999995,
+  "unknownUsage": 0,
+  "parity": true
+ }
+]
