@@ -53,6 +53,11 @@ interface Observed {
   extensionsUsed?: number;
   extensionsMax?: number;
   progress?: readonly string[];
+  /** A background job's attach state (`details.attach`: attached | detached | pending | already-ended | ended), its id and why it detached. */
+  attach?: string;
+  job?: string;
+  reason?: string;
+  detachedAt?: number;
 }
 
 /** The `context.state` of one tool call, shared by its `renderCall` and `renderResult`. */
@@ -110,6 +115,10 @@ function observe(state: OrcheRenderState, details: unknown): void {
   if (finite(details.startedAt)) seen.startedAt = details.startedAt;
   if (finite(details.finishedAt)) seen.finishedAt = details.finishedAt;
   if (finite(details.durationMs)) seen.durationMs = details.durationMs;
+  if (typeof details.attach === "string") seen.attach = details.attach;
+  if (typeof details.job === "string") seen.job = details.job;
+  if (typeof details.reason === "string") seen.reason = details.reason;
+  if (finite(details.detachedAt)) seen.detachedAt = details.detachedAt;
   const deadline = deadlineOf(details.deadline);
   if (deadline) seen.deadline = deadline;
   if (Array.isArray(details.progress)) {
@@ -290,7 +299,16 @@ function timerLine(state: OrcheRenderState, theme: Theme, isError: boolean, widt
   const ext = extensionsOf(seen);
   const showExt = ext !== undefined && ext.max > 0;
   const parts: Array<{ text: string; color: "accent" | "muted" | "warning" | "error" }> = [];
-  if (state.final) {
+  if (state.final && (seen?.attach === "detached" || seen?.attach === "pending")) {
+    // A background job this call stopped waiting for: it keeps running, so this is no duration of the task.
+    const origin = seen.startedAt;
+    const at = seen.detachedAt ?? state.seenEndedAt;
+    const job = seen.job ?? "the job";
+    parts.push({ text: seen.attach === "pending" ? "⇥ not attached" : `⇥ detached${origin !== undefined && at !== undefined ? ` after ${formatElapsed(Math.max(0, at - origin))}` : ""}`, color: "warning" });
+    parts.push({ text: ` · ${job} keeps running in the background`, color: "muted" });
+  } else if (state.final && seen?.attach === "already-ended") {
+    parts.push({ text: `${seen.job ?? "the job"} had already ended`, color: "muted" });
+  } else if (state.final) {
     const elapsed = finalElapsed(state);
     if (elapsed === undefined) return undefined;
     parts.push({ text: `took ${formatElapsed(elapsed)}`, color: isError ? "error" : "muted" });
@@ -303,20 +321,22 @@ function timerLine(state: OrcheRenderState, theme: Theme, isError: boolean, widt
     parts.push({ text: `⏱ ${formatElapsed(elapsed)}`, color: "accent" });
     if (cap !== undefined) parts.push({ text: ` / ${formatDuration(cap)}`, color: cap > 0 && elapsed > cap ? "warning" : "muted" });
     if (showExt) parts.push({ text: ` · ext ${ext.used}/${ext.max}`, color: ext.used > 0 ? "warning" : "muted" });
+    if (seen?.attach === "attached") parts.push({ text: ` · attached to ${seen.job ?? "the job"} (Esc or new input detaches)`, color: "muted" });
   }
   const plain = parts.map(part => part.text).join("");
   if (cellWidth(plain) > width) return theme.fg("muted", truncate(plain, width));
   return parts.map(part => theme.fg(part.color, part.text)).join("");
 }
 
-interface CallArgs { request?: unknown; context?: unknown; role?: unknown; worker?: unknown; files?: unknown; git?: unknown }
+interface CallArgs { request?: unknown; context?: unknown; role?: unknown; worker?: unknown; files?: unknown; git?: unknown; job?: unknown }
 
 function callLines(name: string, args: unknown, state: OrcheRenderState, theme: Theme, expanded: boolean, isError: boolean, width: number): string[] {
   const input: CallArgs = isRecord(args) ? args : {};
   const request = typeof input.request === "string" ? input.request : "";
   const role = typeof input.role === "string" ? input.role : "";
   const worker = typeof input.worker === "string" ? input.worker : "";
-  const subject = [role && (worker ? `${role} ${worker}` : role), oneLine(request)].filter(Boolean).join(" · ");
+  const job = typeof input.job === "string" ? input.job : "";
+  const subject = [job, role && (worker ? `${role} ${worker}` : role), oneLine(request)].filter(Boolean).join(" · ");
   const title = theme.bold(name);
   const room = width - cellWidth(name) - 1;
   const lines = [`${theme.fg("toolTitle", title)}${subject && room > 1 ? ` ${theme.fg("muted", truncate(subject, room))}` : ""}`];
@@ -350,7 +370,7 @@ const textOf = (result: { content?: unknown }): string =>
  * model-use.ts). Nothing for an error without an assignment (thrown before any worker ran: no `worker` in the details) or for other tools.
  */
 function missingModelLine(name: string, details: unknown): string | undefined {
-  if (name !== "orche_task" || !isRecord(details) || typeof details.worker !== "string") return undefined;
+  if ((name !== "orche_task" && name !== "orche_task_attach") || !isRecord(details) || typeof details.worker !== "string") return undefined;
   const answered = isRecord(details.models) ? Object.fromEntries(Object.entries(details.models).filter((entry): entry is [string, number] => finite(entry[1]))) : undefined;
   return `Model: ${formatModelUse({ model: typeof details.model === "string" ? details.model : undefined, thinking: typeof details.thinking === "string" ? details.thinking : undefined, answered })}`;
 }
@@ -360,7 +380,24 @@ function missingModelLine(name: string, details: unknown): string | undefined {
  * the host would show without a renderer (its first {@link COLLAPSED_LINES} lines collapsed, all of them expanded), with the model line of
  * {@link missingModelLine} in an error result.
  */
+/** The collapsed body of a call that detached from (or did not attach to) a background job: what happened, for the user; the model's text expanded. */
+const DETACH_LABEL: Record<string, string> = {
+  input: "new user input", followUp: "a queued follow-up", "session-bus": "a message from another Pi session", abort: "Esc",
+  command: "/orche detach", background: "wait:false", shutdown: "session shutdown", replaced: "another attach",
+};
+function detachedLines(details: Record<string, unknown>, theme: Theme, width: number): string[] {
+  const job = typeof details.job === "string" ? details.job : "the job";
+  const reason = typeof details.reason === "string" ? DETACH_LABEL[details.reason] ?? details.reason : undefined;
+  const text = details.attach === "pending"
+    ? `${job} keeps running; not attached because input is waiting for main.`
+    : details.attach === "already-ended"
+      ? `${job} had already ended; its result was delivered once before.`
+      : `${job} keeps running${reason ? ` (detached by ${reason})` : ""}; its result arrives as a message unless main attaches again.`;
+  return [...wrapAll([text], width).map(line => theme.fg("toolOutput", line)), `${theme.fg("muted", "(")}${expandHint(theme)}${theme.fg("muted", " main's instructions)")}`];
+}
+
 function bodyLines(name: string, result: { content?: unknown; details?: unknown }, partial: boolean, isError: boolean, expanded: boolean, theme: Theme, width: number): string[] {
+  if (!partial && !expanded && isRecord(result.details) && (result.details.attach === "detached" || result.details.attach === "pending" || result.details.attach === "already-ended")) return detachedLines(result.details, theme, width);
   const seen = isRecord(result.details) && Array.isArray(result.details.progress) ? result.details.progress.filter((line): line is string => typeof line === "string") : undefined;
   const source = partial && seen ? seen.map(clean) : clean(textOf(result)).split("\n");
   const logical = source.length === 1 && source[0] === "" ? [] : source;
@@ -404,3 +441,32 @@ export function createOrcheRenderers(name: string): { renderCall: CallRenderer; 
 
 export const orcheRunRenderers = createOrcheRenderers("orche_run");
 export const orcheTaskRenderers = createOrcheRenderers("orche_task");
+
+/**
+ * The `orche-task-result` message of a job that ended while detached: a status header (✓ done, ✗ failed, ⊘ cancelled, ! interrupted,
+ * with the job, worker and duration), then the result text: its first {@link COLLAPSED_LINES} lines collapsed, all of it expanded.
+ * Main reads the message content itself; this changes only what the TUI draws.
+ */
+export function renderJobResultMessage(message: { content: unknown; details?: unknown }, options: { expanded: boolean }, theme: Theme): Component {
+  const details = isRecord(message.details) ? message.details : {};
+  const raw = typeof message.content === "string" ? message.content : textOf({ content: message.content });
+  const all = clean(raw).split("\n");
+  if (/^\[orche task result ·/.test(all[0] ?? "")) all.shift();
+  while (all.length && !all[0]!.trim()) all.shift();
+  const status = typeof details.status === "string" ? details.status : "ended";
+  const icon = ({ done: "✓", failed: "✗", cancelled: "⊘", interrupted: "!" } as Record<string, string>)[status] ?? "•";
+  const color = status === "done" ? "success" : status === "cancelled" ? "warning" : "error";
+  const took = finite(details.startedAt) && finite(details.finishedAt) ? ` after ${formatElapsed(details.finishedAt - details.startedAt)}` : "";
+  const head = `${icon} orche task result · ${String(details.job ?? "?")} · ${String(details.worker ?? "?")} ${String(details.role ?? "")} · ${status}${took}`;
+  return {
+    render(width: number): string[] {
+      const max = Math.max(1, width);
+      const hidden = options.expanded ? 0 : Math.max(0, all.length - COLLAPSED_LINES);
+      const shown = options.expanded ? all : all.slice(0, COLLAPSED_LINES);
+      const lines = [theme.fg(color, theme.bold(truncate(head, max))), ...wrapAll(shown, max).map(line => theme.fg("toolOutput", line))];
+      if (hidden > 0) lines.push(`${theme.fg("muted", truncate(`... (${hidden} more lines, `, max))}${expandHint(theme)}${theme.fg("muted", ")")}`);
+      return lines;
+    },
+    invalidate() {},
+  };
+}

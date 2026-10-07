@@ -12,7 +12,7 @@ export const TOOLS_ENTRY_TYPE = "orche-tools";
 /** Tools the main session may not use while it must delegate every change. */
 const EDIT_TOOLS: readonly string[] = ["edit", "write", "ast_rewrite"];
 const SHELL_TOOLS: readonly string[] = ["bash", "powershell"];
-export const DELEGATION_TOOLS: readonly string[] = ["orche_task", "orche_task_status", "orche_task_message"];
+export const DELEGATION_TOOLS: readonly string[] = ["orche_task", "orche_task_status", "orche_task_message", "orche_task_attach"];
 
 export function isMainMode(value: unknown): value is MainMode {
   return typeof value === "string" && (MAIN_MODES as readonly string[]).includes(value);
@@ -27,9 +27,10 @@ export function blockedTools(mode: MainMode): readonly string[] {
 }
 
 /**
- * The background orche_task flow (jobs.ts): main keeps the conversation while a worker runs, never polls, and can steer the worker.
+ * The background orche_task flow (jobs.ts): the call stays attached to its job like a blocking call; input for main detaches it,
+ * main answers, then attaches again. Main never polls and can steer the worker.
  */
-export const ASYNC_RULE = "Background tasks: in an interactive or RPC session orche_task returns a job id (J1, J2, …) as soon as the worker has the assignment, and the worker's result arrives later as an orche-task-result message that starts your next turn. Until then keep the conversation with the user going (answer questions, refine requirements, collect decisions); never wait, sleep or poll for the result, and call orche_task_status only when the user asks about progress. To add or correct instructions for the running worker, use orche_task_message: it reaches the worker before its next model request and grants no new permissions; a message the worker could not read before it reported is listed as not delivered in the result, so send it as a follow-up orche_task then. One task runs at a time; orche_task_status with cancel:true stops it. Pass wait:true only when you cannot continue the conversation without the result. When the result message arrives, review it as below and report to the user.";
+export const ASYNC_RULE = "Background tasks: in an interactive or RPC session orche_task runs as a job (J1, J2, …) and the call stays attached to it: it waits like a blocking call and returns the worker's result. New user input or a message from another Pi session DETACHES it: the call returns at once, the worker keeps running. Then answer that input first. After answering, if the job is still running and nothing else is waiting for you, call orche_task_attach to wait for the result again; do not attach again after the user detached it themselves (/orche detach) unless they ask, and when the user interrupted with Esc only after answering their next message. A job that ends while detached delivers its result once as an orche-task-result message that starts your next turn. Never wait with sleep and never poll orche_task_status (call it only when the user asks about progress). To add or correct instructions for the running worker, use orche_task_message: it reaches the worker before its next model request and grants no new permissions; a message the worker could not read before it reported is listed as not delivered in the result, so send it as a follow-up orche_task then. One task runs at a time; orche_task_status with cancel:true (or the user's /orche cancel) stops it, detaching never does. Pass wait:true only when the result must not be interrupted. When the result arrives (attached result or message), review it as below and report to the user.";
 const REFERENCE_RULE = "Pass references, not copies: repository paths with line ranges or symbol names, reproduction commands, artifact and run-record paths. Paste only short decisive snippets a worker cannot reproduce (an exact error line or user-provided text); never whole files, diffs or long logs.";
 /**
  * Main reviews a result from the report alone, without re-reading the changed code or re-running checks itself (G-M + G-M2,

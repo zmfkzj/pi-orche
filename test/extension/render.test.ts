@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToolExecutionComponent, initTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import {
-  COLLAPSED_LINES, STALE_RENDER_MS, TICK_MS, createOrcheRenderers, formatElapsed, orcheRunRenderers, orcheTaskRenderers,
+  COLLAPSED_LINES, STALE_RENDER_MS, TICK_MS, createOrcheRenderers, formatElapsed, orcheRunRenderers, orcheTaskRenderers, renderJobResultMessage,
   type OrcheRenderContext,
 } from "../../src/extension/render.js";
 import { extendDeadline, initialDeadline, type DeadlineInfo } from "../../src/extension/progress.js";
@@ -420,6 +420,44 @@ describe("createOrcheRenderers", () => {
   it("titles the block with the tool's name", () => {
     const host = new Host(createOrcheRenderers("orche_custom"), { request: "x" }).start();
     expect(host.drawPlain()[0]).toBe("orche_custom x");
+  });
+});
+
+describe("a background job's attached call", () => {
+  const jobDetails = (extra: Record<string, unknown>) => ({ job: "J1", worker: "W1", role: "implement", status: "running", async: true, startedAt: T0, ...extra });
+
+  it("marks the running block as attached, and a detached end as such instead of `took`: the job keeps running", async () => {
+    const host = new Host(orcheTaskRenderers, { role: "implement", request: "Fix it" }).start();
+    host.receive(textResult("W1 implement · 2 requests", { progress: ["W1 implement · 2 requests"], startedAt: T0, deadline: baseline(), job: "J1", attach: "attached" }));
+    expect(host.drawPlain()[1]).toBe("⏱ 0s / 30m · ext 0/10 · attached to J1 (Esc or new input detaches)");
+    await host.pass(65_000);
+    host.finish(textResult("Started job J1: worker W1 implement. Detached from J1 (worker W1 implement, running 1m 05s): new user input arrived. …", jobDetails({ attach: "detached", reason: "input", detachedAt: T0 + 65_000 })));
+    const lines = host.drawPlain();
+    expect(lines[1]).toBe("⇥ detached after 1m 05s · J1 keeps running in the background");
+    expect(lines.join("\n")).not.toContain("took");
+    expect(lines.slice(2, 4)).toEqual(["J1 keeps running (detached by new user input); its result arrives as a message unless main attaches", "again."]);
+    expect(lines[4]).toBe("(ctrl+o to expand main's instructions)");
+    expect(host.expand(true).drawPlain().join("\n")).toContain("Started job J1");
+  });
+
+  it("an orche_task_attach block names its job; refused and already-ended attaches say so", () => {
+    const renderers = createOrcheRenderers("orche_task_attach");
+    const pending = new Host(renderers, { job: "J1" }).start().finish(textResult("Not attached to J1 …", jobDetails({ attach: "pending", detachedAt: T0 })));
+    expect(pending.drawPlain().slice(0, 3)).toEqual(["orche_task_attach J1", "⇥ not attached · J1 keeps running in the background", "J1 keeps running; not attached because input is waiting for main."]);
+    const ended = new Host(renderers, { job: "J1" }).start().finish(textResult("J1 already ended …", jobDetails({ status: "done", attach: "already-ended" })));
+    expect(ended.drawPlain().slice(1, 3)).toEqual(["J1 had already ended", "J1 had already ended; its result was delivered once before."]);
+  });
+
+  it("draws an orche-task-result message with a status header and the collapsed result", () => {
+    const body = Array.from({ length: 14 }, (_, i) => `line ${i + 1}`).join("\n");
+    const message = { content: `[orche task result · J1 · W1 implement · done after 2m]\n${body}`, details: { job: "J1", worker: "W1", role: "implement", status: "done", startedAt: T0, finishedAt: T0 + 125_000 } };
+    const collapsed = renderJobResultMessage(message, { expanded: false }, theme).render(80);
+    expect(collapsed[0]).toBe("<success>**✓ orche task result · J1 · W1 implement · done after 2m 05s**</success>");
+    expect(collapsed.slice(1, COLLAPSED_LINES + 1).map(plain)).toEqual(Array.from({ length: COLLAPSED_LINES }, (_, i) => `line ${i + 1}`));
+    expect(plain(collapsed.at(-1)!)).toBe("... (4 more lines, ctrl+o to expand)");
+    expect(renderJobResultMessage(message, { expanded: true }, theme).render(80)).toHaveLength(15);
+    const failed = renderJobResultMessage({ content: "[orche task result · J2 · W1 implement · failed after 1s]\nboom", details: { job: "J2", worker: "W1", role: "implement", status: "failed" } }, { expanded: false }, theme).render(80);
+    expect(failed).toEqual(["<error>**✗ orche task result · J2 · W1 implement · failed**</error>", "<toolOutput>boom</toolOutput>"]);
   });
 });
 

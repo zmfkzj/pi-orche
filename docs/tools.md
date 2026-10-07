@@ -18,19 +18,37 @@ The model sees exactly one `read` and one `edit`: custom tools registered under 
 
 ## Main-session task tools (Pi package)
 
-The Pi package (`src/extension/index.ts`) gives the main session three delegation tools. Schemas: `orcheTaskParameters`
-(`src/extension/workers.ts`) and the two `registerTool` calls in `index.ts`; full contract in [pi-package.md](pi-package.md) 5.
+The Pi package (`src/extension/index.ts`) gives the main session four delegation tools. Schemas: `orcheTaskParameters`
+(`src/extension/workers.ts`) and the `registerTool` calls in `index.ts`; full contract in [pi-package.md](pi-package.md) 5.
 
 | Tool | Parameters | What it does |
 | --- | --- | --- |
-| `orche_task` | `role`, `request` (required); `context?`, `worker?`, `files?`, `task?`, `git?`, `gui?`, and: `wait?` (boolean), `writeRoots?` (≤10 paths), `verificationRounds?` (integer 1–5, default 2) | Delegates one assignment to one persistent worker. **Background by default** in interactive (`tui`) and RPC sessions: returns `Started job J1: worker W1 (role, model · thinking level) is working on it in the background.` once the worker has its assignment. `wait: true`, and every other mode (`pi -p` print, `--mode json`, SDK sessions without a UI mode), **block** and return the result, because those processes end with the turn. Errors before the worker has its assignment (unknown worker, bad arguments, a job already running) fail the call itself in both paths. |
-| `orche_task_status` | `job?` (`J<n>`; default the running job, else the latest), `cancel?` (boolean) | Job state, elapsed time, latest progress and the worker's liveness, or the result summary when it ended; `cancel: true` cancels the running job (also `/orche cancel`). Only when the user asks: the result arrives by itself. |
+| `orche_task` | `role`, `request` (required); `context?`, `worker?`, `files?`, `task?`, `git?`, `gui?`, and: `wait?` (boolean), `writeRoots?` (≤10 paths), `verificationRounds?` (integer 1–5, default 2) | Delegates one assignment to one persistent worker. In interactive (`tui`) and RPC sessions it starts a **background job** (J1, …) and stays **attached**: it waits and returns the result like a blocking call, unless it is detached first (see below); a detached call returns `Started job J1: worker W1 implement (model · thinking level). Detached from J1 (…): <why and what to do>`. `wait: false` detaches at once. `wait: true`, and every other mode (`pi -p` print, `--mode json`, SDK sessions without a UI mode), **block** without a job and return the result (aborting cancels), because those processes end with the turn. Errors before the worker has its assignment (unknown worker, bad arguments, a job already running) fail the call itself in all paths. |
+| `orche_task_attach` | `job?` (`J<n>`; default the running job) | Attaches to the running job and waits for its result like `orche_task`; detaches the same way. Refused (`Not attached …`, `details.attach: "pending"`) while user input or an undelivered woken peer note is queued; for a job that already ended it says so (`already-ended`) and repeats nothing. Never restarts or cancels the worker. |
+| `orche_task_status` | `job?` (`J<n>`; default the running job, else the latest), `cancel?` (boolean) | Job state, elapsed time, attached/detached, latest progress and the worker's liveness, or the result summary when it ended; `cancel: true` cancels the running job (also `/orche cancel`). Never waits; only when the user asks. |
 | `orche_task_message` | `message` (1–20,000 chars, self-contained), `job?` (default the running job) | Queues an extra or corrected instruction for the running job's worker (`Queued M1 for W1 (J1): …`). |
 
-**Result delivery.** A background job's result (done, failed, cancelled, timed out) is the same text the blocking call returns,
-headed `[orche task result · J1 · W1 implement · done after 12m]`. It arrives **once** as an `orche-task-result` custom message
-(`pi.sendMessage`, `triggerTurn: true`, `deliverAs: "followUp"`): it starts main's next turn, or waits behind a turn in progress.
-Main is told not to wait, sleep or poll. Each start and end is an `orche-job` session entry (not model context).
+**Attach and detach.** Attaching and detaching only change whether a tool call waits; the job's worker is untouched. An attached
+call detaches when: an `input` event arrives (an interactive prompt, steer or follow-up, an RPC `steer`/`follow_up`; the call
+returns once Pi has queued the input, `ctx.hasPendingMessages()`, at the latest after 1 s), a `session-bus:message` event with
+`wake` other than `suppressed` arrives (pi-session-bus emits it after queuing the note as a steer), the call's abort signal fires
+(Esc, RPC `abort`), or the user runs `/orche detach`. The result says why (`details.attach: "detached"`, `details.reason`: `input`,
+`followUp`, `session-bus`, `abort`, `command`, `background`, `shutdown`) and what main should do: answer the input, then attach
+again when nothing else waits (not after `/orche detach` unless asked; after Esc only after answering the next message; after a
+follow-up end the turn first so it is delivered). A woken note counts as waiting until its `session-bus.message` reaches the
+context (`message_end`), at most 60 s, and is forgotten at `agent_end`.
+
+**Result delivery.** Exactly once per job: settling and detaching are synchronous, so whichever happens first wins. A job that ends
+while a call is attached returns its result to that call (the blocking text; `orche_task_attach` adds the header line). A job that
+ends while detached delivers the same text, headed `[orche task result · J1 · W1 implement · done after 12m]`, as one
+`orche-task-result` custom message (`pi.sendMessage`, `triggerTurn: true`, `deliverAs: "followUp"`): it starts main's next turn,
+or waits behind a turn in progress; the user also gets a one-line notification. Main never sleeps or polls. Each start and end is
+an `orche-job` session entry (not model context).
+
+**Visibility.** The `orche-job` widget (`ctx.ui.setWidget`, plain strings) shows the job running attached (`◉`) or detached (`◌`) with
+its elapsed time and latest progress line, then its end (`✓ done`, `✗ failed`, `⊘ cancelled`, `! interrupted`) and where the result
+went, until the next user input. The TUI repaints it every second; in RPC it is re-sent only when its text changes (minutes, not
+seconds). A detached tool block shows `⇥ detached after 4m 12s · J1 keeps running in the background` instead of `took …`.
 
 **Steer semantics of `orche_task_message`.** Rejected (an error result) when no job runs, the named job is not running, the worker
 is not running an assignment, has already reported, or is stopping, or the message is blank. Otherwise the message is sent into the

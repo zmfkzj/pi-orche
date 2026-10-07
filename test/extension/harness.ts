@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager,
-  type AgentSession, type ExtensionUIContext, type ModelRuntime,
+  type AgentSession, type ExtensionFactory, type ExtensionUIContext, type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage as reply, fauxToolCall as call, type FauxResponseStep, type ToolCall } from "@earendil-works/pi-ai";
 import { createOrcheExtension, type OrcheExtensionOptions } from "../../src/extension/index.js";
@@ -61,6 +61,8 @@ export async function createHarness(options: {
   providers?: { provider: Parameters<ModelRuntime["registerNativeProvider"]>[0] }[];
   /** `ctx.mode` the extension sees (default: the SDK default, i.e. not "tui"). */
   mode?: "tui" | "rpc" | "print" | "json";
+  /** Further extensions loaded after pi-orche (e.g. a stand-in for another extension that talks to it over `pi.events`). */
+  extraExtensions?: ExtensionFactory[];
 }): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "orche-ext-"));
   const cwd = join(root, "project");
@@ -80,7 +82,7 @@ export async function createHarness(options: {
   const resourceLoader = new DefaultResourceLoader({
     cwd, agentDir, settingsManager, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
     // Most fixtures deliberately keep main/worker scripts isolated; inheritance regressions opt in.
-    extensionFactories: [createOrcheExtension({ agentDir, inheritProviders: false, createRuntime: async () => options.inheritMainModel || options.writeUserConfig === false ? main.runtime : orche.runtime, ...options.extension })],
+    extensionFactories: [createOrcheExtension({ agentDir, inheritProviders: false, createRuntime: async () => options.inheritMainModel || options.writeUserConfig === false ? main.runtime : orche.runtime, ...options.extension }), ...(options.extraExtensions ?? [])],
   });
   await resourceLoader.reload();
   const model = main.runtime.getModel(main.faux.provider.id, main.faux.getModel().id)!;
