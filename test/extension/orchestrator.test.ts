@@ -236,6 +236,46 @@ describe("orchestrator: independent verification", () => {
     expect(result.text).toContain("Split: verification — the user asked for an independent review");
     expect(result.text).toMatch(/W1\.1 check \(verify, verification; [^ ]+\/[^ ]+ · thinking off\): passed/);
   });
+
+  it("refuses a verification round past the cap, requires data.unresolved, and says so in the result; main can raise the cap", async () => {
+    const verify = () => tool(SPAWN_TOOL, { reason: "verification", workers: [{ name: "check", role: "verify", request: "Original request: greeting.txt says hello. Run your own checks." }] });
+    const split = { decision: "split", criteria: ["verification"], reason: "the user asked for review rounds" };
+    const seen: Record<string, string> = {};
+    const steps = scripted(12, {
+      orchestrator: (turn, context) => {
+        if (turn <= 2) return verify();
+        if (turn === 3) { seen.refused = JSON.stringify(toolErrorOf(context, SPAWN_TOOL)); return tool("report_result", { kind: "implement", summary: "Done", data: { status: "done", checklist, split } }); }
+        seen.repair = textOf(context);
+        return tool("report_result", { kind: "implement", summary: "Done; one review finding left open", data: { status: "done", checklist, split, unresolved: ["check: greeting.txt lacks a trailing newline (greeting.txt:1)"] } });
+      },
+      check: () => tool("report_result", { kind: "verify", summary: "one finding", data: { passed: false, evidence: ["cat greeting.txt"], issues: ["no trailing newline"] } }),
+    });
+    const { execute } = await fixture(steps);
+    const result = await execute({ request: `${request}\nThe user asks for independent review.` });
+    expect(seen.refused).toContain("already ran 2 verification rounds (the cap is 2");
+    expect(seen.refused).toContain("run the project checks yourself");
+    expect(seen.repair).toContain("data.unresolved is required: a further verification round was refused (cap 2)");
+    expect(result.details.spawned).toHaveLength(2);
+    expect(result.text).toContain("Verification cap: 2 verification rounds ran (cap 2); 1 further round was refused.");
+    expect(result.text).toContain("unresolved: [\"check: greeting.txt lacks a trailing newline (greeting.txt:1)\"]");
+  });
+
+  it("verificationRounds raises the cap for one assignment and is named in its prompt", async () => {
+    let assignment = "";
+    const steps = scripted(10, {
+      orchestrator: (turn, context) => {
+        if (turn === 0) assignment = firstUser(context);
+        if (turn <= 2) return tool(SPAWN_TOOL, { reason: "verification", workers: [{ name: "check", role: "verify", request: "Original request: x. Run your own checks." }] });
+        return tool("report_result", { kind: "implement", summary: "Done after three reviews", data: { status: "done", checklist, split: { decision: "split", criteria: ["verification"], reason: "three review rounds requested" } } });
+      },
+      check: () => tool("report_result", { kind: "verify", summary: "ok", data: { passed: true, evidence: ["checked"], issues: [] } }),
+    });
+    const { execute } = await fixture(steps);
+    const result = await execute({ verificationRounds: 3 });
+    expect(assignment).toContain("Verification rounds for this assignment: at most 3");
+    expect(result.details.spawned).toHaveLength(3);
+    expect(result.text).not.toContain("Verification cap:");
+  });
 });
 
 describe("orchestrator: isolation", () => {

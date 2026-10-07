@@ -11,7 +11,8 @@ describe("task_plan replacement DAG", () => {
     ["invalid status", [{ ...node("a"), status: "finished" }], /status/],
     ["empty plan", [], /greater or equal to 1/],
     ["too many nodes", Array.from({ length: 61 }, (_, i) => node(`n${i}`)), /less or equal to 60/],
-    ["long title", [{ ...node("a"), title: "x".repeat(201) }], /200/],
+    ["title over the input limit", [{ ...node("a"), title: "x".repeat(2001) }], /2000/],
+    ["covers that are not bare requirement ids", [{ ...node("a"), covers: ["R3-revised"] }], /Invalid covers ids: "R3-revised" \(node a; did you mean R3\?\)/],
     ["long note", [{ ...node("a"), note: "x".repeat(501) }], /500/],
     ["two running nodes", [node("a", [], "running"), node("b", [], "running")], /At most one node/],
     ["oversized extra field", [{ ...node("a"), arbitrary: "x".repeat(100_000) }], /Unexpected property/],
@@ -64,5 +65,31 @@ describe("bounded assignment-local task_plan", () => {
     expect((await execute(["R3"])).isError).not.toBe(true);
     ids = [];
     expect((await execute(["R99"])).isError).not.toBe(true); // no R-id request: coverage is advisory.
+  });
+  it("accepts long titles, stores and renders them shortened to 200 characters and says so", async () => {
+    let latest: TaskPlan | undefined;
+    const tool = createTaskPlanTool(plan => { latest = plan; }, () => ["R1"]);
+    const long = "t".repeat(1500);
+    const result = await tool.execute("long", { nodes: [{ ...node("a"), title: long }, { ...node("b", ["a"]), title: "x".repeat(201) }, node("c")] }, undefined as never, undefined as never, undefined as never);
+    expect(result.isError).not.toBe(true);
+    const titles = latest!.nodes.map(n => n.title);
+    expect(titles.map(t => t.length)).toEqual([200, 200, 6]);
+    expect(titles[0]).toBe(`${"t".repeat(199)}…`);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain(`a [pending] ${"t".repeat(199)}… (R1)`);
+    expect(text).toContain("Note: titles of a, b exceeded 200 characters and were shortened");
+    expect(renderTaskPlan(latest!)).not.toContain("t".repeat(200));
+    // 60 nodes of 2000-character titles would exceed the byte limit unshortened; the stored plan fits.
+    const many = Array.from({ length: 60 }, (_, i) => ({ ...node(`n${i}`), title: "y".repeat(2000) }));
+    expect((await tool.execute("many", { nodes: many }, undefined as never, undefined as never, undefined as never)).isError).not.toBe(true);
+    expect(latest!.nodes).toHaveLength(60);
+  });
+  it("rejects malformed covers in one error that lists every bad value, the valid ids and the bare-id hint", async () => {
+    let latest: TaskPlan | undefined;
+    const tool = createTaskPlanTool(plan => { latest = plan; }, () => ["R1", "R2", "R3"]);
+    const result = await tool.execute("bad", { nodes: [{ ...node("a"), covers: ["R3-revised", "R1"] }, { ...node("b"), covers: ["requirement two"] }] }, undefined as never, undefined as never, undefined as never);
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([{ type: "text", text: "Invalid covers ids: \"R3-revised\" (node a; did you mean R3?), \"requirement two\" (node b). covers takes requirement ids only — use the bare id, e.g. R3; put qualifiers like \"revised\" or \"partial\" in the title or note. Valid ids for this assignment: R1, R2, R3." }]);
+    expect(latest).toBeUndefined();
   });
 });

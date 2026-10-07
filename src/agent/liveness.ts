@@ -27,7 +27,11 @@
  * 3. a **non-bash tool is in flight** and has been for no longer than its bound ({@link TOOL_INFLIGHT_MAX_MS}, or the tool's own
  *    known timeout plus {@link TOOL_TIMEOUT_GRACE_MS}), even without updates: ast_rewrite, diagnostics, generate_image, ... are
  *    silent by nature. A bash call has NO such bound: it is judged by its progress alone (rule 1), so a silent `sleep 9999`
- *    stops counting once its last progress is older than the window, however long it has been "running".
+ *    stops counting once its last progress is older than the window, however long it has been "running";
+ * 4. a **declared quiet wait**: a bash call started with an explicit `timeout` argument (seconds) counts as working while it runs
+ *    within that timeout plus {@link TOOL_TIMEOUT_GRACE_MS}, even without output. The worker states how long the wait is meant to
+ *    take; the tool kills it at that bound, and the owner's extension budget still caps the whole assignment, so a quiet wait can
+ *    never extend a deadline without limit. A bash call without a timeout keeps rule 1 only.
  *
  * Idle sessions (no run in flight: waiting for an assignment) never count, whatever happened last. A session that is not idle
  * is in one of the states `tool` (a tool is in flight), `streaming` (a request is in flight and has produced output) or
@@ -192,6 +196,16 @@ interface Flight {
   lastProgressAt: number;
   progress: "start" | "output" | "process";
   heartbeat?: { sample: BashHeartbeatSample; at: number };
+  /** bash only: the explicit `timeout` of the call (ms), a declared quiet wait. */
+  declaredMs?: number;
+}
+
+/** The explicit `timeout` (seconds, a number or an integer string) of a bash call's arguments, in ms; undefined without one. */
+export function declaredBashTimeoutMs(args: unknown): number | undefined {
+  if (!isObject(args)) return undefined;
+  const raw = args.timeout;
+  const seconds = typeof raw === "number" ? raw : typeof raw === "string" && /^\s*\d+(\.\d+)?\s*$/.test(raw) ? Number(raw) : undefined;
+  return seconds !== undefined && Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
 }
 
 export interface LivenessTrackerOptions {
@@ -296,13 +310,15 @@ export class LivenessTracker {
     const running = formatDuration(now - flight.startedAt);
     if (flight.name === "bash" || flight.heartbeat) {
       const age = now - flight.lastProgressAt;
-      const active = age <= window;
+      const quiet = flight.declaredMs !== undefined && now - flight.startedAt <= flight.declaredMs + TOOL_TIMEOUT_GRACE_MS;
+      const active = age <= window || quiet;
       const parts = [`${flight.name} running ${running}`];
+      if (flight.declaredMs !== undefined) parts.push(`declared quiet wait up to ${formatDuration(flight.declaredMs)}${quiet ? "" : " (passed)"}`);
       parts.push(flight.progress === "output" ? `output ${formatDuration(age)} ago`
         : flight.progress === "process" ? `cpu/io activity ${formatDuration(age)} ago` : "no output yet");
       // The latest heartbeat decides what is said about the process: idle now (even if it was busy a moment ago), or no heartbeat at all.
       if (flight.heartbeat && !flight.heartbeat.sample.progressing) parts.push("alive but not progressing");
-      else if (!active) parts.push("no recent progress");
+      else if (age > window) parts.push("no recent progress");
       const beat = flight.heartbeat?.sample;
       if (beat) {
         const facts = [
@@ -374,7 +390,9 @@ export class LivenessTracker {
         if (typeof id !== "string") break;
         this.running = true;
         this.flights.delete(id);
-        this.flights.set(id, { toolCallId: id, name: String(event.toolName ?? "tool"), startedAt: now, lastProgressAt: now, progress: "start" });
+        const name = String(event.toolName ?? "tool");
+        const declaredMs = name === "bash" ? declaredBashTimeoutMs(event.args) : undefined;
+        this.flights.set(id, { toolCallId: id, name, startedAt: now, lastProgressAt: now, progress: "start", ...(declaredMs !== undefined ? { declaredMs } : {}) });
         while (this.flights.size > MAX_FLIGHTS) this.flights.delete(this.flights.keys().next().value!);
         this.lastEventAt = this.lastSignalAt = now;
         break;

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   DEFAULT_CONCURRENT_SESSIONS, DEFAULT_RECORDS, discoverOrcheConfig, loadOrcheConfigFile, MAX_RECORDS_RETENTION_DAYS, NoRouteError, parseConcurrentSessionsConfig, parseRecordsConfig,
@@ -8,7 +8,7 @@ import {
 } from "../../src/extension/config.js";
 import { resolveRunLimits } from "../../src/orchestration/limits.js";
 import { parseRouteConfig } from "../../src/orchestration/routing.js";
-import { DEFAULT_SINGLE, DEFAULT_TASK_CONTEXT, parseSingleConfig, parseTaskContextConfig } from "../../src/extension/config.js";
+import { DEFAULT_SINGLE, DEFAULT_TASK_CONTEXT, parseSingleConfig, parseTaskContextConfig, parseWriteRootsConfig, resolveWriteRoots } from "../../src/extension/config.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -307,6 +307,60 @@ describe("orche config discovery", () => {
     expect(() => parseSingleConfig(value)).toThrow("config.single");
     const files = await layout({ user: { ...cfg("u/user"), single: value } });
     await expect(discoverOrcheConfig({ ...files, projectTrusted: false, session })).rejects.toThrow("config.single");
+  });
+
+
+  it("defaults writeRoots to [] from every source and reads it from the selected file only", async () => {
+    const none = await layout({});
+    expect((await discoverOrcheConfig({ ...none, projectTrusted: true, session })).writeRoots).toEqual([]);
+    const plain = await layout({ user: cfg("u/user") });
+    expect((await discoverOrcheConfig({ ...plain, projectTrusted: true, session })).writeRoots).toEqual([]);
+    const files = await layout({ project: { ...cfg("p/project"), writeRoots: ["../sibling", "/srv/shared"] }, user: { ...cfg("u/user"), writeRoots: ["~/Code/other"] } });
+    const project = await discoverOrcheConfig({ ...files, projectTrusted: true, session });
+    expect(project.writeRoots).toEqual(["../sibling", "/srv/shared"]);
+    expect(project.routes).toEqual(cfg("p/project"));
+    // An untrusted project file is ignored entirely, including its writeRoots.
+    expect((await discoverOrcheConfig({ ...files, projectTrusted: false, session })).writeRoots).toEqual(["~/Code/other"]);
+    expect((await loadOrcheConfigFile(join(files.agentDir, "orche.config.json"))).writeRoots).toEqual(["~/Code/other"]);
+  });
+
+  it("validates writeRoots and rejects /, the home directory and wrong types", async () => {
+    expect(parseWriteRootsConfig([])).toEqual([]);
+    expect(parseWriteRootsConfig(["a", "/b", "~/c"])).toEqual(["a", "/b", "~/c"]);
+    const invalid: [unknown, string][] = [
+      [null, "config.writeRoots: expected an array"],
+      ["/srv", "config.writeRoots: expected an array"],
+      [{ path: "/srv" }, "config.writeRoots: expected an array"],
+      [[5], "config.writeRoots[0]: expected a string"],
+      [["/ok", null], "config.writeRoots[1]: expected a string"],
+      [[""], "config.writeRoots[0]: expected a non-empty path"],
+      [["  "], "config.writeRoots[0]: expected a non-empty path"],
+      [[" /padded"], "config.writeRoots[0]: expected a non-empty path"],
+      [["/"], "config.writeRoots[0]: the filesystem root / cannot be a write root"],
+      [["//"], "filesystem root"],
+      [["/./"], "filesystem root"],
+      [[homedir()], "the home directory"],
+      [[`${homedir()}/`], "the home directory"],
+      [["~"], "only ~/ is expanded"],
+      [["~/"], "the home directory"],
+      [["~other/x"], "only ~/ is expanded"],
+    ];
+    for (const [value, message] of invalid) expect(() => parseWriteRootsConfig(value), JSON.stringify(value)).toThrow(message);
+    for (const [value, message] of [[["/"], "filesystem root"], ["x", "expected an array"], [[1], "expected a string"]] as const) {
+      const files = await layout({ user: { ...cfg("u/user"), writeRoots: value } });
+      await expect(discoverOrcheConfig({ ...files, projectTrusted: true, session }), JSON.stringify(value)).rejects.toThrow(message);
+    }
+    const typo = await layout({ user: { ...cfg("u/user"), writeRoot: ["/srv"] } });
+    await expect(loadOrcheConfigFile(join(typo.agentDir, "orche.config.json"))).rejects.toThrow("config: unknown field");
+  });
+
+  it("resolves writeRoots against the task cwd into absolute normalized paths", () => {
+    expect(resolveWriteRoots("/home/u/Code/repo", ["../sibling", "/srv/x/", "/srv/./x", "sub/../lib", "~/Code/other"])).toEqual([
+      "/home/u/Code/sibling", "/srv/x", "/home/u/Code/repo/lib", join(homedir(), "Code/other"),
+    ]);
+    expect(resolveWriteRoots("/w", [])).toEqual([]);
+    expect(() => resolveWriteRoots("/w", [".."])).toThrow("filesystem root");
+    expect(() => resolveWriteRoots(join(homedir(), "repo"), [".."])).toThrow("the home directory");
   });
 
 });

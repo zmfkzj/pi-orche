@@ -564,7 +564,7 @@ describe("single-worker mode and one-turn override", () => {
 
   it("single policy keeps reuse and supervision explicit", () => {
     const rules = delegationRules("single");
-    for (const criterion of ["Never claim a reuse that did not happen", "workers are gone after a reload", "a worker's report is not acceptance", "report unverified items as unverified", "Intent/Purpose; numbered requirements checklist R1..Rn", "Original request section containing the user's ORIGINAL request text verbatim"])
+    for (const criterion of ["Never claim a reuse that did not happen", "a worker that is gone (idle expiry, eviction, reload) is continued by a NEW worker", "never wait, sleep or poll for the result", "a worker's report is not acceptance", "report unverified items as unverified", "Intent/Purpose; numbered requirements checklist R1..Rn", "Original request section containing the user's ORIGINAL request text verbatim"])
       expect(rules).toContain(criterion);
   });
 });

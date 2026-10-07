@@ -15,7 +15,7 @@ import { normalizeOwnedPath, validateBacklog, type TaskItem } from "../orchestra
 import { ownsPath, WRITING_KINDS } from "../orchestration/ownership.js";
 import type { SubWorkerModelSource, SubWorkerThinkingSource } from "../orchestration/routing.js";
 import type { WorkspaceChange } from "../orchestration/workspace.js";
-import { MAX_SUB_WORKERS } from "./instructions.js";
+import { MAX_SUB_WORKERS, MAX_VERIFICATION_ROUNDS } from "./instructions.js";
 import { formatModelUse } from "../orchestration/model-use.js";
 
 export const SPAWN_TOOL = "orche_spawn";
@@ -142,6 +142,13 @@ export interface SpawnContext {
   onProgress?(lines: string[]): void;
   /** Every finished call (details, records). */
   onSpawned?(reason: SpawnReason, outcomes: readonly SubWorkerOutcome[], warnings: readonly string[]): void;
+  /**
+   * Verification rounds this assignment may start (default {@link MAX_VERIFICATION_ROUNDS}); main raises it with orche_task
+   * `verificationRounds` only when the user explicitly asked for more review rounds.
+   */
+  maxVerificationRounds?: number;
+  /** A verification call refused at the cap (the result then has to state what stays unresolved; see workers.ts). */
+  onVerificationRefused?(rounds: number, cap: number): void;
 }
 
 export interface SpawnDetails { reason: SpawnReason; workers: SubWorkerOutcome[]; warnings: string[]; durationMs: number }
@@ -218,6 +225,13 @@ export async function executeSpawn(context: SpawnContext, params: SpawnParameter
  * The tool. `context()` resolves the current assignment's SpawnContext at call time (the tool lives as long as the worker's
  * session; the context only during an orchestrator assignment) or says why it is unavailable.
  */
+/**
+ * Verification rounds (orche_spawn calls with reason "verification") one orchestrator assignment may start. A review loop that
+ * finds something new in every round does not converge by itself (one real task ran five rounds and 116 minutes); past the cap the
+ * orchestrator fixes what is clearly in scope and reports the remaining findings (`data.unresolved`) for main and the user to decide.
+ */
+const verificationRounds = new WeakMap<SpawnContext, number>();
+
 export function createSpawnTool(context: () => SpawnContext | string): ToolDefinition {
   return {
     name: SPAWN_TOOL,
@@ -228,6 +242,15 @@ export function createSpawnTool(context: () => SpawnContext | string): ToolDefin
     execute: async (_id, params, signal, onUpdate): Promise<AgentToolResult<SpawnDetails | undefined>> => {
       const current = context();
       if (typeof current === "string") return { content: [{ type: "text", text: current }], details: undefined, isError: true } as AgentToolResult<undefined>;
+      if ((params as SpawnParameters).reason === "verification") {
+        const rounds = verificationRounds.get(current) ?? 0;
+        const cap = current.maxVerificationRounds ?? MAX_VERIFICATION_ROUNDS;
+        if (rounds >= cap) {
+          current.onVerificationRefused?.(rounds, cap);
+          return { content: [{ type: "text", text: `Refused: this assignment already ran ${rounds} verification round${rounds === 1 ? "" : "s"} (the cap is ${cap}; only main can raise it, with orche_task verificationRounds when the user asks for more review). Do not start another review round: fix only clear, in-scope defects the last verifiers found, run the project checks yourself (the cap limits fresh verifier sessions, not your own tests), and report_result with data.unresolved listing the remaining findings and any verification you could not do (one short item each, with file references; [] only when nothing remains) so main and the user can decide on them.` }], details: undefined, isError: true } as AgentToolResult<undefined>;
+        }
+        verificationRounds.set(current, rounds + 1);
+      }
       const result = await executeSpawn(current, params as SpawnParameters, signal, text => onUpdate?.({ content: [{ type: "text", text }], details: undefined }));
       return { content: [{ type: "text", text: result.text }], details: result.details };
     },

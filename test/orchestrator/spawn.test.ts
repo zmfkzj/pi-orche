@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { VARIANTS } from "../../experiments/judgment/variants.js";
 import { VARIANTS_V2 } from "../../experiments/judgment/variants-v2.js";
-import { MAX_SUB_WORKERS, orchestratorSection, SPLIT_JUDGMENT, splitError } from "../../src/orchestrator/instructions.js";
+import { MAX_SUB_WORKERS, orchestratorSection, SPLIT_JUDGMENT, splitError, unresolvedError } from "../../src/orchestrator/instructions.js";
 import { createSpawnTool, DEPTH_LIMIT_MESSAGE, executeSpawn, outcomeModelUse, planSpawn, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnParameters, type SubWorkerOutcome } from "../../src/orchestrator/spawn.js";
 import { createSubWorkerRunner, subWorkerGuard } from "../../src/orchestrator/sub-worker.js";
 
@@ -50,6 +50,39 @@ describe("no split (the default)", () => {
     const tool = createSpawnTool(() => "orche_spawn is available only to the orchestrator");
     const result = await tool.execute("c1", { reason: "parallelism", workers: [] } as never, undefined, undefined, undefined as never);
     expect(result).toMatchObject({ isError: true });
+  });
+});
+
+describe("verification round cap", () => {
+  it("allows two verification rounds per orchestrator assignment and refuses the third with the report-unresolved path", async () => {
+    const assignment = context();
+    const tool = createSpawnTool(() => assignment);
+    const verify = { reason: "verification", workers: [{ name: "check", role: "verify", request: "Review the change" }] } as never;
+    for (let round = 1; round <= 2; round++) {
+      const result = await tool.execute(`c${round}`, verify, undefined, undefined, undefined as never);
+      expect(result.isError).toBeFalsy();
+    }
+    const third = await tool.execute("c3", verify, undefined, undefined, undefined as never);
+    expect(third).toMatchObject({ isError: true });
+    expect(JSON.stringify(third.content)).toContain("already ran 2 verification rounds");
+    expect(JSON.stringify(third.content)).toContain("data.unresolved");
+    // Other reasons are not capped, and a new assignment (a new context) starts counting again.
+    expect((await tool.execute("c4", { reason: "isolation", workers: [{ name: "a", role: "answer", request: "x" }] } as never, undefined, undefined, undefined as never)).isError).toBeFalsy();
+    const next = createSpawnTool(() => context());
+    expect((await next.execute("c5", verify, undefined, undefined, undefined as never)).isError).toBeFalsy();
+  });
+  it("uses the assignment's own cap, reports each refusal, and requires data.unresolved after one", async () => {
+    const refusals: [number, number][] = [];
+    const assignment = context({ maxVerificationRounds: 1, onVerificationRefused: (rounds, cap) => refusals.push([rounds, cap]) });
+    const tool = createSpawnTool(() => assignment);
+    const verify = { reason: "verification", workers: [{ name: "check", role: "verify", request: "Review the change" }] } as never;
+    expect((await tool.execute("c1", verify, undefined, undefined, undefined as never)).isError).toBeFalsy();
+    const second = await tool.execute("c2", verify, undefined, undefined, undefined as never);
+    expect(JSON.stringify(second.content)).toContain("already ran 1 verification round (the cap is 1");
+    expect(refusals).toEqual([[1, 1]]);
+    expect(unresolvedError({ status: "done" }, undefined)).toBeUndefined();
+    expect(unresolvedError({ status: "done" }, { rounds: 1, cap: 1 })).toMatch(/data.unresolved is required/);
+    expect(unresolvedError({ status: "done", unresolved: [] }, { rounds: 1, cap: 1 })).toBeUndefined();
   });
 });
 

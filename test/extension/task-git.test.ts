@@ -206,7 +206,9 @@ describe("orche_run workers keep 'Do not commit.'", () => {
     expect(workerInstructions).not.toContain(TASK_COMMIT_RULE);
     expect(taskWorkerInstructions).toContain(` Never edit outside explicitly owned files. ${TASK_COMMIT_RULE} Use short direct send_message NOTES`);
     expect(taskWorkerInstructions).not.toContain("Do not commit.");
-    expect(`${taskWorkerInstructions.replace(TASK_COMMIT_RULE, NO_COMMIT_RULE)} Your id, user request and reply language arrive in the first assignment.`).toBe(workerInstructions);
+    // The task variant is the run variant with its own commit rule, plus task-only guidance (quiet waits, main's messages).
+    const runBase = workerInstructions.replace(" Your id, user request and reply language arrive in the first assignment.", "");
+    expect(taskWorkerInstructions.replace(TASK_COMMIT_RULE, NO_COMMIT_RULE).startsWith(runBase)).toBe(true);
   });
 
   const task = { id: "change", description: "Set value to one", owner: "A1", files: ["core.mjs"], status: "pending" };

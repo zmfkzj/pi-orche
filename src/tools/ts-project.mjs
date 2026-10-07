@@ -36,6 +36,22 @@ export function forcedOptions() {
 }
 
 /**
+ * What a loaded `typescript` module lacks among the pieces the workers use (empty when usable). A project's TypeScript that
+ * is half-installed (e.g. while `npm install` runs) can load as `{}` or without its enums.
+ */
+export function typeScriptProblems(ts) {
+  if (!ts || (typeof ts !== "object" && typeof ts !== "function")) return ["the module itself"];
+  const missing = [];
+  if (typeof ts.version !== "string") missing.push("version");
+  for (const [name, member] of [["ScriptTarget", "ES2022"], ["ModuleKind", "NodeNext"], ["ModuleResolutionKind", "NodeNext"], ["JsxEmit", "Preserve"], ["DiagnosticCategory", "Error"]])
+    if (typeof ts[name]?.[member] !== "number") missing.push(`${name}.${member}`);
+  for (const name of ["createProgram", "getParsedCommandLineOfConfigFile", "flattenDiagnosticMessageText", "OperationCanceledException"])
+    if (typeof ts[name] !== "function") missing.push(name);
+  if (!ts.sys || typeof ts.sys !== "object") missing.push("sys");
+  return missing;
+}
+
+/**
  * The program to build: with explicit `files`, those files under the config nearest to the first; else the config's files, or
  * every source file under `cwd` when there is no config (default options).
  */

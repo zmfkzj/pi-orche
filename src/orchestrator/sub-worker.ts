@@ -5,6 +5,7 @@
  */
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import { formatSchemaErrors } from "../orchestration/schema-errors.js";
 import type { ModelRuntime, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ModelRoute, SubWorkerModelSource, SubWorkerThinkingSource } from "../orchestration/routing.js";
 import type { TaskItem } from "../orchestration/backlog.js";
@@ -53,7 +54,7 @@ function reportFor(role: SubWorkerRole): SpecialistReport<typeof reportSchema> {
       const contract = orchestrationResultSchemas[role];
       if (!contract || ((value.data === undefined || value.data === null) && contract.optional)) return undefined;
       if (Value.Check(contract.schema, value.data)) return undefined;
-      return `Invalid data: ${[...Value.Errors(contract.schema, value.data)].slice(0, 6).map(error => `${error.path || "/"}: ${error.message}`).join("; ")}. Expected data: ${JSON.stringify(contract.schema)}.`;
+      return `Invalid data: ${formatSchemaErrors(contract.schema, value.data, 6)}. Expected data: ${JSON.stringify(contract.schema)}.`;
     },
   };
 }

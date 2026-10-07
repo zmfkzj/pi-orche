@@ -5,6 +5,7 @@ import { Lang, parse, type SgNode } from "@ast-grep/napi";
 import { withFileMutationQueue, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { resolveWorkspacePath } from "./anchors.js";
 import { walkFiles } from "./walk.js";
+import { coerceIntegerArguments } from "./prepare-arguments.js";
 
 const LANGUAGES: Record<string, Lang> = {
   typescript: Lang.TypeScript,
@@ -106,6 +107,7 @@ export function createAstSearchTool(cwd: string): ToolDefinition {
       "Structural code search with ast-grep (JS/TS/TSX/HTML/CSS). The pattern is code with metavariables ($X one node, $$$X many); it matches syntax, not text, so formatting and comments do not matter. Returns path:line plus matched code and captures. Prefer over grep for call sites, imports, declarations.",
     promptSnippet: "Structural (AST) code search with metavariable patterns",
     parameters: searchSchema,
+    prepareArguments: coerceIntegerArguments(["limit"]),
     async execute(_id, params: Static<typeof searchSchema>, _signal, _onUpdate, ctx) {
       const root = ctx?.cwd || cwd;
       const limit = Math.min(MAX_MATCHES, Math.max(1, Math.floor(params.limit ?? MAX_MATCHES)));

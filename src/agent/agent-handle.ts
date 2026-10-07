@@ -3,6 +3,7 @@ import type { SessionOptions } from "../pi/session-factory.js";
 import type { SessionRecords } from "./records.js";
 import type { LivenessEvent } from "./liveness.js";
 import type { ContextClearedStats } from "../pi/context-projection.js";
+import type { LengthRecoveryEvent } from "../pi/length-recovery.js";
 import type {
   NoteMessage,
   DeliveryReceipt,
@@ -28,7 +29,28 @@ export interface Outcome {
   lastText?: string;
   error?: string;
   timestamp: number;
+  /** Messages main injected into this assignment while it ran (see {@link InjectedMessage}); absent when there were none. */
+  injected?: InjectedMessage[];
+  /** Output-limit stops of this assignment (src/pi/length-recovery.ts); absent when there were none. */
+  lengthStops?: { count: number; exhausted: boolean };
 }
+/**
+ * A message main sent to a running worker (`orche_task_message`), steered into its session before its next model request.
+ * `delivered`: the worker saw it while the assignment was open; `late`: it reached the worker only after its result was accepted
+ * (the result does not reflect it); `undelivered`: the assignment ended first and the message was withdrawn, so it can never
+ * leak into a later assignment.
+ */
+export interface InjectedMessage {
+  id: string;
+  text: string;
+  queuedAt: number;
+  status: "queued" | "delivered" | "late" | "undelivered";
+  deliveredAt?: number;
+}
+/** The answer to {@link AgentManager.steer}. */
+export type SteerReceipt =
+  | { status: "queued"; id: string; agentId: string; assignmentId: string }
+  | { status: "rejected"; agentId: string; reason: string };
 export interface AgentSnapshot {
   id: string;
   role: string;
@@ -123,6 +145,10 @@ export type ManagerEvent = { timestamp: number } & (
     }
   /** Tool start metadata only; arguments and output are deliberately excluded. */
   | { type: "tool_started"; agentId: string; assignmentId: string; toolName: string }
+  /** An injected message was queued, reached the worker, or was withdrawn (text excluded). */
+  | { type: "injected_message"; agentId: string; assignmentId: string; id: string; status: InjectedMessage["status"] }
+  /** An output-limit stop and what was done about it (src/pi/length-recovery.ts). */
+  | ({ agentId: string; assignmentId?: string } & LengthRecoveryEvent)
   /** A session's liveness state changed (not sent per heartbeat); see liveness.ts. */
   | LivenessEvent
   | {

@@ -4,6 +4,7 @@ import { basename, join, matchesGlob } from "node:path";
 import { promisify } from "node:util";
 import { createFindToolDefinition, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { SKIPPED_DIRS, walkFiles } from "./walk.js";
+import { coerceIntegerArguments } from "./prepare-arguments.js";
 
 const DOT_SEGMENT = /(^|\/)\./g;
 const execFileAsync = promisify(execFile);
@@ -117,8 +118,10 @@ export function createFindTool(cwd: string): ToolDefinition {
       },
     },
   }) as ToolDefinition;
+  const base = definition();
   return {
-    ...definition(),
+    ...base,
+    prepareArguments: coerceIntegerArguments(["limit"], base.prepareArguments),
     execute(id, params, signal, onUpdate, ctx) {
       return definition(signal).execute(id, params, signal, onUpdate, ctx);
     },

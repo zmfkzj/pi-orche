@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import { schemaErrors } from "../orchestration/schema-errors.js";
 import type {
   AgentSession,
   ToolDefinition,
@@ -20,18 +21,23 @@ import type {
   AgentHandle,
   AgentSnapshot,
   Assignment,
+  InjectedMessage,
   ManagerEvent,
   Outcome,
   ResultDataSchema,
   ResultPayload,
   SpawnOptions,
+  SteerReceipt,
   ToolExecutionEvent,
   WaitResult,
 } from "./agent-handle.js";
 import { reportAgent, targetOf, type AgentRecordEntry, type SessionRecords } from "./records.js";
+import { lengthRecoveryOf, resetLengthRecovery } from "../pi/length-recovery.js";
 import { DEFAULT_LIVENESS_WINDOW_MS, LivenessTracker, isIdleHeartbeat, mergeLiveness, type Liveness, type SessionLiveness } from "./liveness.js";
 /** Requests a forced final report may take after a budget stop before the assignment fails. */
 export const BUDGET_GRACE_REQUESTS = 5;
+/** customType of a message main injected into a running worker ({@link AgentManager.steer}). */
+export const MAIN_MESSAGE_TYPE = "pi-orche.main-message";
 /** SDK abort is cooperative; never hold a session's activity slot indefinitely. */
 export const WORKER_STOP_TIMEOUT_MS = 1000;
 interface RetiredWorker {
@@ -56,6 +62,12 @@ interface Worker {
   requestBudget: number;
   /** Budget ladder: none → noticed (wrap-up notice sent) → stopping (turn aborted) → final (forced report prompt). */
   budget: "none" | "noticed" | "stopping" | "final";
+  /** Messages main injected into the current assignment ({@link AgentManager.steer}). */
+  injected: InjectedMessage[];
+  /** The output-limit recovery was exhausted and the worker was asked once for a report with what it has. */
+  lengthReportPrompted: boolean;
+  /** Length stops of the session before the current assignment (to count this assignment's). */
+  lengthBefore: number;
   abort?: Promise<void>;
   unsubscribe: () => void;
   /** Records bookkeeping (see {@link AgentManager.agentRecord}); never read by the lifecycle itself. */
@@ -106,6 +118,7 @@ export class AgentManager {
   private readonly records: SessionRecords | undefined;
   private readonly closed = new AbortController();
   private readonly pendingSpawns = new Set<string>();
+  private messageSerial = 0;
   /** One-way fence: prevents new assignments, prompts and manager tool side effects. */
   close(reason: unknown = "Agent manager closed"): void {
     if (!this.closed.signal.aborted) this.closed.abort(reason);
@@ -177,7 +190,11 @@ export class AgentManager {
             isError: true,
             terminate: true,
           };
-        const payload = args as ResultPayload;
+        let payload = args as ResultPayload;
+        // Models sometimes send `data` as a JSON string of the object: parse it (validation still runs on the parsed value).
+        if (typeof payload.data === "string" && /^\s*[{[]/.test(payload.data)) {
+          try { payload = { ...payload, data: JSON.parse(payload.data) as unknown }; } catch { /* left as is; validation reports it */ }
+        }
         const contract = owner.resultSchemas[worker.snapshot.currentAssignment.kind];
         if (payload.kind !== worker.snapshot.currentAssignment.kind)
           return owner.rejectResult(worker, `Expected RESULT kind "${worker.snapshot.currentAssignment.kind}"; received "${payload.kind}"`, contract);
@@ -186,6 +203,8 @@ export class AgentManager {
         const workflowError = options.validateResult?.(payload.kind, payload.data);
         if (workflowError) return owner.rejectResult(worker, workflowError, contract ?? { schema: Type.Unknown(), optional: true });
         worker.result = payload;
+        // Messages from main still queued now would reach the worker after its result: withdraw them (the outcome lists them).
+        owner.withdrawInjected(worker);
         return {
           content: [
             { type: "text", text: "Result accepted; assignment complete" },
@@ -244,6 +263,13 @@ export class AgentManager {
     // Opt-in persistence: the records hook decides where this worker's session goes unless the caller already did.
     const target = options.sessionFile || options.sessionDir ? undefined : targetOf(this.records, { id: options.id, role: options.role, kind: "worker" });
     this.pendingSpawns.add(options.id);
+    // Output-limit recovery events go into the manager's stream, tagged with the assignment they belong to.
+    const lengthEvents = options.lengthRecovery?.onEvent;
+    options.lengthRecovery = { ...options.lengthRecovery, onEvent: event => {
+      try { lengthEvents?.(event); } catch { /* observers cannot change recovery */ }
+      if (owner.closed.signal.aborted || !worker || worker.snapshot.status === "disposed") return;
+      owner.emit({ ...event, agentId: worker.snapshot.id, ...(worker.snapshot.currentAssignment ? { assignmentId: worker.snapshot.currentAssignment.id } : {}) });
+    } };
     const signal = options.signal
       ? AbortSignal.any([this.closed.signal, options.signal]) : this.closed.signal;
     const creation = (async () => {
@@ -304,6 +330,9 @@ export class AgentManager {
       requests: 0,
       requestBudget: this.requestBudget,
       budget: "none",
+      injected: [],
+      lengthReportPrompted: false,
+      lengthBefore: 0,
       unsubscribe: () => {},
       stats: { startedAt: Date.now(), requests: 0, models: {}, busyMs: 0, sessionFile: session.sessionFile, reported: false },
       // The state changes go into the manager's event stream, but not once the manager is closed or the worker disposed.
@@ -380,6 +409,15 @@ export class AgentManager {
             ...(typeof u.cost?.total === "number" ? { costUSD: u.cost.total } : {}),
           });
         }
+      } else if (event.type === "message_end" && event.message.role === "custom" && event.message.customType === MAIN_MESSAGE_TYPE) {
+        const id = (event.message.details as { id?: unknown } | undefined)?.id;
+        const message = worker.injected.find(item => item.id === id);
+        if (message && message.status === "queued") {
+          message.status = worker.result ? "late" : "delivered";
+          message.deliveredAt = Date.now();
+          const assignment = worker.snapshot.currentAssignment;
+          if (assignment) owner.emit({ type: "injected_message", timestamp: Date.now(), agentId: options.id, assignmentId: assignment.id, id: message.id, status: message.status });
+        }
       } else if (
         event.type === "message_end" &&
         event.message.role === "custom" &&
@@ -397,9 +435,17 @@ export class AgentManager {
         const assignment = worker.snapshot.currentAssignment;
         const failed = Boolean(worker.failure ?? worker.resultFailure);
         const reportable = assignment && worker.snapshot.status === "running" && !worker.result && !failed;
+        const length = lengthRecoveryOf(session);
         if (reportable && worker.budget === "stopping") {
           worker.budget = "final";
           owner.runAssignment(worker, assignment, `Your request budget for assignment ${assignment.kind} is exhausted and your turn was stopped. Call report_result alone now with what you have: partial findings are fine; for implement/fix use data.status "blocked" with the reason if the work is unfinished.`);
+        } else if (reportable && length.exhausted && !worker.lengthReportPrompted) {
+          // Output-limit recovery is used up (src/pi/length-recovery.ts): one forced report instead of the generic nudge.
+          worker.lengthReportPrompted = true;
+          owner.runAssignment(worker, assignment, `Your last ${length.consecutive} responses hit the output token limit, mostly while reasoning, and produced nothing usable. Do not plan or reason at length now. Call report_result alone immediately with what you have: partial findings are fine; for implement/fix use data.status "blocked" with the reason if the work is unfinished.`);
+        } else if (reportable && length.exhausted) {
+          worker.failure = `Output limit: ${length.consecutive} consecutive responses hit the model's output token limit (mostly while reasoning) and no result was reported. Re-assign with a narrower request, or a lower thinking level for this worker.`;
+          owner.finalize(worker, "failed");
         } else if (reportable && worker.nudges < owner.resultNudges) {
           worker.nudges++;
           owner.emit({ type: "assignment_nudged", timestamp: Date.now(), agentId: options.id, assignmentId: assignment.id, attempt: worker.nudges });
@@ -437,6 +483,10 @@ export class AgentManager {
     w.requests = 0;
     w.requestBudget = this.requestBudget;
     w.budget = "none";
+    w.injected = [];
+    w.lengthReportPrompted = false;
+    resetLengthRecovery(w.adapter.session);
+    w.lengthBefore = lengthRecoveryOf(w.adapter.session).total;
     w.snapshot.requestCount = 0;
     w.snapshot.lastActivityAt = Date.now();
     w.stats.assignedAt = Date.now();
@@ -510,6 +560,44 @@ export class AgentManager {
       w.resultFailure = `Request budget exhausted after ${w.requests} requests without a RESULT`;
       emit("abort");
       void w.adapter.abort().catch(() => undefined);
+    }
+  }
+  /**
+   * Inject a message from main into the assignment `agentId` is running (Pi steering: it reaches the model after the current tool
+   * calls, before the next request; while no request runs it is appended to the context at once). Rejected when the worker is not
+   * running an assignment, has already reported, or is being stopped: such a message would land in the next assignment, or nowhere.
+   * Grants and scope never change through a message; it is text for the model only.
+   */
+  steer(agentId: string, text: string): SteerReceipt {
+    const w = this.workers.get(agentId);
+    const reject = (reason: string): SteerReceipt => ({ status: "rejected", agentId, reason });
+    if (this.closed.signal.aborted) return reject("the worker pool is shutting down");
+    if (!w || w.snapshot.status === "disposed") return reject(`${agentId} is not a live worker`);
+    const assignment = w.snapshot.currentAssignment;
+    if (w.snapshot.status !== "running" || !assignment) return reject(`${agentId} is not running an assignment; send a new orche_task to it instead`);
+    if (w.result || w.resultFailure) return reject(`${agentId} has already reported its result for this assignment; send the message as a follow-up orche_task instead`);
+    if (w.budget === "stopping" || w.budget === "final") return reject(`${agentId} is being stopped (request budget); send the message as a follow-up orche_task instead`);
+    if (!text.trim()) return reject("empty message");
+    const id = `M${++this.messageSerial}`;
+    const message: InjectedMessage = { id, text, queuedAt: Date.now(), status: "queued" };
+    w.injected.push(message);
+    const session = w.adapter.session;
+    const content = `[Message from main while you work on this assignment · ${id}]\n${text}\n(Take it into account from now on. It refines this assignment; it does not replace it unless it says so, and it grants no new permissions.)`;
+    this.emit({ type: "injected_message", timestamp: Date.now(), agentId, assignmentId: assignment.id, id, status: "queued" });
+    void session.sendCustomMessage({ customType: MAIN_MESSAGE_TYPE, content, display: true, details: { id, assignmentId: assignment.id } }, session.isStreaming ? { deliverAs: "steer" } : { triggerTurn: false })
+      .catch(() => { if (message.status === "queued") message.status = "undelivered"; });
+    return { status: "queued", id, agentId, assignmentId: assignment.id };
+  }
+  /** Withdraw injected messages that did not reach the worker yet; they are reported `undelivered`, never carried into a later assignment. */
+  private withdrawInjected(w: Worker): void {
+    const queued = w.injected.filter(message => message.status === "queued");
+    if (!queued.length) return;
+    // Only orche queues steering messages in a worker session (NOTEs and notices wait as end-of-turn custom messages instead).
+    try { w.adapter.session.clearQueue(); } catch { /* a disposed session has no queue */ }
+    const assignment = w.snapshot.currentAssignment;
+    for (const message of queued) {
+      message.status = "undelivered";
+      if (assignment) this.emit({ type: "injected_message", timestamp: Date.now(), agentId: w.snapshot.id, assignmentId: assignment.id, id: message.id, status: "undelivered" });
     }
   }
   /** Resolves once an in-flight interruption of `agentId` (stop/redirect abort) has settled. */
@@ -624,6 +712,10 @@ export class AgentManager {
       ...(status === "no_result" ? { lastText: w.adapter.lastText } : {}),
       ...(w.failure ?? w.resultFailure ? { error: w.failure ?? w.resultFailure } : {}),
     };
+    this.withdrawInjected(w);
+    if (w.injected.length) outcome.injected = w.injected.map(message => ({ ...message }));
+    const length = lengthRecoveryOf(w.adapter.session);
+    if (length.total > w.lengthBefore) outcome.lengthStops = { count: length.total - w.lengthBefore, exhausted: length.exhausted };
     if (w.stats.assignedAt !== undefined) w.stats.busyMs += Math.max(0, outcome.timestamp - w.stats.assignedAt);
     w.stats.assignedAt = undefined;
     w.stats.last = { status, ...(outcome.error ? { error: outcome.error } : {}) };
@@ -915,6 +1007,6 @@ function resultDataErrors(contract: ResultDataSchema, data: unknown): string | u
   // Strict-mode providers send an omitted optional argument as null.
   if ((data === undefined || data === null) && contract.optional) return undefined;
   if (Value.Check(contract.schema, data)) return undefined;
-  const errors = [...Value.Errors(contract.schema, data)].slice(0, 8).map(error => `${error.path || "/"}: ${error.message}`);
+  const errors = schemaErrors(contract.schema, data);
   return errors.length ? errors.join("; ") : "invalid data";
 }

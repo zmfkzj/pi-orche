@@ -3,10 +3,43 @@
 import { workerData, parentPort } from "node:worker_threads";
 import { createRequire } from "node:module";
 import { isAbsolute, relative, sep } from "node:path";
-import { planProject } from "./ts-project.mjs";
+import { planProject, typeScriptProblems } from "./ts-project.mjs";
 
-const { tsPath, cwd, files, maxFiles, deadline, maxItems } = workerData;
-const ts = createRequire(import.meta.url)(tsPath);
+const { projectTsPath, projectTsUnresolved, bundledTsPath, cwd, files, maxFiles, deadline, maxItems } = workerData;
+/** @type {any} */
+let ts;
+
+const firstLine = (error) => (error instanceof Error ? error.message : String(error)).split("\n")[0].slice(0, 200);
+
+/**
+ * The project's TypeScript when it loads and has every piece the worker uses; else orche's own (`bundledTsPath`), with a
+ * note saying why the project's was skipped (e.g. a half-finished `npm install typescript`).
+ */
+function loadTypeScript() {
+  const load = createRequire(import.meta.url);
+  const shown = (path) => {
+    const rel = relative(cwd, path);
+    return rel && !rel.startsWith("..") && !isAbsolute(rel) ? rel.split(sep).join("/") : path;
+  };
+  // Set by the parent when the project has node_modules/typescript that does not even resolve.
+  let skipped = projectTsUnresolved;
+  let label = "node_modules/typescript";
+  if (projectTsPath && projectTsPath !== bundledTsPath) {
+    label = shown(projectTsPath);
+    try {
+      const candidate = load(projectTsPath);
+      const missing = typeScriptProblems(candidate);
+      if (missing.length === 0) return { ts: candidate };
+      skipped = `it is incomplete (missing ${missing.slice(0, 6).join(", ")}${missing.length > 6 ? ", ..." : ""})`;
+    } catch (error) {
+      skipped = `it failed to load (${firstLine(error)})`;
+    }
+  }
+  const bundled = load(bundledTsPath);
+  const missing = typeScriptProblems(bundled);
+  if (missing.length) throw new Error(`TypeScript at ${bundledTsPath} is incomplete (missing ${missing.join(", ")})${skipped ? `; the project's (${label}) was skipped because ${skipped}` : ""}`);
+  return { ts: bundled, note: skipped ? `TypeScript: used orche's bundled ${bundled.version}; the project's (${label}) was skipped because ${skipped}.` : undefined };
+}
 
 // Noise that only says "this workspace lacks installed packages / node typings".
 const IGNORED_CODES = new Set([2580, 2591, 2592, 2593]);
@@ -41,6 +74,8 @@ function keep(d) {
 }
 
 try {
+  const loaded = loadTypeScript();
+  ts = loaded.ts;
   const { roots, options, config, errors, totalConfigured } = plan();
   const token = new Deadline();
   const items = errors.map(render);
@@ -76,7 +111,7 @@ try {
       }
     }
   }
-  parentPort.postMessage({ ok: true, items, total, checked, files: fileCount, configured: totalConfigured, config, timedOut });
+  parentPort.postMessage({ ok: true, items, total, checked, files: fileCount, configured: totalConfigured, config, timedOut, typescriptNote: loaded.note });
 } catch (error) {
   parentPort.postMessage({ ok: false, error: error instanceof Error ? error.message : String(error) });
 }

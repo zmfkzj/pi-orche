@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { access } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -20,14 +21,29 @@ interface WorkerResult {
   configured?: number;
   config?: string;
   timedOut: boolean;
+  /** Set when the project's TypeScript was skipped for the bundled one. */
+  typescriptNote?: string;
 }
 
-/** The workspace's own TypeScript when it has one (matching its version), else this package's. */
-function resolveTypeScript(cwd: string): string {
+interface TypeScriptChoice {
+  /** The workspace's own TypeScript, when it resolves. */
+  projectTsPath?: string;
+  /** Why the workspace's node_modules/typescript could not even be resolved, when it exists. */
+  projectTsUnresolved?: string;
+  /** This package's TypeScript: the fallback, validated by the worker like the project's. */
+  bundledTsPath: string;
+}
+
+/** The workspace's own TypeScript when it has one (matching its version), else this package's; the worker validates both. */
+function resolveTypeScript(cwd: string): TypeScriptChoice {
+  const bundledTsPath = createRequire(import.meta.url).resolve("typescript");
   try {
-    return createRequire(join(cwd, "package.json")).resolve("typescript");
-  } catch {
-    return createRequire(import.meta.url).resolve("typescript");
+    return { projectTsPath: createRequire(join(cwd, "package.json")).resolve("typescript"), bundledTsPath };
+  } catch (error) {
+    // A half-installed package (no package.json or main file yet) does not resolve; one that is absent is not news.
+    if (!existsSync(join(cwd, "node_modules", "typescript"))) return { bundledTsPath };
+    const reason = (error instanceof Error ? error.message : String(error)).split("\n")[0]!.slice(0, 200);
+    return { projectTsUnresolved: `it could not be resolved (${reason})`, bundledTsPath };
   }
 }
 
@@ -75,7 +91,7 @@ export function createDiagnosticsTool(cwd: string): ToolDefinition {
           throw new Error(`File not found: ${file}`);
         });
       const result = await runWorker(
-        { tsPath: resolveTypeScript(root), cwd: root, files, maxFiles: MAX_FILES, maxItems: MAX_ITEMS },
+        { ...resolveTypeScript(root), cwd: root, files, maxFiles: MAX_FILES, maxItems: MAX_ITEMS },
         DIAGNOSTICS_TIMEOUT_MS,
         signal,
       );
@@ -85,9 +101,10 @@ export function createDiagnosticsTool(cwd: string): ToolDefinition {
       const capped = result.configured !== undefined && result.configured > result.files && files.length === 0 ? `; project has ${result.configured} files, only the first ${result.files} were checked` : "";
       const partial = result.timedOut ? `; stopped at the ${DIAGNOSTICS_TIMEOUT_MS / 1000}s time limit` : "";
       const text =
-        result.total === 0
+        (result.total === 0
           ? `No errors in ${scope}${capped}${partial}`
-          : `${result.items.map((d) => `${d.file}${d.line ? `:${d.line}:${d.column}` : ""} ${d.text}`).join("\n")}\n\n${result.total} errors in ${scope}${result.total > result.items.length ? `; showing first ${result.items.length}` : ""}${capped}${partial}`;
+          : `${result.items.map((d) => `${d.file}${d.line ? `:${d.line}:${d.column}` : ""} ${d.text}`).join("\n")}\n\n${result.total} errors in ${scope}${result.total > result.items.length ? `; showing first ${result.items.length}` : ""}${capped}${partial}`)
+        + (result.typescriptNote ? `\n${result.typescriptNote}` : "");
       return { content: [{ type: "text", text }], details: undefined };
     },
   };

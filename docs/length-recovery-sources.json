@@ -1,0 +1,302 @@
+[
+ {
+  "source": "pi-ai (local)",
+  "url": "file:///home/arthur/Code/oh-my-pi-extensions/orche/node_modules/@earendil-works/pi-ai/dist/utils/overflow.js#L153-L172",
+  "version_or_commit": "@earendil-works/pi-ai 1.0.0 (read 2026-10-07)",
+  "claim": "[V] isRecoverableLength = stopReason length && output < desiredMaxOutput; length counts as overflow only if output==0 && input>=0.99*window"
+ },
+ {
+  "source": "pi-coding-agent (local)",
+  "url": "file:///home/arthur/Code/oh-my-pi-extensions/orche/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js#L2339-L2374",
+  "version_or_commit": "1.0.0",
+  "claim": "[V] recoverable length shares the overflow path: omit the attempt, compact, retry once (_overflowRecoveryAttempted), then 'Truncated response recovery failed'"
+ },
+ {
+  "source": "pi-coding-agent (local)",
+  "url": "file:///home/arthur/Code/oh-my-pi-extensions/orche/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js#L715",
+  "version_or_commit": "1.0.0",
+  "claim": "[V] recovery flag resets on a user message or a non-error/non-length assistant stop (L715, L759)"
+ },
+ {
+  "source": "pi-ai (local)",
+  "url": "file:///home/arthur/Code/oh-my-pi-extensions/orche/node_modules/@earendil-works/pi-ai/dist/api/simple-options.js#L4-L15",
+  "version_or_commit": "1.0.0",
+  "claim": "[V] requested maxTokens = model.maxTokens clamped only to the context window; Responses sends max_output_tokens (openai-responses.js:248-250)"
+ },
+ {
+  "source": "pi-ai (local)",
+  "url": "file:///home/arthur/Code/oh-my-pi-extensions/orche/node_modules/@earendil-works/pi-ai/dist/api/openai-responses-shared.js#L675-L684",
+  "version_or_commit": "1.0.0",
+  "claim": "[V] incomplete with reason max_output_tokens maps to stopReason length"
+ },
+ {
+  "source": "pi-agent-core (local)",
+  "url": "file:///home/arthur/Code/oh-my-pi-extensions/orche/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js#L160-L166",
+  "version_or_commit": "1.0.0",
+  "claim": "[V] tool calls in a length-stopped message are all failed with a synthetic 're-issue' result (L342-362); the loop continues"
+ },
+ {
+  "source": "pi docs",
+  "url": "file:///home/arthur/.bun/install/global/node_modules/@earendil-works/pi-coding-agent/docs/compaction.md#L85-L98",
+  "version_or_commit": "pi-coding-agent 1.0.4",
+  "claim": "[D] recovery ordering; a cancelled recovery compaction keeps the omission edits and schedules no retry (also L39)"
+ },
+ {
+  "source": "pi docs",
+  "url": "file:///home/arthur/.bun/install/global/node_modules/@earendil-works/pi-coding-agent/docs/extensions.md#L117",
+  "version_or_commit": "pi-coding-agent 1.0.4",
+  "claim": "[D] turn_end and agent_before_settle can append entries and request one continuation; session_before_compact can cancel (compaction.md:296-318)"
+ },
+ {
+  "source": "earendil-works/pi upstream",
+  "url": "https://github.com/earendil-works/pi/blob/27c7b6ff48ccca57694a960e4af10529f77deae6/packages/ai/src/utils/overflow.ts#L179",
+  "version_or_commit": "27c7b6ff (coding-agent 1.0.4)",
+  "claim": "[V] upstream isRecoverableLength unchanged; agent-session.ts:3008 uses model.maxTokens"
+ },
+ {
+  "source": "pi issue #9793",
+  "url": "https://github.com/earendil-works/pi/issues/9793",
+  "version_or_commit": "open, 2026-09-20",
+  "claim": "[D] ambiguous length stop far below the window triggers a history-dropping compaction; proposal: compact only on context pressure"
+ },
+ {
+  "source": "pi issue #8322",
+  "url": "https://github.com/earendil-works/pi/issues/8322#issuecomment-5342410844",
+  "version_or_commit": "closed 2026-08-19",
+  "claim": "[D] maintainer: '<' is intentional; exhausting the intended limit is not fixed by compaction and needs separate continuation behaviour"
+ },
+ {
+  "source": "pi issue #9409",
+  "url": "https://github.com/earendil-works/pi/issues/9409",
+  "version_or_commit": "open",
+  "claim": "[D] reasoning sessions wedge at the context ceiling with length stops at output 16; one-shot recovery dead-ends"
+ },
+ {
+  "source": "pi issue #9718",
+  "url": "https://github.com/earendil-works/pi/issues/9718",
+  "version_or_commit": "open",
+  "claim": "[D] measured: thinking level vs. outcome is non-monotonic (high 5.8s stop, medium 62.9s length, low 39.4s stop); thinking-only length is a silent exit 0"
+ },
+ {
+  "source": "pi PR #7540",
+  "url": "https://github.com/earendil-works/pi/pull/7540",
+  "version_or_commit": "closed 2026-08-03",
+  "claim": "[D] treat length within 1% of the window as overflow; cites OpenAI reasoning guidance on incomplete-before-visible-output"
+ },
+ {
+  "source": "Codex",
+  "url": "https://github.com/openai/codex/blob/95ec468619386ebb93506ac2091a48e5a558d25c/codex-rs/codex-api/src/sse/responses.rs#L418-L434",
+  "version_or_commit": "95ec4686",
+  "claim": "[V] response.incomplete with a non-interrupted reason becomes ApiError::Stream"
+ },
+ {
+  "source": "Codex",
+  "url": "https://github.com/openai/codex/blob/95ec468619386ebb93506ac2091a48e5a558d25c/codex-rs/protocol/src/error.rs#L397-L437",
+  "version_or_commit": "95ec4686",
+  "claim": "[V] Stream errors retryable, ContextWindowExceeded not"
+ },
+ {
+  "source": "Codex",
+  "url": "https://github.com/openai/codex/blob/95ec468619386ebb93506ac2091a48e5a558d25c/codex-rs/core/src/responses_retry.rs#L87-L166",
+  "version_or_commit": "95ec4686",
+  "claim": "[V] whole sampling request re-sent with backoff up to stream_max_retries (default 5, cap 100: model-provider-info/src/lib.rs:67-73)"
+ },
+ {
+  "source": "Codex",
+  "url": "https://github.com/openai/codex/blob/95ec468619386ebb93506ac2091a48e5a558d25c/codex-rs/codex-api/src/common.rs#L279-L304",
+  "version_or_commit": "95ec4686",
+  "claim": "[V] ResponsesApiRequest has no max_output_tokens field"
+ },
+ {
+  "source": "Codex",
+  "url": "https://github.com/openai/codex/blob/95ec468619386ebb93506ac2091a48e5a558d25c/codex-rs/core/src/session/turn.rs#L1688-L1691",
+  "version_or_commit": "95ec4686",
+  "claim": "[V] ContextWindowExceeded: mark tokens full and error; pre-sampling compaction next turn (turn.rs:1306-1325); compact.rs:338-346 drops oldest items"
+ },
+ {
+  "source": "Claude Code bundle",
+  "url": "https://www.npmjs.com/package/@anthropic-ai/claude-code-linux-x64/v/2.1.292",
+  "version_or_commit": "2.1.292 (strings of bin 'claude')",
+  "claim": "[V] max_tokens and model_context_window_exceeded yield apiError max_output_tokens; recovery loop maxOutputTokensRecoveryCount limit kr=3 with meta message 'Output token limit hit. Resume directly … Break remaining work into smaller pieces.'"
+ },
+ {
+  "source": "Claude Code bundle",
+  "url": "https://www.npmjs.com/package/@anthropic-ai/claude-code-linux-x64/v/2.1.292",
+  "version_or_commit": "2.1.292",
+  "claim": "[V] thinking-only max_tokens (single signed thinking block, server resumable flag, >=2048 headroom) resumed via resumeIncompleteThinking without a nudge; gated by tengu_thinking_block_resumption; separate one-shot 'no visible output' nudge (thinkingOnlyNudged)"
+ },
+ {
+  "source": "Claude Code changelog",
+  "url": "https://github.com/anthropics/claude-code/blob/765f236fe1bfcc678e0ec59af9170fb7d6771a3a/CHANGELOG.md#L7290",
+  "version_or_commit": "765f236f",
+  "claim": "[D] 2.1.0 auto-continue on output-limit cut-off; L4027 (2.1.183) re-prompt once on a thinking-only response; L6160 (2.1.77) Opus 4.6 default 64k/upper 128k"
+ },
+ {
+  "source": "Claude Code docs",
+  "url": "https://code.claude.com/docs/en/env-vars",
+  "version_or_commit": "read 2026-10-07",
+  "claim": "[D] CLAUDE_CODE_MAX_OUTPUT_TOKENS capped per model; an unknown model defaults to 32000; errors page: input+max_tokens over the limit retries with a smaller max_tokens, then compacts"
+ },
+ {
+  "source": "OpenCode",
+  "url": "https://github.com/anomalyco/opencode/blob/ecc4916b5a9608c30e6dd58a67f2137b594407ca/packages/opencode/src/session/prompt.ts#L1111-L1129",
+  "version_or_commit": "ecc4916b (1.18.35)",
+  "claim": "[V] loop exits on any finish other than tool-calls/unknown with no tool calls; no length recovery"
+ },
+ {
+  "source": "OpenCode",
+  "url": "https://github.com/anomalyco/opencode/blob/ecc4916b5a9608c30e6dd58a67f2137b594407ca/packages/opencode/src/provider/transform.ts#L18",
+  "version_or_commit": "ecc4916b",
+  "claim": "[V] OUTPUT_TOKEN_MAX = 32000 default (L1481-1483), env OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"
+ },
+ {
+  "source": "OpenCode",
+  "url": "https://github.com/anomalyco/opencode/blob/ecc4916b5a9608c30e6dd58a67f2137b594407ca/packages/opencode/src/session/processor.ts#L621-L631",
+  "version_or_commit": "ecc4916b",
+  "claim": "[V] ContextOverflowError leads to compaction (not retried: retry.ts:87); compaction replays the last user message (compaction.ts:340-356)"
+ },
+ {
+  "source": "Aider",
+  "url": "https://github.com/Aider-AI/aider/blob/5dc9490bb35f9729ef2c95d00a19ccd30c26339c/aider/coders/base_coder.py#L1492-L1505",
+  "version_or_commit": "5dc9490b (0.86.3.dev)",
+  "claim": "[V] FinishReasonLength: assistant prefill continuation in an uncapped while-True loop; without prefill, exhausted error (L1532-1544)"
+ },
+ {
+  "source": "Aider docs",
+  "url": "https://github.com/Aider-AI/aider/blob/5dc9490bb35f9729ef2c95d00a19ccd30c26339c/aider/website/docs/more/infinite-output.md#L12-L36",
+  "version_or_commit": "5dc9490b",
+  "claim": "[D] infinite output via prefill; joining needs heuristics but is 'typically fairly reliable'"
+ },
+ {
+  "source": "Cline",
+  "url": "https://github.com/cline/cline/blob/5b67631981ac2a3f1ad290e843a667491fb44f7d/sdk/packages/agents/src/agent-runtime.ts#L1453-L1507",
+  "version_or_commit": "5b676319 (sdk/agents 0.0.91)",
+  "claim": "[V] max-tokens turn without tool calls: one forced compaction + retry per run (rationale: local servers cap at remaining context); skipped if nothing to compact"
+ },
+ {
+  "source": "Cline",
+  "url": "https://github.com/cline/cline/blob/5b67631981ac2a3f1ad290e843a667491fb44f7d/sdk/packages/agents/src/agent-runtime.ts#L61-L75",
+  "version_or_commit": "5b676319",
+  "claim": "[V] then 'be concise' nudge retry, MAX_TOKENS_RECOVERY_LIMIT=3 consecutive, reset on tool call; then terminal error (L923-937, L1161-1179)"
+ },
+ {
+  "source": "Roo Code",
+  "url": "https://github.com/RooCodeInc/Roo-Code/blob/b867ec9145750d0ae1ff7f02d35406e9bf2a0b16/src/core/task/Task.ts#L3518-L3560",
+  "version_or_commit": "b867ec91 (3.53.0)",
+  "claim": "[V] no finish_reason length handling; empty or reasoning-only response retried with backoff; context error truncates to 75% up to 3 times (L134-135, L4202-4214)"
+ },
+ {
+  "source": "Gemini CLI",
+  "url": "https://github.com/google-gemini/gemini-cli/blob/ef59c532f07fbb3a58dd68bac024ae217e9c73ce/packages/core/src/core/geminiChat.ts#L1594-L1621",
+  "version_or_commit": "ef59c532 (core 0.65.0-nightly)",
+  "claim": "[V] MAX_TOKENS with empty text becomes MAX_TOKENS_EXCEEDED; thinking-only becomes THINKING_ONLY_RESPONSE"
+ },
+ {
+  "source": "Gemini CLI",
+  "url": "https://github.com/google-gemini/gemini-cli/blob/ef59c532f07fbb3a58dd68bac024ae217e9c73ce/packages/core/src/core/geminiChat.ts#L104-L108",
+  "version_or_commit": "ef59c532",
+  "claim": "[V] content errors: identical request retried, 4 attempts total with exponential backoff (L725-770); then '/compress' suggestion (utils/constants.ts:20-27); text+MAX_TOKENS accepted with warning (cli useGeminiStream.ts:1333)"
+ },
+ {
+  "source": "Gemini CLI",
+  "url": "https://github.com/google-gemini/gemini-cli/blob/ef59c532f07fbb3a58dd68bac024ae217e9c73ce/packages/core/src/core/client.ts#L703-L725",
+  "version_or_commit": "ef59c532",
+  "claim": "[V] proactive compression, then ContextWindowWillOverflow event"
+ },
+ {
+  "source": "Goose",
+  "url": "https://github.com/block/goose/blob/8c0c409a8292c41472d6567a1acb0c841403b4e2/crates/goose-provider-types/src/formats/openai_responses.rs#L1280-L1295",
+  "version_or_commit": "8c0c409a (1.54.0)",
+  "claim": "[V] incomplete max_output_tokens flags output_token_limit_reached; completed function calls kept, in_progress dropped (test L1537-1566)"
+ },
+ {
+  "source": "Goose",
+  "url": "https://github.com/block/goose/blob/8c0c409a8292c41472d6567a1acb0c841403b4e2/crates/goose/src/agents/agent.rs#L3418-L3432",
+  "version_or_commit": "8c0c409a",
+  "claim": "[V] output-limit turns excluded from the empty-turn retry (MAX_EMPTY_TURN_RETRIES=3, L90-92); surfaced as ACP StopReason::MaxTokens (acp/server.rs:742-750); overflow: compaction, 2nd failure terminal (L3266-3290)"
+ },
+ {
+  "source": "Goose",
+  "url": "https://github.com/block/goose/blob/8c0c409a8292c41472d6567a1acb0c841403b4e2/crates/goose/src/providers/bedrock.rs#L850-L905",
+  "version_or_commit": "8c0c409a",
+  "claim": "[V] truncated tool JSON becomes an error tool request advising larger max_tokens or smaller steps"
+ },
+ {
+  "source": "OpenHands software-agent-sdk",
+  "url": "https://github.com/OpenHands/software-agent-sdk/blob/91ac058a08fd6365286fc8c5628f35a5f41ff300/openhands-sdk/openhands/sdk/agent/response_dispatch.py#L54-L78",
+  "version_or_commit": "91ac058a (sdk 1.53.0)",
+  "claim": "[V] finish_reason ignored; REASONING_ONLY/EMPTY handled by keeping the message plus a corrective 'use a tool' nudge (L272-301, L364-389)"
+ },
+ {
+  "source": "OpenHands software-agent-sdk",
+  "url": "https://github.com/OpenHands/software-agent-sdk/blob/91ac058a08fd6365286fc8c5628f35a5f41ff300/openhands-sdk/openhands/sdk/agent/agent.py#L858-L871",
+  "version_or_commit": "91ac058a",
+  "claim": "[V] context window exceeded triggers a CondensationRequest, else raise; default output cap 16384 (llm.py:202)"
+ },
+ {
+  "source": "oh-my-pi",
+  "url": "https://github.com/can1357/oh-my-pi/blob/355b5d9685529d337875d7d387ef53b1f32e7a72/packages/coding-agent/src/session/session-maintenance.ts#L3047-L3178",
+  "version_or_commit": "355b5d96 (coding-agent 18.8.0)",
+  "claim": "[V] length stop: keep a delivered turn if the window is open; otherwise promote, or drop + 'next step only' nudge retry below threshold, or compact only when the window is exhausted; cap 3 (L152) with durable drop and terminal error"
+ },
+ {
+  "source": "oh-my-pi",
+  "url": "https://github.com/can1357/oh-my-pi/blob/355b5d9685529d337875d7d387ef53b1f32e7a72/packages/coding-agent/src/prompts/system/length-stop-retry.md",
+  "version_or_commit": "355b5d96",
+  "claim": "[V] retry injection: discarded while reasoning; reason only about the next step and call the tool; write a minimal deliverable first; attempt n/max"
+ },
+ {
+  "source": "oh-my-pi",
+  "url": "https://github.com/can1357/oh-my-pi/blob/355b5d9685529d337875d7d387ef53b1f32e7a72/packages/coding-agent/src/session/session-maintenance.ts#L2784-L2788",
+  "version_or_commit": "355b5d96",
+  "claim": "[V] counter resets only on delivered content (text/tool/image), not signed reasoning (messages.ts:545-547, 595-597)"
+ },
+ {
+  "source": "oh-my-pi",
+  "url": "https://github.com/can1357/oh-my-pi/blob/355b5d9685529d337875d7d387ef53b1f32e7a72/packages/agent/src/agent-loop.ts#L1665-L1688",
+  "version_or_commit": "355b5d96",
+  "claim": "[V] length-stopped tool calls get synthetic 'length' results and the loop continues"
+ },
+ {
+  "source": "Anthropic docs",
+  "url": "https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting",
+  "version_or_commit": "read 2026-10-07",
+  "claim": "[D] max_tokens stop: thinking counts toward max_tokens; raise max_tokens or lower effort; effort/budget changes invalidate the cache"
+ },
+ {
+  "source": "Anthropic docs",
+  "url": "https://platform.claude.com/docs/en/build-with-claude/thinking-steering-and-cost",
+  "version_or_commit": "read 2026-10-07",
+  "claim": "[D] choose raise-cap vs lower-effort depending on whether the truncated responses needed the reasoning"
+ },
+ {
+  "source": "Anthropic docs",
+  "url": "https://platform.claude.com/docs/en/build-with-claude/effort",
+  "version_or_commit": "read 2026-10-07",
+  "claim": "[D] Opus at xhigh/max: set a large max_tokens, start at 64k"
+ },
+ {
+  "source": "Anthropic docs",
+  "url": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons",
+  "version_or_commit": "read 2026-10-07",
+  "claim": "[D] incomplete tool_use at max_tokens: retry with a higher max_tokens; continuation example capped at 3 attempts; model_context_window_exceeded = truncated"
+ },
+ {
+  "source": "Anthropic docs",
+  "url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+  "version_or_commit": "read 2026-10-07",
+  "claim": "[D] max_tokens strict and includes thinking; no prefill while thinking is on"
+ },
+ {
+  "source": "OpenAI docs",
+  "url": "https://developers.openai.com/api/docs/guides/reasoning",
+  "version_or_commit": "read 2026-10-07",
+  "claim": "[D] incomplete max_output_tokens may occur before any visible output (still billed); reserve >=25,000 tokens; pass reasoning items back; configuration_update changes effort while preserving the cache (GPT-6)"
+ },
+ {
+  "source": "pi-ai faux provider (local)",
+  "url": "file:///home/arthur/Code/oh-my-pi-extensions/orche/node_modules/@earendil-works/pi-ai/dist/providers/faux.js#L118-L150",
+  "version_or_commit": "1.0.0",
+  "claim": "[V] faux provider recomputes usage at ~4 chars/token, so fixtures need ~128k chars of thinking for output≈32000 or a custom scripted provider; orche already wraps it in test/helpers/faux.ts"
+ }
+]

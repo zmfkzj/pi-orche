@@ -16,6 +16,61 @@ Implemented natively on Pi 0.99.1's public API (`ToolDefinition` custom tools + 
 
 The model sees exactly one `read` and one `edit`: custom tools registered under a built-in name replace it in Pi's registry (`customTools` are applied after built-ins), and the allowlist only names `read`/`edit` once.
 
+## Main-session task tools (Pi package)
+
+The Pi package (`src/extension/index.ts`) gives the main session three delegation tools. Schemas: `orcheTaskParameters`
+(`src/extension/workers.ts`) and the two `registerTool` calls in `index.ts`; full contract in [pi-package.md](pi-package.md) 5.
+
+| Tool | Parameters | What it does |
+| --- | --- | --- |
+| `orche_task` | `role`, `request` (required); `context?`, `worker?`, `files?`, `task?`, `git?`, `gui?`, and: `wait?` (boolean), `writeRoots?` (≤10 paths), `verificationRounds?` (integer 1–5, default 2) | Delegates one assignment to one persistent worker. **Background by default** in interactive (`tui`) and RPC sessions: returns `Started job J1: worker W1 (role, model · thinking level) is working on it in the background.` once the worker has its assignment. `wait: true`, and every other mode (`pi -p` print, `--mode json`, SDK sessions without a UI mode), **block** and return the result, because those processes end with the turn. Errors before the worker has its assignment (unknown worker, bad arguments, a job already running) fail the call itself in both paths. |
+| `orche_task_status` | `job?` (`J<n>`; default the running job, else the latest), `cancel?` (boolean) | Job state, elapsed time, latest progress and the worker's liveness, or the result summary when it ended; `cancel: true` cancels the running job (also `/orche cancel`). Only when the user asks: the result arrives by itself. |
+| `orche_task_message` | `message` (1–20,000 chars, self-contained), `job?` (default the running job) | Queues an extra or corrected instruction for the running job's worker (`Queued M1 for W1 (J1): …`). |
+
+**Result delivery.** A background job's result (done, failed, cancelled, timed out) is the same text the blocking call returns,
+headed `[orche task result · J1 · W1 implement · done after 12m]`. It arrives **once** as an `orche-task-result` custom message
+(`pi.sendMessage`, `triggerTurn: true`, `deliverAs: "followUp"`): it starts main's next turn, or waits behind a turn in progress.
+Main is told not to wait, sleep or poll. Each start and end is an `orche-job` session entry (not model context).
+
+**Steer semantics of `orche_task_message`.** Rejected (an error result) when no job runs, the named job is not running, the worker
+is not running an assignment, has already reported, or is stopping, or the message is blank. Otherwise the message is sent into the
+worker's session as a steering custom message: it is read after the worker's current tool calls and before its next model request.
+It grants nothing: no git grant, no write scope, no new role. Guarantee: the job's result lists every message as `delivered` (it was
+in a model request) or `undelivered`. When the worker's report is accepted, or the assignment ends, queued messages are withdrawn,
+so they never leak into a later assignment. An undelivered message has to be re-sent as a follow-up `orche_task` to the same worker.
+
+**Limits and lifecycle.** One job at a time (a second `orche_task` is refused while one runs). Worker and job ids are never reused
+in a session branch, also across reloads. A session shutdown (reload, exit, switch) ends a running job as `interrupted` in its
+`orche-job` entry and its `run.json`, without a message. A job found running at the next session start (the process crashed) is
+closed then and announced once. `run.json` records left `running` by a process that no longer exists (`owner.pid`) are closed as
+`interrupted` at session start. Naming a worker that is gone (idle expiry, eviction, `/orche stop`, reload, crash) starts a new
+worker briefed with the gone worker's transcript path, last record and summary; unknown ids are still errors.
+
+**`writeRoots` and scratch.** Every worker gets a private scratch directory `<os.tmpdir()>/pi-orche/<session>/<worker>` (mode
+0700, symlinks refused, removed when the worker retires), writable by every role, named in its assignment. `writeRoots` opens
+further directories outside the workspace for one implement/game-asset/video assignment (absolute, `~/…`, or relative to the cwd;
+ignored with a note for read-only roles). `writeRoots` at the top level of `orche.config.json` applies to every writing assignment.
+`/` and the home directory itself are rejected. Paths are checked lexically and by real path, so `..` traversal, symlinks out of a
+root and prefix look-alikes (`/repo-other` vs `/repo`) are blocked.
+
+**Worker bash writes.** Worker `bash` commands get the same outside-workspace policy for the write targets visible in the command
+text: redirections and heredocs, `tee`, `cp`/`mv`/`install`, `touch`, `mkdir`, `rm`, `ln`, `sed -i`, `dd of=` and similar
+(`src/orchestration/bash-writes.ts`). This is **not a sandbox**. Targets built at run time (`$VAR`, globs, command substitutions)
+and files programs write by themselves are not seen. The workspace audit still reports changes inside the workspace afterwards.
+
+**Quiet waits.** A worker `bash` call with an explicit `timeout` counts as active for deadline extensions while it runs within
+that timeout plus 30 s, even without output. Without a timeout, a silent command looks idle after the 2-minute activity window,
+as before. `limits.maxExtensions` still caps every assignment.
+
+**Verification rounds.** An implement/answer orchestrator may start at most `verificationRounds` (default 2) fresh-verifier rounds
+(`orche_spawn` with reason `verification`); other spawn reasons are not counted. Main raises the cap only when the user explicitly
+asked for more review rounds. A refused round tells the orchestrator to fix clear in-scope defects, run the project checks itself
+and report the rest. Its report must then carry `data.unresolved` (an explicit `[]` when nothing remains), or it is rejected. The
+result adds `Verification cap: N verification rounds ran (cap N); 1 further round was refused.` and the `unresolved:` line, so
+an unconverged review never reads as a clean pass.
+
+**Output-limit recovery.** See [length-recovery.md](length-recovery.md).
+
 ## Delegation recovery and small changes
 
 In extension `auto` mode, a failed `orche_run` (not a user/signal cancellation) transfers live implementer/verifier/explorer sessions to the `orche_task` pool as implement/verify/explore. Its **Handover** section lists usable `worker` ids, last tasks and remaining issues. Reuse those ids with `orche_task` for fixes and re-checks; do not repeat `orche_run` for the same failed request. `/orche workers`, idle expiry and `/orche stop` apply normally. Context stays intact, without task-output projection on transferred run sessions. Multi mode skips handover and says so; successful/cancelled runs and SDK calls without `RunOptions.onFailedHandover` keep normal disposal.

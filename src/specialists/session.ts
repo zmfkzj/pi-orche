@@ -6,6 +6,7 @@
  */
 import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import { formatSchemaErrors } from "../orchestration/schema-errors.js";
 import type { ModelRuntime, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createSession, type ToolGuard } from "../pi/session-factory.js";
 import type { AstRewriteFileGuard } from "../tools/ast.js";
@@ -71,7 +72,7 @@ export class SpecialistError extends Error {
   constructor(message: string, readonly stats: SpecialistStats, readonly cancelled: boolean) { super(message); }
 }
 
-const errorsOf = (schema: TSchema, value: unknown): string => [...Value.Errors(schema, value)].slice(0, 8).map(error => `${error.path || "/"}: ${error.message}`).join("; ");
+const errorsOf = (schema: TSchema, value: unknown): string => formatSchemaErrors(schema, value);
 
 function reportTool<S extends TSchema>(report: SpecialistReport<S>, capture: (value: Static<S>) => void): ToolDefinition {
   let accepted = false;

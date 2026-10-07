@@ -252,12 +252,17 @@ describe("orche_task persistent session workers", () => {
   });
 
   it("unknown and disposed ids list live workers rather than inventing reused context", async () => {
-    const { pool, execute } = await fixture([result(), result()]);
+    const { pool, execute } = await fixture([result(), result(), result()]);
     await execute();
     await expect(execute({ worker: "W99" })).rejects.toThrow("Unknown worker W99; live workers: W1 (idle, explore). Omit worker to start a new one.");
     await pool.stop("W1");
     await execute();
-    await expect(execute({ worker: "W1" })).rejects.toThrow("live workers: W2 (idle, explore)");
+    // A disposed worker this pool knows is not reused: a NEW worker continues, briefed from what W1 left, and says so.
+    const handed = await execute({ worker: "W1" });
+    expect(handed.details).toMatchObject({ worker: "W3", continuedFrom: "W1" });
+    expect(handed.text).toContain("Note: W1 was gone (stopped with /orche stop); W3 continued its work");
+    const briefing = JSON.stringify(pool.session("W3").messages);
+    expect(briefing).toContain("Handover: you (W3) continue the work of worker W1");
   });
 
   it("evicts the least-recently-used idle worker at cap three; ids are monotonic", async () => {
@@ -278,7 +283,7 @@ describe("orche_task persistent session workers", () => {
     // characters). A tiny model on the same route exercises the real 70% policy;
     // the context alone exceeds it, without adding a production test seam.
     const faux = fauxProvider({ provider: h.orche.faux.provider.id, models: [{ id: h.orche.faux.getModel().id, contextWindow: 1_000, maxTokens: 100 }] });
-    faux.setResponses([result()]);
+    faux.setResponses([result(), result()]);
     h.runtime.registerNativeProvider(faux.provider);
 
     const outcome = await execute({ context: "e".repeat(4_000) });
@@ -287,14 +292,19 @@ describe("orche_task persistent session workers", () => {
     expect(outcome.details.retired).toEqual(["W1"]);
     expect(outcome.details.roster).toBe("no workers");
     expect(pool.list()).toEqual([]);
-    await expect(execute({ worker: "W1" })).rejects.toThrow("Unknown worker W1; live workers: none. Omit worker to start a new one.");
+    const handed = await execute({ worker: "W1" });
+    expect(handed.details).toMatchObject({ worker: "W2", continuedFrom: "W1" });
+    expect(handed.text).toContain("W1 was gone (retired: context nearly full)");
   });
 
   it("expires idle workers with an injectable TTL", async () => {
-    const { pool, execute } = await fixture([result()], 20);
+    const { pool, execute } = await fixture([result(), result()], 20);
     await execute();
     await vi.waitFor(() => expect(pool.list()).toEqual([]));
-    await expect(execute({ worker: "W1" })).rejects.toThrow("Unknown worker W1");
+    expect(pool.goneWorker("W1")?.reason).toMatch(/^idle expiry/);
+    const handed = await execute({ worker: "W1" });
+    expect(handed.details).toMatchObject({ worker: "W2", continuedFrom: "W1" });
+    await expect(execute({ worker: "W7" })).rejects.toThrow("Unknown worker W7");
   });
 
 

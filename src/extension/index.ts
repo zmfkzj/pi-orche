@@ -9,7 +9,10 @@ import { inheritsMain, tierThinking, type MainMode, type ModelTiers } from "../o
 import { delegationRules, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
 import { contextWarning, DEFAULT_CONTEXT_WARNING, type ContextWarningSettings, type ContextWarningState } from "./context-warning.js";
 import { CONFIG_FILE, DEFAULT_SINGLE, loadOrcheConfigFile } from "./config.js";
-import { orcheTaskParameters, WORKER_CAPABILITY_CHANNEL, WorkerPool, type WorkerCapabilityAnswer } from "./workers.js";
+import { orcheTaskParameters, WORKER_CAPABILITY_CHANNEL, WorkerPool, type GoneWorker, type WorkerCapabilityAnswer } from "./workers.js";
+import { Type } from "@sinclair/typebox";
+import { JOB_ENTRY_TYPE, jobResultContent, TASK_RESULT_TYPE, TaskJobs, WORKER_ENTRY_TYPE, type Job, type JobEntry } from "./jobs.js";
+import { recoverOrphanRecords } from "./records.js";
 
 import { formatRecordList, listRecords } from "./records.js";
 import { orcheTaskRenderers } from "./render.js";
@@ -106,12 +109,18 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     let workers: WorkerPool | undefined;
     /** Task ledgers of this session's branch (restored at session start): a fresh pool picks them up, so a task outlives its worker. */
     let restoredLedgers: TaskLedger[] = [];
+    /** Gone workers and used worker ids of this session's branch (restored at session start): ids are never reused. */
+    let restoredHistory: { gone: GoneWorker[]; usedWorkerIds: string[] } = { gone: [], usedWorkerIds: [] };
+    /** The UI of the latest tool call / session start, for the background job's status line. */
+    let lastUi: ExtensionContext["ui"] | undefined;
     const pool = () => {
       if (!workers) {
         workers = new WorkerPool({
           controller, ...(options.agentDir ? { agentDir: options.agentDir } : {}), ...(options.workerIdleTtlMs !== undefined ? { idleTtlMs: options.workerIdleTtlMs } : {}),
           // One small entry per ledger event, not part of the model context: it follows the session branch and survives reloads.
           onLedgerEvent: event => pi.appendEntry(LEDGER_ENTRY_TYPE, event),
+          // Workers that go away are remembered in the session, so naming one later continues with a new worker briefed from it.
+          onWorkerGone: worker => { try { pi.appendEntry(WORKER_ENTRY_TYPE, worker); } catch { /* best effort, e.g. during shutdown */ } },
           // Opt-in capabilities other extensions provide for a worker's own session (pi-gui: `gui`). The first answer wins.
           capability: request => {
             let answer: WorkerCapabilityAnswer;
@@ -120,9 +129,22 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           },
         });
         if (restoredLedgers.length) workers.restoreLedgers(restoredLedgers);
+        workers.restoreHistory(restoredHistory.gone, restoredHistory.usedWorkerIds);
       }
       return workers;
     };
+    // Background orche_task jobs (jobs.ts): started by orche_task, announced to main once as an orche-task-result message.
+    let jobs: TaskJobs | undefined;
+    const taskJobs = () => (jobs ??= new TaskJobs({
+      pool,
+      persist: entry => { try { pi.appendEntry(JOB_ENTRY_TYPE, entry); } catch { /* best effort */ } },
+      deliver: (job: Job) => pi.sendMessage(
+        { customType: TASK_RESULT_TYPE, content: jobResultContent(job), display: true, details: { job: job.id, worker: job.worker, role: job.role, status: job.status, ...(job.record ? { record: job.record } : {}), ...(job.result?.details ? { task: job.result.details } : {}) } },
+        // Starts main's next turn when it is idle; queued behind the current turn when main is talking with the user.
+        { triggerTurn: true, deliverAs: "followUp" },
+      ),
+      status: line => { try { lastUi?.setStatus("orche", line); } catch { /* the UI may be gone */ } },
+    }));
     /** The calling session's own file/id/directory: never reported as another session, and where the session store is. */
     const currentSession = (ctx: Pick<ExtensionContext, "sessionManager">) => ({
       file: ctx.sessionManager.getSessionFile() || undefined,
@@ -189,6 +211,24 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       state.restore(ctx.sessionManager.getBranch());
       restoredLedgers = latestLedgers(ctx.sessionManager.getBranch());
       workers?.restoreLedgers(restoredLedgers);
+      lastUi = ctx.ui;
+      // Jobs and gone workers of this branch: a job that never ended belonged to a process that is gone (crash): it ends now, once.
+      const branch = ctx.sessionManager.getBranch();
+      const customData = <T,>(type: string) => branch.filter(entry => entry.type === "custom" && (entry as { customType?: string }).customType === type).map(entry => (entry as { data?: unknown }).data as T).filter(Boolean);
+      const restored = taskJobs().restore(customData<JobEntry>(JOB_ENTRY_TYPE), customData<GoneWorker>(WORKER_ENTRY_TYPE));
+      restoredHistory = { gone: restored.gone, usedWorkerIds: restored.usedWorkerIds };
+      workers?.restoreHistory(restored.gone, restored.usedWorkerIds);
+      if (restored.interrupted.length) {
+        const lines = restored.interrupted.map(job => `${job.id} (${job.worker ?? "?"} ${job.role}: ${job.request})${job.record ? ` record ${job.record}` : ""}`);
+        const text = `orche: ${restored.interrupted.length === 1 ? "a background task was" : "background tasks were"} still running when the previous pi process ended, and ${restored.interrupted.length === 1 ? "is" : "are"} now marked interrupted: ${lines.join("; ")}. Naming its worker in orche_task continues the work with a new worker briefed from its transcript.`;
+        ctx.ui.notify(text, "warning");
+        pi.sendMessage({ customType: "orche-job-interrupted", content: text, display: true, details: { jobs: restored.interrupted.map(job => job.id) } }, { deliverAs: "nextTurn" });
+      }
+      // run.json records of this session left at "running" by a process that is gone: close them as interrupted (best effort, async).
+      void controller.recordsFor({ cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted(), ...(ctx.model ? { model: ctx.model } : {}) })
+        .then(resolved => recoverOrphanRecords(resolved, { parentSessionId: ctx.sessionManager.getSessionId() || undefined }))
+        .then(recovered => { if (recovered.length) ctx.ui.notify(`orche: closed ${recovered.length} orphaned task record${recovered.length === 1 ? "" : "s"} as interrupted (their process ended while running).`, "info"); })
+        .catch(() => undefined);
       state.apply();
       showMode(ctx);
       if (found.error) ctx.ui.notify(`orche: ${found.error}; using the default mode ${state.session}`, "warning");
@@ -216,6 +256,9 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       return reason ? { block: true, reason } : undefined;
     });
     pi.on("session_shutdown", async () => {
+      // Running background jobs end as interrupted (entry + run record), never silently left "running".
+      jobs?.dispose();
+      jobs = undefined;
       controller.cancel();
       await workers?.dispose();
       workers = undefined;
@@ -331,17 +374,50 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.registerTool({
       name: "orche_task",
       label: "orche task",
-      description: `Delegate one self-contained request to one persistent worker. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs. Choose explore, answer, implement, verify, game-asset (create/modify game art, audio and model assets) or video (produce/edit video); pass worker to reuse a live worker with its retained context and original model. Implement, game-asset and video may write within files (or the workspace when omitted); other roles are read-only. Workers never git commit or push unless this assignment carries \`git\` ({commit, push, remote, branch}; implement, game-asset and video only): set it only when the user explicitly asked in this conversation to commit or push, and scope the commit to the task's files where possible. Only one task can be active. Time budget: ${timeBudget()} an idle worker times out at the base deadline, and the result says why a timeout was not extended.`,
+      description: `Delegate one self-contained request to one persistent worker. In an interactive or RPC session the task runs in the background: this call returns a job id as soon as the worker has its assignment, and the result arrives later as an orche-task-result message (do not poll; keep talking with the user; orche_task_message adds instructions to the running worker). wait:true, and print/JSON modes, block until the result instead. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs. Choose explore, answer, implement, verify, game-asset (create/modify game art, audio and model assets) or video (produce/edit video); pass worker to reuse a live worker with its retained context and original model. Implement, game-asset and video may write within files (or the workspace when omitted); other roles are read-only. Workers never git commit or push unless this assignment carries \`git\` ({commit, push, remote, branch}; implement, game-asset and video only): set it only when the user explicitly asked in this conversation to commit or push, and scope the commit to the task's files where possible. Only one task can be active. Time budget: ${timeBudget()} an idle worker times out at the base deadline, and the result says why a timeout was not extended.`,
       promptSnippet: "orche_task: one reusable worker for explore, answer, implement, verify, game-asset (game art/audio/model assets) or video (production/editing)",
       promptGuidelines: [
         "orche_task workers never git commit or push on their own. Pass `git` ({commit:true} or {push:true, remote?, branch?}) only when the user explicitly asked in this conversation to commit or push; never on your own initiative. Only implement, game-asset and video accept it; explore, answer and verify reject it.",
         "The `git` grant covers that one assignment only: a reused worker's next assignment without it may not commit. Scope the commit to the task's files where possible (pass `files`, name the paths in `request`), and check the commits listed in the result before reporting.",
         "Pass `gui: true` only when the task needs GUI applications (needs pi-gui): the worker then gets its own private desktop that the user does not see, separate from yours and from other workers'. Omit it otherwise.",
+        "orche_task starts a background job (J1, …) and returns at once in interactive/RPC sessions; the result arrives as an orche-task-result message that starts your next turn. Meanwhile keep talking with the user; never wait, sleep or poll. Use orche_task_message to add instructions to the running worker; orche_task_status only when the user asks for progress or wants to cancel.",
+        "Every worker has a private scratch directory for temporary files. Pass `writeRoots` (implement/game-asset/video) only when the user explicitly asked to change a location outside the workspace, such as a sibling repository; it applies to that assignment only.",
+        "An implement/answer orchestrator may run at most 2 fresh-verifier rounds; further rounds are refused and the result lists the remaining findings (data.unresolved, a `Verification cap:` line). Pass `verificationRounds` (up to 5) only when the user explicitly asked for more independent review rounds.",
       ],
       parameters: orcheTaskParameters,
       ...orcheTaskRenderers,
       executionMode: "sequential",
       execute: async (_id, params, signal, onUpdate, ctx) => {
+        lastUi = ctx.ui;
+        const base = {
+          ...params,
+          mainMode: state.effective,
+          cwd: ctx.cwd,
+          model: ctx.model,
+          ...(options.inheritProviders !== false ? { modelRegistry: ctx.modelRegistry } : {}),
+          thinking: pi.getThinkingLevel(),
+          projectTrusted: ctx.isProjectTrusted(),
+          currentSession: currentSession(ctx),
+        };
+        // Background job (jobs.ts) in sessions that keep running after the turn: interactive and RPC. Print/JSON modes exit when the
+        // turn ends, so they (and an explicit wait:true) keep the blocking call.
+        if (params.wait !== true && (ctx.mode === "tui" || ctx.mode === "rpc")) {
+          let returned = false;
+          const job = await taskJobs().start({
+            ...base,
+            onTiming: (timing, lines) => { if (!returned) onUpdate?.(partialUpdate(lines, timing)); },
+            onProgress: (lines, timing) => { if (!returned) onUpdate?.(partialUpdate(lines, timing)); },
+          }, signal);
+          returned = true;
+          const text = [
+            `Started job ${job.id}: worker ${job.worker} (${job.role}${job.model ? `, ${job.model}${job.thinking ? ` · thinking ${job.thinking}` : ""}` : ""}) is working on it in the background.`,
+            `Its result arrives as an orche-task-result message when it ends; do not wait or poll for it. Keep talking with the user meanwhile. To add or correct instructions for this worker use orche_task_message {"job":"${job.id}","message":"…"}; orche_task_status {"job":"${job.id}"} shows progress (only when the user asks) and {"cancel":true} stops it.`,
+          ].join("\n");
+          return {
+            content: [{ type: "text", text: job.record ? `${text}\n\nRecord: ${job.record}` : text }],
+            details: { job: job.id, worker: job.worker, role: job.role, status: "running", async: true, startedAt: job.startedAt, finishedAt: Date.now(), ...(job.model ? { model: job.model } : {}), ...(job.thinking ? { thinking: job.thinking } : {}), ...(job.record ? { record: job.record } : {}) } as never,
+          };
+        }
         // A task whose worker ran and failed, timed out or was cancelled comes back as an isError result that keeps its
         // details; argument validation and errors before a worker ran still throw (see WorkerPool.executeTool).
         return pool().executeTool({
@@ -360,6 +436,38 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
             onUpdate?.(partialUpdate(lines, timing));
           },
         });
+      },
+    });
+
+    pi.registerTool({
+      name: "orche_task_status",
+      label: "orche task status",
+      description: "Status of a background orche_task job (the running one, or the one named): worker, elapsed time, latest progress and liveness, or the result summary when it ended. Do not poll: the result arrives by itself as an orche-task-result message. Use it when the user asks about progress, or with cancel:true to stop the job (its cancelled result is delivered as a message).",
+      promptSnippet: "orche_task_status: progress of the background orche_task job, or cancel it",
+      parameters: Type.Object({
+        job: Type.Optional(Type.String({ pattern: "^J[1-9][0-9]*$", description: "Job id from orche_task (J1, …); default: the running or latest job." })),
+        cancel: Type.Optional(Type.Boolean({ description: "true: cancel the job." })),
+      }),
+      execute: async (_id, params) => {
+        const tasks = taskJobs();
+        if (params.cancel === true) return { content: [{ type: "text", text: await tasks.cancel(params.job) }], details: { job: params.job, cancel: true } };
+        const text = tasks.status(params.job, worker => workers?.workerLiveness(worker)?.detail);
+        return { content: [{ type: "text", text }], details: { job: params.job, cancel: false } };
+      },
+    });
+
+    pi.registerTool({
+      name: "orche_task_message",
+      label: "orche task message",
+      description: "Send an additional or corrected instruction to the worker of the running background orche_task job. It is steered into the worker's session after its current tool calls, before its next model request; it refines the assignment and grants no permissions (no git grant, no new write scope). If the worker reports before reading it, the result lists it as undelivered: then send it as a follow-up orche_task to the same worker.",
+      promptSnippet: "orche_task_message: add instructions to the running orche_task worker",
+      parameters: Type.Object({
+        job: Type.Optional(Type.String({ pattern: "^J[1-9][0-9]*$", description: "Job id (default: the running job)." })),
+        message: Type.String({ minLength: 1, maxLength: 20_000, description: "The instruction, self-contained (the worker does not see this conversation)." }),
+      }),
+      execute: async (_id, params) => {
+        const sent = taskJobs().message(params.job, params.message);
+        return { content: [{ type: "text", text: sent.text }], details: sent.details, ...(sent.ok ? {} : { isError: true }) };
       },
     });
   };

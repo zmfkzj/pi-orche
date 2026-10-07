@@ -60,6 +60,8 @@ describe("single mode does the work", () => {
             role: "implement",
             request: "Goal: change greeting.txt to fixed and add extra.txt. Acceptance: greeting.test.cjs passes. Assumption: extra.txt is plain text. Return evidence and checks.",
             files: ["greeting.txt", "extra.txt", "greeting.test.cjs"],
+            // The TUI starts background jobs by default (test/extension/task-async.test.ts); this end-to-end check blocks.
+            ...(mode === "tui" ? { wait: true } : {}),
           });
         },
         context => {

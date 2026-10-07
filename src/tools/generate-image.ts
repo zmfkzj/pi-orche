@@ -6,6 +6,7 @@ import { withFileMutationQueue, type ToolDefinition } from "@earendil-works/pi-c
 import sharp from "sharp";
 import type { ImageSettings } from "../orchestration/routing.js";
 import { checkWriteRealPath } from "../orchestration/ownership.js";
+import { coerceIntegerArguments } from "./prepare-arguments.js";
 
 export const generateImageParameters = Type.Object({
   prompt: Type.String({ minLength: 1 }),
@@ -42,6 +43,7 @@ export function createGenerateImageTool(options: { cwd: string; runtime: ImageRu
     label: "Generate image",
     description: "Generate raster art, or edit workspace reference images, and save inside your write scope. PNG/WebP preserve alpha. Set width/height for exact target dimensions (gateway size is ignored); use nearest for pixel art. Inspect the saved image with read.",
     parameters: generateImageParameters,
+    prepareArguments: coerceIntegerArguments(["width", "height"]),
     async execute(_id, params, signal) {
       const started = Date.now();
       let usage: Usage | undefined;

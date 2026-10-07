@@ -1,5 +1,6 @@
 import { access, readFile } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, normalize, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parseRouteConfig, RouteConfigError, type RouteConfig } from "../orchestration/routing.js";
 import { DEFAULT_WINDOW_MS } from "./concurrent-sessions.js";
@@ -28,6 +29,8 @@ export interface DiscoveredConfig {
   contextWarning?: ContextWarningSettings;
   /** Single-workflow options (task ledger, orchestrator spawning), with defaults applied. */
   single: SingleSettings;
+  /** `writeRoots` of the selected file as written (absolute, `~/...` or relative to the task cwd; see {@link resolveWriteRoots}); default []. */
+  writeRoots: string[];
   /** Settings of the selected file that were ignored (removed `single` keys); absent without a file. */
   warnings?: string[];
   source: ConfigSource;
@@ -200,11 +203,47 @@ export function parseSingleConfig(value: unknown, warnings?: string[]): SingleSe
 }
 
 /**
+ * `writeRoots` in orche.config.json: directories outside the task workspace that writing workers (implement/fix/game-asset/video)
+ * may change too, e.g. a sibling repository the user works on together with this one. Entries are absolute, start with `~/`, or
+ * are relative to the task cwd. The filesystem root and the home directory itself are refused (also after resolution).
+ */
+export function parseWriteRootsConfig(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new RouteConfigError("config.writeRoots: expected an array of directory paths");
+  return value.map((entry, index) => {
+    if (typeof entry !== "string") throw new RouteConfigError(`config.writeRoots[${index}]: expected a string`);
+    if (!entry.trim() || entry !== entry.trim() || entry.includes("\0")) throw new RouteConfigError(`config.writeRoots[${index}]: expected a non-empty path without surrounding spaces`);
+    if (entry.startsWith("~") && !entry.startsWith("~/")) throw new RouteConfigError(`config.writeRoots[${index}]: only ~/ is expanded; write the home-relative path as ~/<dir>`);
+    if (isAbsolute(entry) || entry.startsWith("~/")) writeRootError(index, expandHome(entry));
+    return entry;
+  });
+}
+
+function expandHome(entry: string): string {
+  return entry.startsWith("~/") ? join(homedir(), entry.slice(2)) : entry;
+}
+function writeRootError(index: number, path: string): void {
+  const normalized = normalize(path).replace(/(.)\/+$/, "$1");
+  if (normalized === "/") throw new RouteConfigError(`config.writeRoots[${index}]: the filesystem root / cannot be a write root; name the directory to change`);
+  if (normalized === normalize(homedir()).replace(/(.)\/+$/, "$1")) throw new RouteConfigError(`config.writeRoots[${index}]: the home directory ${homedir()} itself cannot be a write root; name the directory to change`);
+}
+
+/** Absolute, normalized, de-duplicated write roots for a task in `cwd`; throws for an entry resolving to / or the home directory. */
+export function resolveWriteRoots(cwd: string, roots: readonly string[]): string[] {
+  const result: string[] = [];
+  roots.forEach((entry, index) => {
+    const path = resolve(cwd, expandHome(entry));
+    writeRootError(index, path);
+    if (!result.includes(path)) result.push(path);
+  });
+  return result;
+}
+
+/**
  * Load one orche config file: the route settings (validated by `parseRouteConfig`) plus the extension-only
- * `concurrentSessions`, `records`, `taskContext`, `contextWarning` and `single` settings, validated here and removed before the route parser sees the file.
+ * `concurrentSessions`, `records`, `taskContext`, `contextWarning`, `single` and `writeRoots` settings, validated here and removed before the route parser sees the file.
  * `warnings` lists settings that were ignored (removed `single` keys, keys of the removed coordinator); the file still loads.
  */
-export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings; warnings: string[] }> {
+export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings; writeRoots: string[]; warnings: string[] }> {
   let value: unknown;
   try { value = JSON.parse(await readFile(path, "utf8")); }
   catch (error) { throw new RouteConfigError(`Cannot load route config ${path}: ${error instanceof Error ? error.message : String(error)}`); }
@@ -214,17 +253,19 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
   let taskContext = { ...DEFAULT_TASK_CONTEXT };
   let contextWarning: ContextWarningSettings = { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
   let single: SingleSettings = { ...DEFAULT_SINGLE };
+  let writeRoots: string[] = [];
   const warnings: string[] = [];
   if (value && typeof value === "object" && !Array.isArray(value)) {
-    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, single: singleValue, ...rest } = value as Record<string, unknown>;
+    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, single: singleValue, writeRoots: writeRootsValue, ...rest } = value as Record<string, unknown>;
     if (Object.hasOwn(value, "concurrentSessions")) concurrent = parseConcurrentSessionsConfig(concurrentSessions);
     if (Object.hasOwn(value, "records")) records = parseRecordsConfig(recordsValue);
     if (Object.hasOwn(value, "taskContext")) taskContext = parseTaskContextConfig(taskContextValue);
     if (Object.hasOwn(value, "contextWarning")) contextWarning = parseContextWarningConfig(contextWarningValue);
     if (Object.hasOwn(value, "single")) single = parseSingleConfig(singleValue, warnings);
+    if (Object.hasOwn(value, "writeRoots")) writeRoots = parseWriteRootsConfig(writeRootsValue);
     routeValue = rest;
   }
-  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single, warnings: warnings.map(warning => `${warning} (${path})`) };
+  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single, writeRoots, warnings: warnings.map(warning => `${warning} (${path})`) };
 }
 export class NoRouteError extends Error {
   override readonly name = "NoRouteError";
@@ -276,6 +317,7 @@ export async function discoverOrcheConfig(options: {
     records: resolveRecordsSettings(),
     taskContext: { ...DEFAULT_TASK_CONTEXT },
     single: { ...DEFAULT_SINGLE },
+    writeRoots: [],
     source: { kind: "session", model, ...(thinking ? { thinking } : {}) },
     ignored,
   };

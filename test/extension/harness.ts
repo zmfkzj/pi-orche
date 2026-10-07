@@ -102,7 +102,8 @@ export async function createHarness(options: {
     session, runtime: main.runtime, cwd, agentDir, main, orche, notifications, statuses, widgets,
     async dispose() {
       session.dispose();
-      await rm(root, { recursive: true, force: true });
+      // Late writes of a worker that is still winding down (records, transcripts) can race the removal: retry it.
+      await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     },
   };
 }

@@ -66,7 +66,8 @@ const RUN_DIR = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_(run|task)-[0-9a-f]
 const WORKER_FILE = /^[A-Za-z0-9._-]+-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.jsonl$/;
 
 export type RecordKind = "run" | "task";
-export type RecordStatus = "running" | "done" | "failed" | "cancelled";
+/** `interrupted`: the pi session that ran it shut down (reload, exit, session switch) or crashed while it was running. */
+export type RecordStatus = "running" | "done" | "failed" | "cancelled" | "interrupted";
 
 /** The fields of `run.json` that this module and the integration know. */
 export interface RunManifestFields {
@@ -437,6 +438,52 @@ export async function listRecords(resolved: ResolvedRecords, options: { parentSe
   } catch {
     return [];
   }
+}
+
+/** Whether process `pid` exists (signal 0); EPERM means it exists but belongs to someone else. */
+function processAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+}
+
+/**
+ * Close the records of a pi session that are still `running` although nothing can be writing them any more: their `run.json` names
+ * an owner process (`owner.pid`) that no longer exists, or (records written before the owner was recorded) nothing in the record
+ * changed for {@link ACTIVE_GRACE_MS}. Each becomes `interrupted` with an end time and a failure line; records that started at or
+ * after `startedBefore` (default: now) are left alone, so a task starting meanwhile is never touched. A record of this very process
+ * is never touched either: its pool closes its own records on shutdown. Returns the closed record directories. Fail-soft.
+ */
+export async function recoverOrphanRecords(resolved: ResolvedRecords, options: { parentSessionId?: string; startedBefore?: number; now?: number; isAlive?: (pid: number) => boolean } = {}): Promise<string[]> {
+  if (!resolved.enabled) return [];
+  const now = options.now ?? Date.now();
+  const before = options.startedBefore ?? now;
+  const alive = options.isAlive ?? processAlive;
+  const closed: string[] = [];
+  try {
+    const parent = join(resolved.root, parentDirName(options.parentSessionId));
+    const names = (await readdir(parent, { withFileTypes: true })).filter(entry => entry.isDirectory() && RUN_DIR.test(entry.name)).map(entry => entry.name);
+    for (const name of names) {
+      const dir = join(parent, name);
+      const file = join(dir, RUN_JSON);
+      let manifest: RunManifest;
+      try { manifest = JSON.parse(await readFile(file, "utf8")) as RunManifest; } catch { continue; }
+      if (manifest.status !== "running") continue;
+      const startedAt = Date.parse(manifest.start ?? "");
+      if (!Number.isFinite(startedAt) || startedAt >= before) continue;
+      const owner = (manifest as { owner?: { pid?: unknown } }).owner;
+      const pid = typeof owner?.pid === "number" ? owner.pid : undefined;
+      let orphan: boolean;
+      if (pid !== undefined) orphan = pid !== process.pid && !alive(pid);
+      else {
+        const mtimes = await Promise.all([file, join(dir, EVENTS_JSONL)].map(path => stat(path).then(info => info.mtimeMs, () => 0)));
+        orphan = now - Math.max(...mtimes) > ACTIVE_GRACE_MS;
+      }
+      if (!orphan) continue;
+      const end = new Date(now).toISOString();
+      const patched = { ...manifest, status: "interrupted" as const, end, durationMs: Math.max(0, now - startedAt), failure: manifest.failure ?? `interrupted: the pi process that ran this task ended while it was running (${pid !== undefined ? `pid ${pid} is gone` : "no activity for over an hour"}); closed at the next session start` };
+      try { writePrivateAtomic(file, `${JSON.stringify(patched, null, 2)}\n`); closed.push(dir); } catch { /* left as it was */ }
+    }
+  } catch { /* no records for this session */ }
+  return closed;
 }
 
 function timeOfName(name: string): string {

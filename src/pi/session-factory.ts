@@ -26,6 +26,8 @@ import { dirname, resolve } from "node:path";
 import { ensurePrivateDir, ensurePrivateFile } from "../agent/private-files.js";
 import type { createAssignmentProjector } from "./context-projection.js";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { lengthRecoveryHandlers, type LengthRecoveryOptions } from "./length-recovery.js";
+import { unknownToolHandler } from "./unknown-tool.js";
 export interface SessionOptions {
   route: { role: string; model: string; thinking?: ThinkingLevel; extendedContext?: boolean };
   cwd: string;
@@ -81,6 +83,12 @@ export interface SessionOptions {
    * Their tools still need to be listed in `tools`.
    */
   extensionFactories?: readonly ExtensionFactory[];
+  /**
+   * Output-limit recovery (src/pi/length-recovery.ts): a thinking-only or cut-off response is no longer "recovered" by compacting a
+   * context that is far from full; the worker gets a bounded next-step continuation instead. On by default (`mode: "nudge"`);
+   * `{ mode: "off" }` keeps Pi's own behaviour (the state is still tracked).
+   */
+  lengthRecovery?: LengthRecoveryOptions;
 }
 export type ToolGuard = (toolName: string, input: Record<string, unknown>) => string | undefined | Promise<string | undefined>;
 export interface CompactionStats { tokensBefore: number; tokensAfter: number }
@@ -108,6 +116,30 @@ function createCompactionExtension(options: SessionOptions, getSession: () => Ag
   };
   return { path, resolvedPath: path, hidden: true, sourceInfo: createSyntheticSourceInfo(path, { source: "orche" }),
     handlers: new Map([["session_compact", [handler as never]]]), tools: new Map(), messageRenderers: new Map(), entryRenderers: new Map(), commands: new Map(), flags: new Map(), shortcuts: new Map() };
+}
+/**
+ * Worker-session hygiene that every orche session gets: output-limit recovery (length-recovery.ts) and a suggestion on Pi's bare
+ * `Tool X not found` result (unknown-tool.ts). Both only observe or add text; neither re-routes a tool call.
+ */
+function createWorkerHygieneExtension(options: SessionOptions, getSession: () => AgentSession | undefined): Extension {
+  const path = "<orche:worker-hygiene>";
+  const length = lengthRecoveryHandlers(getSession, options.lengthRecovery);
+  const unknownTool = unknownToolHandler(() => getSession()?.getActiveToolNames() ?? []);
+  const messageEnd = (event: { message: AgentMessage }) => {
+    length.message_end(event as never);
+    return unknownTool(event as never);
+  };
+  return {
+    path, resolvedPath: path, hidden: true,
+    sourceInfo: createSyntheticSourceInfo(path, { source: "orche" }),
+    handlers: new Map([
+      ["message_end", [messageEnd as never]],
+      ["session_before_compact", [length.session_before_compact as never]],
+      ["agent_before_settle", [length.agent_before_settle as never]],
+    ]),
+    tools: new Map(), messageRenderers: new Map(), entryRenderers: new Map(),
+    commands: new Map(), flags: new Map(), shortcuts: new Map(),
+  };
 }
 /** Session extension applying a {@link ToolGuard} through Pi's public, blocking `tool_call` hook. */
 function createGuardExtension(guard: ToolGuard): Extension {
@@ -215,15 +247,16 @@ export async function createSession(
   const model = options.inheritedContextWindow && options.inheritedContextWindow > resolved.model.contextWindow
     ? { ...resolved.model, contextWindow: options.inheritedContextWindow } : resolved.model;
   const info = { ...resolved.info, contextWindow: model.contextWindow, extended: model.contextWindow > catalogModel.contextWindow };
-  let createdSession: AgentSession;
-  const compactionExtension = createCompactionExtension(options, () => createdSession);
+  let createdSession: AgentSession | undefined;
+  const compactionExtension = createCompactionExtension(options, () => createdSession!);
+  const hygieneExtension = createWorkerHygieneExtension(options, () => createdSession);
   options.onContextWindow?.(info);
   // Capability extensions (e.g. pi-gui's MCP server for a GUI worker) load once, with their own extension runtime, which
   // the session then uses: their `pi.*` calls (tools, MCP registrations) must reach the runner of this session.
   const factoryExtensions = options.extensionFactories?.length ? await loadFactoryExtensions(options.cwd, options.extensionFactories) : undefined;
   const loader: ResourceLoader = {
     getExtensions: () => ({
-      extensions: [createSpillExtension(options.cwd), ...(options.toolGuard ? [createGuardExtension(options.toolGuard)] : []), createContextProjectionExtension(() => options.contextProjection), compactionExtension, ...(factoryExtensions?.extensions ?? [])],
+      extensions: [createSpillExtension(options.cwd), ...(options.toolGuard ? [createGuardExtension(options.toolGuard)] : []), createContextProjectionExtension(() => options.contextProjection), compactionExtension, hygieneExtension, ...(factoryExtensions?.extensions ?? [])],
       errors: [],
       runtime: factoryExtensions?.runtime ?? createExtensionRuntime(),
     }),

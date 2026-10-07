@@ -10,6 +10,7 @@
  */
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import { formatSchemaErrors } from "../orchestration/schema-errors.js";
 
 export const SPLIT_JUDGMENT = `Not splitting is the default: do the task yourself unless one of the three criteria below clearly holds. Every sub-worker starts cold and re-reads what it needs, and you still integrate and check its work. On this code base a multi-worker split measured about twice the cost of one worker for about 10% less wall time; splitting coupled work costs more and breaks more.
 1. Parallelism: split only when ALL hold: (a) two or more parts need none of each other's results (no part uses an interface, data or decision that another part creates); (b) the parts write disjoint files (no shared file, registry, schema, config or doc edited by two parts); (c) each part is substantial on its own, roughly ten minutes or more of reading, implementing and testing; (d) the context a worker must load is small compared with its part. Not parallelism: several small edits; a rename or another mechanical change across many files; one bug or feature that spans modules through shared contracts; parts that depend on an interface still to be designed; steps that must run in order; a question that one investigation answers.
@@ -25,9 +26,11 @@ export const ORCHESTRATOR_TEAM_LINE = "There are no peers or backlog; the only o
 
 /** Sub-workers one orche_spawn call may start (they run at the same time). */
 export const MAX_SUB_WORKERS = 4;
+/** Verification rounds (orche_spawn with reason "verification") per orchestrator assignment; see createSpawnTool in spawn.ts. */
+export const MAX_VERIFICATION_ROUNDS = 2;
 
 /** How the orchestrator uses orche_spawn and what it owes afterwards. */
-export const SPAWN_USAGE = `orche_spawn {reason, workers:[{name, role, request, files}]} starts up to ${MAX_SUB_WORKERS} sub-workers in fresh sessions at the same time and returns when all of them have reported. They see only their own request: make each one self-contained (goal, acceptance criteria, constraints, file references, and the user's original wording where it matters) and never paste your reasoning. Sub-workers cannot spawn workers. reason "parallelism": two or more workers; every writing worker (implement, game-asset, video) names the files or directories it owns, no two own the same file, and writes outside a worker's own files are blocked. reason "isolation": a game-asset or video specialist (its own model route and image tools), or a worker that must run apart from this context. reason "verification": role verify only; give the fresh verifier the original request, the acceptance criteria and the changed paths, not how you built it, and let it run its own checks. Call orche_spawn again for another reason (one call at a time). After sub-workers report you own the result: read their reports, check what they changed, run the project checks yourself, fix or finish what is missing, and report one result for the whole task.`;
+export const SPAWN_USAGE = `orche_spawn {reason, workers:[{name, role, request, files}]} starts up to ${MAX_SUB_WORKERS} sub-workers in fresh sessions at the same time and returns when all of them have reported. They see only their own request: make each one self-contained (goal, acceptance criteria, constraints, file references, and the user's original wording where it matters) and never paste your reasoning. Sub-workers cannot spawn workers. reason "parallelism": two or more workers; every writing worker (implement, game-asset, video) names the files or directories it owns, no two own the same file, and writes outside a worker's own files are blocked. reason "isolation": a game-asset or video specialist (its own model route and image tools), or a worker that must run apart from this context. reason "verification": role verify only; give the fresh verifier the original request, the acceptance criteria and the changed paths, not how you built it, and let it run its own checks; at most ${MAX_VERIFICATION_ROUNDS} verification rounds per assignment, after which you report the remaining findings in data.unresolved instead of starting another round. Call orche_spawn again for another reason (one call at a time). After sub-workers report you own the result: read their reports, check what they changed, run the project checks yourself, fix or finish what is missing, and report one result for the whole task.`;
 
 /**
  * The orchestrator part of an implement/answer assignment prompt in the single workflow. `judgment` exists for the split-judgment
@@ -55,7 +58,7 @@ export function splitError(data: unknown, spawnedReasons: ReadonlySet<string>): 
   const split = data && typeof data === "object" && !Array.isArray(data) ? (data as { split?: unknown }).split : undefined;
   // Not splitting is the default: a report without data.split is accepted unless sub-workers ran (then the decision must name them).
   if (split === undefined) return spawnedReasons.size ? `data.split is required after orche_spawn: ${SPLIT_FORMAT}.` : undefined;
-  if (!Value.Check(splitSchema, split)) return `Invalid data.split: ${[...Value.Errors(splitSchema, split)].slice(0, 4).map(error => `${error.path || "/"}: ${error.message}`).join("; ")}. Expected ${SPLIT_FORMAT}.`;
+  if (!Value.Check(splitSchema, split)) return `Invalid data.split: ${formatSchemaErrors(splitSchema, split, 4)}. Expected ${SPLIT_FORMAT}.`;
   if (split.decision === "split" && !split.criteria?.length) return "data.split.criteria must name the criteria that applied when decision is \"split\".";
   if (spawnedReasons.size) {
     if (split.decision !== "split") return `data.split.decision must be "split": you ran sub-workers with orche_spawn (${[...spawnedReasons].join(", ")}).`;
@@ -63,6 +66,17 @@ export function splitError(data: unknown, spawnedReasons: ReadonlySet<string>): 
     if (missing.length) return `data.split.criteria must include ${missing.join(", ")}: you ran orche_spawn for ${missing.length === 1 ? "it" : "them"}.`;
   }
   return undefined;
+}
+
+/**
+ * After a verification round was refused at the cap the report must say what stays open: `data.unresolved` must be present (an
+ * explicit `[]` when nothing remains), so the refused review cannot read as a clean pass. Undefined: valid.
+ */
+export function unresolvedError(data: unknown, refused: { rounds: number; cap: number } | undefined): string | undefined {
+  if (!refused) return undefined;
+  const unresolved = data && typeof data === "object" && !Array.isArray(data) ? (data as { unresolved?: unknown }).unresolved : undefined;
+  if (Array.isArray(unresolved)) return undefined;
+  return `data.unresolved is required: a further verification round was refused (cap ${refused.cap}). List the findings that remain and any verification you could not do, one short item each with file references, or [] when nothing remains.`;
 }
 
 export function splitOf(data: unknown): SplitDecision | undefined {

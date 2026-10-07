@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import { formatSchemaErrors } from "./schema-errors.js";
 import type { ResultDataSchema } from "../agent/agent-handle.js";
 
 /** `data` of a backlog_proposal RESULT. */
@@ -53,9 +54,9 @@ export function requirementIds(request: string): string[] { return [...requireme
 export function requiredChecklistError(ids: readonly string[], data: unknown, requireVerification = false): string | undefined {
   const checklist = (data as { checklist?: ChecklistItem[] } | undefined)?.checklist;
   if (!Array.isArray(checklist)) return "data.checklist is required: report every requirement id with status met|unmet|partial and evidence.";
-  if (!Value.Check(checklistSchema, checklist)) return `Invalid checklist: ${[...Value.Errors(checklistSchema, checklist)].map(error => `${error.path}: ${error.message}`).join("; ")}`;
+  if (!Value.Check(checklistSchema, checklist)) return `Invalid checklist: ${formatSchemaErrors(checklistSchema, checklist)}`;
   const ambiguities = (data as { ambiguities?: unknown } | undefined)?.ambiguities;
-  if (ambiguities !== undefined && !Value.Check(ambiguitiesSchema, ambiguities)) return `Invalid ambiguities: ${[...Value.Errors(ambiguitiesSchema, ambiguities)].map(error => `${error.path}: ${error.message}`).join("; ")}`;
+  if (ambiguities !== undefined && !Value.Check(ambiguitiesSchema, ambiguities)) return `Invalid ambiguities: ${formatSchemaErrors(ambiguitiesSchema, ambiguities)}`;
   const seen = new Set<string>();
   for (const item of checklist) {
     if (seen.has(item.id)) return `Duplicate checklist id ${item.id}; report each requirement once.`;
@@ -69,7 +70,9 @@ export function requiredChecklistError(ids: readonly string[], data: unknown, re
   }
   return undefined;
 }
-export const answerResultSchema = Type.Object({ evidence, checklist: Type.Optional(checklistSchema), ambiguities: Type.Optional(ambiguitiesSchema) });
+/** Findings the worker leaves open on purpose (e.g. after the verification-round cap), one short item each, for main and the user to decide. */
+export const unresolvedSchema = Type.Array(Type.String({ minLength: 1, maxLength: 1000 }), { maxItems: 30 });
+export const answerResultSchema = Type.Object({ evidence, checklist: Type.Optional(checklistSchema), ambiguities: Type.Optional(ambiguitiesSchema), unresolved: Type.Optional(unresolvedSchema) });
 
 /** `data` of an explore RESULT: an optional cause claim with its evidence. */
 export const exploreResultSchema = Type.Object({
@@ -84,6 +87,7 @@ export const implementResultSchema = Type.Object({
   evidence,
   checklist: Type.Optional(checklistSchema),
   ambiguities: Type.Optional(ambiguitiesSchema),
+  unresolved: Type.Optional(unresolvedSchema),
 });
 
 /** Production reports require a verdict and an inventory of delivered outputs. */

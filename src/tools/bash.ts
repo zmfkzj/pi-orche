@@ -9,6 +9,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import { coerceIntegerArguments } from "./prepare-arguments.js";
 
 /**
  * `bash` with a heartbeat. A shell command that prints nothing (a long build, a test run, `sleep`, a network wait) emits
@@ -492,5 +493,6 @@ export function createBashHeartbeatTool(options: BashHeartbeatToolOptions): Tool
       run.stop();
     }
   };
-  return { ...base, execute } as unknown as ToolDefinition;
+  // `timeout` (seconds) given as an integer string ("120") is coerced before pi validates it.
+  return { ...base, prepareArguments: coerceIntegerArguments(["timeout"], base.prepareArguments), execute } as unknown as ToolDefinition;
 }

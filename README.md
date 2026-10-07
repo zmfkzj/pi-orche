@@ -14,7 +14,7 @@ Design, measurements and the reasons behind it: [docs/orchestrator.md](docs/orch
 pi install /path/to/pi-orche     # after `npm install` here; uninstall with: pi remove /path/to/pi-orche
 ```
 
-Every normal `pi` session then has anchored `read`/`edit` (replacing Pi's), `find`, `ast_search`, `ast_rewrite`, `diagnostics`, `grep`, `ls`, long-output spill and a **delegation mode** (`mainMode`): `single` (default) removes `edit`/`write`/`ast_rewrite`, restricts Bash to static inspection and trusted project checks, and delegates each task to one reusable `orche_task` worker; `direct` edits with the main's own tools. In `direct` the user is warned when the main context crosses 50%/75% of the window (configurable with `contextWarning`), the point to switch back with `/orche mode single`. `/orche single <PROMPT>` and `/orche direct <PROMPT>` override the mode for one turn; `/orche workers`, `/orche stop <id>|all`, `/orche records`, `/orche splits [days]` (the orchestrator's split decisions over all sessions, from the split log), `/orche models` (the main, orchestrator and worker models and where each comes from) and `/orche cancel` manage workers. **The `auto` and `multi` modes, the `orche_run` tool and `/orche multi` were removed:** benchmarks showed the multi-agent orchestrator no more accurate than one worker at about twice the cost; the coordinator, its CLI and `runOrchestrated` followed in 0.2.0. A config or saved choice of `auto`/`multi` is read as `single` with a warning. Details: [docs/pi-package.md](docs/pi-package.md).
+Every normal `pi` session then has anchored `read`/`edit` (replacing Pi's), `find`, `ast_search`, `ast_rewrite`, `diagnostics`, `grep`, `ls`, long-output spill and a **delegation mode** (`mainMode`): `single` (default) removes `edit`/`write`/`ast_rewrite`, restricts Bash to static inspection and trusted project checks, and delegates each task to one reusable `orche_task` worker; `direct` edits with the main's own tools. In `direct` the user is warned when the main context crosses 50%/75% of the window (configurable with `contextWarning`), the point to switch back with `/orche mode single`. `/orche single <PROMPT>` and `/orche direct <PROMPT>` override the mode for one turn; `/orche workers`, `/orche stop <id>|all`, `/orche records`, `/orche splits [days]` (the orchestrator's split decisions over all sessions, from the split log), `/orche models` (the main, orchestrator and worker models and where each comes from) and `/orche cancel` manage workers; `orche_task` runs in the background in interactive/RPC sessions (see Background tasks below). **The `auto` and `multi` modes, the `orche_run` tool and `/orche multi` were removed:** benchmarks showed the multi-agent orchestrator no more accurate than one worker at about twice the cost; the coordinator, its CLI and `runOrchestrated` followed in 0.2.0. A config or saved choice of `auto`/`multi` is read as `single` with a warning. Details: [docs/pi-package.md](docs/pi-package.md).
 
 In the **single workflow** (`single`), main first classifies the message by **work type** (`src/single/work-types.ts`): *respond* (only restate or reformat its previous reply: answered directly), *investigation* (information only: `answer`), *execution* (a requested or authorized change, an approved proposal, or a bare bug report to diagnose and fix: `implement`) or *creation* (open-ended creative artifacts: `game-asset`/`video`, else `implement`). It then analyses the user's intent, purpose and requirements and hands off **one end-to-end assignment per round**. The request contains Intent/Purpose, testable numbered requirements as lines **`R1: …`**, constraints/non-goals, explicit assumptions when there is no UI, and a final **Original request** section with the user's text **verbatim**. Standard roles (`explore/answer/implement/verify`) receive **`task_plan`** and compact above **50%** context; specialists and library-run workers keep ordinary tools/compaction behaviour. The worker builds a bounded sequential DAG (1–60 nodes, title ≤200 characters, note ≤500), then implements, tests and checks without main intervention. Unknown coverage ids are rejected; uncovered request ids warn. Plans reset each assignment; reporting without one is allowed but notes **no Task DAG recorded**, with no `details.plan`. Standard roles inherit main's **current model and thinking at hand-off**, including extended context, unless `models.orchestrator` sets their model (below); specialists keep routes. Unresolvable main models fall back to routes visibly; absent main models warn and keep an existing worker's model/effort, or use routes for a new worker. Compaction restores requirements, original request and that assignment's DAG verbatim under a historical label, **superseded by any later Assignment message**; reused prompts explicitly supersede previous ids/plans.
 
@@ -124,6 +124,43 @@ Configure it with the top-level `concurrentSessions` object of the Pi agent or t
 ```
 
 `enabled` (default `true`) switches detection and the warning off with `false`; `windowMinutes` (default `10`, a number greater than 0 and at most 1440) is how recently a session file must have been written to count as active. Unknown fields and values of the wrong type are rejected like the other settings.
+
+### Background tasks, messages to a running worker
+
+In an interactive (TUI) or RPC session `orche_task` runs in the background. The call returns as soon as the worker has its assignment:
+
+```
+Started job J1: worker W1 (implement, provider/model · thinking high) is working on it in the background.
+```
+
+Main keeps talking with the user meanwhile; it never waits or polls. When the job ends (done, failed, cancelled) its result — exactly the text a blocking `orche_task` returns, with a header `[orche task result · J1 · W1 implement · done after 12m]` — arrives once as an `orche-task-result` message that starts main's next turn (queued behind a turn in progress). Two more tools work on the running job:
+
+- `orche_task_message {job?, message}` — an additional or corrected instruction for the running worker. It is steered into the worker's session after its current tool calls, before its next model request, and grants nothing (no git grant, no write scope). A message the worker could not read before it reported is withdrawn (never carried into a later assignment) and the result lists it as `undelivered`; resend it as a follow-up `orche_task`. Messages that reached the worker are listed as `delivered`.
+- `orche_task_status {job?, cancel?}` — progress and liveness of the job, or `cancel: true` to stop it (the cancelled result is delivered as a message). `/orche cancel` does the same.
+
+One job runs at a time. `wait: true` keeps the old blocking call; print and JSON modes (`pi -p`, `--mode json`) always block, because the process exits when the turn ends. Every job start and end is a small `orche-job` session entry (not model context).
+
+**Lifecycle.** Worker and job ids are never reused within a session branch, also across reloads. Naming a worker that is gone (idle expiry after 30 minutes, LRU eviction, `/orche stop`, a reload or a crash) is no longer an error: a new worker continues, briefed with the gone worker's transcript path, last record and last summary, and the result says `Note: W1 was gone (…); W4 continued its work … Name W4 from now on.` Unknown ids are still errors. A session shutdown (reload, exit, session switch) ends running jobs as `interrupted` in their `orche-job` entry and their `run.json`; a job found running at the next session start (the process crashed) is closed then and announced once. `run.json` records left `running` by a process that no longer exists (`owner.pid`) are closed as `interrupted` at session start.
+
+### Write scope outside the workspace
+
+File tools of a worker write inside the workspace (and its owned files) as before. Outside it:
+
+- every worker has a private scratch directory `<tmpdir>/pi-orche/<session>/<worker>` (0700, removed when the worker retires) for temporary files, writable for every role; the assignment prompt names it;
+- `writeRoots` — in `orche.config.json` (top level, absolute or relative to the task cwd) or as an `orche_task` parameter for one implement/game-asset/video assignment — opens further directories (e.g. a sibling repository the user asked to change). `/` and the home directory are rejected;
+- anything else outside is blocked with advice to use the scratch dir or report `blocked` so main can re-assign with `writeRoots`.
+
+Worker bash follows the same policy for the write targets it can see statically (redirections and heredocs, `tee`, `cp`/`mv`/`install`, `touch`, `mkdir`, `rm`, `ln`, `sed -i`, `dd of=`, …). It is **not a sandbox**: dynamic targets (`$VAR`, globs, substitutions) and what programs write on their own are not checked; the workspace audit still reports changes inside the workspace. Paths are checked lexically and by real path (symlinks out of a root, `..` traversal and prefix tricks are blocked).
+
+### Verification rounds
+
+An implement/answer orchestrator may run at most two fresh-verifier rounds (`orche_spawn` with reason `verification`) per assignment; a third is refused, and the report must then list what stays open in `data.unresolved` (`[]` when nothing remains), which the result shows next to a `Verification cap:` line. When the user explicitly asks for more review rounds, main passes `verificationRounds` (up to 5) to `orche_task`. Tool reference: [docs/tools.md](docs/tools.md) "Main-session task tools".
+
+### Output-limit recovery and long quiet waits
+
+A response that hits the model's output limit while still reasoning is no longer "recovered" by compacting a context that is far from full: the worker gets at most two next-step continuations (the second one thinking a level lower), then one forced report, then an explicit `Output limit` failure. Real context overflows keep Pi's compact-and-retry. Survey of other agents, benchmark and decision: [docs/length-recovery.md](docs/length-recovery.md).
+
+A bash command started with an explicit `timeout` counts as a declared quiet wait: while it runs within that timeout it keeps the worker active for deadline extensions, even without output. Without a timeout a silent command looks idle after two minutes, as before; the extension budget (`limits.maxExtensions`) still caps every assignment.
 
 ### Run records
 

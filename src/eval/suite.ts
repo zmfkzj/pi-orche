@@ -7,6 +7,7 @@ import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ModelRuntime, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Type } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
+import { formatSchemaErrors } from '../orchestration/schema-errors.js';
 import { createSession } from '../pi/session-factory.js';
 
 export interface SuiteTask {
@@ -57,7 +58,7 @@ async function json(path: string): Promise<unknown> {
   catch (error) { throw new Error(`Cannot read JSON: ${path}`, { cause: error }); }
 }
 function validate(schema: Parameters<typeof Value.Check>[0], value: unknown, path: string): void {
-  if (!Value.Check(schema, value)) throw new Error(`Invalid ${path}: ${[...Value.Errors(schema, value)].map(error => `${error.path || '/'} ${error.message}`).join('; ')}`);
+  if (!Value.Check(schema, value)) throw new Error(`Invalid ${path}: ${formatSchemaErrors(schema, value, 20)}`);
 }
 async function testFiles(root: string): Promise<string[]> {
   const result: string[] = [];

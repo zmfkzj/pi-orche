@@ -129,14 +129,18 @@ describe("single-workflow task ledger", () => {
   });
 
   it("continues a task after its idle worker expired, and not once the ledger is off", async () => {
-    const { h, pool, run } = await fixture([report(), report()], true, { idleTtlMs: 5 });
+    const { h, pool, run } = await fixture([report(), report(), report()], true, { idleTtlMs: 5 });
     await run(pool);
     await vi.waitFor(() => expect(pool.list()).toEqual([]), { timeout: 2000 });
     const continued = await run(pool, { worker: "W1", task: "T1" });
     expect(continued.details).toMatchObject({ worker: "W2", task: "T1", continuedFrom: "W1" });
     await vi.waitFor(() => expect(pool.list()).toEqual([]), { timeout: 2000 });
     await writeConfig(h);
-    await expect(run(pool, { worker: "W2", task: "T1" })).rejects.toThrow("Unknown worker W2");
+    // Without the ledger the gone worker is still known to the pool: a new worker continues, briefed from its transcript.
+    const handed = await run(pool, { worker: "W2", task: "T1" });
+    expect(handed.details).toMatchObject({ worker: "W3", continuedFrom: "W2" });
+    expect(handed.text).toContain("Note: task T1 ignored");
+    expect(handed.text).toContain("W2 was gone (idle expiry");
   });
 
   it("names the task in failed results, so the main session can retry the same task", async () => {

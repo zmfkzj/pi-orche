@@ -7,6 +7,7 @@ import {
   buildOutline, findSymbols, formatOutline, isOutlineSupported, outlineTargetError, similarNames,
   type OutlineEntry,
 } from "./outline.js";
+import { coerceIntegerArguments } from "./prepare-arguments.js";
 
 export const READ_MAX_LINES = 2000;
 export const READ_MAX_BYTES = 50 * 1024;
@@ -33,6 +34,8 @@ export function createReadTool(cwd: string, registry = new AnchorRegistry()): To
       "Use read, not cat/sed, to examine files; use offset/limit or outline then symbol instead of reading huge files whole.",
     ],
     parameters: readSchema,
+    // Models sometimes send offset/limit as strings ("290"); pi validates after this hook.
+    prepareArguments: coerceIntegerArguments(["offset", "limit"]),
     async execute(toolCallId, params: Static<typeof readSchema>, signal, onUpdate, ctx) {
       const root = ctx?.cwd || cwd;
       if (params.symbol !== undefined && !params.symbol.trim())
