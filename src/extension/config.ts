@@ -5,6 +5,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parseRouteConfig, RouteConfigError, type RouteConfig } from "../orchestration/routing.js";
 import { DEFAULT_WINDOW_MS } from "./concurrent-sessions.js";
 import { DEFAULT_CONTEXT_WARNING, type ContextWarningSettings } from "./context-warning.js";
+import { DEFAULT_THINKING_POLICY, resolveThinkingPolicy, type ThinkingPolicySettings } from "../pi/thinking-policy.js";
 
 export const CONFIG_FILE = "orche.config.json";
 
@@ -29,6 +30,8 @@ export interface DiscoveredConfig {
   contextWarning?: ContextWarningSettings;
   /** Single-workflow options (task ledger, orchestrator spawning), with defaults applied. */
   single: SingleSettings;
+  /** `thinkingPolicy` of the selected file with defaults applied (fixed: the assignment's level throughout; docs/thinking-policy.md). */
+  thinkingPolicy: ThinkingPolicySettings;
   /** `writeRoots` of the selected file as written (absolute, `~/...` or relative to the task cwd; see {@link resolveWriteRoots}); default []. */
   writeRoots: string[];
   /** Settings of the selected file that were ignored (removed `single` keys); absent without a file. */
@@ -203,6 +206,24 @@ export function parseSingleConfig(value: unknown, warnings?: string[]): SingleSe
 }
 
 /**
+ * `thinkingPolicy` in orche.config.json (docs/thinking-policy.md): `"fixed"` (default) or `"phase"`, or an object with `mode` and
+ * overrides of the mode's defaults: `checkpoints`, `escalation`, `subWorkers` (booleans) and `lengthRecovery`
+ * (`"redecompose"` | `"step-down"`).
+ */
+export function parseThinkingPolicyConfig(value: unknown): ThinkingPolicySettings {
+  if (value === "fixed" || value === "phase") return resolveThinkingPolicy({ mode: value });
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError('config.thinkingPolicy: expected "fixed", "phase" or an object');
+  const settings = value as Record<string, unknown>;
+  const keys = new Set(["mode", "checkpoints", "escalation", "lengthRecovery", "subWorkers"]);
+  const unknown = Object.keys(settings).filter(key => !keys.has(key));
+  if (unknown.length) throw new RouteConfigError(`config.thinkingPolicy: unknown field ${unknown.join(", ")}`);
+  if (settings.mode !== undefined && settings.mode !== "fixed" && settings.mode !== "phase") throw new RouteConfigError('config.thinkingPolicy.mode: expected "fixed" or "phase"');
+  for (const key of ["checkpoints", "escalation", "subWorkers"]) if (settings[key] !== undefined && typeof settings[key] !== "boolean") throw new RouteConfigError(`config.thinkingPolicy.${key}: expected boolean`);
+  if (settings.lengthRecovery !== undefined && settings.lengthRecovery !== "redecompose" && settings.lengthRecovery !== "step-down") throw new RouteConfigError('config.thinkingPolicy.lengthRecovery: expected "redecompose" or "step-down"');
+  return resolveThinkingPolicy(settings as Partial<ThinkingPolicySettings>);
+}
+
+/**
  * `writeRoots` in orche.config.json: directories outside the task workspace that writing workers (implement/fix/game-asset/video)
  * may change too, e.g. a sibling repository the user works on together with this one. Entries are absolute, start with `~/`, or
  * are relative to the task cwd. The filesystem root and the home directory itself are refused (also after resolution).
@@ -240,10 +261,10 @@ export function resolveWriteRoots(cwd: string, roots: readonly string[]): string
 
 /**
  * Load one orche config file: the route settings (validated by `parseRouteConfig`) plus the extension-only
- * `concurrentSessions`, `records`, `taskContext`, `contextWarning`, `single` and `writeRoots` settings, validated here and removed before the route parser sees the file.
+ * `concurrentSessions`, `records`, `taskContext`, `contextWarning`, `single`, `thinkingPolicy` and `writeRoots` settings, validated here and removed before the route parser sees the file.
  * `warnings` lists settings that were ignored (removed `single` keys, keys of the removed coordinator); the file still loads.
  */
-export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings; writeRoots: string[]; warnings: string[] }> {
+export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings; thinkingPolicy: ThinkingPolicySettings; writeRoots: string[]; warnings: string[] }> {
   let value: unknown;
   try { value = JSON.parse(await readFile(path, "utf8")); }
   catch (error) { throw new RouteConfigError(`Cannot load route config ${path}: ${error instanceof Error ? error.message : String(error)}`); }
@@ -253,19 +274,21 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
   let taskContext = { ...DEFAULT_TASK_CONTEXT };
   let contextWarning: ContextWarningSettings = { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
   let single: SingleSettings = { ...DEFAULT_SINGLE };
+  let thinkingPolicy: ThinkingPolicySettings = { ...DEFAULT_THINKING_POLICY };
   let writeRoots: string[] = [];
   const warnings: string[] = [];
   if (value && typeof value === "object" && !Array.isArray(value)) {
-    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, single: singleValue, writeRoots: writeRootsValue, ...rest } = value as Record<string, unknown>;
+    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, single: singleValue, thinkingPolicy: thinkingPolicyValue, writeRoots: writeRootsValue, ...rest } = value as Record<string, unknown>;
     if (Object.hasOwn(value, "concurrentSessions")) concurrent = parseConcurrentSessionsConfig(concurrentSessions);
     if (Object.hasOwn(value, "records")) records = parseRecordsConfig(recordsValue);
     if (Object.hasOwn(value, "taskContext")) taskContext = parseTaskContextConfig(taskContextValue);
     if (Object.hasOwn(value, "contextWarning")) contextWarning = parseContextWarningConfig(contextWarningValue);
     if (Object.hasOwn(value, "single")) single = parseSingleConfig(singleValue, warnings);
+    if (Object.hasOwn(value, "thinkingPolicy")) thinkingPolicy = parseThinkingPolicyConfig(thinkingPolicyValue);
     if (Object.hasOwn(value, "writeRoots")) writeRoots = parseWriteRootsConfig(writeRootsValue);
     routeValue = rest;
   }
-  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single, writeRoots, warnings: warnings.map(warning => `${warning} (${path})`) };
+  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single, thinkingPolicy, writeRoots, warnings: warnings.map(warning => `${warning} (${path})`) };
 }
 export class NoRouteError extends Error {
   override readonly name = "NoRouteError";
@@ -317,6 +340,7 @@ export async function discoverOrcheConfig(options: {
     records: resolveRecordsSettings(),
     taskContext: { ...DEFAULT_TASK_CONTEXT },
     single: { ...DEFAULT_SINGLE },
+    thinkingPolicy: { ...DEFAULT_THINKING_POLICY },
     writeRoots: [],
     source: { kind: "session", model, ...(thinking ? { thinking } : {}) },
     ignored,

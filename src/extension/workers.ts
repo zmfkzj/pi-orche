@@ -46,6 +46,10 @@ import { appendSplitLog } from "../orchestrator/split-log.js";
 import { ORCHESTRATOR_TEAM_LINE, orchestratorSection, SPLIT_FORMAT, splitError, splitOf, unresolvedError, MAX_VERIFICATION_ROUNDS, type SplitDecision } from "../orchestrator/instructions.js";
 import { createSpawnTool, outcomeModelUse, scopePaths, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnReason, type SubWorkerOutcome } from "../orchestrator/spawn.js";
 import { createSubWorkerRunner } from "../orchestrator/sub-worker.js";
+import { clampThinkingLevel, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { beginThinkingPolicy, DEFAULT_THINKING_POLICY, onTaskPlan, reportRewriteReason, requireReplan, thinkingPolicySummary, type ThinkingPolicySettings, type ThinkingPolicySummary } from "../pi/thinking-policy.js";
+import { setThinkingPhase, stepDownLevel, thinkingStateOf } from "../pi/thinking-state.js";
 
 export const orcheTaskParameters = Type.Object({
   role: Type.Union([Type.Literal("explore"), Type.Literal("answer"), Type.Literal("implement"), Type.Literal("verify"), Type.Literal("game-asset"), Type.Literal("video")]),
@@ -176,6 +180,8 @@ export interface TaskDetails {
   injected?: InjectedMessage[];
   /** Output-limit stops of this assignment (src/pi/length-recovery.ts). */
   lengthStops?: { count: number; exhausted: boolean };
+  /** The Task DAG thinking policy of this assignment (src/pi/thinking-policy.ts): baseline and step levels, switches, escalations. */
+  thinkingPolicy?: ThinkingPolicySummary;
   /** Directories outside the workspace this assignment could write: the worker's scratch dir and any extra write roots. */
   writeRoots?: WriteRoot[];
 }
@@ -280,6 +286,47 @@ interface Worker {
   roots?: WriteRoot[];
   /** Record directory of the worker's last assignment. */
   lastRecord?: string;
+  /** The thinking policy of the assignment in flight (orche.config.json `thinkingPolicy`, read per task). */
+  thinkingPolicy?: ThinkingPolicySettings;
+}
+
+/**
+ * task_plan of a single-workflow worker: the plan is the worker's (records, compaction essentials) and drives the Task DAG thinking
+ * policy of its session (src/pi/thinking-policy.ts): checkpoints, rework escalation and the level of the next request.
+ */
+function taskPlanToolFor(worker: Worker, session: () => AgentSession) {
+  return createTaskPlanTool(plan => {
+    worker.plan = plan;
+    worker.recordEvent?.({ type: "task_plan", timestamp: Date.now(), worker: worker.id, plan });
+    return onTaskPlan(session(), plan);
+  }, () => worker.requirementIds ?? [], {
+    previous: () => worker.plan,
+    checkpointsRequired: () => !!worker.thinkingPolicy?.checkpoints,
+    onInvalid: () => requireReplan(session(), "rejected task_plan call"),
+  });
+}
+
+/**
+ * The instructions of the Task DAG thinking policy for a single-workflow assignment (docs/thinking-policy.md); empty when the
+ * policy is fixed without checkpoints.
+ */
+export function thinkingPolicyInstructions(policy: ThinkingPolicySettings): string {
+  const checkpoint = 'Finishing a node: set it done with checkpoint {result: one or two sentences, evidence: ["file:line", "command -> outcome"], verification: "passed" | "not_applicable", open?: doubts} in the same task_plan call that sets the next node running; never put your private reasoning there. A node whose check failed is not done: keep it running to rework it, or mark it blocked. Do not record a checkpoint after every tool call, only when a node ends.';
+  const integrate = 'End the DAG with integration node(s) (phase "integrate") that compare every requirement with the actual changes, diffs and check runs, not with the checkpoints alone; an integration node is done only with verification "passed". If a node turns out wrong, reopen it rather than patching around it.';
+  if (policy.mode === "phase") {
+    return `Task DAG effort (thinkingPolicy phase): your analysis and plan, integration, final verification and the report run at your baseline effort; an ordinary node runs one effort level lower while it is running. Keep exactly one node running and switch nodes in one task_plan call so consecutive steps stay at the step level. Mark a node hard:true before it starts when it needs full effort (design decision, root cause of an unclear failure, concurrency or security, ambiguous requirement, hard-to-reverse change); reopened nodes and nodes whose check failed also run at the baseline. ${policy.checkpoints ? `${checkpoint} ` : ""}${integrate} If a response hits the output limit, act on one next step; if asked to, split the running node into smaller nodes. Never report success for work whose check failed or did not run: report it partial or blocked.`;
+  }
+  return policy.checkpoints ? `Task DAG checkpoints (thinkingPolicy): ${checkpoint} ${integrate}` : "";
+}
+
+/** The step level of `baseline` on the model of `route` (its supported levels; the baseline itself when there is none below). */
+function stepRouteThinking(runtime: { getModel(provider: string, id: string): Parameters<typeof getSupportedThinkingLevels>[0] | undefined }, route: ModelRoute): ThinkingLevel | undefined {
+  if (!route.thinking) return undefined;
+  const slash = route.model.indexOf("/");
+  const model = runtime.getModel(route.model.slice(0, slash), route.model.slice(slash + 1));
+  if (!model) return undefined;
+  const baseline = clampThinkingLevel(model, route.thinking);
+  return (stepDownLevel(getSupportedThinkingLevels(model), baseline) ?? baseline) as ThinkingLevel;
 }
 
 function taskCompactionFor(worker: Worker) {
@@ -731,7 +778,7 @@ export class WorkerPool {
   private persist(event: LedgerEvent): void {
     try { this.options.onLedgerEvent?.(structuredClone(event)); } catch { /* persistence is best effort */ }
   }
-  private callbacks(worker: Worker): Pick<WorkerAdoptOptions, "toolGuard" | "writeFileGuard" | "onToolExecution" | "onContextWindow" | "validateResult"> {
+  private callbacks(worker: Worker): Pick<WorkerAdoptOptions, "toolGuard" | "writeFileGuard" | "onToolExecution" | "onContextWindow" | "validateResult" | "reviseResult"> {
     return {
       onContextWindow: info => { worker.contextWindow = info.contextWindow; },
       validateResult: (kind, data) => {
@@ -739,8 +786,11 @@ export class WorkerPool {
         if (round) return round;
         if (!["implement", "answer"].includes(kind)) return undefined;
         const ids = worker.singleWorkflow ? worker.requirementIds ?? [] : [];
-        return ids.length || (data && typeof data === "object" && "checklist" in data) ? requiredChecklistError(ids, data, kind === "implement" && ids.length > 0) : undefined;
+        const checklistError = ids.length || (data && typeof data === "object" && "checklist" in data) ? requiredChecklistError(ids, data, kind === "implement" && ids.length > 0) : undefined;
+        return checklistError;
       },
+      // Phase thinking policy: the report is written at the baseline effort; one whose response ran below it is rewritten at it.
+      reviseResult: () => { try { return reportRewriteReason(this.manager!.session(worker.id)); } catch { return undefined; } },
       toolGuard: async (name, input) => {
         if (name === "task_plan" && !worker.singleWorkflow) return "task_plan is available only for standard single-workflow task assignments.";
         if (name === SPAWN_TOOL && !worker.spawn) return SPAWN_UNAVAILABLE;
@@ -1048,6 +1098,8 @@ export class WorkerPool {
     if (config.source.kind === "session" && args.model && !runtime.getModel(args.model.provider, args.model.id)) throw new NoRouteError(
       `The session model ${sessionModel} cannot be resolved by orche's model runtime. Route orche explicitly in ${args.cwd}/.pi/orche.config.json, or list a worker-only provider's Pi package in "providerExtensions" (see docs/pi-package.md).`,
     );
+    /** This assignment's baseline thinking when the route sets it (a new worker, or a reused one switched to main's/the tier's level); a reused worker otherwise keeps its own. */
+    let baselineLevel: string | undefined;
     if (worker && inheritMain && (configured || args.model || !this.manager.session(worker.id).model)) {
       const session = this.manager.session(worker.id);
       const catalog = runtime.getModel(route.model.slice(0, route.model.indexOf("/")), route.model.slice(route.model.indexOf("/") + 1));
@@ -1057,6 +1109,7 @@ export class WorkerPool {
       try {
         if (session.model?.provider !== effective.provider || session.model?.id !== effective.id || session.model?.contextWindow !== effective.contextWindow) await session.setModel(effective);
         if (session.thinkingLevel !== (route.thinking ?? "off")) session.setThinkingLevel(route.thinking ?? "off");
+        baselineLevel = route.thinking ?? "off";
         worker.model = `${session.model!.provider}/${session.model!.id}`;
         worker.thinking = session.thinkingLevel;
         worker.contextWindow = session.model!.contextWindow;
@@ -1080,10 +1133,8 @@ export class WorkerPool {
       const meta = worker;
       meta.model = route.model;
       meta.thinking = route.thinking ?? "off";
-      const customTools = [...(images ? [createGenerateImageTool({ cwd: args.cwd, runtime, images })] : []), ...(singleWorkflow ? [createTaskPlanTool(plan => {
-        meta.plan = plan;
-        meta.recordEvent?.({ type: "task_plan", timestamp: Date.now(), worker: meta.id, plan });
-      }, () => meta.requirementIds ?? [])] : []),
+      baselineLevel = route.thinking ?? "off";
+      const customTools = [...(images ? [createGenerateImageTool({ cwd: args.cwd, runtime, images })] : []), ...(singleWorkflow ? [taskPlanToolFor(meta, () => this.manager!.session(meta.id))] : []),
       // orche_spawn: registered once per session; usable only while an orchestrator assignment set `meta.spawn` (the guard refuses it otherwise).
       ...(spawnTool ? [createSpawnTool(() => meta.spawn ?? SPAWN_UNAVAILABLE)] : [])];
       // generate_image has its own timeout (images.timeoutMs, 180 s by default): liveness bounds a silent call by it, not by the generic tool bound.
@@ -1108,7 +1159,7 @@ export class WorkerPool {
     if (worker && singleWorkflow && !worker.taskWorkflowInstalled) {
       const meta = worker;
       const projector = createAssignmentProjector();
-      await enableTaskWorkflow(this.manager.session(meta.id), taskCompactionFor(meta), createTaskPlanTool(plan => { meta.plan = plan; meta.recordEvent?.({ type: "task_plan", timestamp: Date.now(), worker: meta.id, plan }); }, () => meta.requirementIds ?? []), projector);
+      await enableTaskWorkflow(this.manager.session(meta.id), taskCompactionFor(meta), taskPlanToolFor(meta, () => this.manager!.session(meta.id)), projector);
       this.manager.setContextProjection(meta.id, projector);
       meta.taskWorkflowInstalled = true;
     }
@@ -1117,6 +1168,13 @@ export class WorkerPool {
     if (meta.taskWorkflowInstalled) configureTaskWorkflow(this.manager.session(meta.id), singleWorkflow ? taskCompactionFor(meta) : undefined);
     meta.singleWorkflow = singleWorkflow;
     const activeSession = this.manager.session(meta.id);
+    // The assignment's thinking: B fixed now (Pi clamps it to the model), S one supported level below; the Task DAG policy switches
+    // between them from the next request on (src/pi/thinking-policy.ts). Always from B: never from a level the previous assignment
+    // left (a step level, a recovery step-down, a cancelled run).
+    const thinkingPolicy = config.thinkingPolicy ?? DEFAULT_THINKING_POLICY;
+    meta.thinkingPolicy = thinkingPolicy;
+    beginThinkingPolicy(activeSession, thinkingPolicy, baselineLevel);
+    thinkingStateOf(activeSession).onSwitch = change => meta.recordEvent?.({ type: "thinking_change", worker: meta.id, ...change });
     if (activeSession.model) meta.model = `${activeSession.model.provider}/${activeSession.model.id}`;
     meta.thinking = activeSession.thinkingLevel ?? meta.thinking ?? route.thinking ?? "off";
     meta.contextWindow = activeSession.model?.contextWindow ?? meta.contextWindow;
@@ -1166,6 +1224,11 @@ export class WorkerPool {
       : subSource === "config"
       ? { role: routeRole, model: workerTier!.model, ...(subThinking ? { thinking: subThinking } : {}), ...(workerExtended !== undefined ? { extendedContext: workerExtended } : {}) }
       : current;
+    // Phase thinking policy (docs/thinking-policy.md): a standard sub-worker that inherits the orchestrator's level runs one supported
+    // level below the orchestrator's baseline B (computed from B on the sub-worker's model, never from the orchestrator's current
+    // level, so it cannot chain), and an independent verification at B. An explicit models.worker level (or "main") is kept.
+    const stepSubThinking = thinkingPolicy.mode === "phase" && thinkingPolicy.subWorkers && subThinkingSource === "orchestrator" ? stepRouteThinking(runtime, subRoute) : undefined;
+    const standardSubRoute: ModelRoute = stepSubThinking && stepSubThinking !== subRoute.thinking ? { ...subRoute, thinking: stepSubThinking } : subRoute;
     /** Sub-workers on main's model (inherited through the orchestrator, or named by `models.worker`) get main's context window. */
     const subWindow = subSource === "config:main" || subSource === "orchestrator" && mainModel ? mainWindow : undefined;
     const definitions = requirementDefinitions(handoffRequest);
@@ -1254,7 +1317,16 @@ export class WorkerPool {
     const answered: Record<string, number> = {};
     /** The model and thinking this assignment runs on: the session's, after Pi resolved and clamped them (see model-use.ts). */
     const modelUse = () => formatModelUse({ model: meta.model, thinking: meta.thinking, answered });
-    const workflowDetails = () => ({ thinking: meta.thinking, ...(Object.keys(answered).length ? { models: { ...answered } } : {}), ...(meta.plan ? { plan: structuredClone(meta.plan) } : {}),
+    const policyDetails = (): Pick<TaskDetails, "thinkingPolicy"> => {
+      if (thinkingPolicy.mode === "fixed" && !thinkingPolicy.checkpoints) return {};
+      try { const summary = thinkingPolicySummary(this.manager!.session(meta.id)); return summary ? { thinkingPolicy: summary } : {}; } catch { return {}; }
+    };
+    const policyLines = (): string[] => {
+      const summary = policyDetails().thinkingPolicy;
+      if (!summary) return [];
+      return [`Thinking policy: ${summary.mode}${summary.mode === "phase" ? ` (baseline ${summary.baseline ?? "?"}, steps ${summary.step ?? "?"}): ${summary.switches} level switch${summary.switches === 1 ? "" : "es"}` : " (checkpoints)"}${summary.escalated?.length ? `; at baseline: ${summary.escalated.map(item => `${item.node} (${item.reason})`).join(", ")}` : ""}${summary.redecompositions ? `; ${summary.redecompositions} re-decomposition${summary.redecompositions === 1 ? "" : "s"}` : ""}${summary.falseRedecompositions ? `; ${summary.falseRedecompositions} plan update${summary.falseRedecompositions === 1 ? "" : "s"} did not split the node as asked` : ""}${summary.reportRewrites ? `; ${summary.reportRewrites} report${summary.reportRewrites === 1 ? "" : "s"} written below the baseline rewritten at it` : ""}`];
+    };
+    const workflowDetails = () => ({ thinking: meta.thinking, ...(Object.keys(answered).length ? { models: { ...answered } } : {}), ...(meta.plan ? { plan: structuredClone(meta.plan) } : {}), ...policyDetails(),
       ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(meta.gui ? { gui: true as const } : {}), ...spawnedDetails() });
     let requests = 0;
     /** Provider-reported cost of this assignment's own requests (the split log); undefined while none was reported. */
@@ -1290,7 +1362,9 @@ export class WorkerPool {
         contextCleared = { ...event.contextCleared };
         record?.appendEvent(event);
       }
-      if (event.type === "length_stop" || event.type === "injected_message") record?.appendEvent(event);
+      if (event.type === "length_stop" || event.type === "injected_message" || event.type === "result_rewrite") record?.appendEvent(event);
+      // New instructions from main mid-assignment: plan again at the baseline until the next accepted task_plan.
+      if (event.type === "injected_message" && event.status === "delivered") requireReplan(this.manager!.session(meta.id), "message from main");
       if (event.type === "usage") { requests++; answered[event.model] = (answered[event.model] ?? 0) + 1; meta.latestInput = event.input + event.cacheRead; if (event.costUSD !== undefined) ownCostUSD = (ownCostUSD ?? 0) + event.costUSD; }
       progress();
     });
@@ -1354,7 +1428,7 @@ export class WorkerPool {
         ...(extra.summary ? { summary: extra.summary } : {}),
         ...(extra.failure ? { failure: extra.failure } : {}),
         ...(status === "cancelled" && this.options.controller.cancelledByUser ? { cancelledByUser: true } : {}),
-        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs, model: details.model, thinking: details.thinking, ...(details.models ? { models: { ...details.models } } : {}), modelSource, thinkingSource, checklist: details.checklist, plan: details.plan, compactions: details.compactions, warnings: details.warnings, ...(details.split ? { split: details.split } : {}) },
+        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs, model: details.model, thinking: details.thinking, ...(details.models ? { models: { ...details.models } } : {}), modelSource, thinkingSource, checklist: details.checklist, plan: details.plan, compactions: details.compactions, warnings: details.warnings, ...(details.split ? { split: details.split } : {}), ...(details.thinkingPolicy ? { thinkingPolicy: details.thinkingPolicy } : {}) },
         workspace: { changes: details.changes, otherChanges: details.otherChanges, ...(details.submodules ? { submodules: details.submodules } : {}), ...(details.headMoved ? { headMoved: details.headMoved } : {}) },
         ...(details.git ? { git: details.git } : {}),
         ...(retired.length ? { retired } : {}),
@@ -1404,7 +1478,9 @@ export class WorkerPool {
           orchestrator: meta.id, ...(files ? { scope: files } : {}), ...(readOnly ? { readOnly: true } : {}), signal,
           nextId: () => `${meta.id}.${++sub}`,
           runWorker: createSubWorkerRunner({
-            orchestrator: meta.id, cwd: args.cwd, runtime, route: subRoute, routeSource: subSource, thinkingSource: subThinkingSource, ...(subWindow ? { inheritedContextWindow: subWindow } : {}),
+            orchestrator: meta.id, cwd: args.cwd, runtime, route: standardSubRoute, routeSource: subSource, thinkingSource: standardSubRoute === subRoute ? subThinkingSource : "orchestrator:step", ...(subWindow ? { inheritedContextWindow: subWindow } : {}),
+            ...(standardSubRoute !== subRoute ? { verifyRoute: subRoute, verifyThinkingSource: subThinkingSource } : {}),
+            ...(thinkingPolicy.mode === "phase" ? { lengthLadder: thinkingPolicy.lengthRecovery } : {}),
             specialistRoute: role => resolveSpecialistRoute(config.routes, role, (provider, id) => !!runtime.getModel(provider, id)),
             imageTool: () => config.routes.images ? createGenerateImageTool({ cwd: args.cwd, runtime, images: config.routes.images }) : undefined,
             prompt: (planned, imagesAvailable) => subWorkerPrompt(planned, meta.id, config.routes.verifyCommands ?? [], imagesAvailable),
@@ -1431,6 +1507,8 @@ export class WorkerPool {
       const rootsLine = [
         formatWriteRoots(meta.roots ?? [], args.role),
         orchestrating && args.verificationRounds !== undefined && args.verificationRounds !== MAX_VERIFICATION_ROUNDS ? `Verification rounds for this assignment: at most ${args.verificationRounds} (set by main; this replaces the default of ${MAX_VERIFICATION_ROUNDS}).` : "",
+        // The DAG is required for implement; an answer worker that plans gets the same rules from task_plan's own errors and notes.
+        singleWorkflow && args.role === "implement" ? thinkingPolicyInstructions(thinkingPolicy) : "",
       ].filter(Boolean).join("\n");
       const prompt = `${assignmentPrompt({ ...args, request: handoffRequest, orchestrate: orchestrating, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant, orchestrating ? orchestratorSection() : "")}${rootsLine ? `\n${rootsLine}` : ""}`;
       const handoff = reusedContext && workflowMode ? prompt.replace(/^(Assignment[^\n]*\n)/, "$1This Assignment message supersedes earlier requirement ids and plans, including any assignment preserved at compaction time. Use only this round's requirements and Task DAG.\n") : prompt;
@@ -1524,7 +1602,7 @@ export class WorkerPool {
       finishRecord("done", details, { summary: meta.summary });
       const planNotes = singleWorkflow && !meta.plan ? ["Note: no Task DAG recorded in this assignment."] : [];
       const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, ...modelWarnings, modelLineOf(details), ...contextLine(),
-        ...taskLines(), "", meta.summary, ...roleData, ...checklistLines, ...outcomeLines(), ...splitLines(splitOf(data)), "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
+        ...taskLines(), "", meta.summary, ...roleData, ...checklistLines, ...outcomeLines(), ...policyLines(), ...splitLines(splitOf(data)), "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
         ...planNotes, ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: follow up with the same worker — ${note}`] : [])].join("\n");
       return { text: withRecordLine(text, record?.dir), details };
     } catch (error) {
@@ -1559,6 +1637,8 @@ export class WorkerPool {
       meta.recordEvent = undefined;
       meta.roundCheck = undefined;
       meta.spawn = undefined;
+      // Idle at the baseline: a step level or a recovery step-down of this assignment never outlives it.
+      try { const ended = this.manager.session(meta.id); thinkingStateOf(ended).onSwitch = undefined; setThinkingPhase(ended, "baseline", "assignment end"); } catch { /* disposed */ }
       meta.files = files;
       await activity?.drain().catch(() => undefined);
       if (audit && before) meta.tree = await audit.snapshot().catch(() => meta.tree);

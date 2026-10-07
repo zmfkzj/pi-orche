@@ -87,7 +87,7 @@ and report the rest. Its report must then carry `data.unresolved` (an explicit `
 result adds `Verification cap: N verification rounds ran (cap N); 1 further round was refused.` and the `unresolved:` line, so
 an unconverged review never reads as a clean pass.
 
-**Output-limit recovery.** See [length-recovery.md](length-recovery.md).
+**Output-limit recovery.** See [length-recovery.md](length-recovery.md). **Task DAG thinking policy** (`task_plan` node fields `phase: "integrate"`, `hard`, `checkpoint`; `"thinkingPolicy"` in the config): see [thinking-policy.md](thinking-policy.md).
 
 ## Delegation recovery and small changes
 

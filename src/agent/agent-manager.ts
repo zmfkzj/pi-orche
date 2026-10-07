@@ -33,9 +33,13 @@ import type {
 } from "./agent-handle.js";
 import { reportAgent, targetOf, type AgentRecordEntry, type SessionRecords } from "./records.js";
 import { lengthRecoveryOf, resetLengthRecovery } from "../pi/length-recovery.js";
+import { beginReportPhase } from "../pi/thinking-policy.js";
+import { noteRequestLevel } from "../pi/thinking-state.js";
 import { DEFAULT_LIVENESS_WINDOW_MS, LivenessTracker, isIdleHeartbeat, mergeLiveness, type Liveness, type SessionLiveness } from "./liveness.js";
 /** Requests a forced final report may take after a budget stop before the assignment fails. */
 export const BUDGET_GRACE_REQUESTS = 5;
+/** Reports sent back to be rewritten (at the assignment's thinking level) before the assignment fails closed. */
+export const MAX_REPORT_REWRITES = 2;
 /** customType of a message main injected into a running worker ({@link AgentManager.steer}). */
 export const MAIN_MESSAGE_TYPE = "pi-orche.main-message";
 /** SDK abort is cooperative; never hold a session's activity slot indefinitely. */
@@ -66,6 +70,8 @@ interface Worker {
   injected: InjectedMessage[];
   /** The output-limit recovery was exhausted and the worker was asked once for a report with what it has. */
   lengthReportPrompted: boolean;
+  /** Reports sent back to be rewritten at the assignment's thinking level ({@link SpawnOptions.reviseResult}); not result retries. */
+  rewrites: number;
   /** Length stops of the session before the current assignment (to count this assignment's). */
   lengthBefore: number;
   abort?: Promise<void>;
@@ -94,7 +100,7 @@ interface WorkerStats {
 }
 /** Opaque, one-use ownership handle; detaching never disposes the session. */
 export interface WorkerTransfer { readonly snapshot: AgentSnapshot }
-export type WorkerAdoptOptions = Pick<Partial<SpawnOptions>, "id" | "role" | "toolGuard" | "writeFileGuard" | "onToolExecution" | "onContextWindow" | "contextProjection" | "validateResult">;
+export type WorkerAdoptOptions = Pick<Partial<SpawnOptions>, "id" | "role" | "toolGuard" | "writeFileGuard" | "onToolExecution" | "onContextWindow" | "contextProjection" | "validateResult" | "reviseResult">;
 const detachedWorkers = new WeakMap<WorkerTransfer, Worker>();
 
 export class AgentManager {
@@ -190,6 +196,9 @@ export class AgentManager {
             isError: true,
             terminate: true,
           };
+        // A report written below the assignment's thinking level is discarded and rewritten at it (not a result retry).
+        const rewrite = options.reviseResult?.();
+        if (rewrite) return owner.rewriteResult(worker, rewrite);
         let payload = args as ResultPayload;
         // Models sometimes send `data` as a JSON string of the object: parse it (validation still runs on the parsed value).
         if (typeof payload.data === "string" && /^\s*[{[]/.test(payload.data)) {
@@ -332,6 +341,7 @@ export class AgentManager {
       budget: "none",
       injected: [],
       lengthReportPrompted: false,
+      rewrites: 0,
       lengthBefore: 0,
       unsubscribe: () => {},
       stats: { startedAt: Date.now(), requests: 0, models: {}, busyMs: 0, sessionFile: session.sessionFile, reported: false },
@@ -389,6 +399,8 @@ export class AgentManager {
           owner.emit({ type: "tool_started", timestamp: Date.now(), agentId: options.id, assignmentId: worker.runAssignment.id, toolName: event.toolName });
         }
       }
+      // The thinking level this request runs at, for the report-effort check (src/pi/thinking-policy.ts reportRewriteReason).
+      if (event.type === "message_start" && event.message.role === "assistant") noteRequestLevel(session);
       if (event.type === "message_end" && event.message.role === "assistant") {
         const assignment = worker.runAssignment;
         if (assignment) {
@@ -436,18 +448,23 @@ export class AgentManager {
         const failed = Boolean(worker.failure ?? worker.resultFailure);
         const reportable = assignment && worker.snapshot.status === "running" && !worker.result && !failed;
         const length = lengthRecoveryOf(session);
+        // Every report prompt of the runtime runs at the assignment's thinking level: the report phase starts before its request.
+        const reportPhase = (reason: string) => { try { beginReportPhase(session, reason); } catch { /* the level stays; a report below it is sent back */ } };
         if (reportable && worker.budget === "stopping") {
           worker.budget = "final";
+          reportPhase("forced report (request budget)");
           owner.runAssignment(worker, assignment, `Your request budget for assignment ${assignment.kind} is exhausted and your turn was stopped. Call report_result alone now with what you have: partial findings are fine; for implement/fix use data.status "blocked" with the reason if the work is unfinished.`);
         } else if (reportable && length.exhausted && !worker.lengthReportPrompted) {
           // Output-limit recovery is used up (src/pi/length-recovery.ts): one forced report instead of the generic nudge.
           worker.lengthReportPrompted = true;
-          owner.runAssignment(worker, assignment, `Your last ${length.consecutive} responses hit the output token limit, mostly while reasoning, and produced nothing usable. Do not plan or reason at length now. Call report_result alone immediately with what you have: partial findings are fine; for implement/fix use data.status "blocked" with the reason if the work is unfinished.`);
+          reportPhase("forced report (output limit)");
+          owner.runAssignment(worker, assignment, `Your last ${length.consecutive} responses hit the output token limit, mostly while reasoning, and produced nothing usable. Do not plan or reason at length now. Call report_result alone immediately with what you have: partial findings are fine, but name what is verified and what is not, and never report unverified or failed work as done; for implement/fix use data.status "blocked" with the reason if the work is unfinished.`);
         } else if (reportable && length.exhausted) {
           worker.failure = `Output limit: ${length.consecutive} consecutive responses hit the model's output token limit (mostly while reasoning) and no result was reported. Re-assign with a narrower request, or a lower thinking level for this worker.`;
           owner.finalize(worker, "failed");
         } else if (reportable && worker.nudges < owner.resultNudges) {
           worker.nudges++;
+          reportPhase("report nudge");
           owner.emit({ type: "assignment_nudged", timestamp: Date.now(), agentId: options.id, assignmentId: assignment.id, attempt: worker.nudges });
           owner.runAssignment(worker, assignment, `You ended without calling report_result for assignment ${assignment.kind}. Call report_result alone now with your result.`);
         } else {
@@ -485,6 +502,7 @@ export class AgentManager {
     w.budget = "none";
     w.injected = [];
     w.lengthReportPrompted = false;
+    w.rewrites = 0;
     resetLengthRecovery(w.adapter.session);
     w.lengthBefore = lengthRecoveryOf(w.adapter.session).total;
     w.snapshot.requestCount = 0;
@@ -731,6 +749,30 @@ export class AgentManager {
       timestamp: outcome.timestamp,
       outcome,
     });
+  }
+  /**
+   * Send a report back to be rewritten ({@link SpawnOptions.reviseResult}): the discarded report is never accepted, and the rewrite
+   * is not one of the result retries. Fail-closed: a further rewrite request after {@link MAX_REPORT_REWRITES} means the owner could
+   * not make the next request run as required; the assignment then fails with that reason instead of accepting the report.
+   */
+  private rewriteResult(w: Worker, reason: string) {
+    const assignment = w.snapshot.currentAssignment!;
+    w.rewrites++;
+    this.emit({ type: "result_rewrite", timestamp: Date.now(), agentId: w.snapshot.id, assignmentId: assignment.id, kind: assignment.kind, attempt: w.rewrites, reason });
+    if (w.rewrites > MAX_REPORT_REWRITES) {
+      w.resultFailure = `Report not accepted: ${reason.split(";")[0]}, again after ${MAX_REPORT_REWRITES} rewrites (the required thinking level could not be applied)`;
+      return {
+        content: [{ type: "text" as const, text: `Result rejected: ${w.resultFailure}. The assignment failed.` }],
+        details: { accepted: false, errors: w.resultFailure },
+        isError: true,
+        terminate: true,
+      };
+    }
+    return {
+      content: [{ type: "text" as const, text: `Result not accepted yet: ${reason}.` }],
+      details: { accepted: false, rewrite: true },
+      isError: true,
+    };
   }
   /**
    * Reject a wrong-kind RESULT or invalid `data`, sharing one assignment-local retry cap.

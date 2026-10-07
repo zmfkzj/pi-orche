@@ -105,6 +105,12 @@ export interface SpawnOptions extends SessionOptions {
   toolTimeoutsMs?: Readonly<Record<string, number>>;
   /** Assignment-local additional RESULT validation for opt-in workflows. */
   validateResult?: (kind: string, data: unknown) => string | undefined;
+  /**
+   * Checked first for every report_result: a reason when the report must be discarded and written again (e.g. its response ran below
+   * the assignment's thinking level, src/pi/thinking-policy.ts), before any validation. Not counted against the result retries;
+   * bounded by MAX_REPORT_REWRITES (then the assignment fails, never accepts the report).
+   */
+  reviseResult?: () => string | undefined;
 }
 /** Contract for the `data` of a RESULT; `optional` also accepts an absent `data`. */
 export interface ResultDataSchema {
@@ -135,6 +141,8 @@ export type ManagerEvent = { timestamp: number } & (
   | { type: "context_cleared"; agentId: string; assignmentId: string; contextCleared: ContextClearedStats }
   | { type: "assignment_nudged"; agentId: string; assignmentId: string; attempt: number }
   | { type: "result_rejected"; agentId: string; assignmentId: string; kind: string; attempt: number; errors: string }
+  /** A report sent back to be rewritten (not a result retry; see SpawnOptions.reviseResult). */
+  | { type: "result_rewrite"; agentId: string; assignmentId: string; kind: string; attempt: number; reason: string }
   | { type: "request_budget"; agentId: string; assignmentId: string; requests: number; budget: number; action: "notice" | "stop" | "abort" }
   | { type: "assignment_outcome"; outcome: Outcome }
   | { type: "message_sent"; message: OrcheMessage }

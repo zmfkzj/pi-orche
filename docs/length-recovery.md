@@ -48,7 +48,14 @@ continuation nudge of Roo/OpenHands-style agents, not their exact wording or cap
 - [V] The once-per-turn flag resets on a user message or on an assistant stop that is not error/length (`agent-session.js:715,759`). So each new prompt gets one more doomed compaction.
 - [V] What pi actually asks the provider for:
   - `maxTokens` = model.maxTokens, clamped only by the context window (`pi-ai/dist/api/simple-options.js:4-15`);
-  - Responses API: `max_output_tokens` = that value (`openai-responses.js:248-250`), so 128000 was requested and the proxy cut at 32000.
+  - the generic Responses API (`openai-responses`) sends that value as `max_output_tokens` (`openai-responses.js:248-250`);
+  - **correction (2026-10-08):** the observed sessions did not use that API. Their provider (`@router-for-me/pi-cliproxyapi-provider`)
+    registers every model with `api: "cliproxyapi-codex-responses"` (`extensions/index.ts:537`), streamed by Pi's Codex Responses
+    code (`pi-ai/dist/api/openai-codex-responses.js`) and the provider's patched copy of it
+    (`/tmp/pi-cliproxyapi-provider/openai-codex-responses-cpa-*.mjs`); neither sends `max_output_tokens` at all (0 occurrences in
+    each; they send `reasoning: { effort, summary: "auto" }` and `text.verbosity`). So no 128000 output limit was requested on this
+    path: the 32000 cap is applied behind the request (the proxy or its upstream), and where exactly is **unverified**. An earlier
+    version of this document said "128000 was requested"; that was wrong for these sessions;
   - incomplete with reason max_output_tokens ⇒ "length" (`openai-responses-shared.js:675-684`).
 - [V] Length stop with tool calls: every call fails with a synthetic "re-issue with complete arguments" result and the loop continues (`pi-agent-core/dist/agent-loop.js:160-166,342-362`).
 - [D] Recovery ordering and cancellation: `compaction.md:39,85-98`. If `session_before_compact` cancels a recovery compaction, the omission edits stay and no retry is scheduled.
@@ -223,11 +230,25 @@ Every orche worker session (orche_task workers and orche_spawn sub-workers) clas
 | cut-off tool calls | length stop with tool calls | Pi already fails the calls with synthetic results and continues; compaction cancelled without context pressure |
 | real context overflow | provider overflow error, or a length stop with the context at ≥85% of the window / within 16k of it | Pi's own compact-and-retry, unchanged |
 
-Bounds: two consecutive recoveries (reset by any delivered text or tool call); the second one runs one thinking level lower and the
-level is restored at the next delivered output or assignment. After that the state is *exhausted*: the worker is asked once to
-report with what it has, and if that also overruns the assignment fails with `Output limit: N consecutive responses hit the
-model's output token limit …` — never a silent `no_result`. Every stop and decision is a `length_stop` event in the record, and the
-result says `Output limit: …`. `lengthRecovery: { mode: "off" }` in `SessionOptions` restores Pi's behaviour.
+Bounds: two consecutive recoveries (reset by any delivered text or tool call); with the `step-down` ladder (the default under
+`"thinkingPolicy": "fixed"`) the second one runs one thinking level lower and the level is restored at the next delivered output
+or assignment. The `redecompose` ladder (the default under `"thinkingPolicy": "phase"`, [thinking-policy.md](thinking-policy.md))
+never lowers the effort: its second recovery asks to split the running Task DAG node (an integration node: one verification node
+per requirement, still at the baseline), and a split counts only when the policy sees the node replaced by two or more new nodes.
+After that the state is *exhausted*: the worker is asked once to report with what it has (naming what is verified and what is
+not; the request runs at the assignment's thinking level, a step-down or step level is cleared first), and if that also overruns the assignment fails with `Output limit: N consecutive responses hit the model's output token
+limit …` — never a silent `no_result`. Also exhausted: more than 8 length stops in one assignment whatever came in between
+(`maxPerAssignment`; a trivial tool call between overruns used to reset the count forever), and with the `redecompose` ladder more
+than 4 stops without Task DAG progress (a newly finished node or an accepted split; a tool call is not progress). Every stop and
+decision is a `length_stop` event in the record, and the result says `Output limit: …`. `lengthRecovery: { mode: "off" }` in
+`SessionOptions` restores Pi's behaviour.
+
+**Fixed (2026-10-08, test/pi/thinking-state.test.ts reproduces both):** the step-down took the next name of a fixed list, so on a
+model without that level Pi clamped it back up (max → "xhigh" → max on a model without xhigh: nothing was lowered; reproduced as
+`[max, max, max]`); it now takes the next level the model supports (`getAvailableThinkingLevels`), never `off`. And the level saved
+for the restore was re-applied at the next assignment start over that assignment's own level (reproduced: a new level `low`
+overwritten by the old `high`); the thinking level now has one owner (src/pi/thinking-state.ts) and every assignment starts at its
+own baseline.
 
 The default thinking level is never lowered up front: the survey found no evidence that it helps in general (pi#9718: non-monotonic),
 and lowering effort is a quality trade-off (Anthropic) that invalidates the prompt cache.

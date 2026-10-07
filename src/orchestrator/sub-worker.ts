@@ -1,7 +1,9 @@
 /**
  * One sub-worker of an orche_spawn call: a fresh one-shot session (src/specialists/session.ts) that sees only its own request, works
  * with the worker tool set, may write only its own files, cannot spawn, and ends with one report_result. Standard roles inherit the
- * orchestrator's model and thinking unless the config sets `models.worker`; game-asset and video use their specialist routes (and generate_image when images are set up).
+ * orchestrator's model and thinking unless the config sets `models.worker` (under `"thinkingPolicy": "phase"` implement/answer run one
+ * supported level below the orchestrator's assignment level and verify at it: docs/thinking-policy.md); game-asset and video use their
+ * specialist routes (and generate_image when images are set up).
  */
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -27,6 +29,14 @@ export interface SubWorkerEnvironment {
   routeSource: Exclude<SubWorkerModelSource, "route">;
   /** Where `route.thinking` comes from: `models.worker`'s level, main's current thinking named by it, or the orchestrator's. */
   thinkingSource: Exclude<SubWorkerThinkingSource, "route">;
+  /**
+   * The route of `verify` sub-workers when it differs from `route` (the phase thinking policy: standard roles at the step level,
+   * an independent verification at the orchestrator's baseline), with where its thinking comes from.
+   */
+  verifyRoute?: ModelRoute;
+  verifyThinkingSource?: Exclude<SubWorkerThinkingSource, "route">;
+  /** The output-limit recovery ladder of standard sub-workers (the thinking policy's; src/pi/length-recovery.ts). */
+  lengthLadder?: "redecompose" | "step-down";
   inheritedContextWindow?: number;
   /** The route of a specialist role (its own configured route, as orche_task resolves it). */
   specialistRoute(role: "game-asset" | "video"): ModelRoute;
@@ -78,11 +88,12 @@ export function subWorkerGuard(worker: PlannedWorker, siblings: readonly Planned
 export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
   return async (worker, siblings, signal, onTool, onModel) => {
     const specialist = worker.role === "game-asset" || worker.role === "video";
-    const route = specialist ? env.specialistRoute(worker.role as "game-asset" | "video") : env.route;
+    const verifyRoute = worker.role === "verify" && env.verifyRoute ? env.verifyRoute : undefined;
+    const route = specialist ? env.specialistRoute(worker.role as "game-asset" | "video") : verifyRoute ?? env.route;
     const image = specialist ? env.imageTool?.() : undefined;
     const guard = subWorkerGuard(worker, siblings, env.cwd);
     const sessionFile = env.sessionFile?.(worker.id);
-    const base = { id: worker.id, name: worker.name, role: worker.role, reason: worker.reason, ...(worker.files ? { files: [...worker.files] } : {}), changes: [] as string[], modelSource: specialist ? "route" as const : env.routeSource, thinkingSource: specialist ? "route" as const : env.thinkingSource };
+    const base = { id: worker.id, name: worker.name, role: worker.role, reason: worker.reason, ...(worker.files ? { files: [...worker.files] } : {}), changes: [] as string[], modelSource: specialist ? "route" as const : env.routeSource, thinkingSource: specialist ? "route" as const : verifyRoute ? env.verifyThinkingSource ?? env.thinkingSource : env.thinkingSource };
     let started = false;
     const fromStats = (stats: SpecialistStats) => ({ model: stats.model, ...(stats.thinking ? { thinking: stats.thinking } : {}), ...(started ? {} : { notStarted: true as const }), requests: stats.requests, models: { ...stats.models }, startedAt: stats.startedAt, durationMs: stats.durationMs, costUSD: stats.usage.cost, ...(stats.sessionFile ? { sessionFile: stats.sessionFile } : {}) });
     try {
@@ -93,6 +104,7 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
         maxTurns: env.maxTurns, timeoutMs: env.timeoutMs, signal, nudges: 1, onTool,
         onSession: use => { started = true; onModel?.(use); },
         ...(sessionFile ? { sessionFile } : {}), ...(!specialist && env.inheritedContextWindow ? { inheritedContextWindow: env.inheritedContextWindow } : {}),
+        ...(!specialist && env.lengthLadder ? { lengthRecovery: { ladder: env.lengthLadder } } : {}),
       });
       const report = value as Report;
       return { ...base, status: statusOf(worker.role, report.data), summary: report.summary, ...(report.data !== undefined ? { data: report.data } : {}), ...fromStats(stats) } satisfies SubWorkerOutcome;

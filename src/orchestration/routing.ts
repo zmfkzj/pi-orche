@@ -86,8 +86,9 @@ export type AssignmentThinkingSource = AssignmentModelSource;
  * (`config:main`), the orchestrator's model because it is unset (`orchestrator`), or a specialist's route (`route`). */
 export type SubWorkerModelSource = "config" | "config:main" | "orchestrator" | "route";
 /** Where a sub-worker's thinking comes from: `models.worker`'s own level (`config`), main's current thinking named by it
- * (`config:main`), the orchestrator's current thinking (`orchestrator`), or a specialist's route (`route`). */
-export type SubWorkerThinkingSource = SubWorkerModelSource;
+ * (`config:main`), the orchestrator's assignment level (`orchestrator`), one supported level below it for a standard sub-worker
+ * under the phase thinking policy (`orchestrator:step`, docs/thinking-policy.md), or a specialist's route (`route`). */
+export type SubWorkerThinkingSource = SubWorkerModelSource | "orchestrator:step";
 export class RouteConfigError extends Error {
   override readonly name = "RouteConfigError";
 }

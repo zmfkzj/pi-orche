@@ -93,3 +93,53 @@ describe("bounded assignment-local task_plan", () => {
     expect(latest).toBeUndefined();
   });
 });
+
+describe("task_plan phases and checkpoints (thinkingPolicy, docs/thinking-policy.md)", () => {
+  const checkpoint = { result: "greeting fixed", evidence: ["greeting.txt:1", "cat greeting.txt → hello"], verification: "passed" as const };
+  const run = (tool: ReturnType<typeof createTaskPlanTool>, nodes: unknown[]) => tool.execute("t", { nodes }, undefined as never, undefined as never, undefined as never);
+  const textOf = (result: Awaited<ReturnType<typeof run>>) => (result.content[0] as { text: string }).text;
+  it("requires a checkpoint with evidence for a node newly marked done, and verification passed for integration, only when checkpoints are on", async () => {
+    let latest: TaskPlan | undefined;
+    let required = true;
+    const tool = createTaskPlanTool(plan => { latest = plan; }, [], { previous: () => latest, checkpointsRequired: () => required });
+    expect(textOf(await run(tool, [node("a", [], "done")]))).toMatch(/^Invalid checkpoints: a is marked done without a checkpoint\. Use checkpoint \{result/);
+    expect(textOf(await run(tool, [{ ...node("a", [], "done"), checkpoint: { ...checkpoint, evidence: [] } }]))).toMatch(/a's checkpoint has no evidence/);
+    expect((await run(tool, [{ ...node("a", [], "done"), checkpoint }, { ...node("i", ["a"], "running"), phase: "integrate" }])).isError).not.toBe(true);
+    expect(textOf(await run(tool, [{ ...node("a", [], "done") }, { ...node("i", ["a"], "done"), phase: "integrate", checkpoint: { ...checkpoint, verification: "not_applicable" } }]))).toMatch(/integration node i is done only with verification "passed"/);
+    // The already-done node a kept its checkpoint although the call omitted it.
+    expect(latest!.nodes[0]!.checkpoint).toEqual(checkpoint);
+    required = false;
+    latest = undefined;
+    expect((await run(tool, [node("a", [], "done")])).isError).not.toBe(true);
+  });
+  it("never accepts a node as done whose checkpoint says its verification failed", async () => {
+    const tool = createTaskPlanTool(() => undefined);
+    expect(textOf(await run(tool, [{ ...node("a", [], "done"), checkpoint: { ...checkpoint, verification: "failed" } }]))).toMatch(/a is done but its checkpoint says verification failed: keep it running to rework it, or mark it blocked/);
+    expect((await run(tool, [{ ...node("a", [], "running"), checkpoint: { ...checkpoint, verification: "failed" } }])).isError).not.toBe(true);
+  });
+  it("keeps phase, hard and an unchanged node's checkpoint when a replacement omits them; a reopened node loses its checkpoint", async () => {
+    let latest: TaskPlan | undefined;
+    const tool = createTaskPlanTool(plan => { latest = plan; }, [], { previous: () => latest, checkpointsRequired: () => true });
+    await run(tool, [{ ...node("a", [], "done"), checkpoint, hard: true }, { ...node("i", ["a"], "pending"), phase: "integrate" }]);
+    await run(tool, [node("a", [], "done"), node("i", ["a"], "running")]);
+    expect(latest!.nodes).toMatchObject([{ id: "a", hard: true, checkpoint }, { id: "i", phase: "integrate" }]);
+    await run(tool, [node("a", [], "running"), node("i", ["a"], "pending")]);
+    expect(latest!.nodes[0]!.checkpoint).toBeUndefined();
+    expect(latest!.nodes[0]!.hard).toBe(true);
+  });
+  it("renders phase tags and checkpoints, appends the policy's lines and reports a rejected call", async () => {
+    let rejected = "";
+    const tool = createTaskPlanTool(() => ["Thinking: the next requests run at medium"], [], { onInvalid: error => { rejected = error; } });
+    const text = textOf(await run(tool, [{ ...node("a", [], "done"), checkpoint: { ...checkpoint, open: "locale?" } }, { ...node("b", ["a"], "running"), hard: true }, { ...node("i", ["b"]), phase: "integrate" }]));
+    expect(text).toBe([
+      "a [done] Work a (R1)",
+      "    checkpoint (passed): greeting fixed [greeting.txt:1; cat greeting.txt → hello] open: locale?",
+      "b [running] {hard} Work b (R1) <- a",
+      "i [pending] {integrate} Work i (R1) <- b",
+      "Next ready: none",
+      "Thinking: the next requests run at medium",
+    ].join("\n"));
+    await run(tool, [node("x", ["missing"])]);
+    expect(rejected).toMatch(/unknown missing/);
+  });
+});

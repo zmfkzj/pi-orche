@@ -4,6 +4,7 @@
  * not. Generalizes `runAdvisorSession` (src/advisor/session.ts): any report schema, an invalid report is sent back to the model to
  * repair instead of ending the call, and usage is returned for the caller's record.
  */
+import type { LengthRecoveryOptions } from "../pi/length-recovery.js";
 import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { formatSchemaErrors } from "../orchestration/schema-errors.js";
@@ -47,6 +48,8 @@ export interface SpecialistRun<S extends TSchema> {
   sessionFile?: string;
   /** Effective main window when the route inherits the main model with extended context. */
   inheritedContextWindow?: number;
+  /** Output-limit recovery options of the session (src/pi/length-recovery.ts); its defaults without. */
+  lengthRecovery?: LengthRecoveryOptions;
   /** Every tool the specialist starts (progress lines). */
   onTool?: (name: string) => void;
   /** Once the session exists: the `provider/id` and thinking level it really runs on (after Pi resolved the route and clamped the level). */
@@ -118,6 +121,7 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
       ...(run.writeFileGuard ? { writeFileGuard: run.writeFileGuard } : {}),
       ...(run.sessionFile ? { sessionFile: run.sessionFile } : {}),
       ...(run.inheritedContextWindow ? { inheritedContextWindow: run.inheritedContextWindow } : {}),
+      ...(run.lengthRecovery ? { lengthRecovery: run.lengthRecovery } : {}),
     }).then(created => {
       if (controller.signal.aborted) { created.dispose(); throw controller.signal.reason; }
       return created;
