@@ -52,6 +52,8 @@
 
 ### Fixed
 
+- Worker runtimes inherit the main session's native/legacy provider registrations, including OAuth and streaming wrappers, before dispatch. Previously a built-in provider could still resolve while silently missing a host extension's request handling. `orche_task`, `orche_spawn` and SDK compaction share the inherited runtime; explicit worker providers keep precedence. Updates/removals sync at assignment boundaries without reloading extensions or copying credentials. Offline regressions cover Anthropic overrides, compaction and nested workers; no claim is made about live Anthropic billing/usage.
+
 - Single-workflow review fixes: historical/superseded compaction essentials and explicit reused-assignment precedence; assignment-local plan reset, bounded DAG validation (1–60 nodes, title ≤200, note ≤500, 64 KiB payload, one running node), request-local coverage validation/warnings and a visible missing-plan note without rejecting reports.
 - Checklist ids now come only from requirement declaration lines outside case-insensitive original-request header variants; incidental prose/path ids do not require a checklist. Answer rejection hints use the registered answer schema. Unmet streaks are per worker and reset on met/omitted/renamed/revised requirements or failed assignments.
 - Task DAG tools and 50% auto-compaction now apply only to standard single-workflow roles, not game-asset/video specialists. An absent main model warns and keeps a reused worker's current model/thinking, or uses routes on spawn. Auto's prose defaults changes to single without phase splitting or stopping for size/risk; single-workflow results no longer add a four-file size note, while blocked/failed-verification notes keep concrete same-worker reasons.

@@ -5,7 +5,7 @@
  * executeTool() is execute() as a tool result, with such a failure returned as an isError result that keeps the details.
  * formatWorkers(), stop(id|"all") and roster() implement the pool slash commands. */
 import { Type, type Static } from "@sinclair/typebox";
-import { getAgentDir, type AgentToolResult, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type AgentToolResult, type ExtensionFactory, type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -27,6 +27,7 @@ import { WORKER_TOOL_NAMES } from "../tools/index.js";
 import { DEFAULT_LIVENESS_WINDOW_MS, KNOWN_TOOL_TIMEOUTS_MS, mergeLiveness, type Liveness, type SessionLiveness } from "../agent/liveness.js";
 import { createGenerateImageTool } from "../tools/generate-image.js";
 import { loadProviderExtensions, type ProviderExtensionHost } from "../pi/provider-extensions.js";
+import { InheritedProviders } from "../pi/inherit-providers.js";
 import { ensureBundledImageProvider } from "../pi/register-bundled-image-provider.js";
 import { describeSource, discoverOrcheConfig, NoRouteError } from "./config.js";
 import { OrcheController, recordsIgnorePaths, routesSummary, withConcurrentWarning, withRecordLine, type OrcheRunArgs } from "./controller.js";
@@ -63,7 +64,7 @@ export const orcheTaskParameters = Type.Object({
 export type TaskParameters = Static<typeof orcheTaskParameters>;
 export type TaskRole = TaskParameters["role"];
 // Extension-supplied effective mode; omitted SDK callers retain legacy routing/instructions.
-type TaskArgs = Omit<OrcheRunArgs, "model"> & TaskParameters & { mainMode?: MainMode; model?: { provider: string; id: string; contextWindow?: number } };
+type TaskArgs = Omit<OrcheRunArgs, "model"> & TaskParameters & { mainMode?: MainMode; model?: { provider: string; id: string; contextWindow?: number }; modelRegistry?: ModelRegistry };
 /** A change the worker is not credited with, and why. */
 export type OtherChange = WorkspaceChange & { reason: string };
 /** HEAD of the task cwd's repository moved during the task (`from` absent: unborn branch; `branch` absent: detached). */
@@ -584,6 +585,7 @@ export class WorkerPool {
   private manager?: AgentManager;
   private readonly workers = new Map<string, Worker>();
   private readonly providers = new Map<string, ProviderExtensionHost>();
+  private readonly inheritedProviders = new InheritedProviders();
   private nextId = 1;
   /** Task ledgers by task id (single workflow with `single.ledger`), including tasks whose worker is gone. */
   private readonly ledgers = new Map<string, TaskLedger>();
@@ -837,6 +839,9 @@ export class WorkerPool {
     const runtime = await this.options.controller.modelRuntime(startupSignal);
     if (this.disposed) throw new Error("Worker pool is disposed");
     signal.throwIfAborted();
+    // All workers, spawned sub-workers and compaction share this provider-aware runtime.
+    // Inherit before explicit providerExtensions, which remain the worker-specific override.
+    if (args.modelRegistry) this.inheritedProviders.sync(runtime, args.modelRegistry);
 
     if (config.routes.providerExtensions?.length) {
       const key = JSON.stringify(config.routes.providerExtensions);
@@ -910,7 +915,7 @@ export class WorkerPool {
       ? "Warning: main model is absent; keeping this worker's current model and thinking."
       : `Warning: main model is absent; using configured route ${route.model}.`);
     if (config.source.kind === "session" && args.model && !runtime.getModel(args.model.provider, args.model.id)) throw new NoRouteError(
-      `The session model ${sessionModel} cannot be resolved by orche's own model runtime (it does not see providers that other Pi extensions register, nor in-memory credentials). Route orche explicitly in ${args.cwd}/.pi/orche.config.json, and list the provider's Pi package in "providerExtensions" if the provider comes from an extension (see docs/pi-package.md).`,
+      `The session model ${sessionModel} cannot be resolved by orche's model runtime. Route orche explicitly in ${args.cwd}/.pi/orche.config.json, or list a worker-only provider's Pi package in "providerExtensions" (see docs/pi-package.md).`,
     );
     if (worker && inheritMain && (configured || args.model || !this.manager.session(worker.id).model)) {
       const session = this.manager.session(worker.id);

@@ -268,9 +268,11 @@ The orchestrated deadline covers runtime/provider/session startup, phases, owned
 
 ### Models, auth and providers that extensions register
 
-Orche runs use **their own `ModelRuntime`** (created lazily, once per Pi session, with `ModelRuntime.create()`): Pi's public, file-backed runtime, so the same `~/.pi/agent` credentials with Pi's own locking and refresh, exactly like the standalone CLI. Orche does not reach into the session's model registry (no private API).
+Orche workers use **their own `ModelRuntime`** (created lazily with `ModelRuntime.create()`), with file-backed credentials and Pi's locking/refresh. Before each `orche_task`, the Pi extension carries the main session's **registered native and legacy provider definitions** into that runtime via public registry APIs. This includes OAuth configuration and `streamSimple` wrappers, not just model metadata. Nothing is loaded twice and no private registry fields or global compat registry are used.
 
-That runtime knows Pi's built-in providers and `models.json`, but not providers that **another Pi extension registers into your session** (for example a gateway package such as `@router-for-me/pi-cliproxyapi-provider`). To use those, list the extension's Pi package in the config:
+All worker sessions, `orche_spawn` sub-workers, specialists and compaction keep the SDK's provider-aware runtime path. Host registration updates/removals are synchronized at assignment boundaries. Explicit worker registrations (including `providerExtensions`) take precedence and are not removed by inheritance. This is registration inheritance, **not** inheritance of main-session event hooks or runtime-only credentials; file-backed credentials must still be available. SDK callers can supply `modelRegistry` to `WorkerPool.execute`, or disable automatic inheritance in `createOrcheExtension({ inheritProviders: false })` when intentionally using an isolated runtime.
+
+`providerExtensions` is still available for worker-only providers and SDK callers without a host registry. For example:
 
 ```json
 {
@@ -285,7 +287,7 @@ How it works (Pi's public resource-loading and session APIs only): each source m
 Consequences:
 
 - All extension files the package declares are loaded into that hidden session (package granularity), so its own hooks/commands exist there but not in your session.
-- Providers registered by an extension you did **not** list, and credentials that live only in memory, are not visible to orche runs.
+- Host-registered provider definitions are inherited automatically by the Pi extension. Providers not registered in the host still need `providerExtensions`; credentials that live only in the host runtime are not copied.
 - If a route names a model that does not resolve, the run fails with `Unknown model: <provider>/<id>`. If no orche config exists and the session's current model cannot be resolved (rule 3), the run fails with a message naming `.pi/orche.config.json` and `providerExtensions`.
 
 ### Extended context (`extendedContext`)
@@ -330,5 +332,7 @@ Covered by automated tests with faux providers and real `AgentSession`s:
 - `test/extension/task.test.ts`: `orche_task` registration, spawn/result/roster and context delivery; session reuse across roles with stale workspace context; implement ownership before writes and changed-file audit; read-only role enforcement and ignored `files`; unsupported globs; unknown/disposed ids with live-worker lists; LRU eviction at cap 3 and monotonic ids; injectable idle TTL; context-full retirement (text/details, removal from the roster/pool, and retired-id reuse error with the live-worker list); mutual exclusion with multi; `/orche cancel` during a task leaving its worker reusable; tool abort signals and running-worker refusal; `/orche workers`/`/orche stop` including malformed stop; idempotent `session_shutdown` disposal; the multi nudge for blocked/failed verification and its absence for successful verification/exploration.
 - `test/extension/task-context-clearing.test.ts` and `test/pi/context-projection.test.ts`: real-provider-request projection, assignment-local byte stability, monotonic thresholds, reasoning/signature removal, recoverable artifact paths, full raw persistence, dynamic disable/re-enable, unchanged multi sessions, pairing and observability.
 - `test/extension/extension.test.ts`: tool exposure and spill; `/orche direct` as a main-session turn and compatible busy follow-up; usage errors that start nothing, `/orche cancel` while idle and strict command parsing (removed `multi`/`auto` tokens are usage errors).
+
+- `test/pi/inherit-providers.test.ts`: host Anthropic stream override used by real SDK turns and compaction, native provider inheritance, registration updates/removals, explicit worker override precedence and main → orche_task → orche_spawn propagation across separate runtimes.
 
 These are deterministic regressions, not live-model verification of the new delegation modes or single-worker pool. The interactive terminal UI (status line, widget, message rendering) has not been driven by automation.

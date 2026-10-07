@@ -96,6 +96,8 @@ export function parseOrcheCommand(args: string): OrcheCommand | undefined {
 export interface OrcheExtensionOptions extends OrcheControllerOptions {
   /** Idle worker retirement timeout, injectable for tests. */
   workerIdleTtlMs?: number;
+  /** Disable only when an embedding intentionally owns an isolated worker provider setup. Default true. */
+  inheritProviders?: boolean;
 }
 /** Build the extension; options provide config/runtime/run and idle-timeout test seams. */
 export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
@@ -347,6 +349,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           mainMode: state.effective,
           cwd: ctx.cwd,
           model: ctx.model,
+          ...(options.inheritProviders !== false ? { modelRegistry: ctx.modelRegistry } : {}),
           thinking: pi.getThinkingLevel(),
           projectTrusted: ctx.isProjectTrusted(),
           signal,

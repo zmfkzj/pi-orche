@@ -79,7 +79,8 @@ export async function createHarness(options: {
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
   const resourceLoader = new DefaultResourceLoader({
     cwd, agentDir, settingsManager, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-    extensionFactories: [createOrcheExtension({ agentDir, createRuntime: async () => options.inheritMainModel || options.writeUserConfig === false ? main.runtime : orche.runtime, ...options.extension })],
+    // Most fixtures deliberately keep main/worker scripts isolated; inheritance regressions opt in.
+    extensionFactories: [createOrcheExtension({ agentDir, inheritProviders: false, createRuntime: async () => options.inheritMainModel || options.writeUserConfig === false ? main.runtime : orche.runtime, ...options.extension })],
   });
   await resourceLoader.reload();
   const model = main.runtime.getModel(main.faux.provider.id, main.faux.getModel().id)!;
