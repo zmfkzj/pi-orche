@@ -353,7 +353,7 @@ describe("orche_task persistent session workers", () => {
     expect(h.notifications.at(-1)?.message).toBe("no workers");
     await h.session.prompt("first");
     await h.session.prompt("/orche workers");
-    expect(h.notifications.at(-1)?.message).toContain("W1 idle · explore · 1 assignments · last: Evidence found · idle 0m");
+    expect(h.notifications.at(-1)?.message).toMatch(/W1 idle · explore · [^ ]+\/[^ ]+ · thinking off · 1 assignments · last: Evidence found · idle 0m/);
     await h.session.prompt("/orche stop");
     expect(h.notifications.at(-1)?.message).toBe(ORCHE_USAGE);
     await h.session.prompt("/orche stop W99");
@@ -453,7 +453,7 @@ describe("orche_task persistent session workers", () => {
       for (const lines of shown) {
         expect(lines).toHaveLength(2);
         expect(lines[0]).toBe(warning);
-        expect(lines[1]).toMatch(/^W1 implement · \d+ requests/);
+        expect(lines[1]).toMatch(/^W1 implement · [^ ]+\/[^ ]+ · thinking off · \d+ requests/);
       }
       expect(updates.at(-1)).toEqual([]);
     });

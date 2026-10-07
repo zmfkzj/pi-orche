@@ -195,7 +195,7 @@ describe("(j) orche_task: extensions are reported in progress, result, details a
     expect(extensionLines(lines)[0]).toMatch(/^⏱ timeout extended 1\/3 \(\+1s\): W1 request in flight \d+s, no output yet$/);
     const withExtension = lines.filter(update => update.some(line => line.startsWith("⏱")));
     expect(withExtension.length).toBeGreaterThan(0);
-    for (const update of withExtension) expect(update.at(-1)).toMatch(/^W1 explore · \d+ requests/);
+    for (const update of withExtension) expect(update.at(-1)).toMatch(/^W1 explore · [^ ]+\/[^ ]+ · thinking off · \d+ requests/);
     expect(lines.at(-1)).toEqual([]); // the final clear still happens
 
     // Result text and details.

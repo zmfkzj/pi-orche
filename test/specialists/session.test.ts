@@ -7,11 +7,12 @@ import { fauxRuntime } from "../helpers/faux.js";
 const tool = (name: string, args: Record<string, unknown>) => reply([call(name, args as never)], { stopReason: "toolUse" });
 const report = { name: "report_answer", label: "Report answer", description: "Submit once.", parameters: Type.Object({ answer: Type.Integer({ minimum: 0 }) }), check: (value: { answer: number }) => value.answer === 13 ? "13 is unlucky." : undefined };
 
-async function run(steps: Parameters<typeof fauxRuntime>[0], options: { maxTurns?: number; signal?: AbortSignal } = {}) {
+async function run(steps: Parameters<typeof fauxRuntime>[0], options: { maxTurns?: number; signal?: AbortSignal; onSession?: (use: { model: string; thinking?: string }) => void } = {}) {
   const faux = await fauxRuntime(steps);
   return runSpecialistSession({
     actor: "framer:W1", route: faux.route, runtime: faux.runtime, cwd: process.cwd(), instructions: "Answer.", prompt: "What is 6 * 7?",
     tools: ["ls"], report, maxTurns: options.maxTurns ?? 5, timeoutMs: 30_000, signal: options.signal ?? new AbortController().signal,
+    ...(options.onSession ? { onSession: options.onSession } : {}),
   });
 }
 
@@ -21,6 +22,21 @@ describe("specialist session", () => {
     expect(result.value).toEqual({ answer: 42 });
     expect(result.stats).toMatchObject({ actor: "framer:W1", requests: 3 });
     expect(Object.values(result.stats.models)).toEqual([3]);
+  });
+
+  it("reports the model and thinking level its session really runs on, once it exists, and records them in the stats", async () => {
+    const seen: { model: string; thinking?: string }[] = [];
+    const result = await run([tool("report_answer", { answer: 42 })], { onSession: use => seen.push(use) });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.model).toMatch(/^[^/]+\/[^/]+$/);
+    expect(result.stats).toMatchObject({ model: seen[0]!.model, ...(seen[0]!.thinking ? { thinking: seen[0]!.thinking } : {}) });
+    expect(Object.keys(result.stats.models)).toEqual([seen[0]!.model]);
+    // Never called when the session never started.
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled"));
+    const none: unknown[] = [];
+    await run([tool("report_answer", { answer: 42 })], { signal: controller.signal, onSession: use => none.push(use) }).catch(() => undefined);
+    expect(none).toEqual([]);
   });
 
   it("fails when the model ends without a report, or keeps going past its turn cap", async () => {

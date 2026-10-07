@@ -48,6 +48,8 @@ export interface SpecialistRun<S extends TSchema> {
   inheritedContextWindow?: number;
   /** Every tool the specialist starts (progress lines). */
   onTool?: (name: string) => void;
+  /** Once the session exists: the `provider/id` and thinking level it really runs on (after Pi resolved the route and clamped the level). */
+  onSession?: (use: { model: string; thinking?: string }) => void;
 }
 export interface SpecialistStats {
   actor: string;
@@ -121,8 +123,10 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
     });
     session = await abortable(creation, controller.signal);
     if (session.sessionFile) stats.sessionFile = session.sessionFile;
-    // The level the session really runs on: Pi clamps the route's thinking to the model (a non-reasoning model runs off).
+    // The model and level the session really runs on: Pi clamps the route's thinking to the model (a non-reasoning model runs off).
+    if (session.model) stats.model = `${session.model.provider}/${session.model.id}`;
     if (session.thinkingLevel) stats.thinking = session.thinkingLevel;
+    run.onSession?.({ model: stats.model, ...(stats.thinking ? { thinking: stats.thinking } : {}) });
     const active = session;
     const stop = () => { void active.abort().catch(() => undefined); };
     controller.signal.addEventListener("abort", stop, { once: true });

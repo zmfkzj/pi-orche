@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { VARIANTS } from "../../experiments/judgment/variants.js";
 import { VARIANTS_V2 } from "../../experiments/judgment/variants-v2.js";
 import { MAX_SUB_WORKERS, orchestratorSection, SPLIT_JUDGMENT, splitError } from "../../src/orchestrator/instructions.js";
-import { createSpawnTool, DEPTH_LIMIT_MESSAGE, executeSpawn, planSpawn, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnParameters, type SubWorkerOutcome } from "../../src/orchestrator/spawn.js";
+import { createSpawnTool, DEPTH_LIMIT_MESSAGE, executeSpawn, outcomeModelUse, planSpawn, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnParameters, type SubWorkerOutcome } from "../../src/orchestrator/spawn.js";
 import { createSubWorkerRunner, subWorkerGuard } from "../../src/orchestrator/sub-worker.js";
 
 const roots: string[] = [];
@@ -162,6 +162,28 @@ describe("isolation and model routes", () => {
     expect(answer!.model).toBe("main/orchestrator-model");
     // No such models in the fake runtime: each outcome is a failure, never a thrown error.
     expect([asset!.status, answer!.status]).toEqual(["failed", "failed"]);
+    // Their sessions never started: the route is kept for the record, but they are shown as unknown, not as running on it.
+    expect([asset!.notStarted, answer!.notStarted]).toEqual([true, true]);
+    expect(outcomeModelUse(answer!)).toBe("model unknown · thinking unknown");
+  });
+  it("shows each sub-worker's model and thinking in the progress lines once its session exists, and in the report", async () => {
+    const progress: string[][] = [];
+    const result = await executeSpawn(context({
+      onProgress: lines => progress.push(lines),
+      runWorker: async (worker, _siblings, _signal, onTool, onModel) => {
+        onModel?.({ model: "p/m", thinking: "medium" });
+        onTool("read");
+        return outcome(worker, { thinking: "medium", models: { "p/m": 2, "p/fallback": 1 } });
+      },
+    }), { reason: "verification", workers: [{ name: "v", role: "verify", request: "Check it" }] }, undefined);
+    const id = result.details.workers[0]!.id;
+    expect(progress.map(lines => lines[0])).toEqual([
+      `W1 → ${id} v (verify): starting`,
+      `W1 → ${id} v (verify · p/m · thinking medium): starting`,
+      `W1 → ${id} v (verify · p/m · thinking medium): last tool read`,
+      `W1 → ${id} v (verify · p/m ×2, p/fallback ×1 · thinking medium): passed`,
+    ]);
+    expect(result.text).toContain(`${id} v (verify, 0s, 1 requests; p/m ×2, p/fallback ×1 · thinking medium): passed`);
   });
 });
 

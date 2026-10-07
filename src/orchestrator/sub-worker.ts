@@ -75,20 +75,22 @@ export function subWorkerGuard(worker: PlannedWorker, siblings: readonly Planned
 }
 
 export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
-  return async (worker, siblings, signal, onTool) => {
+  return async (worker, siblings, signal, onTool, onModel) => {
     const specialist = worker.role === "game-asset" || worker.role === "video";
     const route = specialist ? env.specialistRoute(worker.role as "game-asset" | "video") : env.route;
     const image = specialist ? env.imageTool?.() : undefined;
     const guard = subWorkerGuard(worker, siblings, env.cwd);
     const sessionFile = env.sessionFile?.(worker.id);
     const base = { id: worker.id, name: worker.name, role: worker.role, reason: worker.reason, ...(worker.files ? { files: [...worker.files] } : {}), changes: [] as string[], modelSource: specialist ? "route" as const : env.routeSource, thinkingSource: specialist ? "route" as const : env.thinkingSource };
-    const fromStats = (stats: SpecialistStats) => ({ model: stats.model, ...(stats.thinking ? { thinking: stats.thinking } : {}), requests: stats.requests, models: { ...stats.models }, startedAt: stats.startedAt, durationMs: stats.durationMs, costUSD: stats.usage.cost, ...(stats.sessionFile ? { sessionFile: stats.sessionFile } : {}) });
+    let started = false;
+    const fromStats = (stats: SpecialistStats) => ({ model: stats.model, ...(stats.thinking ? { thinking: stats.thinking } : {}), ...(started ? {} : { notStarted: true as const }), requests: stats.requests, models: { ...stats.models }, startedAt: stats.startedAt, durationMs: stats.durationMs, costUSD: stats.usage.cost, ...(stats.sessionFile ? { sessionFile: stats.sessionFile } : {}) });
     try {
       const { value, stats } = await runSpecialistSession({
         actor: worker.id, route, runtime: env.runtime, cwd: env.cwd, instructions: SUB_WORKER_INSTRUCTIONS, prompt: env.prompt(worker, !!image),
         tools: [...WORKER_TOOL_NAMES, ...(image ? [image.name] : [])], ...(image ? { customTools: [image] } : {}), report: reportFor(worker.role),
         toolGuard: guard, writeFileGuard: (file, abort) => abort?.aborted ? "cancelled" : guard("ast_rewrite", { path: file }),
         maxTurns: env.maxTurns, timeoutMs: env.timeoutMs, signal, nudges: 1, onTool,
+        onSession: use => { started = true; onModel?.(use); },
         ...(sessionFile ? { sessionFile } : {}), ...(!specialist && env.inheritedContextWindow ? { inheritedContextWindow: env.inheritedContextWindow } : {}),
       });
       const report = value as Report;
@@ -98,7 +100,7 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
       const cancelled = error instanceof SpecialistError ? error.cancelled : signal.aborted;
       return {
         ...base, status: cancelled ? "cancelled" : "failed", summary: "", error: error instanceof Error ? error.message : String(error),
-        ...(stats ? fromStats(stats) : { model: route.model, ...(route.thinking ? { thinking: route.thinking } : {}), requests: 0, models: {}, startedAt: Date.now(), durationMs: 0, costUSD: 0 }),
+        ...(stats ? fromStats(stats) : { model: route.model, ...(route.thinking ? { thinking: route.thinking } : {}), ...(started ? {} : { notStarted: true as const }), requests: 0, models: {}, startedAt: Date.now(), durationMs: 0, costUSD: 0 }),
       } satisfies SubWorkerOutcome;
     }
   };

@@ -16,6 +16,7 @@ import { ownsPath, WRITING_KINDS } from "../orchestration/ownership.js";
 import type { SubWorkerModelSource, SubWorkerThinkingSource } from "../orchestration/routing.js";
 import type { WorkspaceChange } from "../orchestration/workspace.js";
 import { MAX_SUB_WORKERS } from "./instructions.js";
+import { formatModelUse } from "../orchestration/model-use.js";
 
 export const SPAWN_TOOL = "orche_spawn";
 export const SPAWN_REASONS = ["parallelism", "isolation", "verification"] as const;
@@ -96,8 +97,12 @@ export interface SubWorkerOutcome {
   data?: unknown;
   error?: string;
   files?: string[];
+  /** `provider/id` of the sub-worker's session (the route's while {@link SubWorkerOutcome.notStarted}). */
   model: string;
+  /** The thinking level the session ran on, after Pi's clamp (the route's while {@link SubWorkerOutcome.notStarted}). */
   thinking?: string;
+  /** The session never started: `model` and `thinking` are only what it was routed to, and it is shown as unknown. */
+  notStarted?: true;
   /** Where the model came from (SubWorkerModelSource): `models.worker`'s model or main's named by it, the orchestrator's, or a route. */
   modelSource: SubWorkerModelSource;
   /** Where `thinking` came from (SubWorkerThinkingSource); `thinking` is the level the session ran on, after Pi's clamp. */
@@ -112,7 +117,12 @@ export interface SubWorkerOutcome {
   changes: string[];
 }
 
-export type RunSubWorker = (worker: PlannedWorker, siblings: readonly PlannedWorker[], signal: AbortSignal, onTool: (name: string) => void) => Promise<SubWorkerOutcome>;
+/** `provider/id · thinking high` of one sub-worker as it ran (see model-use.ts); unknown when its session never started. */
+export const outcomeModelUse = (outcome: Pick<SubWorkerOutcome, "model" | "thinking" | "models" | "notStarted">): string =>
+  formatModelUse(outcome.notStarted ? {} : { model: outcome.model, thinking: outcome.thinking, answered: outcome.models });
+
+/** `onModel`: once the sub-worker's session exists, the model and thinking level it really runs on (the live progress lines show them). */
+export type RunSubWorker = (worker: PlannedWorker, siblings: readonly PlannedWorker[], signal: AbortSignal, onTool: (name: string) => void, onModel?: (use: { model: string; thinking?: string }) => void) => Promise<SubWorkerOutcome>;
 
 /** What the orchestrator's assignment provides to one orche_spawn call (src/extension/workers.ts). */
 export interface SpawnContext {
@@ -149,7 +159,7 @@ export function formatSpawn(details: SpawnDetails): string {
   const requests = details.workers.reduce((sum, worker) => sum + worker.requests, 0);
   const lines = [`orche_spawn (${details.reason}): ${details.workers.length} sub-worker${details.workers.length === 1 ? "" : "s"}, ${Math.round(details.durationMs / 1000)}s, ${requests} requests${cost ? `, $${cost.toFixed(2)}` : ""}`];
   for (const worker of details.workers) {
-    lines.push("", `${worker.id} ${worker.name} (${worker.role}, ${Math.round(worker.durationMs / 1000)}s, ${worker.requests} requests): ${worker.status}${worker.error ? ` — ${clip(worker.error, 300)}` : ""}`);
+    lines.push("", `${worker.id} ${worker.name} (${worker.role}, ${Math.round(worker.durationMs / 1000)}s, ${worker.requests} requests; ${outcomeModelUse(worker)}): ${worker.status}${worker.error ? ` — ${clip(worker.error, 300)}` : ""}`);
     if (worker.summary) lines.push(clip(worker.summary, 4_000));
     const data = dataLine(worker.data);
     if (data) lines.push(data);
@@ -168,16 +178,19 @@ export async function executeSpawn(context: SpawnContext, params: SpawnParameter
   const abort = signals.length ? AbortSignal.any(signals) : new AbortController().signal;
   const before = context.snapshot && context.diff ? await context.snapshot().catch(() => undefined) : undefined;
   const status = new Map(workers.map(worker => [worker.id, "starting"]));
+  /** What each sub-worker's session runs on, once it exists. */
+  const used = new Map<string, string>();
   let lastUpdate = 0;
   const publish = (force = false) => {
-    const lines = workers.map(worker => `${context.orchestrator} → ${worker.id} ${worker.name} (${worker.role}): ${status.get(worker.id)}`);
+    const lines = workers.map(worker => `${context.orchestrator} → ${worker.id} ${worker.name} (${worker.role}${used.has(worker.id) ? ` · ${used.get(worker.id)}` : ""}): ${status.get(worker.id)}`);
     context.onProgress?.(lines);
     // Partial tool output keeps the orchestrator "active" for its deadline while its sub-workers work (liveness counts tool output).
     if (force || Date.now() - lastUpdate >= 3_000) { lastUpdate = Date.now(); onUpdate?.(lines.join("\n")); }
   };
   publish(true);
   const outcomes = await Promise.all(workers.map(async worker => {
-    const outcome = await context.runWorker(worker, workers, abort, name => { status.set(worker.id, `last tool ${name}`); publish(); });
+    const outcome = await context.runWorker(worker, workers, abort, name => { status.set(worker.id, `last tool ${name}`); publish(); }, use => { used.set(worker.id, formatModelUse(use)); publish(true); });
+    used.set(worker.id, outcomeModelUse(outcome));
     status.set(worker.id, outcome.status);
     publish(true);
     return outcome;

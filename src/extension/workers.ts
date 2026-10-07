@@ -21,6 +21,7 @@ import { configureTaskWorkflow, enableTaskWorkflow, taskCompactionSettings, type
 import { withExtendedContext } from "../pi/extended-context.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { inheritsMain, inheritsMainThinking, resolveRoute, resolveSpecialistRoute, tierThinking, type AssignmentModelSource, type AssignmentThinkingSource, type MainMode, type ModelRoute, type SubWorkerModelSource, type SubWorkerThinkingSource } from "../orchestration/routing.js";
+import { formatModelUse } from "../orchestration/model-use.js";
 import { WorkspaceAudit, type GitlinkChange, type WorkspaceChange } from "../orchestration/workspace.js";
 import { CHANGED_WHILE_QUIET, WorkspaceActivity } from "../orchestration/run/activity.js";
 import { WORKER_TOOL_NAMES } from "../tools/index.js";
@@ -40,7 +41,7 @@ import { createAssignmentProjector, type ContextClearedStats } from "../pi/conte
 import { recordFailure, recordHandoff, recordResult, renderLedgerForWorker, renderLedgerSummary, renderResumeBriefing, startLedger, type LedgerEvent, type TaskLedger } from "../single/ledger.js";
 import { appendSplitLog } from "../orchestrator/split-log.js";
 import { ORCHESTRATOR_TEAM_LINE, orchestratorSection, SPLIT_FORMAT, splitError, splitOf, type SplitDecision } from "../orchestrator/instructions.js";
-import { createSpawnTool, scopePaths, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnReason, type SubWorkerOutcome } from "../orchestrator/spawn.js";
+import { createSpawnTool, outcomeModelUse, scopePaths, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnReason, type SubWorkerOutcome } from "../orchestrator/spawn.js";
 import { createSubWorkerRunner } from "../orchestrator/sub-worker.js";
 
 export const orcheTaskParameters = Type.Object({
@@ -82,9 +83,12 @@ export interface TaskDetails {
   worker: string;
   role: TaskRole;
   status: string;
-  /** Model route of the worker (`provider/model`), when known. */
+  /** Model of the worker's session (`provider/model`) during this assignment, when known. */
   model?: string;
+  /** The thinking level (reasoning effort) the session ran on, after Pi's clamp to the model. */
   thinking?: ThinkingLevel;
+  /** `provider/model` → responses of this assignment, as the provider answered them (absent before the first response). */
+  models?: Record<string, number>;
   checklist?: ChecklistItem[];
   /** Requirements the worker reported as ambiguous, with the reading it implemented. */
   ambiguities?: Ambiguity[];
@@ -181,6 +185,9 @@ export class TaskFailedError extends Error {
   /** `isError: true`, `content` = the message, `details` = the TaskDetails plus `failure`. */
   toolResult(): ErrorToolResult<TaskDetails, ToolFailure> { return errorToolResult(this.message, this.details, this.failure); }
 }
+/** `Model: provider/id · thinking high` of a task result (success or failure): the session's model and level, and the models that answered. */
+const modelLineOf = (details: Pick<TaskDetails, "model" | "thinking" | "models">): string =>
+  `Model: ${formatModelUse({ model: details.model, thinking: details.thinking, answered: details.models })}`;
 
 /** Raised inside executeAssignment once the worker was given its assignment and that assignment did not complete; it becomes a {@link TaskFailedError} there. */
 class WorkerFailure extends Error {
@@ -674,7 +681,7 @@ export class WorkerPool {
   formatWorkers(): string {
     return this.list().map(worker => {
       const meta = this.workers.get(worker.id)!;
-      return `${worker.id} ${worker.status} · ${meta.role} · ${worker.completedAssignments} assignments · last: ${meta.summary.slice(0, 80) || "no result yet"} · idle ${Math.floor((Date.now() - meta.lastUsed) / 60_000)}m`;
+      return `${worker.id} ${worker.status} · ${meta.role} · ${formatModelUse({ model: meta.model, thinking: meta.thinking })} · ${worker.completedAssignments} assignments · last: ${meta.summary.slice(0, 80) || "no result yet"} · idle ${Math.floor((Date.now() - meta.lastUsed) / 60_000)}m`;
     }).join("\n") || "no workers";
   }
   private async retire(id: string): Promise<void> {
@@ -1095,9 +1102,13 @@ export class WorkerPool {
       const head = split ? `Split: ${split.decision === "none" ? "none" : (split.criteria ?? []).join(" + ") || "split"} — ${split.reason.replace(/\s+/g, " ")}` : "Split: none (not reported)";
       if (!spawned.length) return [head];
       const cost = spawned.reduce((sum, outcome) => sum + outcome.costUSD, 0);
-      return [head, `Sub-workers: ${spawned.map(outcome => `${outcome.id} ${outcome.name} (${outcome.role}, ${outcome.reason}): ${outcome.status}`).join("; ")} — ${spawned.reduce((sum, outcome) => sum + outcome.requests, 0)} requests${cost ? `, $${cost.toFixed(2)}` : ""}`, ...spawnWarnings.map(warning => `Warning (orche_spawn): ${warning}`)];
+      return [head, `Sub-workers: ${spawned.map(outcome => `${outcome.id} ${outcome.name} (${outcome.role}, ${outcome.reason}; ${outcomeModelUse(outcome)}): ${outcome.status}`).join("; ")} — ${spawned.reduce((sum, outcome) => sum + outcome.requests, 0)} requests${cost ? `, $${cost.toFixed(2)}` : ""}`, ...spawnWarnings.map(warning => `Warning (orche_spawn): ${warning}`)];
     };
-    const workflowDetails = () => ({ thinking: meta.thinking, ...(meta.plan ? { plan: structuredClone(meta.plan) } : {}),
+    /** `provider/model` → responses of this assignment, from the usage events (what the provider answered, not the route). */
+    const answered: Record<string, number> = {};
+    /** The model and thinking this assignment runs on: the session's, after Pi resolved and clamped them (see model-use.ts). */
+    const modelUse = () => formatModelUse({ model: meta.model, thinking: meta.thinking, answered });
+    const workflowDetails = () => ({ thinking: meta.thinking, ...(Object.keys(answered).length ? { models: { ...answered } } : {}), ...(meta.plan ? { plan: structuredClone(meta.plan) } : {}),
       ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(meta.gui ? { gui: true as const } : {}), ...spawnedDetails() });
     let requests = 0;
     /** Provider-reported cost of this assignment's own requests (the split log); undefined while none was reported. */
@@ -1124,7 +1135,7 @@ export class WorkerPool {
     const progress = () => {
       const snapshot = this.manager!.get(meta.id);
       // The extension lines stay (they are part of how the task is going), ahead of the live status line, which stays last: the UI status shows the last line.
-      args.onProgress?.([...(warning ? [warning] : []), ...extensions.map(extension => formatExtensionProgress(extension)), `${meta.id} ${args.role} · ${requests} requests${snapshot.lastToolName ? ` · last tool: ${snapshot.lastToolName}` : ""}`], timingNow());
+      args.onProgress?.([...(warning ? [warning] : []), ...extensions.map(extension => formatExtensionProgress(extension)), `${meta.id} ${args.role} · ${modelUse()} · ${requests} requests${snapshot.lastToolName ? ` · last tool: ${snapshot.lastToolName}` : ""}`], timingNow());
     };
     const unsubscribe = this.manager.subscribe(event => {
       if (!("agentId" in event) || event.agentId !== meta.id) return;
@@ -1133,7 +1144,7 @@ export class WorkerPool {
         contextCleared = { ...event.contextCleared };
         record?.appendEvent(event);
       }
-      if (event.type === "usage") { requests++; meta.latestInput = event.input + event.cacheRead; if (event.costUSD !== undefined) ownCostUSD = (ownCostUSD ?? 0) + event.costUSD; }
+      if (event.type === "usage") { requests++; answered[event.model] = (answered[event.model] ?? 0) + 1; meta.latestInput = event.input + event.cacheRead; if (event.costUSD !== undefined) ownCostUSD = (ownCostUSD ?? 0) + event.costUSD; }
       progress();
     });
     /** The workspace and git part of a result, as of now: the worker is not running any more when this is called. */
@@ -1177,7 +1188,7 @@ export class WorkerPool {
         ...(extra.summary ? { summary: extra.summary } : {}),
         ...(extra.failure ? { failure: extra.failure } : {}),
         ...(status === "cancelled" && this.options.controller.cancelledByUser ? { cancelledByUser: true } : {}),
-        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs, model: details.model, thinking: details.thinking, modelSource, thinkingSource, checklist: details.checklist, plan: details.plan, compactions: details.compactions, warnings: details.warnings, ...(details.split ? { split: details.split } : {}) },
+        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs, model: details.model, thinking: details.thinking, ...(details.models ? { models: { ...details.models } } : {}), modelSource, thinkingSource, checklist: details.checklist, plan: details.plan, compactions: details.compactions, warnings: details.warnings, ...(details.split ? { split: details.split } : {}) },
         workspace: { changes: details.changes, otherChanges: details.otherChanges, ...(details.submodules ? { submodules: details.submodules } : {}), ...(details.headMoved ? { headMoved: details.headMoved } : {}) },
         ...(details.git ? { git: details.git } : {}),
         ...(retired.length ? { retired } : {}),
@@ -1331,7 +1342,7 @@ export class WorkerPool {
       };
       finishRecord("done", details, { summary: meta.summary });
       const planNotes = singleWorkflow && !meta.plan ? ["Note: no Task DAG recorded in this assignment."] : [];
-      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, ...modelWarnings, ...contextLine(),
+      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, ...modelWarnings, modelLineOf(details), ...contextLine(),
         ...taskLines(), "", meta.summary, ...roleData, ...checklistLines, ...splitLines(splitOf(data)), "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
         ...planNotes, ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: follow up with the same worker — ${note}`] : [])].join("\n");
       return { text: withRecordLine(text, record?.dir), details };

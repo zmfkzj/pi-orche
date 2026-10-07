@@ -393,6 +393,27 @@ describe("a finished call", () => {
     host.drawPlain();
     expect(result).toEqual(copy);
   });
+
+  describe("the model line of an orche_task error result", () => {
+    const ran = { worker: "W1", role: "implement", status: "no_result", model: "openai/gpt-5", thinking: "high", models: { "openai/gpt-5": 3 }, durationMs: 7_000 };
+    const task = () => new Host(orcheTaskRenderers, { role: "implement", request: "x" });
+    it("is drawn from the details after the message's first line and its model warnings; the content stays as it was", async () => {
+      const result = textResult("Still no report\nWarning: main model is absent; using configured route a/b.\n\nRecord: /r", ran);
+      const copy = structuredClone(result);
+      expect(task().finish(result, true).drawPlain().slice(2)).toEqual(["Still no report", "Warning: main model is absent; using configured route a/b.", "Model: openai/gpt-5 · thinking high", "", "Record: /r"]);
+      expect(result).toEqual(copy);
+    });
+    it("follows a leading concurrent-session warning like the success text, and shows several models and unknown values honestly", async () => {
+      const warned = task().finish(textResult("Warning: another pi session\n\nWorker W1 timed out after 150ms", { ...ran, models: { "openai/gpt-5": 2, "openai/gpt-5-mini": 1 } }), true);
+      expect(warned.drawPlain().slice(2)).toEqual(["Warning: another pi session", "", "Worker W1 timed out after 150ms", "Model: openai/gpt-5 ×2, openai/gpt-5-mini ×1 · thinking high"]);
+      expect(task().finish(textResult("cancelled", { worker: "W1" }), true).drawPlain().slice(1)).toEqual(["cancelled", "Model: model unknown · thinking unknown"]);
+    });
+    it("is not added to a success (its text has the line), an error before any worker ran, or another tool", async () => {
+      expect(task().finish(textResult("orche task W1 (implement, 7s, 3 requests; c)\nModel: openai/gpt-5 · thinking high", ran)).drawPlain().slice(2)).toEqual(["orche task W1 (implement, 7s, 3 requests; c)", "Model: openai/gpt-5 · thinking high"]);
+      expect(task().finish(textResult("Unknown worker W9", {}), true).drawPlain().slice(1)).toEqual(["Unknown worker W9"]);
+      expect(new Host().finish(textResult("Run failed", ran), true).drawPlain().slice(2)).toEqual(["Run failed"]);
+    });
+  });
 });
 
 describe("createOrcheRenderers", () => {

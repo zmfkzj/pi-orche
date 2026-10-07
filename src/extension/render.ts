@@ -26,6 +26,7 @@
 import { keyText, type Theme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { formatDuration } from "../agent/liveness.js";
 import type { DeadlineInfo } from "./progress.js";
+import { formatModelUse } from "../orchestration/model-use.js";
 
 type CallRenderer = NonNullable<ToolDefinition["renderCall"]>;
 type ResultRenderer = NonNullable<ToolDefinition["renderResult"]>;
@@ -344,13 +345,33 @@ const textOf = (result: { content?: unknown }): string =>
   Array.isArray(result.content) ? result.content.flatMap(part => isRecord(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : []).join("\n") : "";
 
 /**
- * The lines below the header. Running: the progress lines (newest last), collapsed to the newest {@link COLLAPSED_LINES}. Finished: the result text
- * the host would show without a renderer (its first {@link COLLAPSED_LINES} lines collapsed, all of them expanded).
+ * The `Model: …` line of a finished orche_task error result (a failed, timed-out or cancelled assignment: its text is the error message,
+ * kept as it is for the model; a successful result has the line in its text) drawn from the details of the assignment that ran (see
+ * model-use.ts). Nothing for an error without an assignment (thrown before any worker ran: no `worker` in the details) or for other tools.
  */
-function bodyLines(result: { content?: unknown; details?: unknown }, partial: boolean, expanded: boolean, theme: Theme, width: number): string[] {
+function missingModelLine(name: string, details: unknown): string | undefined {
+  if (name !== "orche_task" || !isRecord(details) || typeof details.worker !== "string") return undefined;
+  const answered = isRecord(details.models) ? Object.fromEntries(Object.entries(details.models).filter((entry): entry is [string, number] => finite(entry[1]))) : undefined;
+  return `Model: ${formatModelUse({ model: typeof details.model === "string" ? details.model : undefined, thinking: typeof details.thinking === "string" ? details.thinking : undefined, answered })}`;
+}
+
+/**
+ * The lines below the header. Running: the progress lines (newest last), collapsed to the newest {@link COLLAPSED_LINES}. Finished: the result text
+ * the host would show without a renderer (its first {@link COLLAPSED_LINES} lines collapsed, all of them expanded), with the model line of
+ * {@link missingModelLine} in an error result.
+ */
+function bodyLines(name: string, result: { content?: unknown; details?: unknown }, partial: boolean, isError: boolean, expanded: boolean, theme: Theme, width: number): string[] {
   const seen = isRecord(result.details) && Array.isArray(result.details.progress) ? result.details.progress.filter((line): line is string => typeof line === "string") : undefined;
   const source = partial && seen ? seen.map(clean) : clean(textOf(result)).split("\n");
   const logical = source.length === 1 && source[0] === "" ? [] : source;
+  const modelLine = !partial && isError ? missingModelLine(name, result.details) : undefined;
+  if (modelLine) {
+    // Where a successful result has it: after the first line of the message (behind a leading concurrent-session warning and its blank
+    // line) and the model warnings that follow it.
+    let at = Math.min(logical[1] === "" && logical.length > 2 ? 3 : 1, logical.length);
+    while (at < logical.length && logical[at]!.startsWith("Warning: ")) at++;
+    logical.splice(at, 0, clean(modelLine));
+  }
   if (!logical.length) return [];
   const hidden = expanded ? 0 : Math.max(0, logical.length - COLLAPSED_LINES);
   const shown = expanded ? logical : partial ? logical.slice(hidden) : logical.slice(0, COLLAPSED_LINES);
@@ -376,7 +397,7 @@ export function createOrcheRenderers(name: string): { renderCall: CallRenderer; 
     const state = stateOf(context) ?? {};
     observe(state, result.details);
     sync(state, context, !options.isPartial, stateOf(context) !== undefined);
-    return new Block(state, "result", width => bodyLines(result, options.isPartial, options.expanded, theme, width));
+    return new Block(state, "result", width => bodyLines(name, result, options.isPartial, context.isError, options.expanded, theme, width));
   };
   return { renderCall, renderResult };
 }

@@ -173,7 +173,10 @@ describe("orchestrator: parallel split", () => {
     ]);
     expect(result.details.spawned?.map(worker => worker.changes)).toEqual([["alpha.txt"], ["beta.txt"]]);
     expect(result.text).toContain("Split: parallelism — two independent files");
-    expect(result.text).toMatch(/Sub-workers: W1\.1 alpha \(implement, parallelism\): done; W1\.2 beta \(implement, parallelism\): done — \d+ requests/);
+    expect(result.text).toMatch(/Sub-workers: W1\.1 alpha \(implement, parallelism; main-reasoning\/big · thinking high\): done; W1\.2 beta \(implement, parallelism; main-reasoning\/big · thinking high\): done — \d+ requests/);
+    // The orchestrator's own model line, right below the result's header line (no model warning here).
+    expect(result.text.split("\n")[1]).toBe("Model: main-reasoning/big · thinking high");
+    expect(result.details.models).toEqual({ "main-reasoning/big": 2 });
     expect(result.text).not.toContain("Warning (orche_spawn)");
     // The record lists the sub-workers next to the orchestrator and logs the spawn.
     const record = result.details.record!;
@@ -231,7 +234,7 @@ describe("orchestrator: independent verification", () => {
     expect(seen.repair).toContain('data.split.decision must be \\"split\\"');
     expect(result.details.spawned?.map(worker => [worker.name, worker.role, worker.reason, worker.status])).toEqual([["check", "verify", "verification", "passed"]]);
     expect(result.text).toContain("Split: verification — the user asked for an independent review");
-    expect(result.text).toContain("W1.1 check (verify, verification): passed");
+    expect(result.text).toMatch(/W1\.1 check \(verify, verification; [^ ]+\/[^ ]+ · thinking off\): passed/);
   });
 });
 
