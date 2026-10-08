@@ -64,13 +64,16 @@ const tierSource = (tier: string, route: TierSettings) => `config models.${tier}
 /**
  * The tiers main's current thinking reaches at the next hand-off: the orchestrator unless it sets a level of its own; the worker
  * directly when it names main's thinking, else through the orchestrator when it sets no level and the orchestrator takes main's.
+ * The advisor likewise, when `single.advisor` is on (`advisor`).
  */
-export function mainThinkingReach(tiers: ModelTiers | undefined): string[] {
+export function mainThinkingReach(tiers: ModelTiers | undefined, advisor = false): string[] {
   const orchestrator = !tierThinking(tiers?.orchestrator);
-  const worker = tiers?.worker;
+  const reach = (tier: "worker" | "advisor", route: TierSettings | undefined) =>
+    inheritsMainThinking(route) ? [tier] : !tierThinking(route) && orchestrator ? [`${tier} (through the orchestrator)`] : [];
   return [
     ...(orchestrator ? ["orchestrator"] : []),
-    ...(inheritsMainThinking(worker) ? ["worker"] : !tierThinking(worker) && orchestrator ? ["worker (through the orchestrator)"] : []),
+    ...reach("worker", tiers?.worker),
+    ...(advisor ? reach("advisor", tiers?.advisor) : []),
   ];
 }
 
@@ -83,6 +86,8 @@ export interface ModelTiersView {
   path?: string;
   error?: string;
   tiers?: ModelTiers;
+  /** `single.advisor` of the config file (default off). */
+  advisor?: boolean;
   atStart: { configured?: RouteSettings; applied?: MainModelResult["applied"]; skipped?: string };
 }
 
@@ -99,15 +104,18 @@ export function formatModelTiers(view: ModelTiersView): string {
   const orchestrator = view.tiers?.orchestrator;
   const worker = view.tiers?.worker;
   const main = { ...(view.main ? { model: view.main } : {}), current, thinking: view.thinking ?? "off" };
-  const reach = mainThinkingReach(view.tiers);
+  const reach = mainThinkingReach(view.tiers, !!view.advisor);
+  const advisor = view.tiers?.advisor;
+  const orchestratorModel = orchestrator && !inheritsMain(orchestrator) ? orchestrator.model : view.main ?? "main's model";
   return [
     `orche models (${view.path ?? "no orche config file"}${view.error ? `; config error: ${view.error}` : ""}; mode ${view.mode}):`,
     `- main: ${current} — ${mainSource}`,
     `- orchestrator (orche_task explore/answer/implement/verify): ${orchestrator ? `${describe(orchestrator, "main's", main)} — ${tierSource("orchestrator", orchestrator)}` : `inherited from main (${current})`}`,
-    `- worker (orche_spawn sub-workers, the fresh verifier included): ${worker ? `${describe(worker, "the orchestrator's", main)} — ${tierSource("worker", worker)}` : `inherited from the orchestrator (${orchestrator && !inheritsMain(orchestrator) ? orchestrator.model : view.main ?? "main's model"})`}`,
+    `- worker (orche_spawn sub-workers, the fresh verifier included): ${worker ? `${describe(worker, "the orchestrator's", main)} — ${tierSource("worker", worker)}` : `inherited from the orchestrator (${orchestratorModel})`}`,
+    `- advisor (single.advisor ${view.advisor ? "on" : "off"}: one read-only plan review per orche_task explore/answer/implement/verify assignment): ${advisor ? `${describe(advisor, "the orchestrator's", main)} — ${tierSource("advisor", advisor)}` : `inherited from the orchestrator (${orchestratorModel})`}${view.advisor ? "" : "; turn it on with \"single\": { \"advisor\": true }"}`,
     ...(view.mode === "direct" ? [] : [`- main's thinking (${view.thinking ?? "off"}) reaches at each hand-off: ${reach.length ? reach.join(", ") : "no tier (each sets its own level)"}${reach.length ? "; a model that lacks the level runs the nearest one it supports (Pi's clamp; the task result and run.json record the level used)" : ""}`]),
     "- game-asset, video: their own routes (models does not apply)",
-    ...(orchestrator || worker ? ["A configured model that orche's runtime cannot resolve is replaced by the inherited one, with a warning in the task result."] : []),
+    ...(orchestrator || worker || advisor ? ["A configured model that orche's runtime cannot resolve is replaced by the inherited one, with a warning in the task result."] : []),
     ...(view.mode === "direct" ? ["Direct mode: main does the work itself; only models.main applies."] : []),
   ].join("\n");
 }

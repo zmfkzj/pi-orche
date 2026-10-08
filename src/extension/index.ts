@@ -33,7 +33,7 @@ const ACTIVATE_BUILTINS = ["grep", "find", "ls"];
  * extension-only keys (`concurrentSessions`, `records`) that the plain route parser behind `discoverMainMode` (mode.ts) rejects as unknown, which
  * made a config with `records` look invalid at session start and drop its `mainMode`.
  */
-async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup & { contextWarning?: ContextWarningSettings; spawn?: boolean; warnings?: string[]; models?: ModelTiers }> {
+async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup & { contextWarning?: ContextWarningSettings; spawn?: boolean; advisor?: boolean; warnings?: string[]; models?: ModelTiers }> {
   const candidates = [...(options.projectTrusted ? [join(options.cwd, ".pi", CONFIG_FILE)] : []), join(options.agentDir, CONFIG_FILE)];
   for (const path of candidates) {
     try { await access(path); } catch { continue; }
@@ -45,7 +45,7 @@ async function discoverConfiguredMainMode(options: { cwd: string; agentDir: stri
         const extendedContext = inheritsMain(route) ? undefined : route.extendedContext ?? routes.extendedContext;
         return [tier, { ...route, ...(extendedContext !== undefined ? { extendedContext } : {}) }];
       })) as ModelTiers : undefined;
-      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), ...(routes.legacyMainMode ? { legacyMode: routes.legacyMainMode } : {}), path, contextWarning, spawn: single.spawn, ...(warnings.length ? { warnings } : {}), ...(models ? { models } : {}) };
+      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), ...(routes.legacyMainMode ? { legacyMode: routes.legacyMainMode } : {}), path, contextWarning, spawn: single.spawn, advisor: single.advisor, ...(warnings.length ? { warnings } : {}), ...(models ? { models } : {}) };
     } catch (error) {
       return { path, error: error instanceof Error ? error.message : String(error) };
     }
@@ -375,7 +375,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
 
     // (2) Delegation, one-turn overrides and worker/session controls.
     pi.registerCommand("orche", {
-      description: "/orche single <prompt>: delegate to one worker for one turn. /orche direct <prompt>: edit directly for one turn. /orche mode [single|direct]: show/set delegation. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche splits [days]: the orchestrator's split decisions over all sessions (split rate, criteria, cost and time), optionally of the last N days. /orche models: the main, orchestrator and worker models now and where each comes from (config, inherited, Pi). /orche cancel: stop the active task. /orche detach: stop waiting for the background task (it keeps running; its result arrives as a message).",
+      description: "/orche single <prompt>: delegate to one worker for one turn. /orche direct <prompt>: edit directly for one turn. /orche mode [single|direct]: show/set delegation. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche splits [days]: the orchestrator's split decisions over all sessions (split rate, criteria, cost and time), optionally of the last N days. /orche models: the main, orchestrator, worker and advisor models now and where each comes from (config, inherited, Pi), and whether the advisor (single.advisor) is on. /orche cancel: stop the active task. /orche detach: stop waiting for the background task (it keeps running; its result arrives as a message).",
       handler: async (args, ctx: ExtensionCommandContext) => {
         const parsed = parseOrcheCommand(args);
         if (!parsed) {
@@ -418,9 +418,9 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           return;
         }
         if (parsed.mode === "models") {
-          // The three model tiers now and where each comes from (docs/orchestrator.md 12).
+          // The model tiers now and where each comes from (docs/orchestrator.md 12), with the advisor's on/off state (13).
           const found = await discoverConfiguredMainMode({ cwd: ctx.cwd, agentDir: options.agentDir ?? getAgentDir(), projectTrusted: ctx.isProjectTrusted() });
-          ctx.ui.notify(formatModelTiers({ main: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(), mode: state.effective, ...(found.path ? { path: found.path } : {}), ...(found.error ? { error: found.error } : {}), ...(found.models ? { tiers: found.models } : {}), atStart: mainModel }), "info");
+          ctx.ui.notify(formatModelTiers({ main: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(), mode: state.effective, ...(found.path ? { path: found.path } : {}), ...(found.error ? { error: found.error } : {}), ...(found.models ? { tiers: found.models } : {}), advisor: found.advisor ?? DEFAULT_SINGLE.advisor, atStart: mainModel }), "info");
           return;
         }
         if (parsed.mode === "splits") {

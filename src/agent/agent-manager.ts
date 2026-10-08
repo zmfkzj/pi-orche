@@ -584,9 +584,10 @@ export class AgentManager {
    * Inject a message from main into the assignment `agentId` is running (Pi steering: it reaches the model after the current tool
    * calls, before the next request; while no request runs it is appended to the context at once). Rejected when the worker is not
    * running an assignment, has already reported, or is being stopped: such a message would land in the next assignment, or nowhere.
-   * Grants and scope never change through a message; it is text for the model only.
+   * Grants and scope never change through a message; it is text for the model only. `options.source: "advisor"` marks the plan
+   * advisor's notes (single.advisor), and `options.content` replaces main's framing with the caller's own.
    */
-  steer(agentId: string, text: string): SteerReceipt {
+  steer(agentId: string, text: string, options: { source?: "advisor"; content?: (id: string) => string } = {}): SteerReceipt {
     const w = this.workers.get(agentId);
     const reject = (reason: string): SteerReceipt => ({ status: "rejected", agentId, reason });
     if (this.closed.signal.aborted) return reject("the worker pool is shutting down");
@@ -597,14 +598,18 @@ export class AgentManager {
     if (w.budget === "stopping" || w.budget === "final") return reject(`${agentId} is being stopped (request budget); send the message as a follow-up orche_task instead`);
     if (!text.trim()) return reject("empty message");
     const id = `M${++this.messageSerial}`;
-    const message: InjectedMessage = { id, text, queuedAt: Date.now(), status: "queued" };
+    const message: InjectedMessage = { id, text, queuedAt: Date.now(), status: "queued", ...(options.source ? { source: options.source } : {}) };
     w.injected.push(message);
     const session = w.adapter.session;
-    const content = `[Message from main while you work on this assignment · ${id}]\n${text}\n(Take it into account from now on. It refines this assignment; it does not replace it unless it says so, and it grants no new permissions.)`;
+    const content = options.content?.(id) ?? `[Message from main while you work on this assignment · ${id}]\n${text}\n(Take it into account from now on. It refines this assignment; it does not replace it unless it says so, and it grants no new permissions.)`;
     this.emit({ type: "injected_message", timestamp: Date.now(), agentId, assignmentId: assignment.id, id, status: "queued" });
     void session.sendCustomMessage({ customType: MAIN_MESSAGE_TYPE, content, display: true, details: { id, assignmentId: assignment.id } }, session.isStreaming ? { deliverAs: "steer" } : { triggerTurn: false })
       .catch(() => { if (message.status === "queued") message.status = "undelivered"; });
     return { status: "queued", id, agentId, assignmentId: assignment.id };
+  }
+  /** Copies of the messages injected into `agentId`'s current assignment, with their delivery status so far (empty when unknown). */
+  injected(agentId: string): InjectedMessage[] {
+    return (this.workers.get(agentId)?.injected ?? []).map(message => ({ ...message }));
   }
   /** Withdraw injected messages that did not reach the worker yet; they are reported `undelivered`, never carried into a later assignment. */
   private withdrawInjected(w: Worker): void {

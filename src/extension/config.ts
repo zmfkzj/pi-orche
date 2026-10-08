@@ -176,15 +176,21 @@ export function parseContextWarningConfig(value: unknown): ContextWarningSetting
  * `orche_spawn` (parallel parts with disjoint files, an isolated game-asset/video specialist, a fresh independent verifier) and
  * reports its split decision. `false` is the earlier single worker (no orche_spawn, no split decision).
  *
+ * `advisor` (default false, docs/orchestrator.md 13): a standard single-workflow assignment (explore/answer/implement/verify)
+ * also gets a fresh READ-ONLY advisor session once, at the worker's first Task DAG (or first edit): it reviews the plan against the request and the workspace and
+ * its advice is steered into the running worker as advisory text. Its model and thinking come from `models.advisor` (unset: the
+ * worker's own). Off: no advisor session, no extra request, nothing changes.
+ *
  * The keys of the removed v2 pipeline and workflow policies (`pipeline`, `frame`, `checker`, `nav`, `mainReview`, `investigation`,
  * `creation`) are ignored with a warning, whatever their value, so an old config still loads.
  */
 export interface SingleSettings {
   ledger: boolean;
   spawn: boolean;
+  advisor: boolean;
 }
-export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false, spawn: true };
-const SINGLE_KEYS = new Set(["ledger", "spawn"]);
+export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false, spawn: true, advisor: false };
+const SINGLE_KEYS = new Set(["ledger", "spawn", "advisor"]);
 /** Keys of the removed single pipeline v2, `mainReview` and workflow policies (docs/orchestrator.md 4): ignored with a warning. */
 export const LEGACY_SINGLE_KEYS: ReadonlySet<string> = new Set(["pipeline", "frame", "checker", "nav", "mainReview", "investigation", "creation"]);
 export function legacySingleWarning(keys: readonly string[]): string {
@@ -198,10 +204,12 @@ export function parseSingleConfig(value: unknown, warnings?: string[]): SingleSe
   if (Object.keys(settings).some(key => !SINGLE_KEYS.has(key) && !LEGACY_SINGLE_KEYS.has(key))) throw new RouteConfigError("config.single: unknown field");
   if (settings.ledger !== undefined && typeof settings.ledger !== "boolean") throw new RouteConfigError("config.single.ledger: expected boolean");
   if (settings.spawn !== undefined && typeof settings.spawn !== "boolean") throw new RouteConfigError("config.single.spawn: expected boolean");
+  if (settings.advisor !== undefined && typeof settings.advisor !== "boolean") throw new RouteConfigError("config.single.advisor: expected boolean");
   if (legacy.length) warnings?.push(legacySingleWarning(legacy));
   return {
     ledger: (settings.ledger as boolean | undefined) ?? DEFAULT_SINGLE.ledger,
     spawn: (settings.spawn as boolean | undefined) ?? DEFAULT_SINGLE.spawn,
+    advisor: (settings.advisor as boolean | undefined) ?? DEFAULT_SINGLE.advisor,
   };
 }
 

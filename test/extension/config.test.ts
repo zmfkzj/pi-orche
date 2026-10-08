@@ -250,12 +250,13 @@ describe("orche config discovery", () => {
     await expect(discoverOrcheConfig({ ...files, projectTrusted: false, session })).rejects.toThrow("config.taskContext");
   });
 
-  it("defaults single to {ledger:false, spawn:true} and reads it from the selected file", async () => {
-    const defaults = { ledger: false, spawn: true };
+  it("defaults single to {ledger:false, spawn:true, advisor:false} and reads it from the selected file", async () => {
+    const defaults = { ledger: false, spawn: true, advisor: false };
     expect(DEFAULT_SINGLE).toEqual(defaults);
     expect(parseSingleConfig({})).toEqual(defaults);
     expect(parseSingleConfig({ ledger: true })).toEqual({ ...defaults, ledger: true });
     expect(parseSingleConfig({ spawn: false })).toEqual({ ...defaults, spawn: false });
+    expect(parseSingleConfig({ advisor: true })).toEqual({ ...defaults, advisor: true });
     const none = await layout({});
     expect((await discoverOrcheConfig({ ...none, projectTrusted: true, session })).single).toEqual(defaults);
     const files = await layout({ user: { ...cfg("u/user"), single: { ledger: true } } });
@@ -286,21 +287,35 @@ describe("orche config discovery", () => {
   });
   it.each([{ pipeline: "v2" }, { pipeline: "v3" }, { frame: "spec" }, { checker: { gate: "always" } }, { nav: false }, { mainReview: "evidence" }, { investigation: { critic: "auto" } }, { creation: { divergence: "always", candidates: 2 } }])("ignores the removed single setting %j with a warning", async value => {
     const warnings: string[] = [];
-    expect(parseSingleConfig({ ...value, ledger: true }, warnings)).toEqual({ ledger: true, spawn: true });
+    expect(parseSingleConfig({ ...value, ledger: true }, warnings)).toEqual({ ledger: true, spawn: true, advisor: false });
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain(Object.keys(value)[0]);
     const files = await layout({ user: { ...cfg("u/user"), single: value } });
     const path = join(files.agentDir, "orche.config.json");
     const loaded = await loadOrcheConfigFile(path);
-    expect(loaded.single).toEqual({ ledger: false, spawn: true });
+    expect(loaded.single).toEqual({ ledger: false, spawn: true, advisor: false });
     expect(loaded.warnings.join("\n")).toContain(Object.keys(value)[0]);
     const found = await discoverOrcheConfig({ ...files, projectTrusted: false, session });
-    expect(found.single).toEqual({ ledger: false, spawn: true });
+    expect(found.single).toEqual({ ledger: false, spawn: true, advisor: false });
     expect(found.warnings?.join("\n")).toContain(Object.keys(value)[0]);
   });
 
   it.each([{ spawn: "yes" }, { spawn: null }])("rejects invalid single.spawn %j", value => {
     expect(() => parseSingleConfig(value)).toThrow("config.single");
+  });
+  // single.advisor (docs/orchestrator.md 13): a boolean like the other single switches; an old file without it means off.
+  it.each([{ advisor: "on" }, { advisor: null }, { advisor: 1 }])("rejects invalid single.advisor %j", value => {
+    expect(() => parseSingleConfig(value)).toThrow("config.single.advisor: expected boolean");
+  });
+  it("reads single.advisor from the selected file; a file without it (or without single) keeps the advisor off", async () => {
+    const on = await layout({ user: { ...cfg("u/user"), single: { advisor: true } } });
+    expect((await discoverOrcheConfig({ ...on, projectTrusted: false, session })).single.advisor).toBe(true);
+    const old = await layout({ user: { ...cfg("u/user"), single: { ledger: true } } });
+    expect((await discoverOrcheConfig({ ...old, projectTrusted: false, session })).single.advisor).toBe(false);
+    const bare = await layout({ user: cfg("u/user") });
+    expect((await discoverOrcheConfig({ ...bare, projectTrusted: false, session })).single.advisor).toBe(false);
+    const invalid = await layout({ user: { ...cfg("u/user"), single: { advisor: "yes" } } });
+    await expect(discoverOrcheConfig({ ...invalid, projectTrusted: false, session })).rejects.toThrow("config.single.advisor: expected boolean");
   });
 
   it.each([null, [], true, { unknown: true }, { ledger: "true" }, { ledger: 1 }, { ledger: null }])("rejects invalid single %j without fallback", async value => {

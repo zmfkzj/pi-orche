@@ -45,6 +45,8 @@ export interface InjectedMessage {
   text: string;
   queuedAt: number;
   status: "queued" | "delivered" | "late" | "undelivered";
+  /** `advisor`: the plan advisor's notes (single.advisor), not a message from main. */
+  source?: "advisor";
   deliveredAt?: number;
 }
 /** The answer to {@link AgentManager.steer}. */

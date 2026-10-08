@@ -27,10 +27,11 @@ export interface RouteConfig {
   /** `workers.explorerRoles[0]`: the route role of orche_task explore workers (default `explorer-path`). */
   readonly workers?: { readonly explorerRoles?: readonly string[] };
   /**
-   * Models of the three tiers (docs/orchestrator.md 12), each a route without a role: `main` is applied to the Pi session at its
+   * Models of the tiers (docs/orchestrator.md 12), each a route without a role: `main` is applied to the Pi session at its
    * start, `orchestrator` replaces main's model for the single workflow's standard-role workers, `worker` replaces the
-   * orchestrator's model for its sub-workers. Unset tiers inherit (main: Pi's model; orchestrator: main; worker: orchestrator).
-   * `{ "model": "main" }` (INHERIT_MAIN) in `orchestrator` or `worker` names main's current model explicitly.
+   * orchestrator's model for its sub-workers, `advisor` is the model of the plan advisor (`single.advisor`, docs/orchestrator.md 13).
+   * Unset tiers inherit (main: Pi's model; orchestrator: main; worker and advisor: the orchestrator).
+   * `{ "model": "main" }` (INHERIT_MAIN) in `orchestrator`, `worker` or `advisor` names main's current model explicitly.
    * Specialists (game-asset, video) keep their routes.
    */
   readonly models?: ModelTiers;
@@ -48,14 +49,14 @@ export interface RouteConfig {
 export const LEGACY_CONFIG_KEYS: readonly string[] = ["advisors", "audit"];
 export const LEGACY_WORKERS_KEYS: readonly string[] = ["maxWorkers", "answerAngles"];
 export function legacyConfigWarning(keys: readonly string[]): string {
-  return `config.${keys.length === 1 ? keys[0] : `{${keys.join(", ")}}`} ${keys.length === 1 ? "was" : "were"} removed with the multi-worker coordinator and ${keys.length === 1 ? "is" : "are"} ignored`;
+  return `config.${keys.length === 1 ? keys[0] : `{${keys.join(", ")}}`} ${keys.length === 1 ? "was" : "were"} removed with the multi-worker coordinator and ${keys.length === 1 ? "is" : "are"} ignored${keys.includes("advisors") ? ' (the plan advisor of worker runs is now "single": { "advisor": true } with models.advisor)' : ""}`;
 }
-export const MODEL_TIERS = ["main", "orchestrator", "worker"] as const;
+export const MODEL_TIERS = ["main", "orchestrator", "worker", "advisor"] as const;
 export type ModelTier = typeof MODEL_TIERS[number];
-/** A tier of `orchestrator` or `worker`: a route whose model and whose thinking may each be INHERIT_MAIN. */
+/** A tier of `orchestrator`, `worker` or `advisor`: a route whose model and whose thinking may each be INHERIT_MAIN. */
 export interface TierSettings { readonly model: string; readonly thinking?: ThinkingLevel | typeof INHERIT_MAIN; readonly extendedContext?: boolean }
-/** `main` is a plain route (the Pi session's own model); `orchestrator` and `worker` may name main's model or thinking. */
-export interface ModelTiers { readonly main?: RouteSettings; readonly orchestrator?: TierSettings; readonly worker?: TierSettings }
+/** `main` is a plain route (the Pi session's own model); `orchestrator`, `worker` and `advisor` may name main's model or thinking. */
+export interface ModelTiers { readonly main?: RouteSettings; readonly orchestrator?: TierSettings; readonly worker?: TierSettings; readonly advisor?: TierSettings }
 /**
  * `{ "model": "main" }` in `models.orchestrator` or `models.worker`: run on main's current model and, unless the tier sets
  * `thinking`, main's current thinking, at each hand-off (what an unset `models.orchestrator` does). A model id is always
@@ -98,7 +99,7 @@ const MAX_VERIFY_COMMANDS = 8;
 /** The former MAX_WORKERS_LIMIT bound of `workers.explorerRoles`. */
 const MAX_EXPLORER_ROLES = 8;
 /** `"main"` outside `models.orchestrator`/`models.worker` (routes, default, models.main): nothing to inherit from there. */
-const thinkingMainError = (location: string) => new RouteConfigError(`${location}.thinking: "main" (inherit main's thinking) is for models.orchestrator and models.worker; expected ${thinkingLevels.join(", ")}`);
+const thinkingMainError = (location: string) => new RouteConfigError(`${location}.thinking: "main" (inherit main's thinking) is for models.orchestrator, models.worker and models.advisor; expected ${thinkingLevels.join(", ")}`);
 function parseThinking(value: unknown, location: string): ThinkingLevel | undefined {
   if (value === INHERIT_MAIN) throw thinkingMainError(location);
   if (value !== undefined && (typeof value !== "string" || !thinkingLevels.includes(value)))
@@ -181,7 +182,7 @@ function parseImages(value: unknown): ImageSettings {
   return { model: images.model, ...(images.timeoutMs !== undefined ? { timeoutMs: images.timeoutMs as number } : {}) };
 }
 
-/** `models`: `main`, `orchestrator` and `worker`, each `{model, thinking?, extendedContext?}` validated like a route. */
+/** `models`: `main`, `orchestrator`, `worker` and `advisor`, each `{model, thinking?, extendedContext?}` validated like a route. */
 function parseModelTiers(value: unknown): ModelTiers {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.models: expected object");
   const tiers = value as Record<string, unknown>;
@@ -205,7 +206,7 @@ function parseTier(tier: ModelTier, value: unknown): TierSettings {
     const { thinking: _main, ...rest } = route!;
     return { ...parseSettings(rest, location), thinking: INHERIT_MAIN };
   }
-  if (tier === "main") throw new RouteConfigError(`${location}: "main" (inherit main's model) is for models.orchestrator and models.worker; models.main is the Pi session's own model (omit it to keep Pi's model)`);
+  if (tier === "main") throw new RouteConfigError(`${location}: "main" (inherit main's model) is for models.orchestrator, models.worker and models.advisor; models.main is the Pi session's own model (omit it to keep Pi's model)`);
   if (!route) throw new RouteConfigError(`${location}: expected route object; write { "model": "main" } to inherit main's model`);
   if (Object.keys(route).some(key => key !== "model" && key !== "thinking" && key !== "extendedContext")) throw new RouteConfigError(`${location}: unknown route field`);
   if (route.extendedContext !== undefined) throw new RouteConfigError(`${location}.extendedContext: not with model "main" (main's model is inherited with main's context window)`);

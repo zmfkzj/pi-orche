@@ -22,7 +22,7 @@ import { createTaskPlanTool, renderTaskPlan, type TaskPlan } from "../tools/task
 import { configureTaskWorkflow, enableTaskWorkflow, taskCompactionSettings, type CompactionStats } from "../pi/session-factory.js";
 import { withExtendedContext } from "../pi/extended-context.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { inheritsMain, inheritsMainThinking, resolveRoute, resolveSpecialistRoute, tierThinking, type AssignmentModelSource, type AssignmentThinkingSource, type MainMode, type ModelRoute, type SubWorkerModelSource, type SubWorkerThinkingSource } from "../orchestration/routing.js";
+import { inheritsMain, inheritsMainThinking, resolveRoute, resolveSpecialistRoute, tierThinking, type AssignmentModelSource, type AssignmentThinkingSource, type MainMode, type ModelRoute, type SubWorkerModelSource, type SubWorkerThinkingSource, type TierSettings } from "../orchestration/routing.js";
 import { formatModelUse } from "../orchestration/model-use.js";
 import { WorkspaceAudit, type GitlinkChange, type WorkspaceChange } from "../orchestration/workspace.js";
 import { CHANGED_WHILE_QUIET, WorkspaceActivity } from "../orchestration/run/activity.js";
@@ -50,6 +50,7 @@ import { clampThinkingLevel, getSupportedThinkingLevels } from "@earendil-works/
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { beginThinkingPolicy, DEFAULT_THINKING_POLICY, onTaskPlan, reportRewriteReason, requireReplan, thinkingPolicySummary, type ThinkingPolicySettings, type ThinkingPolicySummary } from "../pi/thinking-policy.js";
 import { setThinkingPhase, stepDownLevel, thinkingStateOf } from "../pi/thinking-state.js";
+import { ADVISOR_TIMEOUT_MS, advisorLines, AssignmentAdvisor, type AdvisorDetails, type AdvisorSource } from "../single/advisor.js";
 
 export const orcheTaskParameters = Type.Object({
   role: Type.Union([Type.Literal("explore"), Type.Literal("answer"), Type.Literal("implement"), Type.Literal("verify"), Type.Literal("game-asset"), Type.Literal("video")]),
@@ -184,6 +185,8 @@ export interface TaskDetails {
   thinkingPolicy?: ThinkingPolicySummary;
   /** Directories outside the workspace this assignment could write: the worker's scratch dir and any extra write roots. */
   writeRoots?: WriteRoot[];
+  /** The plan advisor of this assignment (`single.advisor`, src/single/advisor.ts): how it ended, its model and cost, its advice. */
+  advisor?: AdvisorDetails;
 }
 /** One sub-worker in a task result: what it was for, how it ended and what it cost (the full report went to the orchestrator). */
 export type SpawnedWorker = Omit<SubWorkerOutcome, "data" | "summary"> & { summary: string };
@@ -288,6 +291,8 @@ interface Worker {
   lastRecord?: string;
   /** The thinking policy of the assignment in flight (orche.config.json `thinkingPolicy`, read per task). */
   thinkingPolicy?: ThinkingPolicySettings;
+  /** The plan advisor of the assignment in flight (`single.advisor`); started by its first task_plan or edit, cleared when it ends. */
+  advisor?: AssignmentAdvisor;
 }
 
 /**
@@ -298,6 +303,8 @@ function taskPlanToolFor(worker: Worker, session: () => AgentSession) {
   return createTaskPlanTool(plan => {
     worker.plan = plan;
     worker.recordEvent?.({ type: "task_plan", timestamp: Date.now(), worker: worker.id, plan });
+    // The plan advisor (single.advisor) starts at the first accepted plan of the assignment; later plans do not restart it.
+    worker.advisor?.trigger("task_plan", plan);
     return onTaskPlan(session(), plan);
   }, () => worker.requirementIds ?? [], {
     previous: () => worker.plan,
@@ -327,6 +334,33 @@ function stepRouteThinking(runtime: { getModel(provider: string, id: string): Pa
   if (!model) return undefined;
   const baseline = clampThinkingLevel(model, route.thinking);
   return (stepDownLevel(getSupportedThinkingLevels(model), baseline) ?? baseline) as ThinkingLevel;
+}
+
+/**
+ * The route of a helper that inherits the orchestrator, by the rules of `models.worker` (docs/orchestrator.md 12), for
+ * `models.advisor`: the tier's own model (`config`) or main's model named by `"main"` (`config:main`), else the orchestrator's
+ * current route (`orchestrator`); thinking likewise (the tier's level, main's current one named by it, else the orchestrator's). A
+ * model orche's runtime cannot resolve is replaced by the orchestrator's, with a warning.
+ */
+function helperTierRoute(input: {
+  name: string; tier: TierSettings | undefined; current: ModelRoute; runtime: { getModel(provider: string, id: string): unknown };
+  sessionModel?: string; mainResolvable: boolean; mainThinking?: ThinkingLevel; extendedContext?: boolean; warnings: string[];
+}): { route: ModelRoute; source: AdvisorSource; thinkingSource: AdvisorSource } {
+  const { tier, current } = input;
+  const main = inheritsMain(tier);
+  const level = tierThinking(tier);
+  const resolvable = !tier ? false : main ? input.mainResolvable : !!input.runtime.getModel(tier.model.slice(0, tier.model.indexOf("/")), tier.model.slice(tier.model.indexOf("/") + 1));
+  if (tier && !resolvable) input.warnings.push(main
+    ? `Warning: models.${input.name} "main": ${input.sessionModel ? `main's model ${input.sessionModel} is unresolvable in orche's runtime` : "main's model is absent"}; the ${input.name} inherits the orchestrator's model instead.`
+    : `Warning: models.${input.name} ${tier.model} is unresolvable in orche's runtime; the ${input.name} inherits the orchestrator's model instead.`);
+  const source: AdvisorSource = tier && resolvable ? (main ? "config:main" : "config") : "orchestrator";
+  const thinkingSource: AdvisorSource = source === "orchestrator" ? "orchestrator" : level ? "config" : inheritsMainThinking(tier) ? "config:main" : "orchestrator";
+  const thinking = thinkingSource === "config" ? level : thinkingSource === "config:main" ? input.mainThinking ?? "off" : current.thinking;
+  const extended = tier?.extendedContext ?? input.extendedContext;
+  const route: ModelRoute = source === "config:main" ? { role: current.role, model: input.sessionModel!, thinking: thinking ?? "off", extendedContext: false }
+    : source === "config" ? { role: current.role, model: tier!.model, ...(thinking ? { thinking } : {}), ...(extended !== undefined ? { extendedContext: extended } : {}) }
+    : current;
+  return { route, source, thinkingSource };
 }
 
 function taskCompactionFor(worker: Worker) {
@@ -713,6 +747,8 @@ export class WorkerPool {
   private readonly gone = new Map<string, GoneWorker>();
   /** Records of assignments in flight: finished as `interrupted` when the pool is disposed under them. */
   private readonly inflight = new Set<RunRecord>();
+  /** Plan advisors of assignments in flight (single.advisor): stopped when the pool is disposed under them. */
+  private readonly advisors = new Set<AssignmentAdvisor>();
   private disposed = false;
   private disposal?: Promise<void>;
   constructor(private readonly options: WorkerPoolOptions) {
@@ -778,25 +814,37 @@ export class WorkerPool {
   private persist(event: LedgerEvent): void {
     try { this.options.onLedgerEvent?.(structuredClone(event)); } catch { /* persistence is best effort */ }
   }
+  /** The report checks before the advisor gate: the round check and the checklist. */
+  private reportError(worker: Worker, kind: string, data: unknown): string | undefined {
+    const round = worker.roundCheck?.(kind, data);
+    if (round) return round;
+    if (!["implement", "answer"].includes(kind)) return undefined;
+    const ids = worker.singleWorkflow ? worker.requirementIds ?? [] : [];
+    const checklistError = ids.length || (data && typeof data === "object" && "checklist" in data) ? requiredChecklistError(ids, data, kind === "implement" && ids.length > 0) : undefined;
+    return checklistError;
+  }
   private callbacks(worker: Worker): Pick<WorkerAdoptOptions, "toolGuard" | "writeFileGuard" | "onToolExecution" | "onContextWindow" | "validateResult" | "reviseResult"> {
     return {
       onContextWindow: info => { worker.contextWindow = info.contextWindow; },
       validateResult: (kind, data) => {
-        const round = worker.roundCheck?.(kind, data);
-        if (round) return round;
-        if (!["implement", "answer"].includes(kind)) return undefined;
-        const ids = worker.singleWorkflow ? worker.requirementIds ?? [] : [];
-        const checklistError = ids.length || (data && typeof data === "object" && "checklist" in data) ? requiredChecklistError(ids, data, kind === "implement" && ids.length > 0) : undefined;
-        return checklistError;
+        const error = this.reportError(worker, kind, data);
+        if (error) return error;
+        // The plan advisor's report gate (single.advisor): a report is held until the advice it got is applied or rejected.
+        try { return worker.advisor?.reportGate(data, this.manager!.injected(worker.id)); } catch { return undefined; }
       },
       // Phase thinking policy: the report is written at the baseline effort; one whose response ran below it is rewritten at it.
       reviseResult: () => { try { return reportRewriteReason(this.manager!.session(worker.id)); } catch { return undefined; } },
       toolGuard: async (name, input) => {
         if (name === "task_plan" && !worker.singleWorkflow) return "task_plan is available only for standard single-workflow task assignments.";
         if (name === SPAWN_TOOL && !worker.spawn) return SPAWN_UNAVAILABLE;
+        // The worker reports: the advisor closes for the rest of the assignment and a running one is awaited (bounded), so the
+        // report gate can hand its advice over before any result is accepted.
+        if (name === "report_result") await worker.advisor?.beforeReport();
         const blocked = await this.guard(worker, name, input);
         if (blocked) return blocked;
         await worker.activity?.enter(worker.id, name);
+        // A worker that edits before it plans starts the plan advisor at that first edit (single.advisor).
+        if (WRITE_TOOLS.has(name)) worker.advisor?.trigger("first_edit");
         return undefined;
       },
       writeFileGuard: (file, signal) => signal?.aborted ? "cancelled" : this.guard(worker, "ast_rewrite", { path: file }),
@@ -868,6 +916,8 @@ export class WorkerPool {
     // (a reload or quit used to leave run.json at status "running" forever).
     for (const record of this.inflight) record.finish({ status: "interrupted", failure: "interrupted: the pi session shut down (reload, exit or session switch) while the worker was running" });
     this.inflight.clear();
+    // Their advisor sessions stop with them (each is disposed by its own run; the assignment's finish records it as cancelled).
+    for (const advisor of this.advisors) advisor.cancel();
     for (const worker of this.workers.values()) {
       clearTimeout(worker.timer);
       this.noteGone(worker, "the pi session that owned it ended (reload, exit or session switch)");
@@ -1231,6 +1281,17 @@ export class WorkerPool {
     const standardSubRoute: ModelRoute = stepSubThinking && stepSubThinking !== subRoute.thinking ? { ...subRoute, thinking: stepSubThinking } : subRoute;
     /** Sub-workers on main's model (inherited through the orchestrator, or named by `models.worker`) get main's context window. */
     const subWindow = subSource === "config:main" || subSource === "orchestrator" && mainModel ? mainWindow : undefined;
+    // The plan advisor (single.advisor, src/single/advisor.ts): every standard single-workflow assignment (explore, answer,
+    // implement, verify) started by orche_task; never for specialists (game-asset, video), direct mode, orche_spawn sub-workers or
+    // the advisor itself. `models.advisor` follows the rules of `models.worker`: its own model and thinking, main's named by
+    // "main", otherwise the worker's current model and thinking (the assignment's baseline). Resolved here so that run.json and the
+    // result carry an unresolvable models.advisor warning.
+    const advisorOn = singleWorkflow && config.single.advisor;
+    const advisorRoute = advisorOn ? helperTierRoute({
+      name: "advisor", tier: config.routes.models?.advisor, current: { ...current, role: "advisor" }, runtime, sessionModel,
+      mainResolvable: !!args.model && !!runtime.getModel(args.model.provider, args.model.id), mainThinking: args.thinking, extendedContext: config.routes.extendedContext, warnings: modelWarnings,
+    }) : undefined;
+    const advisorWindow = advisorRoute && (advisorRoute.source === "config:main" || advisorRoute.source === "orchestrator" && mainModel) ? mainWindow : undefined;
     const definitions = requirementDefinitions(handoffRequest);
     meta.unmetStreak = new Map(singleWorkflow ? [...meta.unmetStreak ?? []].filter(([id]) => definitions.has(id) && definitions.get(id) === meta.requirementDefinitions?.get(id)) : []);
     meta.requirementDefinitions = definitions;
@@ -1283,7 +1344,7 @@ export class WorkerPool {
       manifest: {
         config: describeSource(config.source), routes: routesSummary(config.routes),
         worker: { id: meta.id, role: args.role, ...(workerFile ? { sessionFile: workerFile } : {}) },
-        assignment: { role: args.role, reusedWorker: reusedContext, model: meta.model, thinking: meta.thinking, modelSource, thinkingSource, ...(files ? { files } : {}), ...(grant ? { git: grant } : {}), ...(meta.gui ? { gui: true } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}) },
+        assignment: { role: args.role, reusedWorker: reusedContext, model: meta.model, thinking: meta.thinking, modelSource, thinkingSource, ...(files ? { files } : {}), ...(grant ? { git: grant } : {}), ...(meta.gui ? { gui: true } : {}), ...(advisorRoute ? { advisor: { model: advisorRoute.route.model, ...(advisorRoute.route.thinking ? { thinking: advisorRoute.route.thinking } : {}), modelSource: advisorRoute.source, thinkingSource: advisorRoute.thinkingSource } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}) },
         ...(concurrent ? { concurrentSessions: concurrent.activity } : {}),
         // The process that runs it: a later session start tells an orphan (that process is gone) from a record still being written.
         owner: { pid: process.pid },
@@ -1292,6 +1353,16 @@ export class WorkerPool {
     if (record) this.inflight.add(record);
     meta.lastRecord = record?.dir;
     meta.recordEvent = event => record?.appendEvent(event);
+    /** The plan advisor of this assignment (single.advisor): created right before the hand-off, settled when the assignment ends. */
+    let advisor: AssignmentAdvisor | undefined;
+    let advisorDetails: AdvisorDetails | undefined;
+    /** The advisor in the record: a `run.json` agent (with its transcript) and the `advisor` outcome. */
+    const recordAdvisor = () => {
+      if (!record || !advisorDetails || advisorDetails.status === "skipped") return;
+      const { id, model, thinking, modelSource: source, thinkingSource: levelSource, requests, models, durationMs, startedAt: at, sessionFile, error, status } = advisorDetails;
+      record.addAgent({ id, role: "advisor", kind: "advisor", model, ...(thinking ? { thinking } : {}), modelSource: source, thinkingSource: levelSource, requests, models: { ...models }, durationMs: durationMs ?? 0, startedAt: at ?? started,
+        status: status === "failed" || status === "cancelled" ? status : "completed", ...(sessionFile ? { sessionFile } : {}), ...(error ? { error } : {}) });
+    };
     /** Sub-workers in the record (`run.json` agents, their transcripts under the records' workers/), next to the orchestrator's own entry. */
     const recordSpawned = () => {
       for (const outcome of spawned) record?.addAgent({
@@ -1353,7 +1424,7 @@ export class WorkerPool {
     const progress = () => {
       const snapshot = this.manager!.get(meta.id);
       // The extension lines stay (they are part of how the task is going), ahead of the live status line, which stays last: the UI status shows the last line.
-      args.onProgress?.([...(warning ? [warning] : []), ...extensions.map(extension => formatExtensionProgress(extension)), `${meta.id} ${args.role} · ${modelUse()} · ${requests} requests${snapshot.lastToolName ? ` · last tool: ${snapshot.lastToolName}` : ""}`], timingNow());
+      args.onProgress?.([...(warning ? [warning] : []), ...extensions.map(extension => formatExtensionProgress(extension)), `${meta.id} ${args.role} · ${modelUse()} · ${requests} requests${snapshot.lastToolName ? ` · last tool: ${snapshot.lastToolName}` : ""}${advisor?.state ? ` · ${advisor.state}` : ""}`], timingNow());
     };
     const unsubscribe = this.manager.subscribe(event => {
       if (!("agentId" in event) || event.agentId !== meta.id) return;
@@ -1364,7 +1435,7 @@ export class WorkerPool {
       }
       if (event.type === "length_stop" || event.type === "injected_message" || event.type === "result_rewrite") record?.appendEvent(event);
       // New instructions from main mid-assignment: plan again at the baseline until the next accepted task_plan.
-      if (event.type === "injected_message" && event.status === "delivered") requireReplan(this.manager!.session(meta.id), "message from main");
+      if (event.type === "injected_message" && event.status === "delivered") requireReplan(this.manager!.session(meta.id), advisor?.messageId === event.id ? "advisor notes" : "message from main");
       if (event.type === "usage") { requests++; answered[event.model] = (answered[event.model] ?? 0) + 1; meta.latestInput = event.input + event.cacheRead; if (event.costUSD !== undefined) ownCostUSD = (ownCostUSD ?? 0) + event.costUSD; }
       progress();
     });
@@ -1389,23 +1460,30 @@ export class WorkerPool {
     /** TaskDetails of an assignment that did not complete. What the audit cannot read is left out: the failure matters more. */
     /** The last outcome the worker's assignment produced (its injected messages and output-limit stops), also for a failure. */
     let lastOutcome: Outcome | undefined;
-    const outcomeDetails = (): Pick<TaskDetails, "injected" | "lengthStops" | "writeRoots"> => ({
+    const outcomeDetails = (): Pick<TaskDetails, "injected" | "lengthStops" | "writeRoots" | "advisor"> => ({
       ...(lastOutcome?.injected?.length ? { injected: lastOutcome.injected.map(message => ({ ...message })) } : {}),
       ...(lastOutcome?.lengthStops ? { lengthStops: { ...lastOutcome.lengthStops } } : {}),
       ...(meta.roots?.length ? { writeRoots: meta.roots.map(root => ({ ...root })) } : {}),
+      ...(advisorDetails ? { advisor: structuredClone(advisorDetails) } : {}),
     });
-    /** Lines about the messages main injected and the output-limit stops, for the result text (success and failure alike). */
+    /** Lines about the messages main injected, the advisor and the output-limit stops, for the result text (success and failure alike). */
     const outcomeLines = (): string[] => {
       const lines: string[] = [];
-      const injected = lastOutcome?.injected ?? [];
+      // The advisor's notes travel the same channel but are not main's messages: they get their own lines below.
+      const injected = (lastOutcome?.injected ?? []).filter(message => message.source !== "advisor");
       if (injected.length) {
         const missed = injected.filter(message => message.status !== "delivered");
         lines.push(`Messages from main: ${injected.map(message => `${message.id} ${message.status}`).join(", ")}${missed.length ? ` — ${missed.map(message => message.id).join(", ")} did not shape this result (${missed.some(message => message.status === "late") ? "reached the worker after it reported" : "the assignment ended first"}); resend as a follow-up orche_task if still relevant.` : ""}`);
       }
       const stops = lastOutcome?.lengthStops;
       if (stops) lines.push(`Output limit: ${stops.count} response${stops.count === 1 ? "" : "s"} hit the model's output token limit${stops.exhausted ? " and the recovery cap was reached" : "; recovered without compaction"} (see the record's length_stop events).`);
+      lines.push(...advisorResultLines());
       return lines;
     };
+    /** The advisor's lines of the result (single.advisor): how it ended, and its notes when they arrived after the report. */
+    const advisorResultLines = (): string[] => advisorDetails
+      ? advisorLines(advisorDetails, formatModelUse({ model: advisorDetails.model, ...(advisorDetails.thinking ? { thinking: advisorDetails.thinking as ThinkingLevel } : {}), ...(advisorDetails.models ? { answered: advisorDetails.models } : {}) }))
+      : [];
     const failedDetails = async (status: string): Promise<TaskDetails> => {
       let report: ChangeReport = { changes: [], otherChanges: [] };
       let gitReport: GitReport | undefined;
@@ -1423,6 +1501,7 @@ export class WorkerPool {
       if (!record) return;
       record.addAgent(this.manager!.agentRecord(meta.id));
       recordSpawned();
+      recordAdvisor();
       record.finish({
         status,
         ...(extra.summary ? { summary: extra.summary } : {}),
@@ -1434,6 +1513,7 @@ export class WorkerPool {
         ...(retired.length ? { retired } : {}),
         ...(details.extensions ? { extensions: details.extensions } : {}), ...(details.notExtended ? { notExtended: details.notExtended } : {}),
         ...(concurrent ? { concurrentSessions: concurrent.activity } : {}),
+        ...(details.advisor ? { advisor: details.advisor } : {}),
       });
       // One line per finished assignment that outlives the records (docs/orchestrator.md 11).
       const subCosts = spawned.map(outcome => outcome.costUSD);
@@ -1512,6 +1592,22 @@ export class WorkerPool {
       ].filter(Boolean).join("\n");
       const prompt = `${assignmentPrompt({ ...args, request: handoffRequest, orchestrate: orchestrating, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant, orchestrating ? orchestratorSection() : "")}${rootsLine ? `\n${rootsLine}` : ""}`;
       const handoff = reusedContext && workflowMode ? prompt.replace(/^(Assignment[^\n]*\n)/, "$1This Assignment message supersedes earlier requirement ids and plans, including any assignment preserved at compaction time. Use only this round's requirements and Task DAG.\n") : prompt;
+      // The plan advisor (single.advisor): armed before the hand-off, started by the worker's first accepted task_plan (or first edit).
+      if (advisorRoute) {
+        const manager = this.manager;
+        const advisorFile = workerSessionFile(resolved, { ...(args.currentSession?.id ? { parentSessionId: args.currentSession.id } : {}), workerId: `${meta.id}.advisor`, spawnedAt: Date.now() });
+        advisor = new AssignmentAdvisor({
+          worker: meta.id, role: args.role, cwd: args.cwd, runtime, route: advisorRoute.route, modelSource: advisorRoute.source, thinkingSource: advisorRoute.thinkingSource,
+          // At most half the assignment's base cap: a report held for the advisor leaves the worker time to process its notes.
+          request: meta.request ?? handoffRequest, timeoutMs: Math.min(ADVISOR_TIMEOUT_MS, Math.max(1000, Math.floor(limits.assignmentMs / 2))), signal,
+          ...(advisorFile ? { sessionFile: advisorFile } : {}), ...(advisorWindow ? { inheritedContextWindow: advisorWindow } : {}),
+          deliver: (text, content) => manager.steer(meta.id, text, { source: "advisor", content }),
+          onEvent: event => record?.appendEvent(event),
+          onChange: () => progress(),
+        });
+        meta.advisor = advisor;
+        this.advisors.add(advisor);
+      }
       this.manager.assign(meta.id, args.role, prefix + handoff, { enabled: reusedContext && config.taskContext.clearBetweenAssignments, minClearTokens: config.taskContext.minClearTokens });
       assigned = true;
       try {
@@ -1543,6 +1639,8 @@ export class WorkerPool {
         if (waited.type === "timeout") {
           const why = waited.notExtended;
           if (why.message && why.reason !== "disabled") notExtended = { reason: why.reason, message: why.message };
+          // A report held for the advisor (report_result's guard awaits it) must not keep the stopping worker waiting.
+          advisor?.cancel();
           await manager.stop(meta.id); await manager.wait(meta.id, 0);
           // `overallCapMs` is the base plus the extensions it received; the first line carries why it was not extended, the rest what was extended.
           const history = formatExtensionSummary(extensions, { maxExtensions: current.maxExtensions, extensionMs: current.extensionMs });
@@ -1556,7 +1654,13 @@ export class WorkerPool {
         return { ...reported, result: reported.result };
       };
       const outcome = await waitRound(`${meta.id} ${args.role}`);
+      // The worker's report was accepted: the advisor's report gate already held it until any advice was applied or rejected (the
+      // bounded finalization in the same session). Advice still without a disposition after the gate's last prompt is no success.
+      if (advisor) advisorDetails = await advisor.finish({ reported: true, ...(lastOutcome?.injected ? { injected: lastOutcome.injected } : {}) });
       meta.summary = outcome.result.summary;
+      if (advisorDetails?.status === "unprocessed") {
+        throw new WorkerFailure(`Worker ${meta.id} did not process the advisor notes: ${advisorDetails.unprocessed}. Its report is not returned as a result; send the notes to the same worker as a follow-up orche_task if they still matter.\nWorker's report (not accepted): ${meta.summary.replace(/\s+/g, " ").slice(0, 1500)}`, "failed", "advice_unprocessed");
+      }
       const { changeReport, gitReport } = await collect();
       meta.lastUsed = Date.now();
       if (!meta.singleWorkflow && meta.contextWindow && meta.latestInput >= meta.contextWindow * 0.7) {
@@ -1617,12 +1721,17 @@ export class WorkerPool {
       if (ledger) {
         this.persist(recordFailure(ledger, { role: args.role, worker: meta.id, status: error.status, reason: failureReason(base), ...(record ? { record: record.dir } : {}) }));
       }
+      // No result: a running advisor is stopped; advice it gave that was not applied or rejected is reported as unprocessed.
+      if (advisor) advisorDetails = await advisor.finish({ reported: false, ...(lastOutcome?.injected ? { injected: lastOutcome.injected } : {}) });
       const details = await failedDetails(error.status);
       const thrown = warning ? withConcurrentWarning(error, warning) : error;
       finishRecord(error.kind === "cancelled" ? "cancelled" : "failed", details, { failure: failureReason(base) });
-      throw new TaskFailedError([thrown instanceof Error ? thrown.message : base, ...modelWarnings, ...contextLine(), ...taskLines()].join("\n"), details, { kind: error.kind, status: error.status, reason: failureReason(base) });
+      throw new TaskFailedError([thrown instanceof Error ? thrown.message : base, ...modelWarnings, ...contextLine(), ...taskLines(), ...advisorResultLines()].join("\n"), details, { kind: error.kind, status: error.status, reason: failureReason(base) });
     } finally {
       signal.removeEventListener("abort", abort);
+      // An advisor still running here (an unexpected error) is stopped and awaited: it never outlives its assignment.
+      if (advisor) { await advisor.finish({ reported: false }).catch(() => undefined); this.advisors.delete(advisor); }
+      meta.advisor = undefined;
       await stopPromise;
       // Whatever happened above, the record ends here (a no-op when the outcome was recorded already) and shows this worker's totals.
       if (record) {
