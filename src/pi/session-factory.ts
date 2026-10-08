@@ -27,6 +27,10 @@ import { ensurePrivateDir, ensurePrivateFile } from "../agent/private-files.js";
 import type { createAssignmentProjector } from "./context-projection.js";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { lengthRecoveryHandlers, type LengthRecoveryOptions } from "./length-recovery.js";
+import { outputCapHandler } from "./output-cap.js";
+import { thinkingPolicyOf } from "./thinking-policy.js";
+import { atEffectiveBaseline, thinkingStateOf } from "./thinking-state.js";
+import { BOOKKEEPING_TOOLS, evidenceLedgerOf, recordToolCall, refText } from "./tool-evidence.js";
 import { unknownToolHandler } from "./unknown-tool.js";
 export interface SessionOptions {
   route: { role: string; model: string; thinking?: ThinkingLevel; extendedContext?: boolean };
@@ -118,16 +122,28 @@ function createCompactionExtension(options: SessionOptions, getSession: () => Ag
     handlers: new Map([["session_compact", [handler as never]]]), tools: new Map(), messageRenderers: new Map(), entryRenderers: new Map(), commands: new Map(), flags: new Map(), shortcuts: new Map() };
 }
 /**
- * Worker-session hygiene that every orche session gets: output-limit recovery (length-recovery.ts) and a suggestion on Pi's bare
- * `Tool X not found` result (unknown-tool.ts). Both only observe or add text; neither re-routes a tool call.
+ * Worker-session hygiene that every orche session gets: output-limit recovery (length-recovery.ts), a suggestion on Pi's bare
+ * `Tool X not found` result (unknown-tool.ts), the explicit output budget of Claude requests through CLIProxyAPI (output-cap.ts), and
+ * the tool-call ledger behind checkpoint evidence (tool-evidence.ts: a `[orche ref Tn]` line on tool results when the assignment's
+ * thinking policy links evidence). None of them re-routes a tool call.
  */
 function createWorkerHygieneExtension(options: SessionOptions, getSession: () => AgentSession | undefined): Extension {
   const path = "<orche:worker-hygiene>";
   const length = lengthRecoveryHandlers(getSession, options.lengthRecovery);
   const unknownTool = unknownToolHandler(() => getSession()?.getActiveToolNames() ?? []);
+  const outputCap = outputCapHandler(getSession);
   const messageEnd = (event: { message: AgentMessage }) => {
     length.message_end(event as never);
     return unknownTool(event as never);
+  };
+  const toolResult = (event: { toolCallId: string; toolName: string; input?: Record<string, unknown>; isError: boolean; content: unknown[]; structuredContent?: unknown }) => {
+    const session = getSession();
+    if (!session) return undefined;
+    const thinking = thinkingStateOf(session);
+    const running = thinkingPolicyOf(session)?.plan?.nodes.find(node => node.status === "running")?.id;
+    const record = recordToolCall(session, event, { request: thinking.requestSeq, ...(thinking.requestLevel ? { level: thinking.requestLevel } : {}), atBaseline: atEffectiveBaseline(thinking, thinking.requestLevel), ...(running ? { node: running } : {}) });
+    if (!evidenceLedgerOf(session).tag || BOOKKEEPING_TOOLS.has(event.toolName)) return undefined;
+    return { content: [...event.content, { type: "text" as const, text: refText(record) }], ...(event.structuredContent !== undefined ? { structuredContent: event.structuredContent } : {}) };
   };
   return {
     path, resolvedPath: path, hidden: true,
@@ -136,6 +152,8 @@ function createWorkerHygieneExtension(options: SessionOptions, getSession: () =>
       ["message_end", [messageEnd as never]],
       ["session_before_compact", [length.session_before_compact as never]],
       ["agent_before_settle", [length.agent_before_settle as never]],
+      ["before_provider_request", [outputCap as never]],
+      ["tool_result", [toolResult as never]],
     ]),
     tools: new Map(), messageRenderers: new Map(), entryRenderers: new Map(),
     commands: new Map(), flags: new Map(), shortcuts: new Map(),

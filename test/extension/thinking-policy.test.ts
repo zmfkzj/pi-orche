@@ -75,15 +75,17 @@ describe("thinkingPolicy phase through orche_task", () => {
   it("a report written at S is discarded and rewritten at B in the next request (not a result retry); a missing checkpoint is refused at B", async () => {
     const { execute, script, seen } = await fixture("phase");
     script([
-      plan(n("a", "running")),
+      plan(n("a", "running"), n("i", "pending", { phase: "integrate" }, ["a"])),
       implemented(),
-      plan(n("a", "done")),
-      plan(n("a", "done", { checkpoint: cp })),
+      plan(n("a", "done"), n("i", "running", {}, ["a"])),
+      plan(n("a", "done", { checkpoint: cp }), n("i", "running", {}, ["a"])),
+      read(),
+      plan(n("a", "done"), n("i", "done", { checkpoint: cp }, ["a"])),
       implemented(),
     ]);
     const result = await execute();
     // Request trace: plan at B, the S report, then everything at B (the report phase): the rewrite never runs at S.
-    expect(seen.map(item => item.reasoning)).toEqual(["high", "medium", "high", "high", "high"]);
+    expect(seen.map(item => item.reasoning)).toEqual(["high", "medium", "high", "high", "high", "high", "high"]);
     expect(seen[2]!.last).toMatch(/Result not accepted yet: This report_result was written at the reduced step effort \(medium\) while node a is still running.*baseline effort \(high\), which applies from your next request\. It is not counted as a failed attempt/);
     expect(seen[3]!.last).toMatch(/Invalid checkpoints: a is marked done without a checkpoint/);
     expect(result.details).toMatchObject({ status: "done", thinkingPolicy: { reportRewrites: 1 } });
@@ -102,36 +104,41 @@ describe("thinkingPolicy phase through orche_task", () => {
     script([
       plan(n("a", "running"), n("i", "pending", { phase: "integrate" }, ["a"])),
       both,
+      read(),
       plan(n("a", "done"), n("i", "done", { phase: "integrate", checkpoint: cp }, ["a"])),
       implemented(),
     ]);
     const result = await execute();
-    expect(seen.map(item => item.reasoning)).toEqual(["high", "medium", "high", "high"]);
+    expect(seen.map(item => item.reasoning)).toEqual(["high", "medium", "high", "high", "high"]);
     expect(result.details).toMatchObject({ status: "done", thinkingPolicy: { reportRewrites: 1 } });
   });
 
   it("a message from main mid-assignment sends the worker back to B until its next plan", async () => {
     const { pool, execute, script, seen } = await fixture("phase");
     script([
-      plan(n("a", "running")),
+      plan(n("a", "running"), n("i", "pending", { phase: "integrate" }, ["a"])),
       () => { expect(pool.inject("W1", "Also keep the trailing newline.").status).toBe("queued"); return read(); },
-      plan(n("a", "running", { note: "trailing newline too" })),
-      plan(n("a", "done", { checkpoint: cp })),
+      plan(n("a", "running", { note: "trailing newline too" }), n("i", "pending", { phase: "integrate" }, ["a"])),
+      read(),
+      plan(n("a", "done", { checkpoint: cp }), n("i", "running", { phase: "integrate" }, ["a"])),
+      read(),
+      plan(n("a", "done"), n("i", "done", { phase: "integrate", checkpoint: cp }, ["a"])),
       implemented(),
     ]);
     await execute();
-    expect(seen.map(item => item.reasoning)).toEqual(["high", "medium", "high", "medium", "high"]);
+    expect(seen.map(item => item.reasoning)).toEqual(["high", "medium", "high", "medium", "medium", "high", "high", "high"]);
   });
 
   it("every assignment starts at its own B: a failed one left at S does not leak, and a new main level gives a new B and S", async () => {
     const { pool, execute, script, seen } = await fixture("phase");
-    script([plan(n("a", "running")), reply("no report"), reply("still no report")]);
+    const two = (a: string, i: string, extra: Partial<Node> = {}) => [n("a", a, a === "done" ? { checkpoint: cp } : {}), n("i", i, { phase: "integrate", ...extra }, ["a"])];
+    script([plan(...two("running", "pending")), reply("no report"), reply("still no report")]);
     expect(await execute().catch((error: unknown) => error)).toBeInstanceOf(TaskFailedError);
     expect(pool.session("W1").thinkingLevel).toBe("high");
-    script([plan(n("a", "running")), plan(n("a", "done", { checkpoint: cp })), implemented()]);
+    script([plan(...two("running", "pending")), plan(...two("done", "running")), read(), plan(...two("done", "done", { checkpoint: cp })), implemented()]);
     seen.length = 0;
     await execute({ worker: "W1", thinking: "medium" });
-    expect(seen.map(item => item.reasoning)).toEqual(["medium", "low", "medium"]);
+    expect(seen.map(item => item.reasoning)).toEqual(["medium", "low", "medium", "medium", "medium"]);
     expect(thinkingStateOf(pool.session("W1"))).toMatchObject({ baseline: "medium", step: "low" });
   });
 
@@ -139,12 +146,13 @@ describe("thinkingPolicy phase through orche_task", () => {
     const { execute, script } = await fixture("phase");
     const answered = tool("report_result", { kind: "answer", summary: "greeting.txt says hello world", data: { evidence: ["greeting.txt:1"] } });
     script([
-      plan(n("a", "running")),
+      plan(n("a", "running"), n("v", "pending", { phase: "integrate" })),
       tool(SPAWN_TOOL, { reason: "parallelism", workers: [{ name: "one", role: "answer", request: "Read greeting.txt." }, { name: "two", role: "answer", request: "Read greeting.txt too." }] }),
       answered, answered,
-      plan(n("a", "done", { checkpoint: cp }), n("v", "running", { phase: "integrate" })),
+      plan(n("a", "done", { checkpoint: { ...cp, evidence: ["T1 two answers: greeting.txt says hello world"] } }), n("v", "running", { phase: "integrate" })),
       tool(SPAWN_TOOL, { reason: "verification", workers: [{ name: "check", role: "verify", request: "Original request: greeting.txt says hello. Run your own checks." }] }),
       tool("report_result", { kind: "verify", summary: "ok", data: { passed: true, evidence: ["cat greeting.txt"], issues: [] } }),
+      read(),
       plan(n("a", "done"), n("v", "done", { phase: "integrate", checkpoint: cp })),
       implemented({ decision: "split", criteria: ["parallelism", "verification"], reason: "two reads and an independent check" }),
     ]);
@@ -190,6 +198,55 @@ describe("thinkingPolicy phase through orche_task", () => {
   });
 });
 
+describe("the phase gate through orche_task (bypasses seen in the 2026-10-08 real-model pilot)", () => {
+  const blocked = tool("report_result", { kind: "implement", summary: "Partial: integration not run", data: { status: "blocked", reason: "integration not verified", checklist: [{ id: "R1", status: "partial", evidence: "greeting.txt:1" }], split: { decision: "none", reason: "small" } } });
+  it("pilot c1: steps and the integration batched to done in one S response are refused; the integration then runs at B and the report passes", async () => {
+    const { execute, script, seen } = await fixture("phase");
+    script([
+      plan(n("a", "running"), n("i", "pending", { phase: "integrate" }, ["a"])),
+      read(),
+      plan(n("a", "done", { checkpoint: cp }), n("i", "done", { phase: "integrate", checkpoint: cp }, ["a"])),
+      plan(n("a", "done", { checkpoint: cp }), n("i", "running", { phase: "integrate" }, ["a"])),
+      read(),
+      plan(n("a", "done"), n("i", "done", { phase: "integrate", checkpoint: cp }, ["a"])),
+      implemented(),
+    ]);
+    const result = await execute();
+    expect(seen[3]!.last).toMatch(/Task DAG gate \(thinkingPolicy phase\): integration node i goes to done without having run/);
+    // The refusal is a re-plan: B from the next request on; the integration then runs at B.
+    expect(seen.map(item => item.reasoning)).toEqual(["high", "medium", "medium", "high", "high", "high", "high"]);
+    expect(seen[5]!.last).toMatch(/hello world.*\[orche ref T2\]/);
+    expect(result.details).toMatchObject({ status: "done", thinkingPolicy: { gateRejections: 1, effective: { baseline: "high", step: "medium", source: "none" } } });
+    const run = JSON.parse(await readFile(join(result.details.record!, "run.json"), "utf8")) as { outcome: Record<string, unknown> };
+    expect(run.outcome).toMatchObject({ thinkingPolicy: { gateRejections: 1, evidence: expect.objectContaining({ verified: expect.any(Number) }) } });
+  });
+  it("a success report before the integration is sent back (a result retry); a blocked report is accepted, so the gate never traps the worker", async () => {
+    const { execute, script, seen } = await fixture("phase");
+    script([
+      plan(n("a", "running"), n("i", "pending", { phase: "integrate" }, ["a"])),
+      read(),
+      plan(n("a", "done", { checkpoint: cp }), n("i", "running", { phase: "integrate" }, ["a"])),
+      implemented(),
+      blocked,
+    ]);
+    const result = await execute();
+    expect(seen[4]!.last).toMatch(/A success report needs the Task DAG's integration done at the baseline effort: node i \(running\) is not finished; requirement R1 has no finished integration node/);
+    expect(result.details.status).toBe("blocked");
+  });
+  it("an integration node turned into a step or dropped is refused with the reason", async () => {
+    const { execute, script, seen } = await fixture("phase");
+    script([
+      plan(n("a", "running"), n("i", "pending", { phase: "integrate" }, ["a"])),
+      plan(n("a", "running"), n("i", "pending", { phase: "step" }, ["a"])),
+      plan(n("a", "running")),
+      blocked,
+    ]);
+    await execute();
+    expect(seen[2]!.last).toMatch(/i is an integration node; it cannot become a step/);
+    expect(seen[3]!.last).toMatch(/integration node i cannot be removed unless other integration nodes take over its requirements/);
+  });
+});
+
 describe("the default stays fixed", () => {
   it("without thinkingPolicy every request runs at the assignment's level, checkpoints are optional and the prompt has no policy text", async () => {
     const { execute, script, seen } = await fixture();
@@ -206,7 +263,7 @@ describe("the default stays fixed", () => {
   });
   it.each([
     ["fixed", "fixed"],
-    ["phase without checkpoints (arm b)", { mode: "phase", checkpoints: false, escalation: false, lengthRecovery: "step-down", subWorkers: false }],
+    ["phase without checkpoints and gate (arm b)", { mode: "phase", checkpoints: false, escalation: false, lengthRecovery: "step-down", subWorkers: false, gate: false, evidence: "off" }],
   ])("%s: a multi-node plan in the pre-policy format (no phase, hard or checkpoint) is accepted as it is", async (_name, policy) => {
     const { execute, script, seen } = await fixture(policy);
     script([
@@ -233,9 +290,10 @@ describe("the default stays fixed", () => {
 
 describe("thinkingPolicy config", () => {
   it("accepts the two modes and per-field overrides, with the mode's defaults", () => {
-    expect(parseThinkingPolicyConfig("fixed")).toEqual({ mode: "fixed", checkpoints: false, escalation: false, lengthRecovery: "step-down", subWorkers: false });
-    expect(parseThinkingPolicyConfig("phase")).toEqual({ mode: "phase", checkpoints: true, escalation: true, lengthRecovery: "redecompose", subWorkers: true });
-    expect(parseThinkingPolicyConfig({ mode: "phase", checkpoints: false, escalation: false, lengthRecovery: "step-down" })).toEqual({ mode: "phase", checkpoints: false, escalation: false, lengthRecovery: "step-down", subWorkers: true });
+    expect(parseThinkingPolicyConfig("fixed")).toEqual({ mode: "fixed", checkpoints: false, escalation: false, lengthRecovery: "step-down", subWorkers: false, gate: false, evidence: "off" });
+    expect(parseThinkingPolicyConfig("phase")).toEqual({ mode: "phase", checkpoints: true, escalation: true, lengthRecovery: "redecompose", subWorkers: true, gate: true, evidence: "strict" });
+    expect(parseThinkingPolicyConfig({ mode: "phase", checkpoints: false, escalation: false, lengthRecovery: "step-down" })).toEqual({ mode: "phase", checkpoints: false, escalation: false, lengthRecovery: "step-down", subWorkers: true, gate: true, evidence: "strict" });
+    expect(parseThinkingPolicyConfig({ mode: "phase", gate: false, evidence: "warn", effortAliases: [{ model: "cliproxyapi/claude-*", aliases: {} }] })).toMatchObject({ gate: false, evidence: "warn", effortAliases: [{ model: "cliproxyapi/claude-*", aliases: {} }] });
     expect(parseThinkingPolicyConfig({ checkpoints: true, lengthRecovery: "redecompose" })).toMatchObject({ mode: "fixed", checkpoints: true, lengthRecovery: "redecompose" });
   });
   it.each([
@@ -244,6 +302,10 @@ describe("thinkingPolicy config", () => {
     ["a bad mode", { mode: "auto" }, /mode: expected "fixed" or "phase"/],
     ["a bad boolean", { checkpoints: "yes" }, /checkpoints: expected boolean/],
     ["a bad ladder", { lengthRecovery: "lower" }, /lengthRecovery: expected "redecompose" or "step-down"/],
+    ["a bad evidence policy", { evidence: "loose" }, /evidence: expected "off", "warn" or "strict"/],
+    ["a bad gate", { gate: 1 }, /gate: expected boolean/],
+    ["effortAliases without provider/", { effortAliases: [{ model: "claude-*", aliases: { xhigh: "max" } }] }, /effortAliases\[0\]\.model/],
+    ["effortAliases with a bad name", { effortAliases: [{ model: "p/m", aliases: { xhigh: 3 } }] }, /aliases\.xhigh: expected an effort name/],
   ])("rejects %s", (_name, value, error) => {
     expect(() => parseThinkingPolicyConfig(value)).toThrow(error);
   });

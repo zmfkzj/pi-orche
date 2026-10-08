@@ -19,7 +19,7 @@ export const CHECKPOINT_LIMITS = { result: 300, evidenceItems: 4, evidenceChars:
  */
 export const checkpointSchema = Type.Object({
   result: Type.String({ minLength: 1, maxLength: CHECKPOINT_LIMITS.result, description: "Conclusion of the node in one or two sentences" }),
-  evidence: Type.Array(Type.String({ minLength: 1, maxLength: CHECKPOINT_LIMITS.evidenceChars }), { maxItems: CHECKPOINT_LIMITS.evidenceItems, description: "file:line references, commands or tests and their outcomes" }),
+  evidence: Type.Array(Type.String({ minLength: 1, maxLength: CHECKPOINT_LIMITS.evidenceChars }), { maxItems: CHECKPOINT_LIMITS.evidenceItems, description: "Tool-call refs from the results ([orche ref T12] -> \"T12 npm test -> 14 pass\"), file:line references, commands and their outcomes" }),
   verification: Type.Union([Type.Literal("passed"), Type.Literal("failed"), Type.Literal("not_applicable")], { description: "passed: its check ran and passed; failed: it ran and failed; not_applicable: nothing to run (e.g. reading code)" }),
   open: Type.Optional(Type.String({ maxLength: CHECKPOINT_LIMITS.open, description: "Open questions or doubts; omit when none" })),
 }, { additionalProperties: false });
@@ -35,6 +35,7 @@ export const taskPlanParameters = Type.Object({
     note: Type.Optional(Type.String({ maxLength: 500 })),
     phase: Type.Optional(Type.Union([Type.Literal("step"), Type.Literal("integrate")], { description: "step (default): one piece of the work; integrate: comparing every requirement with the actual changes and checks, final verification" })),
     hard: Type.Optional(Type.Boolean({ description: "true: this step needs full effort (design decision, root cause of an unclear failure, concurrency/security, ambiguous requirement, hard-to-reverse change)" })),
+    parent: Type.Optional(Type.String({ minLength: 1, maxLength: 100, description: "Id of the node this one was split from (re-decomposition); the children together carry the parent's covers" })),
     checkpoint: Type.Optional(checkpointSchema),
   }, { additionalProperties: false }), { minItems: 1, maxItems: MAX_NODES }),
 }, { additionalProperties: false });
@@ -106,13 +107,13 @@ export function renderTaskPlan(plan: TaskPlan): string {
   const ordered = orderTaskPlan(plan);
   const finished = new Set(ordered.filter(node => ["done", "skipped"].includes(node.status)).map(node => node.id));
   const next = ordered.find(node => node.status === "pending" && node.dependsOn.every(id => finished.has(id)));
-  const tags = (node: TaskPlan["nodes"][number]) => `${node.phase === "integrate" ? " {integrate}" : ""}${node.hard ? " {hard}" : ""}`;
+  const tags = (node: TaskPlan["nodes"][number]) => `${node.phase === "integrate" ? " {integrate}" : ""}${node.hard ? " {hard}" : ""}${node.parent ? ` {split of ${node.parent}}` : ""}`;
   return [...ordered.map(node => `${node.id} [${node.status}]${tags(node)} ${shorten(node.title)} (${node.covers.join(", ") || "no requirements"})${node.dependsOn.length ? ` <- ${node.dependsOn.join(", ")}` : ""}${node.note ? ` — ${node.note}` : ""}${node.checkpoint ? renderCheckpoint(node.checkpoint) : ""}`), `Next ready: ${next ? `${next.id} — ${shorten(next.title)}` : "none"}`].join("\n");
 }
 
 /**
- * A replacement plan keeps what its nodes already had when it omits it: the phase, the hard flag and, while a node's status is
- * unchanged (a done node stays done), its checkpoint. A reopened node loses its old checkpoint: it no longer stands.
+ * A replacement plan keeps what its nodes already had when it omits it: the phase, the hard flag, the split parent and, while a
+ * node's status is unchanged (a done node stays done), its checkpoint. A reopened node loses its old checkpoint: it no longer stands.
  */
 export function carryOver(previous: TaskPlan | undefined, plan: TaskPlan): TaskPlan {
   if (!previous) return plan;
@@ -126,13 +127,14 @@ export function carryOver(previous: TaskPlan | undefined, plan: TaskPlan): TaskP
         ...node,
         ...(node.phase === undefined && old.phase !== undefined ? { phase: old.phase } : {}),
         ...(node.hard === undefined && old.hard !== undefined ? { hard: old.hard } : {}),
+        ...(node.parent === undefined && old.parent !== undefined ? { parent: old.parent } : {}),
         ...(node.checkpoint === undefined && old.checkpoint && node.status === old.status ? { checkpoint: old.checkpoint } : {}),
       };
     }),
   };
 }
 
-export const CHECKPOINT_FORMAT = 'checkpoint {result: one or two sentences, evidence: ["file:line", "command -> outcome"], verification: "passed" | "failed" | "not_applicable", open?: "doubts"}, never your private reasoning';
+export const CHECKPOINT_FORMAT = 'checkpoint {result: one or two sentences, evidence: ["T12 npm test -> 14 pass", "src/x.ts:40"] (cite the [orche ref Tn] of tool results that show it, when results carry one), verification: "passed" | "failed" | "not_applicable", open?: "doubts"}, never your private reasoning';
 
 /**
  * Checkpoint rules. Always: a node whose verification failed is not done. With `required` (thinkingPolicy checkpoints), a node newly
@@ -160,6 +162,8 @@ export interface TaskPlanToolOptions {
   previous?: () => TaskPlan | undefined;
   /** Whether a node newly marked done needs a checkpoint (thinkingPolicy checkpoints). */
   checkpointsRequired?: () => boolean;
+  /** Policy checks of an incoming plan (src/pi/thinking-policy.ts checkPolicyPlan): throws to reject it, returns notes for the result. */
+  validate?: (previous: TaskPlan | undefined, plan: TaskPlan) => readonly string[] | void;
   /** Called with the error of a rejected call (the plan stays as it was). */
   onInvalid?: (error: string) => void;
 }
@@ -170,7 +174,7 @@ export interface TaskPlanToolOptions {
  */
 export function createTaskPlanTool(onPlan: (plan: TaskPlan) => void | readonly string[], requiredIds: readonly string[] | (() => readonly string[]) = [], options: TaskPlanToolOptions = {}): ToolDefinition {
   return {
-    name: "task_plan", label: "Task plan", description: `Replace the current Task DAG. Cover every requirement id (bare ids like R3 in covers), execute nodes sequentially in dependency order and update statuses as work progresses. Keep titles short (over ${MAX_TITLE_CHARS} characters they are shortened); details go in note. Optional per node: phase "integrate" for requirement comparison and final verification, hard:true for a step that needs full effort, and a checkpoint when the node is finished (${CHECKPOINT_FORMAT}). Omitted phase, hard and checkpoints of unchanged nodes are kept from the previous plan.`,
+    name: "task_plan", label: "Task plan", description: `Replace the current Task DAG. Cover every requirement id (bare ids like R3 in covers), execute nodes sequentially in dependency order and update statuses as work progresses. Keep titles short (over ${MAX_TITLE_CHARS} characters they are shortened); details go in note. Optional per node: phase "integrate" for requirement comparison and final verification, hard:true for a step that needs full effort, parent for a node split from another, and a checkpoint when the node is finished (${CHECKPOINT_FORMAT}). Omitted phase, hard, parent and checkpoints of unchanged nodes are kept from the previous plan.`,
     parameters: taskPlanParameters,
     execute: async (_id, args) => {
       try {
@@ -179,8 +183,12 @@ export function createTaskPlanTool(onPlan: (plan: TaskPlan) => void | readonly s
         checkCoversFormat(normalized.nodes, ids);
         const previous = options.previous?.();
         const incoming = carryOver(previous, normalized);
+        const known = new Set([...incoming.nodes, ...previous?.nodes ?? []].map(node => node.id));
+        const badParents = incoming.nodes.filter(node => node.parent !== undefined && (node.parent === node.id || !known.has(node.parent)));
+        if (badParents.length) throw new Error(`Invalid parent: ${badParents.map(node => `${node.id} -> ${node.parent}`).join(", ")}; parent names the node (of this or the previous plan) a node was split from.`);
         const rendered = renderTaskPlan(incoming); // Validate before cloning or publishing a potentially huge plan.
         checkCheckpoints(previous, incoming, options.checkpointsRequired?.() ?? false);
+        const policyNotes = options.validate?.(previous, incoming) ?? [];
         const covered = new Set(incoming.nodes.flatMap(node => node.covers));
         const unknown = ids.length ? [...covered].filter(id => !ids.includes(id)) : [];
         if (unknown.length) throw new Error(`Unknown covers ids: ${unknown.join(", ")}; use only this assignment's requirement ids (${ids.join(", ")}).`);
@@ -190,7 +198,7 @@ export function createTaskPlanTool(onPlan: (plan: TaskPlan) => void | readonly s
         const text = rendered
           + (uncovered.length ? `\nWarning: uncovered request ids: ${uncovered.join(", ")}; add nodes covering them.` : "")
           + (shortened.length ? `\nNote: title${shortened.length > 1 ? "s" : ""} of ${shortened.join(", ")} exceeded ${MAX_TITLE_CHARS} characters and ${shortened.length > 1 ? "were" : "was"} shortened with "…"; keep titles short and put details in note.` : "")
-          + notes.map(line => `\n${line}`).join("");
+          + [...policyNotes, ...notes].map(line => `\n${line}`).join("");
         return { content: [{ type: "text", text }], details: { plan } };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

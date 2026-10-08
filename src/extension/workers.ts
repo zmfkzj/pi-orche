@@ -48,7 +48,9 @@ import { createSpawnTool, outcomeModelUse, scopePaths, SPAWN_TOOL, type PlannedW
 import { createSubWorkerRunner } from "../orchestrator/sub-worker.js";
 import { clampThinkingLevel, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import { beginThinkingPolicy, DEFAULT_THINKING_POLICY, onTaskPlan, reportRewriteReason, requireReplan, thinkingPolicySummary, type ThinkingPolicySettings, type ThinkingPolicySummary } from "../pi/thinking-policy.js";
+import { beginThinkingPolicy, checkPolicyPlan, DEFAULT_THINKING_POLICY, onTaskPlan, reportGateError, reportRewriteReason, requireReplan, thinkingPolicySummary, type ThinkingPolicySettings, type ThinkingPolicySummary } from "../pi/thinking-policy.js";
+import { effortMappingFor, type EffortAliasRule } from "../pi/effort-mapping.js";
+import { configureOutputCap } from "../pi/output-cap.js";
 import { setThinkingPhase, stepDownLevel, thinkingStateOf } from "../pi/thinking-state.js";
 import { ADVISOR_TIMEOUT_MS, advisorLines, AssignmentAdvisor, type AdvisorDetails, type AdvisorSource } from "../single/advisor.js";
 
@@ -309,6 +311,7 @@ function taskPlanToolFor(worker: Worker, session: () => AgentSession) {
   }, () => worker.requirementIds ?? [], {
     previous: () => worker.plan,
     checkpointsRequired: () => !!worker.thinkingPolicy?.checkpoints,
+    validate: (previous, plan) => checkPolicyPlan(session(), previous, plan),
     onInvalid: () => requireReplan(session(), "rejected task_plan call"),
   });
 }
@@ -318,22 +321,25 @@ function taskPlanToolFor(worker: Worker, session: () => AgentSession) {
  * policy is fixed without checkpoints.
  */
 export function thinkingPolicyInstructions(policy: ThinkingPolicySettings): string {
-  const checkpoint = 'Finishing a node: set it done with checkpoint {result: one or two sentences, evidence: ["file:line", "command -> outcome"], verification: "passed" | "not_applicable", open?: doubts} in the same task_plan call that sets the next node running; never put your private reasoning there. A node whose check failed is not done: keep it running to rework it, or mark it blocked. Do not record a checkpoint after every tool call, only when a node ends.';
+  const checkpoint = `Finishing a node: set it done with checkpoint {result: one or two sentences, evidence: [${policy.evidence !== "off" ? '"T12 npm test -> 14 pass", ' : ""}"file:line", "command -> outcome"], verification: "passed" | "not_applicable", open?: doubts} in the same task_plan call that sets the next node running; never put your private reasoning there. A node whose check failed is not done: keep it running to rework it, or mark it blocked. Do not record a checkpoint after every tool call, only when a node ends.`;
+  const evidence = policy.evidence !== "off" ? ` Every tool result ends with [orche ref Tn]: cite those refs as evidence; a ref that does not exist or a call that failed is never evidence for "passed"${policy.evidence === "strict" ? " (such a checkpoint is rejected)" : ""}, and a checkpoint that cites no call proves nothing.` : "";
   const integrate = 'End the DAG with integration node(s) (phase "integrate") that compare every requirement with the actual changes, diffs and check runs, not with the checkpoints alone; an integration node is done only with verification "passed". If a node turns out wrong, reopen it rather than patching around it.';
   if (policy.mode === "phase") {
-    return `Task DAG effort (thinkingPolicy phase): your analysis and plan, integration, final verification and the report run at your baseline effort; an ordinary node runs one effort level lower while it is running. Keep exactly one node running and switch nodes in one task_plan call so consecutive steps stay at the step level. Mark a node hard:true before it starts when it needs full effort (design decision, root cause of an unclear failure, concurrency or security, ambiguous requirement, hard-to-reverse change); reopened nodes and nodes whose check failed also run at the baseline. ${policy.checkpoints ? `${checkpoint} ` : ""}${integrate} If a response hits the output limit, act on one next step; if asked to, split the running node into smaller nodes. Never report success for work whose check failed or did not run: report it partial or blocked.`;
+    const gate = policy.gate ? ' The runtime enforces the baseline parts: an integration or hard node is marked done only in a response after the one that set it running (never pending -> done, never running and done in one call), the integration checkpoint cites checks it ran while running, integration nodes are never dropped, skipped or turned into steps (split one into per-requirement integration nodes instead), and a success report needs every requirement covered by a finished integration node: report partial or blocked otherwise.' : "";
+    return `Task DAG effort (thinkingPolicy phase): your analysis and plan, integration, final verification and the report run at your baseline effort; an ordinary node runs one effort level lower while it is running. The first plan fixes the requirements, small verifiable nodes and each node's done condition (in note): do not design or write the implementation while planning; each node's design, code and checks happen while it runs. Keep exactly one node running and switch nodes in one task_plan call so consecutive steps stay at the step level. Mark a node hard:true before it starts when it needs full effort (design decision, root cause of an unclear failure, concurrency or security, ambiguous requirement, hard-to-reverse change); reopened nodes, nodes whose check failed and new nodes that redo failed or integrated work also run at the baseline. ${policy.checkpoints ? `${checkpoint}${evidence} ` : ""}${integrate}${gate} If a response hits the output limit, act on one next step; if asked to, split the running node into new nodes with parent set to it. Never report success for work whose check failed or did not run: report it partial or blocked.`;
   }
-  return policy.checkpoints ? `Task DAG checkpoints (thinkingPolicy): ${checkpoint} ${integrate}` : "";
+  return policy.checkpoints ? `Task DAG checkpoints (thinkingPolicy): ${checkpoint}${evidence} ${integrate}` : "";
 }
 
 /** The step level of `baseline` on the model of `route` (its supported levels; the baseline itself when there is none below). */
-function stepRouteThinking(runtime: { getModel(provider: string, id: string): Parameters<typeof getSupportedThinkingLevels>[0] | undefined }, route: ModelRoute): ThinkingLevel | undefined {
+function stepRouteThinking(runtime: { getModel(provider: string, id: string): Parameters<typeof getSupportedThinkingLevels>[0] | undefined }, route: ModelRoute, effortAliases?: readonly EffortAliasRule[]): ThinkingLevel | undefined {
   if (!route.thinking) return undefined;
   const slash = route.model.indexOf("/");
   const model = runtime.getModel(route.model.slice(0, slash), route.model.slice(slash + 1));
   if (!model) return undefined;
   const baseline = clampThinkingLevel(model, route.thinking);
-  return (stepDownLevel(getSupportedThinkingLevels(model), baseline) ?? baseline) as ThinkingLevel;
+  // Effective levels (src/pi/effort-mapping.ts): a level the proxy sends as B's effort is not a step down.
+  return (stepDownLevel(getSupportedThinkingLevels(model), baseline, effortMappingFor(model as never, effortAliases).names) ?? baseline) as ThinkingLevel;
 }
 
 /**
@@ -814,14 +820,17 @@ export class WorkerPool {
   private persist(event: LedgerEvent): void {
     try { this.options.onLedgerEvent?.(structuredClone(event)); } catch { /* persistence is best effort */ }
   }
-  /** The report checks before the advisor gate: the round check and the checklist. */
+  /** The report checks before the advisor gate: the round check, the checklist and the phase thinking policy's report gate. */
   private reportError(worker: Worker, kind: string, data: unknown): string | undefined {
     const round = worker.roundCheck?.(kind, data);
     if (round) return round;
     if (!["implement", "answer"].includes(kind)) return undefined;
     const ids = worker.singleWorkflow ? worker.requirementIds ?? [] : [];
     const checklistError = ids.length || (data && typeof data === "object" && "checklist" in data) ? requiredChecklistError(ids, data, kind === "implement" && ids.length > 0) : undefined;
-    return checklistError;
+    if (checklistError) return checklistError;
+    // Phase thinking policy gate: a success report needs the Task DAG's integration done at the baseline (partial/blocked passes).
+    if (!worker.singleWorkflow) return undefined;
+    try { return reportGateError(this.manager!.session(worker.id), kind, data); } catch { return undefined; }
   }
   private callbacks(worker: Worker): Pick<WorkerAdoptOptions, "toolGuard" | "writeFileGuard" | "onToolExecution" | "onContextWindow" | "validateResult" | "reviseResult"> {
     return {
@@ -1223,7 +1232,9 @@ export class WorkerPool {
     // left (a step level, a recovery step-down, a cancelled run).
     const thinkingPolicy = config.thinkingPolicy ?? DEFAULT_THINKING_POLICY;
     meta.thinkingPolicy = thinkingPolicy;
-    beginThinkingPolicy(activeSession, thinkingPolicy, baselineLevel);
+    beginThinkingPolicy(activeSession, thinkingPolicy, baselineLevel, args.role);
+    // Explicit output budget for Claude via CLIProxyAPI (src/pi/output-cap.ts; orche.config.json `outputCap`).
+    configureOutputCap(activeSession, config.outputCap, decision => meta.recordEvent?.({ type: "output_cap", timestamp: Date.now(), worker: meta.id, ...decision }));
     thinkingStateOf(activeSession).onSwitch = change => meta.recordEvent?.({ type: "thinking_change", worker: meta.id, ...change });
     if (activeSession.model) meta.model = `${activeSession.model.provider}/${activeSession.model.id}`;
     meta.thinking = activeSession.thinkingLevel ?? meta.thinking ?? route.thinking ?? "off";
@@ -1277,7 +1288,7 @@ export class WorkerPool {
     // Phase thinking policy (docs/thinking-policy.md): a standard sub-worker that inherits the orchestrator's level runs one supported
     // level below the orchestrator's baseline B (computed from B on the sub-worker's model, never from the orchestrator's current
     // level, so it cannot chain), and an independent verification at B. An explicit models.worker level (or "main") is kept.
-    const stepSubThinking = thinkingPolicy.mode === "phase" && thinkingPolicy.subWorkers && subThinkingSource === "orchestrator" ? stepRouteThinking(runtime, subRoute) : undefined;
+    const stepSubThinking = thinkingPolicy.mode === "phase" && thinkingPolicy.subWorkers && subThinkingSource === "orchestrator" ? stepRouteThinking(runtime, subRoute, thinkingPolicy.effortAliases) : undefined;
     const standardSubRoute: ModelRoute = stepSubThinking && stepSubThinking !== subRoute.thinking ? { ...subRoute, thinking: stepSubThinking } : subRoute;
     /** Sub-workers on main's model (inherited through the orchestrator, or named by `models.worker`) get main's context window. */
     const subWindow = subSource === "config:main" || subSource === "orchestrator" && mainModel ? mainWindow : undefined;

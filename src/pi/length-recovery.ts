@@ -37,7 +37,8 @@
  */
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { beginThinking, clearThinkingOverride, lowerThinkingForRecovery, thinkingStateOf } from "./thinking-state.js";
-import { requestRedecompose, thinkingPolicyOf, type RedecomposeRequest } from "./thinking-policy.js";
+import { integrationRunning, requestRedecompose, thinkingPolicyOf, type RedecomposeRequest } from "./thinking-policy.js";
+import { lastOutputCap, PROXY_DEFAULT_OUTPUT } from "./output-cap.js";
 
 export type LengthStopKind = "thinking_only" | "partial_text" | "partial_tool";
 /**
@@ -81,6 +82,15 @@ export interface LengthRecoveryEvent {
   action: "observed" | "compaction_cancelled" | "continued" | "exhausted" | "left_to_pi";
   consecutive: number;
   total: number;
+  /**
+   * The output budget the request carried (src/pi/output-cap.ts) and where it came from; absent when orche sent none (on the
+   * CLIProxyAPI Claude path the proxy then used its 32000 default). Observations, not a diagnosis: `atCap` only says the output
+   * reached the budget orche sent (or the proxy default when none was sent); whether the cap or the context ended the response is
+   * decided by the context check (`left_to_pi` under context pressure).
+   */
+  outputCap?: number;
+  capSource?: string;
+  atCap?: boolean;
 }
 
 export interface LengthRecoveryState {
@@ -168,10 +178,10 @@ export function redecomposeNudge(pending: NonNullable<LengthRecoveryState["pendi
   const what = pending.kind === "partial_text" ? `and was cut off again (recovery ${attempt}/${max}); it ended with «…${(pending.tail ?? "").slice(-300)}»` : `again while still reasoning, before any text or tool call (recovery ${attempt}/${max})`;
   const head = `[pi-orche] Your previous response hit the output token limit (${pending.output} tokens) ${what}. The scope is too large for one response; your effort level stays the same.`;
   if (request.kind === "integrate") {
-    return `${head} Split the integration now: call task_plan with one verification node per requirement id (phase "integrate", covering that id only)${request.node ? `, mark ${request.node} skipped` : ""}, then verify one requirement per response against the actual changes, diffs and check runs. Do not lower the bar: a requirement you cannot verify is reported unmet or partial.`;
+    return `${head} Split the integration now: call task_plan with one verification node per requirement id (phase "integrate", covering that id only${request.node ? `, parent "${request.node}"` : ""})${request.node ? `, mark ${request.node} skipped` : ""}, then verify one requirement per response against the actual changes, diffs and check runs. Do not lower the bar: a requirement you cannot verify is reported unmet or partial.`;
   }
   if (request.kind === "step") {
-    return `${head} Call task_plan now and split ${request.node ? `the running node ${request.node}` : "the next node"} into two or more smaller nodes${request.node ? ` (mark ${request.node} skipped, or done with its checkpoint for the part that is finished)` : ""}; then start the first of them with one tool call. Do not re-plan the rest of the Task DAG.`;
+    return `${head} Call task_plan now and split ${request.node ? `the running node ${request.node}` : "the next node"} into two or more smaller nodes with distinct titles${request.node ? `, each with parent "${request.node}" and the part of ${request.node}'s covers it does (together all of them; mark ${request.node} skipped, or done with its checkpoint for the part that is finished)` : ""}; then start the first of them with one tool call. Do not re-plan the rest of the Task DAG.`;
   }
   return `${head} Narrow the scope: do one small, concrete step now with one tool call (read one file region, run one check). If the remaining work cannot fit, call report_result with what you have and name what is not done; never present unverified work as done.`;
 }
@@ -218,7 +228,11 @@ export function lengthRecoveryHandlers(getSession: () => AgentSession | undefine
   };
   const ladder = () => policy()?.settings.lengthRecovery ?? options.ladder ?? "step-down";
   const emit = (current: LengthRecoveryState, kind: LengthStopKind, output: number, contextTokens: number, action: LengthRecoveryEvent["action"]) => {
-    try { options.onEvent?.({ type: "length_stop", timestamp: Date.now(), kind, output, contextTokens, action, consecutive: current.consecutive, total: current.total }); } catch { /* observers cannot change recovery */ }
+    const session = getSession();
+    const cap = session ? lastOutputCap(session) : undefined;
+    const budget = cap?.cap ?? (cap?.source === "out-of-scope" || cap?.source === "disabled" ? undefined : cap ? PROXY_DEFAULT_OUTPUT : undefined);
+    const capInfo = cap ? { ...(cap.cap !== undefined ? { outputCap: cap.cap } : {}), capSource: cap.source, ...(budget !== undefined ? { atCap: output >= budget } : {}) } : {};
+    try { options.onEvent?.({ type: "length_stop", timestamp: Date.now(), kind, output, contextTokens, action, consecutive: current.consecutive, total: current.total, ...capInfo }); } catch { /* observers cannot change recovery */ }
   };
   const restoreThinking = () => {
     const session = getSession();
@@ -281,7 +295,9 @@ export function lengthRecoveryHandlers(getSession: () => AgentSession | undefine
       // Pi's own behaviour, untouched (the benchmark's baseline): length stops are only counted.
       if (mode === "off") return undefined;
       // Pi keeps running a length stop with tool calls on its own; it only reaches here if the run is ending anyway.
-      const quality = ladder() === "redecompose";
+      // An integration that overruns keeps its effort and is split per requirement, whatever the ladder (quality first).
+      const session0 = getSession();
+      const quality = ladder() === "redecompose" || (!!session0 && integrationRunning(session0));
       if (current.consecutive > max || current.assignmentStops > perAssignment || (quality && current.sinceProgress > withoutProgress)) return exhaust(current, pending);
       const details = { kind: pending.kind, output: pending.output, attempt: current.consecutive, max };
       const last = current.consecutive === max;

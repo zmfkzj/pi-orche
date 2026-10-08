@@ -60,7 +60,7 @@ describe("quality-first output-limit recovery: same effort, smaller scope", () =
     const { outcome, seen, policy } = await run(PHASE_THINKING_POLICY, request => [
       plan(node("a", "running"), node("b", "pending")),
       capped(), capped(),
-      plan(node("a", "skipped"), node("a1", "running"), node("a2", "pending"), node("b", "pending")),
+      plan(node("a", "skipped"), node("a1", "running", { parent: "a" }), node("a2", "pending", { parent: "a" }), node("b", "pending")),
       read(),
       plan(node("a", "skipped"), node("a1", "done", { checkpoint: cp }), node("a2", "done", { checkpoint: cp }), node("b", "done", { checkpoint: cp })),
       report(),
@@ -68,7 +68,7 @@ describe("quality-first output-limit recovery: same effort, smaller scope", () =
     expect(outcome).toMatchObject({ status: "completed", lengthStops: { count: 2, exhausted: false } });
     expect(seen.map(item => item.reasoning)).toEqual(["high", "medium", "medium", "medium", "medium", "medium", "high"]);
     expect(seen[2]!.last).toMatch(/Reason only about the immediate next step/);
-    expect(seen[3]!.last).toMatch(/your effort level stays the same\. Call task_plan now and split the running node a into two or more smaller nodes/);
+    expect(seen[3]!.last).toMatch(/your effort level stays the same\. Call task_plan now and split the running node a into two or more smaller nodes with distinct titles, each with parent \\"a\\"/);
     expect(policy).toMatchObject({ redecompositions: 1, falseRedecompositions: 0 });
   });
 
@@ -76,14 +76,14 @@ describe("quality-first output-limit recovery: same effort, smaller scope", () =
     const { outcome, seen } = await run(PHASE_THINKING_POLICY, request => [
       plan(node("a", "done", { checkpoint: cp }), node("i", "running", { phase: "integrate" })),
       capped(), capped(),
-      plan(node("a", "done"), node("i", "skipped", { phase: "integrate" }), node("i1", "running", { phase: "integrate" }), node("i2", "pending", { phase: "integrate" })),
+      plan(node("a", "done"), node("i", "skipped", { phase: "integrate" }), node("i1", "running", { phase: "integrate", parent: "i" }), node("i2", "pending", { phase: "integrate", parent: "i" })),
       read(),
       plan(node("a", "done"), node("i", "skipped"), node("i1", "done", { checkpoint: cp }), node("i2", "done", { checkpoint: cp })),
       report(),
     ][request - 1] ?? report());
     expect(outcome?.status).toBe("completed");
     expect(new Set(seen.map(item => item.reasoning))).toEqual(new Set(["high"]));
-    expect(seen[3]!.last).toMatch(/Split the integration now: call task_plan with one verification node per requirement id \(phase \\"integrate\\", covering that id only\), mark i skipped/);
+    expect(seen[3]!.last).toMatch(/Split the integration now: call task_plan with one verification node per requirement id \(phase \\"integrate\\", covering that id only, parent \\"i\\"\), mark i skipped/);
   });
 
   it("a plan update that does not split anything is not progress: the recovery ends in an explicit failure, bounded in requests", async () => {

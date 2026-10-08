@@ -164,10 +164,10 @@ describe("the policy on task_plan boundaries", () => {
     const state = thinkingPolicyOf(s)!;
     expect(requestRedecompose(s)).toEqual({ kind: "step", node: "a" });
     const notes = onTaskPlan(s, plan(node("a", "running", { hard: true, note: "still thinking" }), node("b", "pending", {}, ["a"])));
-    expect(notes.join("\n")).toMatch(/does not split a into two or more new, smaller nodes \(a is still running\)/);
+    expect(notes.join("\n")).toMatch(/does not split a: a is still running/);
     expect(state).toMatchObject({ progress: 0, falseRedecompositions: 1, redecompositions: 0 });
     requestRedecompose(s);
-    onTaskPlan(s, plan(node("a", "skipped", { hard: true }), node("a1", "running"), node("a2", "pending", {}, ["a1"]), node("b", "pending", {}, ["a"])));
+    onTaskPlan(s, plan(node("a", "skipped", { hard: true }), node("a1", "running", { parent: "a" }), node("a2", "pending", { parent: "a" }, ["a1"]), node("b", "pending", {}, ["a"])));
     expect(state).toMatchObject({ progress: 1, redecompositions: 1 });
     // a ran at B (hard): its parts stay at B.
     expect(s.thinkingLevel).toBe("high");
@@ -178,18 +178,20 @@ describe("the policy on task_plan boundaries", () => {
     expect(requestRedecompose(s)).toEqual({ kind: "no-plan" });
     onTaskPlan(s, plan(done("a"), node("i", "running", { phase: "integrate" }, ["a"])));
     expect(requestRedecompose(s)).toEqual({ kind: "integrate", node: "i" });
-    let nodes = [done("a"), node("i", "running", { phase: "integrate" }, ["a"])];
-    for (let round = 0; round < MAX_REDECOMPOSITIONS; round++) {
-      nodes = [...nodes.map(item => item.status === "running" ? { ...item, status: "skipped" as const } : item), node(`i${round}x`, "running", { phase: "integrate" }), node(`i${round}y`, "pending", { phase: "integrate" })];
-      onTaskPlan(s, plan(...nodes));
-      if (round < MAX_REDECOMPOSITIONS - 1) requestRedecompose(s);
-    }
+    // Three splits (the cap), never deeper than MAX_SPLIT_DEPTH: i -> i0x/i0y, i0x -> i1x/i1y, then i0y -> i2x/i2y.
+    const parts = (id: string, parent: string) => [node(`${id}x`, "running", { phase: "integrate", parent, title: `Check ${id} first half` }), node(`${id}y`, "pending", { phase: "integrate", parent, title: `Check ${id} second half` })];
+    let nodes = [done("a"), node("i", "skipped", { phase: "integrate" }, ["a"]), ...parts("i0", "i")];
+    onTaskPlan(s, plan(...nodes));
+    requestRedecompose(s);
+    nodes = [...nodes.map(item => item.id === "i0x" ? { ...item, status: "skipped" as const } : item), ...parts("i1", "i0x")];
+    onTaskPlan(s, plan(...nodes));
+    nodes = nodes.map(item => item.id === "i1x" ? { ...item, status: "done" as const, checkpoint: { result: "ok", evidence: ["x"], verification: "passed" as const } } : item.id === "i0y" ? { ...item, status: "running" as const } : item);
+    onTaskPlan(s, plan(...nodes));
+    requestRedecompose(s);
+    nodes = [...nodes.map(item => item.id === "i0y" ? { ...item, status: "skipped" as const } : item), ...parts("i2", "i0y").map(item => ({ ...item, status: "pending" as const }))];
+    onTaskPlan(s, plan(...nodes));
     expect(thinkingPolicyOf(s)!.redecompositions).toBe(MAX_REDECOMPOSITIONS);
     expect(requestRedecompose(s)).toEqual({ kind: "exhausted" });
-    // A newly finished node is progress too.
-    const before = thinkingPolicyOf(s)!.progress;
-    onTaskPlan(s, plan(...nodes.map(item => item.status === "running" ? { ...item, status: "done" as const, checkpoint: { result: "R1 met", evidence: ["test → pass"], verification: "passed" as const } } : item)));
-    expect(thinkingPolicyOf(s)!.progress).toBe(before + 1);
   });
   it("a report whose request ran at S is sent back and the report phase pins B; never re-accepted at S, no loop", () => {
     const s = start();

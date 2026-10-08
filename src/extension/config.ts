@@ -6,6 +6,7 @@ import { parseRouteConfig, RouteConfigError, type RouteConfig } from "../orchest
 import { DEFAULT_WINDOW_MS } from "./concurrent-sessions.js";
 import { DEFAULT_CONTEXT_WARNING, type ContextWarningSettings } from "./context-warning.js";
 import { DEFAULT_THINKING_POLICY, resolveThinkingPolicy, type ThinkingPolicySettings } from "../pi/thinking-policy.js";
+import { DEFAULT_OUTPUT_CAP, type OutputCapSettings } from "../pi/output-cap.js";
 
 export const CONFIG_FILE = "orche.config.json";
 
@@ -32,6 +33,8 @@ export interface DiscoveredConfig {
   single: SingleSettings;
   /** `thinkingPolicy` of the selected file with defaults applied (fixed: the assignment's level throughout; docs/thinking-policy.md). */
   thinkingPolicy: ThinkingPolicySettings;
+  /** `outputCap` of the selected file with defaults applied (auto: explicit max_output_tokens for Claude via CLIProxyAPI; src/pi/output-cap.ts). */
+  outputCap?: OutputCapSettings;
   /** `writeRoots` of the selected file as written (absolute, `~/...` or relative to the task cwd; see {@link resolveWriteRoots}); default []. */
   writeRoots: string[];
   /** Settings of the selected file that were ignored (removed `single` keys); absent without a file. */
@@ -215,20 +218,71 @@ export function parseSingleConfig(value: unknown, warnings?: string[]): SingleSe
 
 /**
  * `thinkingPolicy` in orche.config.json (docs/thinking-policy.md): `"fixed"` (default) or `"phase"`, or an object with `mode` and
- * overrides of the mode's defaults: `checkpoints`, `escalation`, `subWorkers` (booleans) and `lengthRecovery`
- * (`"redecompose"` | `"step-down"`).
+ * overrides of the mode's defaults: `checkpoints`, `escalation`, `subWorkers`, `gate` (booleans), `lengthRecovery`
+ * (`"redecompose"` | `"step-down"`), `evidence` (`"off"` | `"warn"` | `"strict"`) and `effortAliases`
+ * (`[{ "model": "provider/id-glob", "aliases": { "xhigh": "max" } }]`, src/pi/effort-mapping.ts).
  */
 export function parseThinkingPolicyConfig(value: unknown): ThinkingPolicySettings {
   if (value === "fixed" || value === "phase") return resolveThinkingPolicy({ mode: value });
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError('config.thinkingPolicy: expected "fixed", "phase" or an object');
   const settings = value as Record<string, unknown>;
-  const keys = new Set(["mode", "checkpoints", "escalation", "lengthRecovery", "subWorkers"]);
+  const keys = new Set(["mode", "checkpoints", "escalation", "lengthRecovery", "subWorkers", "gate", "evidence", "effortAliases"]);
   const unknown = Object.keys(settings).filter(key => !keys.has(key));
   if (unknown.length) throw new RouteConfigError(`config.thinkingPolicy: unknown field ${unknown.join(", ")}`);
   if (settings.mode !== undefined && settings.mode !== "fixed" && settings.mode !== "phase") throw new RouteConfigError('config.thinkingPolicy.mode: expected "fixed" or "phase"');
-  for (const key of ["checkpoints", "escalation", "subWorkers"]) if (settings[key] !== undefined && typeof settings[key] !== "boolean") throw new RouteConfigError(`config.thinkingPolicy.${key}: expected boolean`);
+  for (const key of ["checkpoints", "escalation", "subWorkers", "gate"]) if (settings[key] !== undefined && typeof settings[key] !== "boolean") throw new RouteConfigError(`config.thinkingPolicy.${key}: expected boolean`);
   if (settings.lengthRecovery !== undefined && settings.lengthRecovery !== "redecompose" && settings.lengthRecovery !== "step-down") throw new RouteConfigError('config.thinkingPolicy.lengthRecovery: expected "redecompose" or "step-down"');
+  if (settings.evidence !== undefined && settings.evidence !== "off" && settings.evidence !== "warn" && settings.evidence !== "strict") throw new RouteConfigError('config.thinkingPolicy.evidence: expected "off", "warn" or "strict"');
+  if (settings.effortAliases !== undefined) parseEffortAliases(settings.effortAliases);
   return resolveThinkingPolicy(settings as Partial<ThinkingPolicySettings>);
+}
+
+const LEVEL_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
+function parseEffortAliases(value: unknown): void {
+  if (!Array.isArray(value)) throw new RouteConfigError('config.thinkingPolicy.effortAliases: expected an array of { "model": "provider/id-glob", "aliases": { "xhigh": "max" } }');
+  value.forEach((entry, index) => {
+    const at = `config.thinkingPolicy.effortAliases[${index}]`;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new RouteConfigError(`${at}: expected an object`);
+    const rule = entry as Record<string, unknown>;
+    if (Object.keys(rule).some(key => key !== "model" && key !== "aliases")) throw new RouteConfigError(`${at}: unknown field`);
+    if (typeof rule.model !== "string" || !rule.model.includes("/")) throw new RouteConfigError(`${at}.model: expected "provider/model-id" (with * wildcards)`);
+    if (!rule.aliases || typeof rule.aliases !== "object" || Array.isArray(rule.aliases)) throw new RouteConfigError(`${at}.aliases: expected an object mapping a sent effort to the effort the model runs at`);
+    for (const [from, to] of Object.entries(rule.aliases)) if (!LEVEL_NAME.test(from) || typeof to !== "string" || !LEVEL_NAME.test(to)) throw new RouteConfigError(`${at}.aliases.${from}: expected an effort name`);
+  });
+}
+
+/**
+ * `outputCap` in orche.config.json (src/pi/output-cap.ts): `"auto"` (default) or `"off"`, or an object with `mode`, `tokens` (a fixed
+ * budget) and `models` (`[{ "model": "provider/id-glob", "tokens": 64000 | "off" }]`, first match wins).
+ */
+export function parseOutputCapConfig(value: unknown): OutputCapSettings {
+  if (value === "auto" || value === "off") return { mode: value };
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError('config.outputCap: expected "auto", "off" or an object');
+  const settings = value as Record<string, unknown>;
+  const unknown = Object.keys(settings).filter(key => key !== "mode" && key !== "tokens" && key !== "models");
+  if (unknown.length) throw new RouteConfigError(`config.outputCap: unknown field ${unknown.join(", ")}`);
+  if (settings.mode !== undefined && settings.mode !== "auto" && settings.mode !== "off") throw new RouteConfigError('config.outputCap.mode: expected "auto" or "off"');
+  const tokens = (key: string, value: unknown) => {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1024 || value > 10_000_000) throw new RouteConfigError(`${key}: expected an integer from 1024 to 10000000`);
+    return value;
+  };
+  if (settings.tokens !== undefined) tokens("config.outputCap.tokens", settings.tokens);
+  if (settings.models !== undefined) {
+    if (!Array.isArray(settings.models)) throw new RouteConfigError('config.outputCap.models: expected an array of { "model": "provider/id-glob", "tokens": number | "off" }');
+    settings.models.forEach((entry, index) => {
+      const at = `config.outputCap.models[${index}]`;
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new RouteConfigError(`${at}: expected an object`);
+      const rule = entry as Record<string, unknown>;
+      if (Object.keys(rule).some(key => key !== "model" && key !== "tokens")) throw new RouteConfigError(`${at}: unknown field`);
+      if (typeof rule.model !== "string" || !rule.model.includes("/")) throw new RouteConfigError(`${at}.model: expected "provider/model-id" (with * wildcards)`);
+      if (rule.tokens !== "off") tokens(`${at}.tokens`, rule.tokens);
+    });
+  }
+  return {
+    mode: (settings.mode as OutputCapSettings["mode"] | undefined) ?? DEFAULT_OUTPUT_CAP.mode,
+    ...(settings.tokens !== undefined ? { tokens: settings.tokens as number } : {}),
+    ...(settings.models !== undefined ? { models: (settings.models as { model: string; tokens: number | "off" }[]).map(rule => ({ model: rule.model, tokens: rule.tokens })) } : {}),
+  };
 }
 
 /**
@@ -272,7 +326,7 @@ export function resolveWriteRoots(cwd: string, roots: readonly string[]): string
  * `concurrentSessions`, `records`, `taskContext`, `contextWarning`, `single`, `thinkingPolicy` and `writeRoots` settings, validated here and removed before the route parser sees the file.
  * `warnings` lists settings that were ignored (removed `single` keys, keys of the removed coordinator); the file still loads.
  */
-export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings; thinkingPolicy: ThinkingPolicySettings; writeRoots: string[]; warnings: string[] }> {
+export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings; thinkingPolicy: ThinkingPolicySettings; outputCap: OutputCapSettings; writeRoots: string[]; warnings: string[] }> {
   let value: unknown;
   try { value = JSON.parse(await readFile(path, "utf8")); }
   catch (error) { throw new RouteConfigError(`Cannot load route config ${path}: ${error instanceof Error ? error.message : String(error)}`); }
@@ -283,20 +337,22 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
   let contextWarning: ContextWarningSettings = { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
   let single: SingleSettings = { ...DEFAULT_SINGLE };
   let thinkingPolicy: ThinkingPolicySettings = { ...DEFAULT_THINKING_POLICY };
+  let outputCap: OutputCapSettings = { ...DEFAULT_OUTPUT_CAP };
   let writeRoots: string[] = [];
   const warnings: string[] = [];
   if (value && typeof value === "object" && !Array.isArray(value)) {
-    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, single: singleValue, thinkingPolicy: thinkingPolicyValue, writeRoots: writeRootsValue, ...rest } = value as Record<string, unknown>;
+    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, single: singleValue, thinkingPolicy: thinkingPolicyValue, outputCap: outputCapValue, writeRoots: writeRootsValue, ...rest } = value as Record<string, unknown>;
     if (Object.hasOwn(value, "concurrentSessions")) concurrent = parseConcurrentSessionsConfig(concurrentSessions);
     if (Object.hasOwn(value, "records")) records = parseRecordsConfig(recordsValue);
     if (Object.hasOwn(value, "taskContext")) taskContext = parseTaskContextConfig(taskContextValue);
     if (Object.hasOwn(value, "contextWarning")) contextWarning = parseContextWarningConfig(contextWarningValue);
     if (Object.hasOwn(value, "single")) single = parseSingleConfig(singleValue, warnings);
     if (Object.hasOwn(value, "thinkingPolicy")) thinkingPolicy = parseThinkingPolicyConfig(thinkingPolicyValue);
+    if (Object.hasOwn(value, "outputCap")) outputCap = parseOutputCapConfig(outputCapValue);
     if (Object.hasOwn(value, "writeRoots")) writeRoots = parseWriteRootsConfig(writeRootsValue);
     routeValue = rest;
   }
-  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single, thinkingPolicy, writeRoots, warnings: warnings.map(warning => `${warning} (${path})`) };
+  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single, thinkingPolicy, outputCap, writeRoots, warnings: warnings.map(warning => `${warning} (${path})`) };
 }
 export class NoRouteError extends Error {
   override readonly name = "NoRouteError";
@@ -349,6 +405,7 @@ export async function discoverOrcheConfig(options: {
     taskContext: { ...DEFAULT_TASK_CONTEXT },
     single: { ...DEFAULT_SINGLE },
     thinkingPolicy: { ...DEFAULT_THINKING_POLICY },
+    outputCap: { ...DEFAULT_OUTPUT_CAP },
     writeRoots: [],
     source: { kind: "session", model, ...(thinking ? { thinking } : {}) },
     ignored,

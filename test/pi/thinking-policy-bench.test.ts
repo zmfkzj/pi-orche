@@ -18,9 +18,11 @@ describe("thinking-policy comparison harness (arms a-d, scripted scenarios)", ()
     expect([get("c_phase_full", "hidden_error").correct, get("b_phase_plain", "hidden_error").correct, get("b_phase_plain", "hidden_error").status]).toEqual([true, false, "blocked"]);
     // A premature report at the step level is caught by the report guard (both phase arms) and the integration runs.
     expect(get("c_phase_full", "premature_report")).toMatchObject({ correct: true, falseSuccess: false });
-    // An overrunning integration: the step-down ladder finishes it at a lower effort, the split ladder at the baseline.
-    expect([get("a_fixed", "integration_overrun").integrationEffort, get("c_phase_full", "integration_overrun").integrationEffort, get("d_fixed_checkpoints", "integration_overrun").integrationEffort]).toEqual(["medium", "high", "high"]);
+    // An overrunning integration keeps the baseline in every arm and is split per requirement: the step-down ladder no longer lowers
+    // the effort of an integration node (quality first; before, arm a finished it at medium).
+    expect([get("a_fixed", "integration_overrun").integrationEffort, get("c_phase_full", "integration_overrun").integrationEffort, get("d_fixed_checkpoints", "integration_overrun").integrationEffort]).toEqual(["high", "high", "high"]);
     expect(get("c_phase_full", "integration_overrun").redecompositions).toBe(1);
+    expect(get("a_fixed", "integration_overrun")).toMatchObject({ correct: true, falseSuccess: false });
     // A hopeless model ends in an explicit failure in every arm (the split ladder spends more before giving up).
     for (const arm of ["a_fixed", "b_phase_plain", "c_phase_full", "d_fixed_checkpoints"]) expect(get(arm, "stubborn")).toMatchObject({ completed: false, correct: false });
     expect(get("c_phase_full", "stubborn").outputTokens).toBeGreaterThan(get("a_fixed", "stubborn").outputTokens);
@@ -32,9 +34,10 @@ describe("thinking-policy comparison harness (arms a-d, scripted scenarios)", ()
       expect(efforts.slice(efforts.indexOf("high", 1))).toEqual(efforts.slice(efforts.indexOf("high", 1)).map(() => "high"));
     }
     // Plans in the format from before the policy: accepted as they are without required checkpoints (a, b), refused once and
-    // completed with checkpoints where they are required (c, d).
+    // completed with checkpoints where they are required (d), refused for the missing integration node and then for the missing
+    // checkpoint under the full phase policy with its gate (c).
     expect(["a_fixed", "b_phase_plain", "c_phase_full", "d_fixed_checkpoints"].map(arm => [arm, get(arm, "legacy_plan").correct, get(arm, "legacy_plan").checkpointRejections])).toEqual([
-      ["a_fixed", true, 0], ["b_phase_plain", true, 0], ["c_phase_full", true, 1], ["d_fixed_checkpoints", true, 1],
+      ["a_fixed", true, 0], ["b_phase_plain", true, 0], ["c_phase_full", true, 2], ["d_fixed_checkpoints", true, 1],
     ]);
   }, 60_000);
 });

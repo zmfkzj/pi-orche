@@ -27,7 +27,7 @@ import { TaskFailedError, WorkerPool, type TaskDetails } from "../../src/extensi
  */
 export const ARMS = {
   a_fixed: "fixed",
-  b_phase_plain: { mode: "phase", checkpoints: false, escalation: false, lengthRecovery: "step-down", subWorkers: false },
+  b_phase_plain: { mode: "phase", checkpoints: false, escalation: false, lengthRecovery: "step-down", subWorkers: false, gate: false, evidence: "off" },
   c_phase_full: "phase",
   d_fixed_checkpoints: { mode: "fixed", checkpoints: true, lengthRecovery: "redecompose" },
 } as const;
@@ -47,8 +47,9 @@ export type ArmName = keyof typeof ARMS;
  * - `integration_overrun`: the integration of all three requirements in one node overruns at the baseline; per requirement it fits.
  * - `stubborn`: every working request overruns.
  * - `legacy_plan`: a model that writes plans in the format from before the policy (no phase, hard or checkpoint fields; the
- *   integration node is an ordinary node to the runtime). Where checkpoints are required (arms c, d) task_plan refuses the first
- *   node marked done without one and the model adds checkpoints from then on; arms a and b must accept every plan as before.
+ *   integration node is an ordinary node to the runtime). Where the gate requires an integration node (arm c) task_plan refuses the
+ *   first plan and the model marks its integration node from then on; where checkpoints are required (arms c, d) task_plan refuses
+ *   the first node marked done without one and the model adds checkpoints from then on; arms a and b accept every plan as before.
  */
 export const SCENARIOS = ["plain", "overrun_at_baseline", "hidden_error", "premature_report", "integration_overrun", "stubborn", "legacy_plan"] as const;
 export type ScenarioName = typeof SCENARIOS[number];
@@ -59,7 +60,7 @@ const REQUEST = "Intent/Purpose: produce three result files\nRequirements:\nR1: 
 const CAP = 32_000;
 
 type Status = "pending" | "running" | "done" | "blocked" | "skipped";
-interface SimNode { id: string; title: string; dependsOn: string[]; covers: string[]; status: Status; phase?: "integrate"; hard?: boolean; checkpoint?: { result: string; evidence: string[]; verification: "passed" | "failed" | "not_applicable" } }
+interface SimNode { id: string; title: string; dependsOn: string[]; covers: string[]; status: Status; phase?: "integrate"; hard?: boolean; parent?: string; checkpoint?: { result: string; evidence: string[]; verification: "passed" | "failed" | "not_applicable" } }
 
 const lastText = (context: { messages: unknown[] }) => JSON.stringify(context.messages.at(-1) ?? "");
 const base = (id: string) => id.replace(/\..*$/, "");
@@ -70,6 +71,8 @@ function simulate(scenario: ScenarioName, counters: { output: number; simErrors:
   const legacy = scenario === "legacy_plan";
   /** legacy_plan: the model has seen the checkpoint requirement and sends checkpoints from then on. */
   let learned = false;
+  /** legacy_plan under the gate: the model has seen the integration-node requirement and marks its integration node from then on. */
+  let learnedPhase = false;
   const files: Record<string, "right" | "wrong"> = {};
   const worked = new Set<string>();
   const checked = new Set<string>();
@@ -80,8 +83,8 @@ function simulate(scenario: ScenarioName, counters: { output: number; simErrors:
   const tool = (name: string, args: Record<string, unknown>) => out(reply([call(name, args as never)], { stopReason: "toolUse" }));
   const plan = () => tool("task_plan", { nodes: nodes.map(node => {
     if (!legacy) return { ...node };
-    const { phase: _phase, hard: _hard, checkpoint, ...rest } = node;
-    return learned && checkpoint ? { ...rest, checkpoint } : rest;
+    const { phase, hard: _hard, checkpoint, ...rest } = node;
+    return { ...rest, ...(learnedPhase && phase ? { phase } : {}), ...(learned && checkpoint ? { checkpoint } : {}) };
   }) });
   const running = () => nodes.find(node => node.status === "running");
   const startNext = () => {
@@ -119,6 +122,11 @@ function simulate(scenario: ScenarioName, counters: { output: number; simErrors:
       learned = true;
       return plan();
     }
+    if (legacy && lastMessage?.role === "toolResult" && lastMessage.isError && /Task DAG gate .*the plan has no integration node/.test(last)) {
+      counters.checkpointRejections++;
+      learnedPhase = true;
+      return plan();
+    }
     if (lastMessage?.role === "toolResult" && lastMessage.isError && lastMessage.toolName !== "report_result") counters.simErrors.push(last.slice(0, 200));
     if (/output token limit/.test(last) && /report_result alone immediately/.test(last)) return scenario === "stubborn" ? capped() : report(true);
     if (/report_result was written at the reduced step effort/.test(last)) {
@@ -134,8 +142,8 @@ function simulate(scenario: ScenarioName, counters: { output: number; simErrors:
       if (node && (integrationSplit ? node.phase === "integrate" : true)) {
         node.status = "skipped";
         const parts: SimNode[] = integrationSplit
-          ? Object.values(REQUIREMENTS).map((requirement, index) => ({ id: `${node.id}.${requirement}`, title: `Verify ${requirement}`, dependsOn: index ? [`${node.id}.${Object.values(REQUIREMENTS)[index - 1]}`] : [], covers: [requirement], status: index ? "pending" : "running", phase: "integrate" }))
-          : [{ id: `${node.id}.a`, title: `${node.title} (part a)`, dependsOn: [], covers: node.covers, status: "running" }, { id: `${node.id}.b`, title: `${node.title} (part b)`, dependsOn: [`${node.id}.a`], covers: node.covers, status: "pending" }];
+          ? Object.values(REQUIREMENTS).map((requirement, index) => ({ id: `${node.id}.${requirement}`, title: `Verify ${requirement}`, dependsOn: index ? [`${node.id}.${Object.values(REQUIREMENTS)[index - 1]}`] : [], covers: [requirement], status: index ? "pending" : "running", phase: "integrate", parent: node.id }))
+          : [{ id: `${node.id}.a`, title: `${node.title} (part a)`, dependsOn: [], covers: node.covers, status: "running", parent: node.id }, { id: `${node.id}.b`, title: `${node.title} (part b)`, dependsOn: [`${node.id}.a`], covers: node.covers, status: "pending", parent: node.id }];
         const index = nodes.indexOf(node);
         const last = parts.at(-1)!.id;
         nodes = [...nodes.slice(0, index + 1), ...parts, ...nodes.slice(index + 1).map(item => item.dependsOn.includes(node.id) ? { ...item, dependsOn: [...item.dependsOn, last] } : item)];
