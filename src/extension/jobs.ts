@@ -67,7 +67,7 @@ export interface JobToolResult {
 }
 
 /** Why an attached call stopped waiting while its job keeps running. */
-export type DetachReason = "input" | "followUp" | "session-bus" | "abort" | "command" | "background" | "shutdown" | "replaced";
+export type DetachReason = "input" | "session-bus" | "abort" | "command" | "background" | "shutdown" | "replaced";
 
 /** How an attach ended. */
 export type AttachOutcome =
@@ -140,6 +140,11 @@ export class TaskJobs {
   /** The job a tool call is attached to, if any. */
   get attached(): Job | undefined {
     return this.waiter?.job;
+  }
+
+  /** The current attachment (opaque; a new attach, even to the same job, is a different one): a deferred detach checks it is still the same. */
+  get attachment(): object | undefined {
+    return this.waiter;
   }
 
   private changed(job: Job): void {

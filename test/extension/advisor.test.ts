@@ -513,4 +513,39 @@ describe("advisor: through the extension", () => {
     expect(advisorFaux.getPendingResponseCount()).toBe(0);
     expect(h.orche.faux.getPendingResponseCount()).toBe(0);
   });
+
+  it("attached, a user follow-up queued during the advisor's bounded finalization does not detach: the processed result comes first, then the follow-up", async () => {
+    const advisorFaux = tierProvider("ext-advisor", "a1");
+    const reporting = deferred(), finalizing = deferred(), gate = deferred();
+    const h: Harness = await createHarness({
+      mainSteps: [tool("orche_task", { role: "implement", request }), reply("Reviewed J1."), reply("Follow-up answered.")],
+      orcheSteps: [plan(), () => { reporting.resolve(); return reported("Greeting first draft"); }, async () => { finalizing.resolve(); await gate.promise; return reported("Greeting fixed", applied); }],
+      mode: "tui", single: { advisor: true, spawn: false }, models: { advisor: { model: "ext-advisor/a1", thinking: "high" } },
+    });
+    opened.push(h);
+    execFileSync("git", ["init", "-q"], { cwd: h.cwd });
+    h.orche.runtime.registerNativeProvider(advisorFaux.provider);
+    advisorFaux.setResponses([async () => { await reporting.promise; await sleep(200); return advice("Late but useful."); }]);
+    const run = h.session.prompt("fix the greeting");
+    // The worker's report is held and it is processing the notes (finalization prompt 1/2) while main's call stays attached.
+    await finalizing.promise;
+    await h.session.prompt("afterwards, summarise", { streamingBehavior: "followUp" });
+    await sleep(1200);
+    expect(h.session.messages.filter(message => message.role === "toolResult")).toHaveLength(0);
+    expect(h.session.getFollowUpMessages()).toEqual(["afterwards, summarise"]);
+    gate.resolve();
+    await run;
+    const results = h.session.messages.filter(message => message.role === "toolResult") as unknown as { content: unknown; details: Record<string, unknown> }[];
+    expect(results).toHaveLength(1);
+    expect(results[0]!.details).toMatchObject({ job: "J1", attach: "ended" });
+    expect(textOf(results[0]!.content)).toContain("Greeting fixed");
+    expect(textOf(results[0]!.content)).toContain("W1 applied them");
+    const tail = h.session.messages.slice(-3).map(message => message.role === "user" ? `user:${textOf(message.content)}` : `${message.role}`);
+    expect(tail[0]).toBe("assistant");
+    expect(tail[1]).toContain("afterwards, summarise");
+    expect(h.session.getLastAssistantText()).toBe("Follow-up answered.");
+    expect(h.session.messages.filter(message => message.role === "custom" && (message as { customType?: string }).customType === "orche-task-result")).toHaveLength(0);
+    expect(advisorFaux.getPendingResponseCount()).toBe(0);
+    expect(h.orche.faux.getPendingResponseCount()).toBe(0);
+  });
 });

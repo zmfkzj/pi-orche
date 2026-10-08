@@ -64,6 +64,21 @@ describe("TaskJobs attach/detach", () => {
     expect(delivered).toHaveLength(1);
   });
 
+  it("each attach is its own attachment: a check that captured an earlier one sees that a re-attach to the same job is a different one", async () => {
+    const { jobs, runs, start } = setup();
+    await start({});
+    const first = jobs.attachment;
+    expect(first).toBeDefined();
+    jobs.detach("abort");
+    expect(jobs.attachment).toBeUndefined();
+    const again = jobs.attach("J1", {});
+    expect(jobs.attachment).toBeDefined();
+    expect(jobs.attachment).not.toBe(first);
+    runs[0]!.finish();
+    expect(await again).toMatchObject({ kind: "ended" });
+    expect(jobs.attachment).toBeUndefined();
+  });
+
   it("settle and detach in the same tick: exactly one wins, in both orders", async () => {
     for (const order of ["settle-first", "detach-first"] as const) {
       const { jobs, runs, delivered, start } = setup();

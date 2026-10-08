@@ -42,6 +42,24 @@ const jobEntries = (h: Harness) => h.session.sessionManager.getBranch().filter(e
 /** The job widget as it stands (the newest setWidget of its key). */
 const widget = (h: Harness) => h.widgets.filter(entry => entry.key === "orche-job").at(-1)?.lines?.join("\n") ?? "";
 const attachedNow = (h: Harness) => expect(widget(h)).toContain("attached: waiting for the result");
+const contentText = (content: unknown) => typeof content === "string" ? content : Array.isArray(content) ? content.filter(part => part?.type === "text").map(part => part.text).join("") : "";
+/** Main's transcript in order: user prompts, assistant text (or its tool calls), tool results with their attach state, custom messages. */
+const transcript = (h: Harness) => h.session.messages.filter(message => message.role !== "system").map(message => {
+  const m = message as { role: string; content?: unknown; toolName?: string; details?: { attach?: string }; customType?: string };
+  if (m.role === "user") return `user:${contentText(m.content)}`;
+  if (m.role === "assistant") return `assistant:${contentText(m.content) || `[${(m.content as { type: string; name?: string }[]).filter(part => part.type === "toolCall").map(part => part.name).join(",")}]`}`;
+  if (m.role === "toolResult") return `tool:${m.toolName}:${m.details?.attach ?? ""}`;
+  return `${m.role}:${m.customType ?? ""}`;
+});
+/** Well past the input grace (1 s): the call is still attached, no tool result came back, and the follow-ups wait in Pi's queue (undelivered). */
+async function stillAttached(h: Harness, followUps: string[]) {
+  const results = h.session.messages.filter(message => message.role === "toolResult").length;
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  attachedNow(h);
+  expect(h.session.messages.filter(message => message.role === "toolResult")).toHaveLength(results);
+  expect(h.session.getFollowUpMessages()).toEqual(followUps);
+  expect(h.session.isStreaming).toBe(true);
+}
 
 async function harness(mainSteps: FauxResponseStep[], orcheSteps: FauxResponseStep[], extra: { records?: boolean; extraExtensions?: ExtensionFactory[] } = {}) {
   const h = await createHarness({ mainSteps, orcheSteps, mode: "tui", mainMode: "single", single: { spawn: false }, ...extra });
@@ -119,7 +137,7 @@ describe("attached orche_task", () => {
     const detached = toolResults(h, "orche_task")[0]!;
     expect(detached).toMatchObject({ isError: false, details: { job: "J1", worker: "W1", attach: "detached", reason: "input", status: "running" } });
     expect(textOf(detached)).toContain("Started job J1: worker W1 implement");
-    expect(textOf(detached)).toContain("new user input arrived");
+    expect(textOf(detached)).toContain("new user input was steered into this turn");
     expect(textOf(detached)).toContain("detaching never cancels it");
     // Main saw the detach and the user's message in the same request, and attached again: the worker never stopped.
     await vi.waitFor(() => expect(saw).toContain("what is 6*7?"));
@@ -265,25 +283,164 @@ describe("attached orche_task", () => {
     expect(customMessages(h, TASK_RESULT_TYPE)).toHaveLength(0);
   });
 
-  it("a queued follow-up detaches with the instruction to end the turn so it is delivered", async () => {
+  it("a queued follow-up does not detach the initial attached call: it stays queued until the result was reviewed, then reaches main", async () => {
     const entered = deferred(), gate = deferred();
     const h = await harness([
       tool("orche_task", { role: "implement", request }),
-      reply("J1 is still running."),
-      reply("Here is the follow-up answer."),
       reply("Reviewed J1."),
+      reply("Here is the follow-up answer."),
     ], [gated(entered, gate, report())]);
     const run = h.session.prompt("go");
     await entered.promise;
     await vi.waitFor(() => attachedNow(h));
     await h.session.prompt("afterwards, summarise", { streamingBehavior: "followUp" });
-    await vi.waitFor(() => expect(toolResults(h, "orche_task")).toHaveLength(1));
-    expect(toolResults(h, "orche_task")[0]).toMatchObject({ details: { attach: "detached", reason: "followUp" } });
-    expect(textOf(toolResults(h, "orche_task")[0])).toContain("End this turn now");
-    await run;
-    expect(h.session.getLastAssistantText()).toBe("Here is the follow-up answer.");
+    await stillAttached(h, ["afterwards, summarise"]);
     gate.resolve();
-    await vi.waitFor(() => expect(customMessages(h, TASK_RESULT_TYPE)).toHaveLength(1), { timeout: 5000 });
+    await run;
+    expect(toolResults(h, "orche_task")).toHaveLength(1);
+    expect(toolResults(h, "orche_task")[0]).toMatchObject({ isError: false, details: { job: "J1", attach: "ended" } });
+    expect(transcript(h)).toEqual([
+      "user:go", "assistant:[orche_task]", "tool:orche_task:ended", "assistant:Reviewed J1.",
+      "user:afterwards, summarise", "assistant:Here is the follow-up answer.",
+    ]);
+    expect(customMessages(h, TASK_RESULT_TYPE)).toHaveLength(0);
+    expect(jobEntries(h).filter(entry => entry.event === "end")).toMatchObject([{ status: "done" }]);
+    expect(h.main.faux.getPendingResponseCount()).toBe(0);
+  });
+
+  it("a follow-up queued over RPC (session.followUp) does not detach a re-attached call either; it reaches main after the result", async () => {
+    const entered = deferred(), gate = deferred();
+    const h = await harness([
+      tool("orche_task", { role: "implement", request }),
+      tool("orche_task_attach", { job: "J1" }),
+      reply("Reviewed J1."),
+      reply("Follow-up answered."),
+    ], [gated(entered, gate, report())]);
+    const run = h.session.prompt("go");
+    await entered.promise;
+    await vi.waitFor(() => attachedNow(h));
+    await h.session.steer("what is 6*7?", undefined, { source: "rpc" });
+    await vi.waitFor(() => expect(toolResults(h, "orche_task")).toHaveLength(1));
+    expect(toolResults(h, "orche_task")[0]).toMatchObject({ details: { attach: "detached", reason: "input" } });
+    // Re-attached after the steer was answered; a follow-up queued now waits for the result.
+    await vi.waitFor(() => attachedNow(h));
+    await h.session.followUp("then list the next steps", undefined, { source: "rpc" });
+    await stillAttached(h, ["then list the next steps"]);
+    expect(toolResults(h, "orche_task_attach")).toHaveLength(0);
+    gate.resolve();
+    await run;
+    expect(toolResults(h, "orche_task_attach")).toMatchObject([{ details: { job: "J1", attach: "ended" } }]);
+    expect(transcript(h)).toEqual([
+      "user:go", "assistant:[orche_task]", "tool:orche_task:detached", "user:what is 6*7?", "assistant:[orche_task_attach]",
+      "tool:orche_task_attach:ended", "assistant:Reviewed J1.", "user:then list the next steps", "assistant:Follow-up answered.",
+    ]);
+    expect(customMessages(h, TASK_RESULT_TYPE)).toHaveLength(0);
+  });
+
+  for (const order of ["follow-up first", "steer first", "same text"] as const) {
+    it(`steer and follow-up both queued (${order}): the steer detaches and is answered first, the re-attach is not refused for the follow-up, which comes after the result`, async () => {
+      const entered = deferred(), gate = deferred();
+      const steerText = order === "same text" ? "check the docs too" : "quick question";
+      const followText = order === "same text" ? "check the docs too" : "afterwards, summarise";
+      const h = await harness([
+        tool("orche_task", { role: "implement", request }),
+        tool("orche_task_attach", { job: "J1" }),
+        reply("Reviewed J1."),
+        reply("Follow-up answered."),
+      ], [gated(entered, gate, report())]);
+      const run = h.session.prompt("go");
+      await entered.promise;
+      await vi.waitFor(() => attachedNow(h));
+      if (order === "steer first") {
+        await h.session.prompt(steerText, { streamingBehavior: "steer" });
+        await h.session.prompt(followText, { streamingBehavior: "followUp" });
+      } else {
+        await h.session.prompt(followText, { streamingBehavior: "followUp" });
+        await h.session.prompt(steerText, { streamingBehavior: "steer" });
+      }
+      await vi.waitFor(() => expect(toolResults(h, "orche_task")).toHaveLength(1));
+      expect(toolResults(h, "orche_task")[0]).toMatchObject({ details: { attach: "detached", reason: "input" } });
+      await vi.waitFor(() => attachedNow(h));
+      await stillAttached(h, [followText]);
+      gate.resolve();
+      await run;
+      expect(toolResults(h, "orche_task_attach")).toMatchObject([{ details: { attach: "ended" } }]);
+      expect(transcript(h)).toEqual([
+        "user:go", "assistant:[orche_task]", "tool:orche_task:detached", `user:${steerText}`, "assistant:[orche_task_attach]",
+        "tool:orche_task_attach:ended", "assistant:Reviewed J1.", `user:${followText}`, "assistant:Follow-up answered.",
+      ]);
+      expect(customMessages(h, TASK_RESULT_TYPE)).toHaveLength(0);
+    });
+  }
+
+  it("a steer another extension transforms still counts as answered once delivered: the re-attach with a follow-up still queued waits", async () => {
+    const entered = deferred(), gate = deferred();
+    const transformer: ExtensionFactory = pi => {
+      pi.on("input", event => event.streamingBehavior === "steer" ? { action: "transform", text: `[expanded] ${event.text}` } : undefined);
+    };
+    const h = await harness([
+      tool("orche_task", { role: "implement", request }),
+      tool("orche_task_attach", { job: "J1" }),
+      reply("Reviewed J1."),
+      reply("Follow-up answered."),
+    ], [gated(entered, gate, report())], { extraExtensions: [transformer] });
+    const run = h.session.prompt("go");
+    await entered.promise;
+    await vi.waitFor(() => attachedNow(h));
+    await h.session.prompt("afterwards, summarise", { streamingBehavior: "followUp" });
+    await h.session.prompt("quick question", { streamingBehavior: "steer" });
+    await vi.waitFor(() => expect(toolResults(h, "orche_task")).toHaveLength(1));
+    await vi.waitFor(() => attachedNow(h));
+    await stillAttached(h, ["afterwards, summarise"]);
+    gate.resolve();
+    await run;
+    expect(transcript(h)).toEqual([
+      "user:go", "assistant:[orche_task]", "tool:orche_task:detached", "user:[expanded] quick question", "assistant:[orche_task_attach]",
+      "tool:orche_task_attach:ended", "assistant:Reviewed J1.", "user:afterwards, summarise", "assistant:Follow-up answered.",
+    ]);
+  });
+
+  it("only a follow-up queued: orche_task_attach on a detached (wait:false) job attaches instead of returning at once", async () => {
+    const entered = deferred(), gate = deferred(), queuedUp = deferred();
+    const h = await harness([
+      tool("orche_task", { role: "implement", request, wait: false }),
+      async () => { await queuedUp.promise; return tool("orche_task_attach", {}); },
+      reply("Reviewed J1."),
+      reply("Follow-up answered."),
+    ], [gated(entered, gate, report())]);
+    const run = h.session.prompt("go");
+    await entered.promise;
+    await vi.waitFor(() => expect(toolResults(h, "orche_task")).toHaveLength(1));
+    await h.session.prompt("afterwards, summarise", { streamingBehavior: "followUp" });
+    queuedUp.resolve();
+    await vi.waitFor(() => attachedNow(h));
+    await stillAttached(h, ["afterwards, summarise"]);
+    expect(toolResults(h, "orche_task_attach")).toHaveLength(0);
+    gate.resolve();
+    await run;
+    expect(toolResults(h, "orche_task_attach")).toMatchObject([{ details: { attach: "ended" } }]);
+    expect(transcript(h).slice(-3)).toEqual(["assistant:Reviewed J1.", "user:afterwards, summarise", "assistant:Follow-up answered."]);
+    expect(customMessages(h, TASK_RESULT_TYPE)).toHaveLength(0);
+  });
+
+  it("the worker's result and a follow-up in the same moment: the result reaches the attached call exactly once, the follow-up comes after it", async () => {
+    const entered = deferred(), gate = deferred();
+    const h = await harness([
+      tool("orche_task", { role: "implement", request }),
+      reply("Reviewed J1."),
+      reply("Follow-up answered."),
+    ], [gated(entered, gate, report())]);
+    const run = h.session.prompt("go");
+    await entered.promise;
+    await vi.waitFor(() => attachedNow(h));
+    gate.resolve();
+    await h.session.prompt("afterwards, summarise", { streamingBehavior: "followUp" });
+    await run;
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(toolResults(h, "orche_task")).toMatchObject([{ details: { attach: "ended" } }]);
+    expect(customMessages(h, TASK_RESULT_TYPE)).toHaveLength(0);
+    expect(jobEntries(h).filter(entry => entry.event === "end")).toHaveLength(1);
+    expect(transcript(h).slice(-4)).toEqual(["tool:orche_task:ended", "assistant:Reviewed J1.", "user:afterwards, summarise", "assistant:Follow-up answered."]);
   });
 
   it("Esc (abort) detaches without cancelling: the job finishes and its result comes as a message", async () => {

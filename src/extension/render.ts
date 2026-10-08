@@ -381,6 +381,7 @@ function missingModelLine(name: string, details: unknown): string | undefined {
  * {@link missingModelLine} in an error result.
  */
 /** The collapsed body of a call that detached from (or did not attach to) a background job: what happened, for the user; the model's text expanded. */
+// `followUp` only appears in sessions recorded before queued follow-ups stopped detaching; it stays readable there.
 const DETACH_LABEL: Record<string, string> = {
   input: "new user input", followUp: "a queued follow-up", "session-bus": "a message from another Pi session", abort: "Esc",
   command: "/orche detach", background: "wait:false", shutdown: "session shutdown", replaced: "another attach",

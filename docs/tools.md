@@ -24,19 +24,29 @@ The Pi package (`src/extension/index.ts`) gives the main session four delegation
 | Tool | Parameters | What it does |
 | --- | --- | --- |
 | `orche_task` | `role`, `request` (required); `context?`, `worker?`, `files?`, `task?`, `git?`, `gui?`, and: `wait?` (boolean), `writeRoots?` (≤10 paths), `verificationRounds?` (integer 1–5, default 2) | Delegates one assignment to one persistent worker. In interactive (`tui`) and RPC sessions it starts a **background job** (J1, …) and stays **attached**: it waits and returns the result like a blocking call, unless it is detached first (see below); a detached call returns `Started job J1: worker W1 implement (model · thinking level). Detached from J1 (…): <why and what to do>`. `wait: false` detaches at once. `wait: true`, and every other mode (`pi -p` print, `--mode json`, SDK sessions without a UI mode), **block** without a job and return the result (aborting cancels), because those processes end with the turn. Errors before the worker has its assignment (unknown worker, bad arguments, a job already running) fail the call itself in all paths. |
-| `orche_task_attach` | `job?` (`J<n>`; default the running job) | Attaches to the running job and waits for its result like `orche_task`; detaches the same way. Refused (`Not attached …`, `details.attach: "pending"`) while user input or an undelivered woken peer note is queued; for a job that already ended it says so (`already-ended`) and repeats nothing. Never restarts or cancels the worker. |
+| `orche_task_attach` | `job?` (`J<n>`; default the running job) | Attaches to the running job and waits for its result like `orche_task`; detaches the same way. Refused (`Not attached …`, `details.attach: "pending"`) while a steered user message or an undelivered woken peer note waits (queued follow-ups do not count); for a job that already ended it says so (`already-ended`) and repeats nothing. Never restarts or cancels the worker. |
 | `orche_task_status` | `job?` (`J<n>`; default the running job, else the latest), `cancel?` (boolean) | Job state, elapsed time, attached/detached, latest progress and the worker's liveness, or the result summary when it ended; `cancel: true` cancels the running job (also `/orche cancel`). Never waits; only when the user asks. |
 | `orche_task_message` | `message` (1–20,000 chars, self-contained), `job?` (default the running job) | Queues an extra or corrected instruction for the running job's worker (`Queued M1 for W1 (J1): …`). |
 
 **Attach and detach.** Attaching and detaching only change whether a tool call waits; the job's worker is untouched. An attached
-call detaches when: an `input` event arrives (an interactive prompt, steer or follow-up, an RPC `steer`/`follow_up`; the call
-returns once Pi has queued the input, `ctx.hasPendingMessages()`, at the latest after 1 s), a `session-bus:message` event with
+call detaches when: a steer arrives (`input` event with `streamingBehavior: "steer"`: an interactive prompt sent while main works,
+an RPC `steer`; the call returns once Pi has queued it, `ctx.hasPendingMessages()`, at the latest after 1 s), a `session-bus:message` event with
 `wake` other than `suppressed` arrives (pi-session-bus emits it after queuing the note as a steer), the call's abort signal fires
 (Esc, RPC `abort`), or the user runs `/orche detach`. The result says why (`details.attach: "detached"`, `details.reason`: `input`,
-`followUp`, `session-bus`, `abort`, `command`, `background`, `shutdown`) and what main should do: answer the input, then attach
-again when nothing else waits (not after `/orche detach` unless asked; after Esc only after answering the next message; after a
-follow-up end the turn first so it is delivered). A woken note counts as waiting until its `session-bus.message` reaches the
-context (`message_end`), at most 60 s, and is forgotten at `agent_end`.
+`session-bus`, `abort`, `command`, `background`, `shutdown`; `followUp` only in sessions recorded before follow-ups stopped
+detaching) and what main should do: answer the input, then attach again when nothing else waits (not after `/orche detach` unless
+asked; after Esc only after answering the next message). A woken note counts as waiting until its `session-bus.message` reaches
+the context (`message_end`), at most 60 s, and is forgotten at `agent_end`.
+
+**Follow-ups.** A follow-up (`input` with `streamingBehavior: "followUp"`: Alt+Enter, RPC `follow_up`, `sendUserMessage` with
+`deliverAs: "followUp"`) never detaches. It stays in Pi's follow-up queue, untouched (not consumed, re-sent or turned into a steer):
+the attached call returns the job's result, main answers it, and Pi delivers the follow-up when the run has nothing else to do. A
+follow-up queued after a steer detached the call does not block the re-attach either. `ctx.hasPendingMessages()` counts steers and
+follow-ups together, so pi-orche counts the steers and follow-ups it saw as `input` events and takes one off per user message Pi
+delivers (`message_start`; Pi delivers steers before follow-ups); a queued message it saw no input for counts as a steer. Counts are
+dropped when nothing is queued and no input arrived within the last second, at `agent_settled` and at session start/shutdown. The
+attach guard (`orche_task_attach`, and `orche_task` right after the worker got its assignment) refuses only for a waiting steer or
+woken note. A delayed input check only detaches the attachment it was started for, never a later re-attach to the same job.
 
 **Result delivery.** Exactly once per job: settling and detaching are synchronous, so whichever happens first wins. A job that ends
 while a call is attached returns its result to that call (the blocking text; `orche_task_attach` adds the header line). A job that

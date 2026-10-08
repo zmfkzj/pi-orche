@@ -68,9 +68,10 @@ function timeBudget(): string {
 /** How long a one-turn override waits for the session to start the turn it just queued before giving up. */
 const SINGLE_START_TIMEOUT_MS = 10_000;
 /**
- * Pi queues a prompt typed during a turn right after the `input` handlers return: an attached call detaches once the input is
+ * Pi queues a steer typed during a turn right after the `input` handlers return: an attached call detaches once the steer is
  * queued (`ctx.hasPendingMessages()`), checked every {@link INPUT_CHECK_MS}, and at the latest after this grace (another
- * extension may have consumed the input; detaching then only costs main one re-attach).
+ * extension may have consumed the input; detaching then only costs main one re-attach). A follow-up never detaches: Pi delivers
+ * it when the run has nothing else to do, i.e. after the attached call returned the job's result.
  */
 const INPUT_GRACE_MS = 1000;
 const INPUT_CHECK_MS = 10;
@@ -189,7 +190,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       } else stopWidgetTimer();
     };
 
-    // Detaching an attached call: input for main (user prompts, woken session-bus notes) and how long a note counts as waiting.
+    // Detaching an attached call: input for main (user steers, woken session-bus notes) and how long a note counts as waiting.
     /** Woken session-bus notes Pi has queued but not yet delivered into main's context: note id -> arrival. */
     const pendingNotes = new Map<string, number>();
     const notesWaiting = () => {
@@ -197,9 +198,29 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       for (const [id, at] of pendingNotes) if (now - at > NOTE_PENDING_MS) pendingNotes.delete(id);
       return pendingNotes.size > 0;
     };
-    /** Whether input waits for main: queued user prompts or an undelivered woken note. */
+    /**
+     * User prompts queued for main while it runs (`input` events with `streamingBehavior`), not yet delivered. Pi delivers every
+     * queued steer before any follow-up, each as a user message (`message_start`, after Pi took it out of its queue), and
+     * `ctx.hasPendingMessages()` counts both queues together; these counts tell a waiting steer (answer it now) from a follow-up
+     * that waits for the run to end. They are counts, not texts: other input handlers and prompt templates may change the text
+     * Pi queues. An input another extension handled is never queued: its count goes with the next delivered user message, once
+     * nothing is queued any more, or when the session settles.
+     */
+    const queued = { steer: 0, followUp: 0 };
+    /** When the last queued-kind input arrived: until Pi has queued it (at most {@link INPUT_GRACE_MS}) its count is kept. */
+    let lastQueuedInput = 0;
+    const resetQueued = () => { queued.steer = 0; queued.followUp = 0; };
+    /**
+     * Whether input waits for main that an attached call must make way for: a queued steer or an undelivered woken note. Queued
+     * follow-ups alone do not count: they wait for the job's result like Pi's follow-up queue waits for the run. A queued message
+     * orche saw no input for counts as a steer (the earlier, safe behaviour).
+     */
     const inputWaiting = (ctx: Pick<ExtensionContext, "hasPendingMessages">) => {
-      try { if (ctx.hasPendingMessages()) return true; } catch { /* stale context */ }
+      let pending = false;
+      try { pending = ctx.hasPendingMessages(); } catch { /* stale context */ }
+      // Nothing queued and no input on its way into the queue: counts of inputs that were never queued are stale.
+      if (!pending && Date.now() - lastQueuedInput >= INPUT_GRACE_MS) resetQueued();
+      if (pending && (queued.steer > 0 || queued.followUp === 0)) return true;
       return notesWaiting();
     };
     /** The attach options of a tool call: its abort signal detaches, its block shows the job's progress. */
@@ -208,17 +229,23 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       pending: () => inputWaiting(ctx),
       onUpdate: job => onUpdate?.(jobUpdate(job)),
     });
-    /** Detach once the input that just arrived is queued for main (or after the grace): see {@link INPUT_GRACE_MS}. */
-    const detachOnInput = (ctx: ExtensionContext, reason: DetachReason) => {
+    /**
+     * Detach once the steer that just arrived is queued for main (or after the grace): see {@link INPUT_GRACE_MS}. Only this
+     * attachment: a later attach (even to the same job) is not touched. While follow-ups are queued `ctx.hasPendingMessages()`
+     * is already true, so the first check detaches; Pi queues the steer as soon as the input handlers have returned, so only
+     * another extension's slow async input handler can make that check come first (then the next attach is refused once the
+     * steer is queued).
+     */
+    const detachOnInput = (ctx: ExtensionContext) => {
       const tasks = jobs;
-      const attached = tasks?.attached;
-      if (!tasks || !attached) return;
+      const attachment = tasks?.attachment;
+      if (!tasks || !attachment) return;
       const since = Date.now();
       const check = () => {
-        if (tasks.attached !== attached) return;
-        let queued = false;
-        try { queued = ctx.hasPendingMessages(); } catch { queued = true; }
-        if (queued || Date.now() - since >= INPUT_GRACE_MS) tasks.detach(reason);
+        if (tasks.attachment !== attachment) return;
+        let isQueued = false;
+        try { isQueued = ctx.hasPendingMessages(); } catch { isQueued = true; }
+        if (isQueued || Date.now() - since >= INPUT_GRACE_MS) tasks.detach("input");
         else setTimeout(check, INPUT_CHECK_MS).unref?.();
       };
       setTimeout(check, 0).unref?.();
@@ -293,6 +320,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       lastMode = ctx.mode;
       endedShown = undefined;
       pendingNotes.clear();
+      resetQueued();
       stopWidgetTimer();
       if (widgetText !== undefined) { widgetText = undefined; try { ctx.ui.setWidget(JOB_WIDGET_KEY, undefined); } catch { /* no UI */ } }
       // Jobs and gone workers of this branch: a job that never ended belonged to a process that is gone (crash): it ends now, once.
@@ -338,10 +366,14 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       const reason = guardToolCall(state.effective, event.toolName, event.input as Record<string, unknown>);
       return reason ? { block: true, reason } : undefined;
     });
-    // Input for main detaches an attached call (the job keeps running); the widget's last end line goes with the next user input.
+    // A steer for main detaches an attached call (the job keeps running); a follow-up stays queued in Pi until the run has nothing
+    // else to do, i.e. after the attached call returned the result. The widget's last end line goes with the next user input.
     pi.on("input", (event, ctx) => {
       if (endedShown && !jobs?.running) { endedShown = undefined; paintJob(); }
-      if (jobs?.attached) detachOnInput(ctx, event.streamingBehavior === "followUp" ? "followUp" : "input");
+      if (event.streamingBehavior) lastQueuedInput = Date.now();
+      if (event.streamingBehavior === "followUp") { queued.followUp++; return undefined; }
+      if (event.streamingBehavior === "steer") queued.steer++;
+      if (jobs?.attached) detachOnInput(ctx);
       return undefined;
     });
     // pi-session-bus announces each note Pi accepted (after its steer is queued). A woken note detaches and counts as waiting for
@@ -352,6 +384,12 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       if (typeof note.id === "string") pendingNotes.set(note.id, Date.now());
       jobs?.detach("session-bus");
     });
+    pi.on("message_start", event => {
+      // Pi takes a queued user prompt out of its queue as it delivers it, steers first.
+      if ((event.message as { role?: string }).role !== "user") return undefined;
+      if (queued.steer > 0) queued.steer--; else if (queued.followUp > 0) queued.followUp--;
+      return undefined;
+    });
     pi.on("message_end", event => {
       const message = event.message as { role?: string; customType?: string; details?: { note?: { id?: unknown } } };
       if (message.role === "custom" && message.customType === SESSION_BUS_MESSAGE_TYPE && typeof message.details?.note?.id === "string") pendingNotes.delete(message.details.note.id);
@@ -359,6 +397,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     });
     // A run that ended has taken every steered message (or Esc dropped them): nothing it queued is still waiting.
     pi.on("agent_end", () => { pendingNotes.clear(); });
+    // A settled session runs no queued continuation: no user prompt is still queued (Esc returned them to the editor).
+    pi.on("agent_settled", () => { resetQueued(); });
     pi.registerMessageRenderer(TASK_RESULT_TYPE, renderJobResultMessage);
     pi.on("session_shutdown", async () => {
       // Running background jobs end as interrupted (entry + run record), never silently left "running"; an attached call returns.
@@ -367,6 +407,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       if (widgetText !== undefined) { widgetText = undefined; try { lastUi?.setWidget(JOB_WIDGET_KEY, undefined); } catch { /* the UI may be gone */ } }
       endedShown = undefined;
       pendingNotes.clear();
+      resetQueued();
       jobs = undefined;
       controller.cancel();
       await workers?.dispose();
@@ -493,13 +534,13 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.registerTool({
       name: "orche_task",
       label: "orche task",
-      description: `Delegate one self-contained request to one persistent worker. In an interactive or RPC session the task runs as a background job (J1, …) and this call stays ATTACHED to it: it waits like a blocking call, shows the worker's progress and returns the result, unless new user input, a message from another Pi session, Esc or /orche detach DETACHES it first. Then it returns at once with the job id, the worker keeps running, and the result arrives later as one orche-task-result message unless you attach again with orche_task_attach. wait:false returns as soon as the worker has its assignment (detached); wait:true, and print/JSON modes, block until the result and cannot detach (aborting cancels). Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs. Choose explore, answer, implement, verify, game-asset (create/modify game art, audio and model assets) or video (produce/edit video); pass worker to reuse a live worker with its retained context and original model. Implement, game-asset and video may write within files (or the workspace when omitted); other roles are read-only. Workers never git commit or push unless this assignment carries \`git\` ({commit, push, remote, branch}; implement, game-asset and video only): set it only when the user explicitly asked in this conversation to commit or push, and scope the commit to the task's files where possible. Only one task can be active. Time budget: ${timeBudget()} an idle worker times out at the base deadline, and the result says why a timeout was not extended.`,
+      description: `Delegate one self-contained request to one persistent worker. In an interactive or RPC session the task runs as a background job (J1, …) and this call stays ATTACHED to it: it waits like a blocking call, shows the worker's progress and returns the result, unless a user message steered into the turn, a message from another Pi session, Esc or /orche detach DETACHES it first; a queued follow-up message does not detach it and reaches you after the result. Then it returns at once with the job id, the worker keeps running, and the result arrives later as one orche-task-result message unless you attach again with orche_task_attach. wait:false returns as soon as the worker has its assignment (detached); wait:true, and print/JSON modes, block until the result and cannot detach (aborting cancels). Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs. Choose explore, answer, implement, verify, game-asset (create/modify game art, audio and model assets) or video (produce/edit video); pass worker to reuse a live worker with its retained context and original model. Implement, game-asset and video may write within files (or the workspace when omitted); other roles are read-only. Workers never git commit or push unless this assignment carries \`git\` ({commit, push, remote, branch}; implement, game-asset and video only): set it only when the user explicitly asked in this conversation to commit or push, and scope the commit to the task's files where possible. Only one task can be active. Time budget: ${timeBudget()} an idle worker times out at the base deadline, and the result says why a timeout was not extended.`,
       promptSnippet: "orche_task: one reusable worker for explore, answer, implement, verify, game-asset (game art/audio/model assets) or video (production/editing)",
       promptGuidelines: [
         "orche_task workers never git commit or push on their own. Pass `git` ({commit:true} or {push:true, remote?, branch?}) only when the user explicitly asked in this conversation to commit or push; never on your own initiative. Only implement, game-asset and video accept it; explore, answer and verify reject it.",
         "The `git` grant covers that one assignment only: a reused worker's next assignment without it may not commit. Scope the commit to the task's files where possible (pass `files`, name the paths in `request`), and check the commits listed in the result before reporting.",
         "Pass `gui: true` only when the task needs GUI applications (needs pi-gui): the worker then gets its own private desktop that the user does not see, separate from yours and from other workers'. Omit it otherwise.",
-        "In interactive/RPC sessions orche_task stays attached to its job (J1, …) and returns the result like a blocking call. When it returns DETACHED (new user input or a peer-session message arrived), answer that input first; then, if the job is still running and nothing else is waiting for you, call orche_task_attach to wait for it again. Never wait with sleep, never poll orche_task_status (only when the user asks for progress or wants to cancel). Use orche_task_message to add instructions to the running worker.",
+        "In interactive/RPC sessions orche_task stays attached to its job (J1, …) and returns the result like a blocking call. When it returns DETACHED (a steered user message or a peer-session message arrived), answer that input first; then, if the job is still running and nothing else is waiting for you, call orche_task_attach to wait for it again. Queued follow-up messages never detach and do not count as waiting: Pi delivers them after the result, when the turn has nothing else to do. Never wait with sleep, never poll orche_task_status (only when the user asks for progress or wants to cancel). Use orche_task_message to add instructions to the running worker.",
         "Every worker has a private scratch directory for temporary files. Pass `writeRoots` (implement/game-asset/video) only when the user explicitly asked to change a location outside the workspace, such as a sibling repository; it applies to that assignment only.",
         "An implement/answer orchestrator may run at most 2 fresh-verifier rounds; further rounds are refused and the result lists the remaining findings (data.unresolved, a `Verification cap:` line). Pass `verificationRounds` (up to 5) only when the user explicitly asked for more independent review rounds.",
       ],
@@ -533,7 +574,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
             onProgress: (lines, timing) => { if (!started) onUpdate?.(partialUpdate(lines, timing)); },
           }, signal, params.wait === false ? undefined : attachOptions(signal, ctx, onUpdate));
           started = true;
-          // Input that arrived while the worker started (a typed prompt, a woken peer note) is answered first.
+          // A steer or woken peer note that arrived while the worker started is answered first; a queued follow-up waits for the result.
           if (outcome && tasks.attached === job && inputWaiting(ctx)) tasks.detach("input");
           if (outcome) onUpdate?.(jobUpdate(job));
           return attachResult(outcome ? await outcome : { kind: "detached", job, reason: "background" }, "orche_task") as never;
@@ -579,8 +620,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.registerTool({
       name: "orche_task_attach",
       label: "orche task attach",
-      description: "Attach to the running background orche_task job (the one named, else the running one) and wait for its result like a blocking orche_task: the call shows the worker's progress and returns the result when the job ends. New user input, a woken message from another Pi session, Esc or /orche detach DETACH it: it then returns at once, the worker keeps running, and the result arrives as one orche-task-result message unless you attach again. Call it after you answered the input that detached the job, when the job is still running and nothing else waits for you; it refuses while input is queued. Attaching never restarts or cancels the worker.",
-      promptSnippet: "orche_task_attach: wait again for the running orche_task job (detaches on new input)",
+      description: "Attach to the running background orche_task job (the one named, else the running one) and wait for its result like a blocking orche_task: the call shows the worker's progress and returns the result when the job ends. A user message steered into the turn, a woken message from another Pi session, Esc or /orche detach DETACH it: it then returns at once, the worker keeps running, and the result arrives as one orche-task-result message unless you attach again. Call it after you answered the input that detached the job, when the job is still running and nothing else waits for you; it refuses while a steered message or a woken peer note is waiting; queued follow-up messages do not count (they wait for the result). Attaching never restarts or cancels the worker.",
+      promptSnippet: "orche_task_attach: wait again for the running orche_task job (detaches on steered input, not on follow-ups)",
       parameters: Type.Object({
         job: Type.Optional(Type.String({ pattern: "^J[1-9][0-9]*$", description: "Job id from orche_task (J1, …); default: the running job." })),
       }),
