@@ -1,0 +1,51 @@
+{
+  "id": "line__line-bot-sdk-python-981_interface",
+  "title": "Add convenience wrappers for issuing stateless channel access tokens using either JWT assertion authentication or client",
+  "repo": "line/line-bot-sdk-python",
+  "baseCommit": "f0d222be1a25553005bff35c2ace82424a683fd9",
+  "createdAt": "2026-04-01 07:44:57",
+  "problemStatement": "Add convenience wrappers for issuing stateless channel access tokens using either JWT assertion authentication or client ID/client secret authentication.\n\nThe wrappers should avoid requiring callers to pass empty unused authentication fields. Both synchronous and asynchronous ChannelAccessToken APIs should expose equivalent methods. JWT assertion wrappers should send only the JWT assertion authentication fields needed by the LINE OAuth API. Client-secret wrappers should send only the client ID/client secret authentication fields. Each variant should also have a `_with_http_info` form that returns the full API response object.\n\nThis is an additive API change and should preserve the existing lower-level token issuing methods.\n\n## Interface\n\nType: Function\nName: issue_stateless_channel_token_by_jwt_assertion\nPath: linebot/v3/oauth/api/channel_access_token.py and linebot/v3/oauth/api/async_channel_access_token.py\nInput: client_assertion: str, **kwargs\nOutput: IssueStatelessChannelAccessTokenResponse\nDescription: Issues a stateless channel access token using a JWT assertion without requiring empty client-secret parameters.\n\nType: Function\nName: issue_stateless_channel_token_by_client_secret\nPath: linebot/v3/oauth/api/channel_access_token.py and linebot/v3/oauth/api/async_channel_access_token.py\nInput: client_id: str, client_secret: str, **kwargs\nOutput: IssueStatelessChannelAccessTokenResponse\nDescription: Issues a stateless channel access token using client ID and client secret without requiring empty JWT assertion parameters.\n\nType: Function\nName: issue_stateless_channel_token_with_http_info_by_jwt_assertion\nPath: linebot/v3/oauth/api/channel_access_token.py and linebot/v3/oauth/api/async_channel_access_token.py\nInput: client_assertion: str, **kwargs\nOutput: ApiResponse\nDescription: JWT assertion variant returning the full HTTP response.\n\nType: Function\nName: issue_stateless_channel_token_with_http_info_by_client_secret\nPath: linebot/v3/oauth/api/channel_access_token.py and linebot/v3/oauth/api/async_channel_access_token.py\nInput: client_id: str, client_secret: str, **kwargs\nOutput: ApiResponse\nDescription: Client-secret variant returning the full HTTP response.",
+  "interface": "Type: Function\nName: issue_stateless_channel_token_by_jwt_assertion\nPath: linebot/v3/oauth/api/channel_access_token.py and linebot/v3/oauth/api/async_channel_access_token.py\nInput: client_assertion: str, **kwargs\nOutput: IssueStatelessChannelAccessTokenResponse\nDescription: Issues a stateless channel access token using a JWT assertion without requiring empty client-secret parameters.\n\nType: Function\nName: issue_stateless_channel_token_by_client_secret\nPath: linebot/v3/oauth/api/channel_access_token.py and linebot/v3/oauth/api/async_channel_access_token.py\nInput: client_id: str, client_secret: str, **kwargs\nOutput: IssueStatelessChannelAccessTokenResponse\nDescription: Issues a stateless channel access token using client ID and client secret without requiring empty JWT assertion parameters.\n\nType: Function\nName: issue_stateless_channel_token_with_http_info_by_jwt_assertion\nPath: linebot/v3/oauth/api/channel_access_token.py and linebot/v3/oauth/api/async_channel_access_token.py\nInput: client_assertion: str, **kwargs\nOutput: ApiResponse\nDescription: JWT assertion variant returning the full HTTP response.\n\nType: Function\nName: issue_stateless_channel_token_with_http_info_by_client_secret\nPath: linebot/v3/oauth/api/channel_access_token.py and linebot/v3/oauth/api/async_channel_access_token.py\nInput: client_id: str, client_secret: str, **kwargs\nOutput: ApiResponse\nDescription: Client-secret variant returning the full HTTP response.",
+  "failToPass": [
+    "tests/api/test_issue_stateless_channel_token.py::TestIssueStatelessChannelToken::test_issue_stateless_channel_token_by_client_secret",
+    "tests/api/test_issue_stateless_channel_token.py::TestIssueStatelessChannelToken::test_issue_stateless_channel_token_by_jwt_assertion",
+    "tests/api/test_issue_stateless_channel_token.py::TestIssueStatelessChannelToken::test_issue_stateless_channel_token_with_http_info_by_client_secret",
+    "tests/api/test_issue_stateless_channel_token.py::TestIssueStatelessChannelToken::test_issue_stateless_channel_token_with_http_info_by_jwt_assertion"
+  ],
+  "passToPass": [],
+  "testFiles": [
+    "tests/api/test_issue_stateless_channel_token.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/api/test_issue_stateless_channel_token.py",
+  "datasetInstall": "pip install -e . -q && pip install -r requirements-test.txt -q",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "38c76091a70cb4672f59c28bde13f74624b9cd843624024456765b875ec0fcf3"
+  },
+  "install": "pip install . -q && pip install -r requirements-test.txt -q",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-08T01:17:34.985Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 2916,
+      "counts": {
+        "FAILED": 4
+      }
+    },
+    "reference": {
+      "ms": 1531,
+      "counts": {
+        "PASSED": 4
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

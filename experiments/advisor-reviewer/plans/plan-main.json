@@ -1,0 +1,3 @@
+{ "out": "results/advisor-reviewer/main", "revision": "96cd2a7", "phase": "main", "arms": ["baseline", "advisor", "reviewer"], "repeats": 2, "concurrency": 6,
+  "scratch": "/tmp/pi-orche/01a11712-78d5-74a1-917c-810024d98c76/W2/runs",
+  "tasks": ["d1-transactional-outbox", "tobymao__sqlglot-7479", "pycqa__isort-2491", "lcb-atcoder-arc196_c", "nesquena__hermes-webui-2056", "d8-build-graph", "scientific-python__docstub-123", "copier-org__copier-2646", "sqlfluff__sqlfluff-7615", "python-scim__scim2-models-139_interface"] }

@@ -1,0 +1,53 @@
+{
+  "id": "pypa__twine-1309",
+  "title": "Error during upload. ValueError: 499 is not a valid HTTPStatus",
+  "repo": "pypa/twine",
+  "baseCommit": "cab618fb122bb2d1e6c042f5bf0c5a8b8e2573bc",
+  "createdAt": "2026-04-17 17:23:13",
+  "problemStatement": "Error during upload. ValueError: 499 is not a valid HTTPStatus\n### Is there an existing issue for this?\n\n- [x] I have searched the existing issues (open and closed), and could not find an existing issue\n\n### What keywords did you use to search existing issues?\n\n499 \nValueError\n\n### What operating system(s) are you using?\n\nLinux\n\n### If you selected 'Other', describe your Operating System here\n\n_No response_\n\n### What version of Python are you running?\n\n```console\nPython 3.12 (this is GHA hosted runner)\n```\n\n### How did you install twine? Did you use your operating system's package manager or pip or something else?\n\n```console\nhttps://github.com/karellen/karellen-llvm/actions/runs/23277186082/job/67682577805#step:3:21\n\npip install --no-input --user --break-system-packages twine\n```\n\n### What version of twine do you have installed (include the complete output)\n\n```console\ntwine --version\ntwine version 6.2.0 (keyring: 25.7.0, packaging: 26.0, requests: 2.32.5,\nrequests-toolbelt: 1.0.0, urllib3: 2.6.3, id: 1.6.1)\n```\n\n### Which package repository are you using?\n\npypi.org\n\n### Please describe the issue that you are experiencing\n\n```\nWARNING  Error during upload. Retry with the --verbose option for more details. \nTraceback (most recent call last):\n  File \"/home/runner/.local/lib/python3.12/site-packages/twine/__main__.py\", line 33, in main\n    error = cli.dispatch(sys.argv[1:])\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/runner/.local/lib/python3.12/site-packages/twine/cli.py\", line 139, in dispatch\n    return main(args.args)\n           ^^^^^^^^^^^^^^^\n  File \"/home/runner/.local/lib/python3.12/site-packages/twine/commands/upload.py\", line 253, in main\n    return upload(upload_settings, parsed_args.dists)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/runner/.local/lib/python3.12/site-packages/twine/commands/upload.py\", line 216, in upload\n    utils.check_status_code(resp, upload_settings.verbose)\n  File \"/home/runner/.local/lib/python3.12/site-packages/twine/utils.py\", line 248, in check_status_code\n    raise err\n  File \"/home/runner/.local/lib/python3.12/site-packages/twine/utils.py\", line 240, in check_status_code\n    response.raise_for_status()\n  File \"/home/runner/.local/lib/python3.12/site-packages/requests/models.py\", line 1026, in raise_for_status\n    raise HTTPError(http_error_msg, response=self)\nrequests.exceptions.HTTPError: 499 Client Error: status code 499 for url: https://upload.pypi.org/legacy/\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/home/runner/.local/bin/twine\", line 8, in <module>\n    sys.exit(main())\n             ^^^^^^\n  File \"/home/runner/.local/lib/python3.12/site-packages/twine/__main__.py\", line 40, in main\n    status_phrase = http.HTTPStatus(status_code).phrase\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/enum.py\", line 757, in __call__\n    return cls.__new__(cls, value)\n           ^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/enum.py\", line 1171, in __new__\n    raise ve_exc\nValueError: 499 is not a valid HTTPStatus\n```\n\nhttps://github.com/karellen/karellen-llvm/actions/runs/23277186082/job/67682577805#step:6:2129\n\n### Please list the steps required to reproduce this behaviour\n\nThis is GHA Workflow failing, the full reproducer is here: https://github.com/karellen/karellen-llvm/actions/runs/23277186082/workflow#L58\n\n### Please include the PKG-INFO file contents from the artifact you're attempting to upload\n\n```email\nArtifacts are publicly published and are contained in the release.\nThis is the artifact that is failing: https://github.com/karellen/karellen-llvm/releases/download/v22.1.1.post17/karellen_llvm_core_debug-22.1.1.post17-py3-none-manylinux_2_28_x86_64.whl\nOther artifacts continue to succeed.\n```\n\n### A redacted version of your `.pypirc` file\n\n```ini\nthere isn't one, it's CI host.\n```\n\n### Anything else you'd like to mention?\n\n_No response_",
+  "interface": "",
+  "failToPass": [
+    "tests/test_main.py::test_http_exception_handling[599-Unknown"
+  ],
+  "passToPass": [
+    "tests/test_main.py::test_exception_handling",
+    "tests/test_main.py::test_http_exception_handling[400-Bad",
+    "tests/test_main.py::test_no_color_exception"
+  ],
+  "testFiles": [
+    "tests/test_main.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/test_main.py",
+  "datasetInstall": "pip install -e . -q && pip install pretend pytest pytest-socket coverage -q",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "9c2cedd75800eca2452243aaca5525724c1c7d144e59b7bdc83e54af67af729f"
+  },
+  "install": "pip install . -q && pip install pretend pytest pytest-socket coverage -q",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-08T00:41:27.962Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 355,
+      "counts": {
+        "FAILED": 1,
+        "PASSED": 3
+      }
+    },
+    "reference": {
+      "ms": 349,
+      "counts": {
+        "PASSED": 4
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

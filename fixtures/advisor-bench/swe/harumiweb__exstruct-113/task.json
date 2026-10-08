@@ -1,0 +1,57 @@
+{
+  "id": "harumiweb__exstruct-113",
+  "title": "Package import optimization: lighten exstruct.__init__ and introduce lazy exports",
+  "repo": "harumiWeb/exstruct",
+  "baseCommit": "c0c8c52d0a3b507ac13feb4b700e5d858f2a81dc",
+  "createdAt": "2026-03-21 08:53:23",
+  "problemStatement": "Package import optimization: lighten exstruct.__init__ and introduce lazy exports\n### Before submitting\n\n- [x] I understand that this project is maintained in spare time and that not all issues may result in changes.\n\n### Description\n\n### Summary\n\n`exstruct/__init__.py` currently re-exports multiple public APIs for convenience.\nHowever, this also makes `import exstruct` relatively heavy, and in the CLI path it contributes to early loading of transitive dependencies through imports such as `from exstruct import process_excel`.\n\nTo reduce package import overhead, we should **lighten `exstruct/__init__.py` and introduce lazy exports for public APIs**.\n\n### Problem\n\nHeavy imports in `__init__.py` cause several issues:\n\n* `import exstruct` itself becomes slower\n* the CLI pays broad import cost just to access `process_excel`\n* convenience re-exports negatively impact startup performance\n* Python API consumers also pay unnecessary initial import cost\n\nThis becomes especially costly when imports eventually pull in dependencies such as `pandas`, `numpy`, `xlwings`, or rendering-related modules.\n\n### Proposal\n\nAdopt one of the following approaches, or a combination of them:\n\n#### Option 1: Wrapper-function exports\n\nExpose public functions such as `process_excel` via thin wrappers in `__init__.py`, and import the real implementation inside the wrapper body.\n\n#### Option 2: PEP 562 lazy exports\n\nUse module-level `__getattr__` so symbols are imported only when accessed.\n\n#### Option 3: Reduce re-export surface\n\nKeep `__init__.py` minimal and require heavier APIs to be imported from submodules directly.\n\n### Expected benefits\n\n* Faster `import exstruct`\n* Lower startup cost for CLI code paths that currently rely on `from exstruct import process_excel`\n* Clearer package boundaries\n* Better import-time performance for Python API consumers\n\n### Scope\n\nPotential files:\n\n* `src/exstruct/__init__.py`\n* possibly `src/exstruct/engine.py`\n* possibly related render/core import-path cleanup\n\n### Acceptance criteria\n\n* `import exstruct` shows measurable improvement in import time\n* Public API compatibility is preserved as much as possible\n* CLI startup cost related to importing `process_excel` is reduced\n* Type-checking and documentation tooling remain usable with acceptable impact\n\n### Notes\n\nThis change benefits not only the CLI but also Python API users, so it has broader architectural value.\nHowever, because it touches the public package surface, it should be handled a bit more carefully than A/B.\n\n\n### Minimal example (optional)\n\n_No response_\n\n### Additional notes (optional)\n\n_No response_",
+  "interface": "",
+  "failToPass": [
+    "tests/cli/test_cli_lazy_imports.py::test_import_engine_module_stays_lightweight",
+    "tests/cli/test_cli_lazy_imports.py::test_import_public_engine_export_stays_lightweight"
+  ],
+  "passToPass": [
+    "tests/cli/test_cli_lazy_imports.py::test_import_exstruct_stays_lightweight",
+    "tests/cli/test_cli_lazy_imports.py::test_import_cli_main_does_not_load_edit_or_extraction_modules",
+    "tests/cli/test_cli_lazy_imports.py::test_import_cli_edit_does_not_load_mcp_or_edit_execution_modules",
+    "tests/cli/test_cli_lazy_imports.py::test_public_type_hints_resolve_lazy_exports_at_runtime",
+    "tests/cli/test_cli_lazy_imports.py::test_help_path_keeps_lightweight_import_boundaries",
+    "tests/cli/test_cli_lazy_imports.py::test_ops_list_keeps_mcp_and_extraction_lightweight"
+  ],
+  "testFiles": [
+    "tests/cli/test_cli_lazy_imports.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/cli/test_cli_lazy_imports.py",
+  "datasetInstall": "pip install -e \".[yaml,mcp]\" --quiet && pip install pytest pytest-cov pytest-mock --quiet",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "350a008e345968ae113a29680a43aef1e5b1c2fc08f4606e874f49a8d00224e7"
+  },
+  "install": "pip install \".[yaml,mcp]\" --quiet && pip install pytest pytest-cov pytest-mock --quiet",
+  "generatedFiles": [],
+  "pythonPath": "src",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-08T01:16:56.935Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 1936,
+      "counts": {
+        "FAILED": 2,
+        "PASSED": 6
+      }
+    },
+    "reference": {
+      "ms": 1057,
+      "counts": {
+        "PASSED": 8
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

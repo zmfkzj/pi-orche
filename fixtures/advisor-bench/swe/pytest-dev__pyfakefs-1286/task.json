@@ -1,0 +1,75 @@
+{
+  "id": "pytest-dev__pyfakefs-1286",
+  "title": "Regression caused by changes for weakref of filesystem",
+  "repo": "pytest-dev/pyfakefs",
+  "baseCommit": "50579559c7957f5350a5d2408e2827b355e1017c",
+  "createdAt": "2026-02-22 08:19:23",
+  "problemStatement": "Regression caused by changes for weakref of filesystem\nThe new changes can cause a test error in #1267 when calling `pyfakefs` directly through `fake_filesystem` and not `fake_filesystem_unittest.TestCase`. Error is manifested when setting a local function scoped variable for the new `FakeFilesystem()` as an arg for `fake_filesystem.FakeOsModule` which then gets de-referenced, and removed (I think) when calling a function in the test function, like `os.path.join` that would not require a fake filesystem object.\n\nThe following unit test causes a new test failure:\n\n```python\nclass FakePathlibTestCase(unittest.TestCase):\n\n  def setUp(self):\n    super().setUp()\n    fs = FakeFilesystem()\n    self.fake_os = fake_filesystem.FakeOsModule(fs)\n\n  def test_path_join(self):\n    self.assertEqual(\n        self.fake_os.path.join(\"/fake\", \"file1\"),\n        \"/fake/file1\",\n    )\n```\n\nCauses the error output:\n\n```\n______________________ FakePathlibTestCase.test_path_join ______________________\n\nself = <pyfakefs.tests.fake_pathlib_test.FakePathlibTestCase testMethod=test_path_join>\n\n    def test_path_join(self):\n      self.assertEqual(\n>         self.fake_os.path.join(\"/fake\", \"file1\"),\n          \"/fake/file1\",\n      )\n\ntests/fake_pathlib_test.py:59: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nfake_path.py:596: in wrapped\n    if not should_use_original and self.filesystem.has_patcher:\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nself = <pyfakefs.fake_path.FakePathModule object at 0x503bbe08fd70>\n\n    @property\n    def filesystem(self) -> FakeFilesystem:\n        fs = self._filesystem()\n>       assert fs is not None\nE       AssertionError\n````",
+  "interface": "",
+  "failToPass": [
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_absolute_sym_link_to_folder",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_bad_relative_path",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_broken_relative_path",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_broken_sym_link",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_broken_sym_link_to_sibling_directory",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_builtin_open_modes",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_directory_permissions",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_empty_file",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_empty_path",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_file_in_a_folder",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_file_with_binary_contents",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_file_with_contents",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_getmtime_nonexistent_path",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_hard_link_to_empty_file",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_hard_link_to_real_file",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_isabs",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_link_to_folder_after_chdir",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_non_existent_file",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_none_path",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_path_through_sym_link_to_parent",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_relative_path",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_relative_sym_link_to_folder",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_root_path",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_sym_link_to_empty_file",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_sym_link_to_parent",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_sym_link_to_real_file",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_sym_link_to_sibling_directory",
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py::FakeFilesystemVsRealTest::test_sym_link_to_sibling_directory_non_existent_file"
+  ],
+  "passToPass": [],
+  "testFiles": [
+    "pyfakefs/tests/fake_filesystem_vs_real_test.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider pyfakefs/tests/fake_filesystem_vs_real_test.py",
+  "datasetInstall": "pip install -e \".[doc]\" --quiet && pip install pytest --quiet",
+  "datasetPython": "3.12",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_02.jsonl",
+    "recordSha256": "318439e9f69fd97ec06f8ce7bf8c5d5de292318c9d137427245d4c5f0f3ed405"
+  },
+  "install": "pip install \".[doc]\" --quiet && pip install pytest --quiet",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-08T00:55:22.566Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 336,
+      "counts": {
+        "FAILED": 28
+      }
+    },
+    "reference": {
+      "ms": 352,
+      "counts": {
+        "PASSED": 28
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

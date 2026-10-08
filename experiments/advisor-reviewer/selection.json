@@ -1,0 +1,1438 @@
+{
+ "note": "Preliminary baseline runs (worker only, the same protocol and limits as the main study). They are NOT part of the main results. Labels: pass = every counted run passed, fail = none passed. Selection rule in docs/advisor-reviewer-bench.md.",
+ "candidates": [
+  {
+   "task": "a7-auth-rotation",
+   "kind": "suite",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": null,
+     "wallS": 79,
+     "costUsd": 0.224
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": null,
+     "wallS": 81,
+     "costUsd": 0.25
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.237,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "conan-io__conan-19735_interface",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe4",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "22/22",
+     "wallS": 54,
+     "costUsd": 0.18
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.18,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "copier-org__copier-2646",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe2",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "7/7",
+     "wallS": 659,
+     "costUsd": 1.375
+    },
+    {
+     "study": "calibration-swe2",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "7/7",
+     "wallS": 617,
+     "costUsd": 1.546
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 1.461,
+   "decision": "selected",
+   "reason": "SWE-rebench: second highest mean baseline cost among passing SWE tasks with two calibration runs"
+  },
+  {
+   "task": "cpp-linter__cpp-linter-hooks-206_interface",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe3",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "31/31",
+     "wallS": 127,
+     "costUsd": 0.34
+    },
+    {
+     "study": "calibration-swe3",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "31/31",
+     "wallS": 100,
+     "costUsd": 0.299
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.32,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "d1-transactional-outbox",
+   "kind": "suite",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "fail",
+     "tests": null,
+     "wallS": 158,
+     "costUsd": 0.496
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "fail",
+     "tests": null,
+     "wallS": 154,
+     "costUsd": 0.459
+    }
+   ],
+   "label": "fail",
+   "meanCostUsd": 0.478,
+   "decision": "selected",
+   "reason": "every failing hidden check (retry attempts per claim, lease ownership) is a contract stated in the instruction"
+  },
+  {
+   "task": "d2-keyed-queue",
+   "kind": "suite",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": null,
+     "wallS": 104,
+     "costUsd": 0.272
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": null,
+     "wallS": 119,
+     "costUsd": 0.308
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.29,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "d4-cache-fencing",
+   "kind": "suite",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": null,
+     "wallS": 147,
+     "costUsd": 0.406
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": null,
+     "wallS": 99,
+     "costUsd": 0.31
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.358,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "d6-snapshot-pagination",
+   "kind": "suite",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": null,
+     "wallS": 129,
+     "costUsd": 0.408
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": null,
+     "wallS": 147,
+     "costUsd": 0.459
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.433,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "d8-build-graph",
+   "kind": "suite",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": null,
+     "wallS": 272,
+     "costUsd": 0.615
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": null,
+     "wallS": 276,
+     "costUsd": 0.655
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.635,
+   "decision": "selected",
+   "reason": "suite (JS repository): highest mean baseline cost among passing suite tasks"
+  },
+  {
+   "task": "delgan__loguru-1451",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "24/24",
+     "wallS": 242,
+     "costUsd": 0.321
+    },
+    {
+     "study": "calibration-swe",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "24/24",
+     "wallS": 513,
+     "costUsd": 0.527
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.424,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "harumiweb__exstruct-113",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe4",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "8/8",
+     "wallS": 278,
+     "costUsd": 1.215
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 1.215,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "hkuds__openharness-217",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe4",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "8/8",
+     "wallS": 218,
+     "costUsd": 0.264
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.264,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "holoviz__param-1117",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "96/96",
+     "wallS": 268,
+     "costUsd": 0.974
+    },
+    {
+     "study": "calibration-swe",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "96/96",
+     "wallS": 290,
+     "costUsd": 0.937
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.956,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "joke2k__django-environ-592",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe2",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "42/42",
+     "wallS": 68,
+     "costUsd": 0.248
+    },
+    {
+     "study": "calibration-swe2",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "42/42",
+     "wallS": 92,
+     "costUsd": 0.344
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.296,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "lcb-atcoder-abc389_g",
+   "kind": "lcb",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 72,
+     "costUsd": 0.191
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 83,
+     "costUsd": 0.234
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.213,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "lcb-atcoder-abc390_f",
+   "kind": "lcb",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 44,
+     "costUsd": 0.1
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 46,
+     "costUsd": 0.102
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.101,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "lcb-atcoder-abc391_g",
+   "kind": "lcb",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 32,
+     "costUsd": 0.097
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 40,
+     "costUsd": 0.092
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.095,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "lcb-atcoder-abc393_e",
+   "kind": "lcb",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 34,
+     "costUsd": 0.083
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 38,
+     "costUsd": 0.095
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.089,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "lcb-atcoder-abc394_g",
+   "kind": "lcb",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "41/41",
+     "wallS": 468,
+     "costUsd": 0.177
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "41/41",
+     "wallS": 797,
+     "costUsd": 0.255
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.216,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "lcb-atcoder-abc397_g",
+   "kind": "lcb",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 82,
+     "costUsd": 0.163
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 78,
+     "costUsd": 0.179
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.171,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "lcb-atcoder-abc398_g",
+   "kind": "lcb",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 229,
+     "costUsd": 0.551
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 294,
+     "costUsd": 0.551
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.551,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "lcb-atcoder-abc399_f",
+   "kind": "lcb",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 38,
+     "costUsd": 0.101
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 74,
+     "costUsd": 0.102
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.102,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "lcb-atcoder-arc192_d",
+   "kind": "lcb",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 141,
+     "costUsd": 0.267
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 88,
+     "costUsd": 0.193
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.23,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "lcb-atcoder-arc194_d",
+   "kind": "lcb",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "42/42",
+     "wallS": 53,
+     "costUsd": 0.121
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "42/42",
+     "wallS": 79,
+     "costUsd": 0.109
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.115,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "lcb-atcoder-arc195_d",
+   "kind": "lcb",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "2/2",
+     "wallS": 225,
+     "costUsd": 0.365
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "2/2",
+     "wallS": 196,
+     "costUsd": 0.46
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.412,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "lcb-atcoder-arc196_c",
+   "kind": "lcb",
+   "calibration": [
+    {
+     "study": "calibration",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 637,
+     "costUsd": 0.981
+    },
+    {
+     "study": "calibration",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "43/43",
+     "wallS": 753,
+     "costUsd": 1.369
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 1.175,
+   "decision": "selected",
+   "reason": "LiveCodeBench: highest mean baseline cost among passing LCB tasks"
+  },
+  {
+   "task": "macbre__sql-metadata-625_interface",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "8/8",
+     "wallS": 202,
+     "costUsd": 0.671
+    },
+    {
+     "study": "calibration-swe",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "8/8",
+     "wallS": 143,
+     "costUsd": 0.488
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.58,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "marshmallow-code__marshmallow-2925_interface",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "221/221",
+     "wallS": 226,
+     "costUsd": 0.326
+    },
+    {
+     "study": "calibration-swe",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "221/221",
+     "wallS": 78,
+     "costUsd": 0.283
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.304,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "nesquena__hermes-webui-2056",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe3",
+     "repeat": 1,
+     "outcome": "fail",
+     "tests": "54/57",
+     "wallS": 223,
+     "costUsd": 0.451
+    },
+    {
+     "study": "calibration-swe3",
+     "repeat": 2,
+     "outcome": "fail",
+     "tests": "54/57",
+     "wallS": 178,
+     "costUsd": 0.441
+    }
+   ],
+   "label": "fail",
+   "meanCostUsd": 0.446,
+   "decision": "selected",
+   "reason": "hidden tests require the safe slug local-127.0.0.1-15721, which the issue proposes explicitly (Fix 1, \"ideally both\")"
+  },
+  {
+   "task": "nesquena__hermes-webui-330_interface",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe3",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "8/8",
+     "wallS": 104,
+     "costUsd": 0.394
+    },
+    {
+     "study": "calibration-swe3",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "8/8",
+     "wallS": 267,
+     "costUsd": 0.603
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.498,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "nolar__kopf-1225",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe3",
+     "repeat": 1,
+     "outcome": "fail",
+     "tests": "131/135",
+     "wallS": 248,
+     "costUsd": 0.28
+    },
+    {
+     "study": "calibration-swe3",
+     "repeat": 2,
+     "outcome": "fail",
+     "tests": "131/135",
+     "wallS": 220,
+     "costUsd": 0.255
+    }
+   ],
+   "label": "fail",
+   "meanCostUsd": 0.268,
+   "decision": "excluded",
+   "reason": "spec gap: hidden tests require an exact log text (\"termination pending: <reason>: <message>\") the issue never mentions"
+  },
+  {
+   "task": "olofk__fusesoc-776_interface",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe3",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "15/15",
+     "wallS": 109,
+     "costUsd": 0.35
+    },
+    {
+     "study": "calibration-swe3",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "15/15",
+     "wallS": 204,
+     "costUsd": 0.301
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.326,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "omni-us__jsonargparse-839",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "54/54",
+     "wallS": 139,
+     "costUsd": 0.48
+    },
+    {
+     "study": "calibration-swe",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "54/54",
+     "wallS": 193,
+     "costUsd": 0.841
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.66,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "pallets-eco__wtforms-892_interface",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe",
+     "repeat": 1,
+     "outcome": "fail",
+     "tests": "6/10",
+     "wallS": 180,
+     "costUsd": 0.611
+    },
+    {
+     "study": "calibration-swe",
+     "repeat": 2,
+     "outcome": "fail",
+     "tests": "6/10",
+     "wallS": 123,
+     "costUsd": 0.4
+    }
+   ],
+   "label": "fail",
+   "meanCostUsd": 0.506,
+   "decision": "excluded",
+   "reason": "spec gap: failing hidden tests require render-time label override and default->value attribute semantics not stated in the issue or interface"
+  },
+  {
+   "task": "pallets__click-3239",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "698/698",
+     "wallS": 134,
+     "costUsd": 0.438
+    },
+    {
+     "study": "calibration-swe",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "698/698",
+     "wallS": 119,
+     "costUsd": 0.426
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.432,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "psf__black-4952",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "149/149",
+     "wallS": 117,
+     "costUsd": 0.258
+    },
+    {
+     "study": "calibration-swe",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "149/149",
+     "wallS": 190,
+     "costUsd": 0.294
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.276,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "pycqa__isort-2491",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe",
+     "repeat": 1,
+     "outcome": "fail",
+     "tests": "73/74",
+     "wallS": 423,
+     "costUsd": 1.254
+    },
+    {
+     "study": "calibration-swe",
+     "repeat": 2,
+     "outcome": "fail",
+     "tests": "73/74",
+     "wallS": 208,
+     "costUsd": 0.739
+    }
+   ],
+   "label": "fail",
+   "meanCostUsd": 0.996,
+   "decision": "selected",
+   "reason": "hidden test checks the comment placement behaviour the issue states (plus the symmetric attribute-line case)"
+  },
+  {
+   "task": "pypa__build-1027",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe3",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "62/62",
+     "wallS": 253,
+     "costUsd": 0.845
+    },
+    {
+     "study": "calibration-swe3",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "62/62",
+     "wallS": 205,
+     "costUsd": 0.516
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.68,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "pypa__twine-1309",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe",
+     "repeat": 1,
+     "outcome": "fail",
+     "tests": "3/4",
+     "wallS": 62,
+     "costUsd": 0.197
+    },
+    {
+     "study": "calibration-swe",
+     "repeat": 2,
+     "outcome": "fail",
+     "tests": "3/4",
+     "wallS": 48,
+     "costUsd": 0.145
+    }
+   ],
+   "label": "fail",
+   "meanCostUsd": 0.171,
+   "decision": "excluded",
+   "reason": "spec gap: hidden test requires the exact phrase \"Unknown Status\" for an unknown HTTP code; the issue does not state any output"
+  },
+  {
+   "task": "pytest-dev__pyfakefs-1286",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe2",
+     "repeat": 1,
+     "outcome": "infra",
+     "tests": null,
+     "wallS": 253,
+     "costUsd": 0.757,
+     "note": "grader could not copy a file the run left unreadable (EACCES); workspace not preserved"
+    },
+    {
+     "study": "calibration-swe2",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "28/28",
+     "wallS": 287,
+     "costUsd": 0.926
+    },
+    {
+     "study": "calibration-swe4",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "28/28",
+     "wallS": 332,
+     "costUsd": 1.262
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.982,
+   "decision": "excluded",
+   "reason": "unreliable calibration: one run lost to a grader copy error (fixed afterwards), one pass, one later pass; not a baseline failure"
+  },
+  {
+   "task": "python-markdown__markdown-1587",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "118/118",
+     "wallS": 189,
+     "costUsd": 0.65
+    },
+    {
+     "study": "calibration-swe",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "118/118",
+     "wallS": 235,
+     "costUsd": 0.746
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.698,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "python-scim__scim2-models-120",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe4",
+     "repeat": 1,
+     "outcome": "fail",
+     "tests": "301/303",
+     "wallS": 281,
+     "costUsd": 0.531
+    }
+   ],
+   "label": "fail",
+   "meanCostUsd": 0.531,
+   "decision": "excluded",
+   "reason": "spec gap: hidden test matches the error text \"Multiple values marked as primary\", not in the issue or the codebase"
+  },
+  {
+   "task": "python-scim__scim2-models-126",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe3",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "340/340",
+     "wallS": 257,
+     "costUsd": 0.408
+    },
+    {
+     "study": "calibration-swe3",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "340/340",
+     "wallS": 104,
+     "costUsd": 0.287
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.347,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "python-scim__scim2-models-139_interface",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe2",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "9/9",
+     "wallS": 285,
+     "costUsd": 1.288
+    },
+    {
+     "study": "calibration-swe2",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "9/9",
+     "wallS": 380,
+     "costUsd": 1.434
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 1.361,
+   "decision": "selected",
+   "reason": "SWE-rebench: third highest mean baseline cost among passing SWE tasks with two calibration runs"
+  },
+  {
+   "task": "scientific-python__docstub-123",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe4",
+     "repeat": 1,
+     "outcome": "fail",
+     "tests": "144/147",
+     "wallS": 109,
+     "costUsd": 0.356
+    },
+    {
+     "study": "calibration-swe4b",
+     "repeat": 1,
+     "outcome": "fail",
+     "tests": "146/147",
+     "wallS": 97,
+     "costUsd": 0.311
+    }
+   ],
+   "label": "fail",
+   "meanCostUsd": 0.334,
+   "decision": "selected",
+   "reason": "the new syntax works but existing tests (test_callable_error) break: a regression detectable by running the project tests"
+  },
+  {
+   "task": "sciunto-org__python-bibtexparser-515",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe2",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "27/27",
+     "wallS": 110,
+     "costUsd": 0.395
+    },
+    {
+     "study": "calibration-swe2",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "27/27",
+     "wallS": 103,
+     "costUsd": 0.304
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.35,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "sqlfluff__sqlfluff-7615",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe4",
+     "repeat": 1,
+     "outcome": "fail",
+     "tests": "24/25",
+     "wallS": 485,
+     "costUsd": 1.061
+    },
+    {
+     "study": "calibration-swe4b",
+     "repeat": 1,
+     "outcome": "fail",
+     "tests": "24/25",
+     "wallS": 267,
+     "costUsd": 0.696
+    }
+   ],
+   "label": "fail",
+   "meanCostUsd": 0.878,
+   "decision": "selected",
+   "reason": "hidden test checks that the placeholder with a :: cast is left as is, the expected behaviour stated in the issue"
+  },
+  {
+   "task": "sqlfluff__sqlfluff-7622",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe4",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "30/30",
+     "wallS": 308,
+     "costUsd": 1.057
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 1.057,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "stravalib__stravalib-709_interface",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe3",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "28/28",
+     "wallS": 76,
+     "costUsd": 0.225
+    },
+    {
+     "study": "calibration-swe3",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "28/28",
+     "wallS": 95,
+     "costUsd": 0.197
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.211,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "tobymao__sqlglot-7187",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "39/39",
+     "wallS": 175,
+     "costUsd": 0.364
+    },
+    {
+     "study": "calibration-swe",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "39/39",
+     "wallS": 193,
+     "costUsd": 0.398
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.381,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "tobymao__sqlglot-7457",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "58/58",
+     "wallS": 289,
+     "costUsd": 0.491
+    },
+    {
+     "study": "calibration-swe",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "58/58",
+     "wallS": 214,
+     "costUsd": 0.443
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.467,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "tobymao__sqlglot-7479",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe2",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "58/58",
+     "wallS": 583,
+     "costUsd": 1.4
+    },
+    {
+     "study": "calibration-swe2",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "58/58",
+     "wallS": 879,
+     "costUsd": 2.138
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 1.769,
+   "decision": "selected",
+   "reason": "SWE-rebench: highest mean baseline cost among passing SWE tasks with two calibration runs"
+  },
+  {
+   "task": "tox-dev__tox-3904",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe4",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "167/167",
+     "wallS": 407,
+     "costUsd": 1.23
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 1.23,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "ucfopen__canvasapi-716",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe3",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "62/62",
+     "wallS": 218,
+     "costUsd": 0.535
+    },
+    {
+     "study": "calibration-swe3",
+     "repeat": 2,
+     "outcome": "pass",
+     "tests": "62/62",
+     "wallS": 129,
+     "costUsd": 0.441
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.488,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  },
+  {
+   "task": "youssofal__mtplx-21",
+   "kind": "swe",
+   "calibration": [
+    {
+     "study": "calibration-swe4",
+     "repeat": 1,
+     "outcome": "pass",
+     "tests": "9/9",
+     "wallS": 675,
+     "costUsd": 0.908
+    }
+   ],
+   "label": "pass",
+   "meanCostUsd": 0.908,
+   "decision": "not selected",
+   "reason": "baseline passed every calibration run; the pass half takes, per source, the passing tasks with the highest mean baseline cost"
+  }
+ ],
+ "invalidOrUnavailable": [
+  {
+   "task": "delgan__loguru-1425",
+   "reason": "environment validation failed (FAIL_TO_PASS not all passing with the reference fix on Python 3.14)"
+  },
+  {
+   "task": "sqlfluff__sqlfluff-7617",
+   "reason": "environment validation failed"
+  },
+  {
+   "task": "python-wheel-build__fromager-1124",
+   "reason": "environment validation failed"
+  },
+  {
+   "task": "python-wheel-build__fromager-1106",
+   "reason": "environment validation failed"
+  },
+  {
+   "task": "scrapy__scrapy-7351_interface",
+   "reason": "environment validation failed (11 PASS_TO_PASS and FAIL_TO_PASS fail with the reference fix)"
+  },
+  {
+   "task": "jsonpickle__jsonpickle-587",
+   "reason": "setup failed (bson does not build on Python 3.14)"
+  },
+  {
+   "task": "pyinfra-dev__pyinfra-1630",
+   "reason": "setup failed (hatch build hook)"
+  },
+  {
+   "task": "agentscope-ai__qwenpaw-3278",
+   "reason": "setup failed (requires Python < 3.14)"
+  }
+ ],
+ "selected": {
+  "baselineFail": [
+   "d1-transactional-outbox",
+   "pycqa__isort-2491",
+   "nesquena__hermes-webui-2056",
+   "scientific-python__docstub-123",
+   "sqlfluff__sqlfluff-7615"
+  ],
+  "baselinePass": [
+   "d8-build-graph",
+   "lcb-atcoder-arc196_c",
+   "tobymao__sqlglot-7479",
+   "copier-org__copier-2646",
+   "python-scim__scim2-models-139_interface"
+  ]
+ }
+}

@@ -1,0 +1,3 @@
+{ "out": "results/advisor-reviewer/calibration-swe", "revision": "96cd2a7", "phase": "calibration", "arms": ["baseline"], "repeats": 2, "concurrency": 6,
+  "scratch": "/tmp/pi-orche/01a11712-78d5-74a1-917c-810024d98c76/W2/runs",
+  "tasks": ["pycqa__isort-2491", "delgan__loguru-1451", "holoviz__param-1117", "marshmallow-code__marshmallow-2925_interface", "pallets-eco__wtforms-892_interface", "macbre__sql-metadata-625_interface", "python-markdown__markdown-1587", "omni-us__jsonargparse-839", "pypa__twine-1309", "pallets__click-3239", "psf__black-4952", "tobymao__sqlglot-7457", "tobymao__sqlglot-7187"] }

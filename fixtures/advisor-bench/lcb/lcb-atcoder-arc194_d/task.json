@@ -1,0 +1,14 @@
+{
+  "id": "lcb-atcoder-arc194_d",
+  "title": "Reverse Brackets",
+  "prompt": "Solve the programming problem in problem.md (examples in examples.json). Write the complete Python 3 solution to `solution.py` in this directory. `solution.py` reads the input from standard input and writes the answer to standard output. Hidden tests check correctness and speed (CPython 3.14, about 6 s per test, standard library only). There is no internet access. Only `solution.py` is graded.",
+  "difficulty": "hard",
+  "contestDate": "2025-03-09T00:00:00",
+  "platform": "atcoder",
+  "tests": 42,
+  "source": {
+    "gold": "results/iso-token/gold/coding/lcb-atcoder-arc194_d.json",
+    "goldSha256": "e1ea77b421c5e07621087be8c35fb88cf4d19e3ca81b0d9350c19bb795bff470",
+    "task": "results/iso-token/tasks/coding/lcb-atcoder-arc194_d"
+  }
+}

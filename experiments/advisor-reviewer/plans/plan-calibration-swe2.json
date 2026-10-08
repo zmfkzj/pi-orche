@@ -1,0 +1,3 @@
+{ "out": "results/advisor-reviewer/calibration-swe2", "revision": "96cd2a7", "phase": "calibration", "arms": ["baseline"], "repeats": 2, "concurrency": 6,
+  "scratch": "/tmp/pi-orche/01a11712-78d5-74a1-917c-810024d98c76/W2/runs",
+  "tasks": ["pytest-dev__pyfakefs-1286", "sciunto-org__python-bibtexparser-515", "python-scim__scim2-models-139_interface", "joke2k__django-environ-592", "tobymao__sqlglot-7479", "copier-org__copier-2646"] }

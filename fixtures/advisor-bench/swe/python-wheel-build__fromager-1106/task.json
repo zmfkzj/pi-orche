@@ -1,0 +1,71 @@
+{
+  "id": "python-wheel-build__fromager-1106",
+  "title": "fix(dependency_graph): remove_dependency leaves orphaned child nodes in graph",
+  "repo": "python-wheel-build/fromager",
+  "baseCommit": "f82c1e64a027060c3e25090f6a4a4d7f4e3d985d",
+  "createdAt": "2026-05-04 11:13:36",
+  "problemStatement": "fix(dependency_graph): remove_dependency leaves orphaned child nodes in graph\nParent: https://github.com/python-wheel-build/fromager/issues/878\n\n## Problem\n\n`DependencyGraph.remove_dependency()` (added in #1035) removes a node and its incoming edges from parent nodes, but does not clean up child nodes that become orphaned. It also does not remove stale entries from the `parents` list on child nodes.\n\nFor example, if `tomli==1.5` fails to bootstrap in `--multiple-versions` mode and is removed from the graph:\n- Its children (e.g., `flit-core==3.11.0`) remain in `self.nodes` even if no other node references them\n- `flit-core==3.11.0.parents` still contains a stale edge pointing to the deleted `tomli==1.5` node\n\nOrphaned nodes don't affect build order (traversal starts from ROOT), but they appear in the serialized graph JSON as unreachable noise.\n\n## Expected behavior\n\nWhen a node is removed, its children should be checked for remaining parents. Children with no remaining parents should be removed recursively.\n\n## Suggested fix\n\n1. Collect child nodes before deletion\n2. Clean up `parents` list on children (remove stale edges to deleted node)\n3. Recursively remove children that have no remaining parents",
+  "interface": "",
+  "failToPass": [
+    "tests/test_dependency_graph.py::test_remove_dependency_cascades_orphans",
+    "tests/test_dependency_graph.py::test_remove_dependency_diamond_sequential",
+    "tests/test_dependency_graph.py::test_remove_dependency_mid_graph_cascades",
+    "tests/test_dependency_graph.py::test_remove_dependency_shared_child_kept_by_other_subtree",
+    "tests/test_dependency_graph.py::test_remove_dependency_cascades_through_diamond"
+  ],
+  "passToPass": [
+    "tests/test_dependency_graph.py::test_dependencynode_compare",
+    "tests/test_dependency_graph.py::test_dependencynode_hash",
+    "tests/test_dependency_graph.py::test_dependencynode_dataclass",
+    "tests/test_dependency_graph.py::test_iter_requirements",
+    "tests/test_dependency_graph.py::test_pr759_discussion",
+    "tests/test_dependency_graph.py::test_tracking_topology_sorter",
+    "tests/test_dependency_graph.py::test_tracking_topology_sorter_cyclic_error",
+    "tests/test_dependency_graph.py::test_tracking_topology_sorter_not_passed_out_error",
+    "tests/test_dependency_graph.py::test_tracking_topology_sorter_not_active_error",
+    "tests/test_dependency_graph.py::test_e2e_parallel_graph",
+    "tests/test_dependency_graph.py::test_tracking_topology_sorter_concurrent_access",
+    "tests/test_dependency_graph.py::test_tracking_topology_sorter_empty_graph",
+    "tests/test_dependency_graph.py::test_remove_dependency_basic",
+    "tests/test_dependency_graph.py::test_remove_dependency_keeps_shared_children",
+    "tests/test_dependency_graph.py::test_remove_dependency_already_removed_child",
+    "tests/test_dependency_graph.py::test_remove_dependency_nonexistent"
+  ],
+  "testFiles": [
+    "tests/test_dependency_graph.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/test_dependency_graph.py",
+  "datasetInstall": "pip install -e \".[test]\" --quiet",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "63daa9bb7f2b5d0d52fb85d7ae9e3377ef1b8b7b9e564dbe0f586cb761d19277"
+  },
+  "install": "pip install \".[test]\" --quiet",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-08T01:16:08.016Z",
+    "valid": false,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": false,
+    "base": {
+      "ms": 1122,
+      "counts": {
+        "FAILED": 5,
+        "PASSED": 16
+      }
+    },
+    "reference": {
+      "ms": 620,
+      "counts": {
+        "FAILED": 5,
+        "PASSED": 16
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

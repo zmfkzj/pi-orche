@@ -1,0 +1,1 @@
+{ "out": "results/advisor-reviewer/smoke", "revision": "HEAD", "tasks": ["a6-typo-message"], "arms": ["baseline", "advisor", "reviewer"], "repeats": 1, "concurrency": 3, "phase": "smoke", "scratch": "/tmp/pi-orche/01a11712-78d5-74a1-917c-810024d98c76/W2/runs" }

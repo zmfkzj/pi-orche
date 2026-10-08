@@ -1,0 +1,14 @@
+{
+  "id": "lcb-atcoder-abc394_g",
+  "title": "Dense Buildings",
+  "prompt": "Solve the programming problem in problem.md (examples in examples.json). Write the complete Python 3 solution to `solution.py` in this directory. `solution.py` reads the input from standard input and writes the answer to standard output. Hidden tests check correctness and speed (CPython 3.14, about 6 s per test, standard library only). There is no internet access. Only `solution.py` is graded.",
+  "difficulty": "hard",
+  "contestDate": "2025-02-22T00:00:00",
+  "platform": "atcoder",
+  "tests": 41,
+  "source": {
+    "gold": "results/iso-token/gold/coding/lcb-atcoder-abc394_g.json",
+    "goldSha256": "866cdea97e7e77306b60e4b7391c3a03fba2b3baefcb0c42931e723ab9c40480",
+    "task": "results/iso-token/tasks/coding/lcb-atcoder-abc394_g"
+  }
+}

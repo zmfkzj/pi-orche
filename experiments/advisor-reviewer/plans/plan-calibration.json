@@ -1,0 +1,3 @@
+{ "out": "results/advisor-reviewer/calibration", "revision": "96cd2a7", "phase": "calibration", "arms": ["baseline"], "repeats": 2, "concurrency": 6,
+  "scratch": "/tmp/pi-orche/01a11712-78d5-74a1-917c-810024d98c76/W2/runs",
+  "tasks": ["lcb-atcoder-abc389_g", "d1-transactional-outbox", "lcb-atcoder-abc390_f", "d6-snapshot-pagination", "lcb-atcoder-abc391_g", "d8-build-graph", "lcb-atcoder-abc393_e", "d2-keyed-queue", "lcb-atcoder-abc394_g", "d4-cache-fencing", "lcb-atcoder-abc397_g", "a7-auth-rotation", "lcb-atcoder-abc398_g", "lcb-atcoder-abc399_f", "lcb-atcoder-arc192_d", "lcb-atcoder-arc194_d", "lcb-atcoder-arc195_d", "lcb-atcoder-arc196_c"] }

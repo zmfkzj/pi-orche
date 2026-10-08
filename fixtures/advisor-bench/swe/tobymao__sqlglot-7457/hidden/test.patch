@@ -1,0 +1,18 @@
+diff --git a/tests/dialects/test_bigquery.py b/tests/dialects/test_bigquery.py
+index af43a0bce8..ae93bbbb9e 100644
+--- a/tests/dialects/test_bigquery.py
++++ b/tests/dialects/test_bigquery.py
+@@ -2414,6 +2414,13 @@ def test_ml_functions(self):
+             "SELECT * FROM ML.FORECAST(MODEL `mydataset.mymodel`, (SELECT * FROM mydataset.query_table), STRUCT())"
+         )
+ 
++        self.validate_identity(
++            "SELECT * FROM AI.FORECAST(TABLE citibike_trips, data_col => 'num_trips', timestamp_col => 'date', horizon => 30)"
++        )
++        self.validate_identity(
++            "SELECT * FROM AI.FORECAST((SELECT * FROM citibike_trips), data_col => 'num_trips', timestamp_col => 'date', horizon => 30)"
++        )
++
+         for name in ("GENERATE_EMBEDDING", "GENERATE_TEXT_EMBEDDING"):
+             with self.subTest(f"Testing BigQuery's ML function {name}"):
+                 ast = self.validate_identity(

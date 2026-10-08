@@ -1,0 +1,85 @@
+{
+  "id": "python-wheel-build__fromager-1124",
+  "title": "Exempt == version pins from release cooldown enforcement",
+  "repo": "python-wheel-build/fromager",
+  "baseCommit": "5fd5d20ff117279b938f003a5a0de18292fbbb83",
+  "createdAt": "2026-05-07 03:47:42",
+  "problemStatement": "Exempt == version pins from release cooldown enforcement\nFollow-up from #877 ([comment](https://github.com/python-wheel-build/fromager/issues/877#issuecomment-4196113065)) — deferred from Phase 1 (#1018).\n\n## Summary\n\nWhen a top-level requirements file uses `==` version pins, those packages should bypass `min_release_age` cooldown enforcement. The operator has explicitly chosen that exact version, so the cooldown guard adds friction without security benefit.\n\n## Scope\n\nPer Doug's [original comment](https://github.com/python-wheel-build/fromager/issues/877#issuecomment-4136041530), this exemption applies to `==` specifiers in top-level requirements files only — **not** `==` specifiers in transitive dependency metadata further down the build graph.\n\n## Context\n\n- The per-package `resolver_dist.min_release_age: 0` override already provides an explicit opt-out, but requires a settings file change per package rather than honoring existing `==` pins automatically.\n- The release cooldown proposal initially scoped this to constraints files specifically, but the discussion settled on top-level requirements files as the right boundary.\n\nPart of the release cooldown feature: #877, #1078, #1079, #1080",
+  "interface": "",
+  "failToPass": [
+    "tests/test_cooldown.py::test_toplevel_equality_pin_bypasses_cooldown_via_resolve",
+    "tests/test_cooldown.py::test_resolve_package_cooldown_exempt_toplevel_equality_pin",
+    "tests/test_cooldown.py::test_resolve_package_cooldown_enforced_transitive_equality_pin",
+    "tests/test_cooldown.py::test_resolve_package_cooldown_enforced_toplevel_no_pin",
+    "tests/test_cooldown.py::test_resolve_package_cooldown_none_req_type_not_exempt",
+    "tests/test_cooldown.py::test_resolve_package_cooldown_toplevel_wildcard_equality_not_exempt",
+    "tests/test_cooldown.py::test_resolve_package_cooldown_toplevel_compound_specifier_not_exempt"
+  ],
+  "passToPass": [
+    "tests/test_cooldown.py::test_cooldown_filters_recent_version",
+    "tests/test_cooldown.py::test_cooldown_disabled_selects_latest",
+    "tests/test_cooldown.py::test_cooldown_all_blocked_raises_informative_error",
+    "tests/test_cooldown.py::test_cooldown_rejects_candidate_without_upload_time",
+    "tests/test_cooldown.py::test_cooldown_missing_timestamp_error_message",
+    "tests/test_cooldown.py::test_cooldown_applied_automatically_via_ctx",
+    "tests/test_cooldown.py::test_cooldown_applied_via_get_source_provider",
+    "tests/test_cooldown.py::test_non_pypi_index_allows_without_upload_time",
+    "tests/test_cooldown.py::test_resolve_package_cooldown_inherits_global",
+    "tests/test_cooldown.py::test_resolve_package_cooldown_disabled_per_package",
+    "tests/test_cooldown.py::test_resolve_package_cooldown_disabled_no_global",
+    "tests/test_cooldown.py::test_resolve_package_cooldown_override_days",
+    "tests/test_cooldown.py::test_resolve_package_cooldown_override_no_global",
+    "tests/test_cooldown.py::test_per_package_cooldown_disable_via_ctx",
+    "tests/test_cooldown.py::test_gitlab_cooldown_filters_recent_tag",
+    "tests/test_cooldown.py::test_gitlab_cooldown_disabled_selects_latest",
+    "tests/test_cooldown.py::test_gitlab_cooldown_no_upload_time_fails_closed",
+    "tests/test_cooldown.py::test_github_cooldown_skips_with_warning",
+    "tests/test_cooldown.py::test_local_wheel_server_allows_without_upload_time",
+    "tests/test_cooldown.py::test_max_release_age_filters_old_versions",
+    "tests/test_cooldown.py::test_max_release_age_keeps_only_recent",
+    "tests/test_cooldown.py::test_max_release_age_disabled_returns_all",
+    "tests/test_cooldown.py::test_max_release_age_all_too_old_keeps_all",
+    "tests/test_cooldown.py::test_max_release_age_candidates_without_upload_time_pass_through",
+    "tests/test_cooldown.py::test_max_release_age_combined_with_cooldown",
+    "tests/test_cooldown.py::test_compute_max_age_cutoff_with_cooldown",
+    "tests/test_cooldown.py::test_compute_max_age_cutoff_without_cooldown",
+    "tests/test_cooldown.py::test_compute_max_age_cutoff_disabled"
+  ],
+  "testFiles": [
+    "tests/test_cooldown.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/test_cooldown.py",
+  "datasetInstall": "pip install -e \".[test]\" --quiet",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "e85a363f9256663c65979899983e2a5212d45a0bcb3ad10e63332e8321ad5ff7"
+  },
+  "install": "pip install \".[test]\" --quiet",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-08T00:58:24.711Z",
+    "valid": false,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": false,
+    "base": {
+      "ms": 1148,
+      "counts": {
+        "FAILED": 7,
+        "PASSED": 28
+      }
+    },
+    "reference": {
+      "ms": 1348,
+      "counts": {
+        "FAILED": 7,
+        "PASSED": 28
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

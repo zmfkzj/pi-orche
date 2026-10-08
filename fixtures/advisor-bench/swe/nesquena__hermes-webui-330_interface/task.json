@@ -1,0 +1,57 @@
+{
+  "id": "nesquena__hermes-webui-330_interface",
+  "title": "Onboarding should not block already configured Hermes Web UI deployments, and API keys entered during onboarding should ",
+  "repo": "nesquena/hermes-webui",
+  "baseCommit": "9c44d0cf3e7623937dc9c81f3f0562bafa668c6a",
+  "createdAt": "2026-04-12 21:10:36",
+  "problemStatement": "Onboarding should not block already configured Hermes Web UI deployments, and API keys entered during onboarding should be usable immediately.\n\nHosting providers can preconfigure a Hermes Web UI instance before handing it to a user. In that case, the onboarding wizard should not force an extra settings write when chat is already ready. Separately, when a user enters an API key through onboarding, the running server should be able to use that key immediately instead of requiring a restart.\n\n## Interface",
+  "interface": "Add support for the `HERMES_WEBUI_SKIP_ONBOARDING` environment variable. When its value is `1`, `true`, or `yes` and the onboarding status reports `chat_ready: true`, the onboarding status should be treated as completed and the UI should go directly to chat without writing settings. If the variable is absent, has another value, or chat is not ready, existing onboarding behavior should remain unchanged.\n\nWhen onboarding saves a provider API key, the key must be written to the normal dotenv-backed configuration and also made available to the current server process synchronously, so subsequent chat requests can use it without a server restart. If no key is supplied, existing environment values should not be overwritten.",
+  "failToPass": [
+    "tests/test_sprint39.py::TestSkipOnboardingEnvVar::test_skip_env_1_and_chat_ready_marks_completed",
+    "tests/test_sprint39.py::TestSkipOnboardingEnvVar::test_skip_env_true_and_chat_ready_marks_completed",
+    "tests/test_sprint39.py::TestSkipOnboardingEnvVar::test_skip_env_yes_and_chat_ready_marks_completed",
+    "tests/test_sprint39.py::TestApplyOnboardingKeySync::test_api_key_set_in_os_environ_after_apply"
+  ],
+  "passToPass": [
+    "tests/test_sprint39.py::TestSkipOnboardingEnvVar::test_settings_completed_still_works_without_env_var",
+    "tests/test_sprint39.py::TestSkipOnboardingEnvVar::test_skip_env_set_but_not_chat_ready_does_not_skip",
+    "tests/test_sprint39.py::TestSkipOnboardingEnvVar::test_skip_env_unset_leaves_default_false",
+    "tests/test_sprint39.py::TestApplyOnboardingKeySync::test_no_key_provided_does_not_set_environ"
+  ],
+  "testFiles": [
+    "tests/test_sprint39.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/test_sprint39.py",
+  "datasetInstall": "pip install -q pyyaml && pip install -q pytest pytest-timeout",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "3addc8f839d4bd799626dba8ed84b861faeaf192f09fa716029d475ea549d6ee"
+  },
+  "install": "pip install -q pyyaml && pip install -q pytest pytest-timeout",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-08T00:59:58.375Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 1071,
+      "counts": {
+        "FAILED": 4,
+        "PASSED": 4
+      }
+    },
+    "reference": {
+      "ms": 1139,
+      "counts": {
+        "PASSED": 8
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

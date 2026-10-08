@@ -1,0 +1,23 @@
+diff --git a/tests/dialects/test_bigquery.py b/tests/dialects/test_bigquery.py
+index 03f55e135c..72c6a48be8 100644
+--- a/tests/dialects/test_bigquery.py
++++ b/tests/dialects/test_bigquery.py
+@@ -2445,6 +2445,18 @@ def test_ml_functions(self):
+             "SELECT AI.GENERATE_BOOL(MODEL `mydataset.gemini_model`, 'Is sky blue?')"
+         )
+ 
++        ast = self.validate_identity("SELECT AI.EMBED('hello')")
++        assert isinstance(ast.expressions[0], exp.Dot)
++        assert isinstance(ast.expressions[0].expression, exp.AIEmbed)
++
++        ast = self.validate_identity("SELECT AI.SIMILARITY('a', 'b')")
++        assert isinstance(ast.expressions[0], exp.Dot)
++        assert isinstance(ast.expressions[0].expression, exp.AISimilarity)
++
++        ast = self.validate_identity("SELECT AI.GENERATE('Write a haiku')")
++        assert isinstance(ast.expressions[0], exp.Dot)
++        assert isinstance(ast.expressions[0].expression, exp.AIGenerate)
++
+     def test_merge(self):
+         self.validate_all(
+             """

@@ -1,0 +1,77 @@
+{
+  "id": "sciunto-org__python-bibtexparser-515",
+  "title": "Splitter interprets any @ sign as new block start",
+  "repo": "sciunto-org/python-bibtexparser",
+  "baseCommit": "c015d35b8d89055eaadf992801aa6436ec783463",
+  "createdAt": "2026-01-17 20:53:02",
+  "problemStatement": "Splitter interprets any @ sign as new block start\n**Describe the bug**\r\nThe splitter's methods [_move_to_comma_or_closing_curly_bracket](https://github.com/sciunto-org/python-bibtexparser/blob/main/bibtexparser/splitter.py#L173) and [_move_to_closed_bracket](https://github.com/sciunto-org/python-bibtexparser/blob/main/bibtexparser/splitter.py#L125) each contain a check for unexpected block starts. Unfortunately, this interferes with the parsing of entries that contain the `@` sign as raw text.\r\n\r\n**Reproducing**\r\n\r\nVersion: `2.0.0b7`\r\n\r\nCode:\r\nThis example parse fails because of the `@` in the title, raising a BlockAbortedException and adding the block to failed_blocks.\r\n```python\r\ntest = bibtexparser.parse_string(\r\n    \"\"\"\r\n    @inproceedings{DBLP:conf/cikm/EsuliM021,\r\n      author       = {Andrea Esuli and Alejandro Moreo and Fabrizio Sebastiani},\r\n      editor       = {Gao Cong and Maya Ramanath},\r\n      title        = {LeQua @ {CLEF} 2022: {A} Shared Task for Evaluating Quantification Systems},\r\n      booktitle    = {Proceedings of the {CIKM} 2021 Workshops co-located with 30th {ACM}\r\n                      International Conference on Information and Knowledge Management {(CIKM}\r\n                      2021), Gold Coast, Queensland, Australia, November 1-5, 2021},\r\n      series       = {{CEUR} Workshop Proceedings},\r\n      volume       = {3052},\r\n      publisher    = {CEUR-WS.org},\r\n      year         = {2021},\r\n      url          = {https://ceur-ws.org/Vol-3052/abstract4.pdf},\r\n      timestamp    = {Fri, 10 Mar 2023 16:22:33 +0100},\r\n      biburl       = {https://dblp.org/rec/conf/cikm/EsuliM021.bib},\r\n      bibsource    = {dblp computer science bibliography, https://dblp.org}\r\n    }\r\n    \"\"\"\r\n)\r\nprint(test.entries_dict['DBLP:conf/cikm/EsuliM021'])\r\n```\r\n\r\nBibtex:\r\n```\r\n@inproceedings{DBLP:conf/cikm/EsuliM021,\r\n      author       = {Andrea Esuli and Alejandro Moreo and Fabrizio Sebastiani},\r\n      editor       = {Gao Cong and Maya Ramanath},\r\n      title        = {LeQua @ {CLEF} 2022: {A} Shared Task for Evaluating Quantification Systems},\r\n      booktitle    = {Proceedings of the {CIKM} 2021 Workshops co-located with 30th {ACM}\r\n                      International Conference on Information and Knowledge Management {(CIKM}\r\n                      2021), Gold Coast, Queensland, Australia, November 1-5, 2021},\r\n      series       = {{CEUR} Workshop Proceedings},\r\n      volume       = {3052},\r\n      publisher    = {CEUR-WS.org},\r\n      year         = {2021},\r\n      url          = {https://ceur-ws.org/Vol-3052/abstract4.pdf},\r\n      timestamp    = {Fri, 10 Mar 2023 16:22:33 +0100},\r\n      biburl       = {https://dblp.org/rec/conf/cikm/EsuliM021.bib},\r\n      bibsource    = {dblp computer science bibliography, https://dblp.org}\r\n}\r\n```\r\n\r\n**Workaround**\r\nMonkey-patching the two methods by removing the `@` check leads to a successful parse.\r\n\r\n**Remaining Questions (Optional)**\r\n- [x] I would be willing to contribute a PR to fix this issue.\r\n- [ ] This issue is a blocker, I'd be grateful for an early fix.\r\n\r\nIt says in the code that new blocks are identified by being after a new line. If that assumption is generally safe to make, I could remove the two checks altogether. The only other solution I could think of is replacing the `\"@\"` check with a tuple of the most common entry types, e.g. `startswith((\"@article\", \"@book\", \"@proceedings\", ...))`. Let me know if one of those works and I'll gladly prepare a PR.",
+  "interface": "",
+  "failToPass": [
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_at_sign_in_field_value[at_sign_space_brace_in_title]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_at_sign_in_field_value[at_sign_followed_by_brace]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_at_sign_in_field_value[literal_at_entry_in_quotes]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_at_sign_in_field_value[literal_at_entry_in_braces]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_no_false_recovery_mid_line[at_entry_mid_line]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_no_false_recovery_mid_line[at_brace_mid_line]"
+  ],
+  "passToPass": [
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_at_sign_in_field_value[email_address_in_braces]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_at_sign_in_field_value[email_address_in_quotes]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_at_sign_in_field_value[multiple_at_signs]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_multiple_entries_same_line[two_entries_with_space]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_multiple_entries_same_line[two_entries_no_space]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_multiple_entries_same_line[three_entries]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_mixed_blocks_same_line[entry_and_string]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_mixed_blocks_same_line[entry_and_comment]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_error_recovery_at_line_start[unclosed_entry_field]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_error_recovery_at_line_start[unclosed_string]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_error_recovery_at_line_start[indented_new_block]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_error_recovery_preserves_failed_block_raw",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_edge_cases_entries[block_at_file_start]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_edge_cases_entries[block_after_whitespace_only]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_edge_cases_entries[nested_braces_with_at]",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_preamble_with_at_sign",
+    "tests/splitter_tests/test_splitter_block_start_detection.py::test_explicit_comment_with_at_sign",
+    "tests/test_entrypoint.py::test_gbk",
+    "tests/test_entrypoint.py::test_write_file_default_encoding",
+    "tests/test_entrypoint.py::test_write_file_gbk_encoding",
+    "tests/test_entrypoint.py::test_write_file_roundtrip_gbk"
+  ],
+  "testFiles": [
+    "tests/splitter_tests/test_splitter_block_start_detection.py",
+    "tests/test_entrypoint.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider -W ignore::DeprecationWarning tests/splitter_tests/test_splitter_block_start_detection.py tests/test_entrypoint.py",
+  "datasetInstall": "pip install -q -e .[test]",
+  "datasetPython": "3.12",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_01.jsonl",
+    "recordSha256": "88581ef72370d7b86f834827573668924bb6263a01853614431dba4b3ea7dc50"
+  },
+  "install": "pip install -q .[test]",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-08T00:56:07.542Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 387,
+      "counts": {
+        "FAILED": 6,
+        "PASSED": 21
+      }
+    },
+    "reference": {
+      "ms": 378,
+      "counts": {
+        "PASSED": 27
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

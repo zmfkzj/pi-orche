@@ -1,0 +1,14 @@
+{
+  "id": "lcb-atcoder-abc399_f",
+  "title": "Range Power Sum",
+  "prompt": "Solve the programming problem in problem.md (examples in examples.json). Write the complete Python 3 solution to `solution.py` in this directory. `solution.py` reads the input from standard input and writes the answer to standard output. Hidden tests check correctness and speed (CPython 3.14, about 6 s per test, standard library only). There is no internet access. Only `solution.py` is graded.",
+  "difficulty": "hard",
+  "contestDate": "2025-03-29T00:00:00",
+  "platform": "atcoder",
+  "tests": 43,
+  "source": {
+    "gold": "results/iso-token/gold/coding/lcb-atcoder-abc399_f.json",
+    "goldSha256": "88ec2e16b7af3c979a94e6a10404f4fb9e3e1181117e6c8bc68ad69b5c98aa1e",
+    "task": "results/iso-token/tasks/coding/lcb-atcoder-abc399_f"
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "id": "youssofal__mtplx-21",
+  "title": "Tool-call markup leaks as content when model produces text + <tool_call> in the same response",
+  "repo": "youssofal/MTPLX",
+  "baseCommit": "c06cc13286e86d9ff3d2e3b991eba327549c534b",
+  "createdAt": "2026-05-07 19:59:26",
+  "problemStatement": "Tool-call markup leaks as content when model produces text + <tool_call> in the same response\n## Summary\n\nWhen the model produces **mixed content** (preamble text followed by `<tool_call>` blocks in the same assistant response), v0.2.0's streaming tool-call translator emits the entire response as content text and the tool calls leak through as raw `<tool_call>` markup. OpenAI-compatible clients (opencode, Aider, etc.) see no `delta.tool_calls`, so no tools are dispatched and the agent loop exits without doing any work.\n\nThis appears to be a regression / blind spot in the v0.2.0 streaming fix. The fix correctly handles \"tool-only\" responses but not \"preamble text + tool calls\" responses, which Qwen3.6 27B produces frequently when given long system prompts.\n\n## Reproduction\n\n1. Start MTPLX 0.2.0 with `--profile sustained` against `Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed`.\n2. Send a chat completion with `tools` array set and a system prompt that nudges the model toward thinking out loud (e.g., \"investigate the codebase\").\n3. Stream the response. Observe `delta.content` containing literal `<tool_call><function=...><parameter=...>...</function></tool_call>` text.\n\n## Captured evidence\n\nReal assistant message content from a `Research mountain implementation` subagent invocation, served via v0.2.0 streaming:\n\n```\nI'll investigate the mountain/terrain implementation systematically by searching for relevant files and patterns.\n\n<tool_call>\n<function=grep>\n<parameter=pattern>\nmountain|Mountain\n</parameter>\n<parameter=path>\n/Users/dan/code-2/mpt/testing/3dworld/src\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=glob>\n<parameter=pattern>\nsrc/objects/*.ts\n</parameter>\n<parameter=path>\n/Users/dan/code-2/mpt/testing/3dworld\n</parameter>\n</function>\n</tool_call>\n... (more tool_call blocks)\n```\n\nThe entire 845-character response was sent as `delta.content` text. Zero `delta.tool_calls` chunks were emitted. opencode's session DB shows 2 text parts and 0 tool parts for that round.\n\n## Root cause (initial investigation)\n\n`mtplx/server/openai.py` line ~1300, class `_ToolAwareContentStreamTranslator`:\n\n```python\ndef feed(self, field: str, text: str) -> list[dict[str, Any]]:\n    ...\n    self._pending += text\n    if self._mode == \"tool\":\n        return self._tool_deltas_if_complete(final=False)\n\n    stripped = self._pending.lstrip()\n    if not stripped:\n        return []\n    lowered = stripped.lower()\n    if lowered.startswith(self._START_MARKER):     # only fires if response STARTS with <tool_call\n        self._mode = \"tool\"\n        return self._tool_deltas_if_complete(final=False)\n    if self._START_MARKER.startswith(lowered):\n        return []\n\n    self._mode = \"content\"                          # ← LOCKED IN, never re-checks for <tool_call later\n    content = self._pending\n    self._pending = \"\"\n    return [{\"content\": content}]\n```\n\nOnce `_mode == \"content\"`, the translator never re-examines the stream for `<tool_call>` markers. So:\n\n- Response that is **purely** `<tool_call>...` → mode jumps to \"tool\" immediately, parsed correctly. ✅\n- Response that is **text only** → mode jumps to \"content\", emitted as text. ✅\n- Response that is **text then `<tool_call>...`** → mode jumps to \"content\" on first byte, the later `<tool_call>` is treated as more content. ❌\n\nThe same issue likely affects the non-streaming path through `_parse_generated_tool_calls` if the model emits text alongside tool calls in the buffered case.\n\n## Suggested fix\n\nTwo reasonable options:\n\n1. In `content` mode, scan incoming text for `<tool_call>` markers. When found, emit text-before-marker as content, transition to `tool` mode, process the marker.\n2. Don't transition to \"content\" mode irreversibly. Keep accumulating into `_pending`; emit content opportunistically only as far as the next-possible `<tool_call>` start is ruled out.\n\nOption 1 is simpler. I have a working patch ready and will open a PR if useful.\n\n## Workaround for users\n\nTighten subagent system prompts to forbid preamble text:\n\n> Your FIRST output MUST be a tool call. Do NOT write any \"Let me investigate...\" text before your first tool call.\n\nThis works but is fragile - any model drift toward chatty responses re-breaks the tool flow.\n\n## Environment\n\n- MTPLX `0.2.0` (commit `c06cc13`)\n- Apple Silicon M5 Max, 128 GB\n- Model: `Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed`, profile `sustained`, depth 3\n- Client: opencode (latest) with custom `agent` config + per-agent `mtplx-*` providers\n\nHappy to provide a full SSE capture or session DB extract on request.",
+  "interface": "",
+  "failToPass": [
+    "tests/test_tool_aware_stream_translator.py::test_mixed_text_then_tool_call_in_one_chunk",
+    "tests/test_tool_aware_stream_translator.py::test_mixed_text_then_tool_call_streamed_in_pieces",
+    "tests/test_tool_aware_stream_translator.py::test_partial_marker_held_across_chunks_in_content_mode",
+    "tests/test_tool_aware_stream_translator.py::test_marker_split_across_three_chunks_after_text"
+  ],
+  "passToPass": [
+    "tests/test_tool_aware_stream_translator.py::test_no_tools_passthrough",
+    "tests/test_tool_aware_stream_translator.py::test_pure_text_response",
+    "tests/test_tool_aware_stream_translator.py::test_pure_tool_call_response_streamed_in_pieces",
+    "tests/test_tool_aware_stream_translator.py::test_lookalike_marker_prefix_in_content_does_not_block_emission",
+    "tests/test_tool_aware_stream_translator.py::test_leading_whitespace_before_marker_still_dropped"
+  ],
+  "testFiles": [
+    "tests/test_tool_aware_stream_translator.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/test_tool_aware_stream_translator.py",
+  "datasetInstall": "pip install -e \".[dev,server]\" --quiet",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "47d417a56f387411d10271593b1b7df399af7d418c5c0e57bc695634c10cbe0b"
+  },
+  "install": "pip install \".[dev,server]\" --quiet",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-08T01:17:12.421Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 664,
+      "counts": {
+        "FAILED": 4,
+        "PASSED": 5
+      }
+    },
+    "reference": {
+      "ms": 689,
+      "counts": {
+        "PASSED": 9
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

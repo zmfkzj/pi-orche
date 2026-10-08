@@ -1,0 +1,3 @@
+{ "out": "results/advisor-reviewer/calibration-swe4", "revision": "96cd2a7", "phase": "calibration", "arms": ["baseline"], "repeats": 1, "concurrency": 6,
+  "scratch": "/tmp/pi-orche/01a11712-78d5-74a1-917c-810024d98c76/W2/runs",
+  "tasks": ["sqlfluff__sqlfluff-7622", "sqlfluff__sqlfluff-7615", "scientific-python__docstub-123", "python-scim__scim2-models-120", "conan-io__conan-19735_interface", "hkuds__openharness-217", "tox-dev__tox-3904", "harumiweb__exstruct-113", "youssofal__mtplx-21", "pytest-dev__pyfakefs-1286"] }

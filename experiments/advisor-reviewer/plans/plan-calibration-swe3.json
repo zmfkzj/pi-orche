@@ -1,0 +1,3 @@
+{ "out": "results/advisor-reviewer/calibration-swe3", "revision": "96cd2a7", "phase": "calibration", "arms": ["baseline"], "repeats": 2, "concurrency": 4,
+  "scratch": "/tmp/pi-orche/01a11712-78d5-74a1-917c-810024d98c76/W2/runs",
+  "tasks": ["olofk__fusesoc-776_interface", "nesquena__hermes-webui-330_interface", "cpp-linter__cpp-linter-hooks-206_interface", "stravalib__stravalib-709_interface", "ucfopen__canvasapi-716", "python-scim__scim2-models-126", "pypa__build-1027", "nolar__kopf-1225", "nesquena__hermes-webui-2056"] }

@@ -1,0 +1,71 @@
+{
+  "id": "conan-io__conan-19735_interface",
+  "title": "detect_api does not tolerate Emscripten diagnostic output before the version line",
+  "repo": "conan-io/conan",
+  "baseCommit": "4a65d65f53d2ab37f4ce0e52dc3f25cd832b2934",
+  "createdAt": "2026-03-10 10:33:02",
+  "problemStatement": "detect_api does not tolerate Emscripten diagnostic output before the version line\n\nOn a fresh Emscripten SDK install, compiler detection can receive an informational `shared:INFO` line before the actual `emcc --version` line. The detector should still find the Emscripten compiler and version instead of returning `None` and causing profile rendering to fail.\n\n## Interface",
+  "interface": "`detect_api.detect_emcc_compiler()` must parse the Emscripten compiler identity and version from compiler output even when one or more diagnostic/log lines precede the version line. In particular, output beginning with `shared:INFO: (Emscripten: Running sanity checks)` followed by `emcc (Emscripten gcc/clang-like replacement + linker emulating GNU ld) 4.0.22 ...` must return compiler name `emcc`, version `4.0.22`, and executable `emcc`.\n\nThe detector should ignore non-matching leading lines and scan for the first valid Emscripten version line, while preserving existing behavior for output where the version line is the first line. If no valid version line is present, the detector may continue to report no detected compiler as before.",
+  "failToPass": [
+    "test/unittests/util/detect_test.py::test_detect_compiler[detect_emcc_compiler-shared:INFO:"
+  ],
+  "passToPass": [
+    "test/unittests/util/detect_test.py::TestDetect::test_detect_empty_arch",
+    "test/unittests/util/detect_test.py::TestDetect::test_detect_aix[powerpc-64-7.1.0.0-ppc64]",
+    "test/unittests/util/detect_test.py::TestDetect::test_detect_aix[powerpc-32-7.1.0.0-ppc32]",
+    "test/unittests/util/detect_test.py::TestDetect::test_detect_aix[rs6000-None-4.2.1.0-ppc32]",
+    "test/unittests/util/detect_test.py::TestDetect::test_detect_arch[arm64-armv8]",
+    "test/unittests/util/detect_test.py::TestDetect::test_detect_arch[i386-x86]",
+    "test/unittests/util/detect_test.py::TestDetect::test_detect_arch[i686-x86]",
+    "test/unittests/util/detect_test.py::TestDetect::test_detect_arch[i86pc-x86]",
+    "test/unittests/util/detect_test.py::TestDetect::test_detect_arch[amd64-x86_64]",
+    "test/unittests/util/detect_test.py::TestDetect::test_detect_arch[aarch64-armv8]",
+    "test/unittests/util/detect_test.py::TestDetect::test_detect_arch[sun4v-sparc]",
+    "test/unittests/util/detect_test.py::TestDetect::test_detect_clang_gcc_toolchain",
+    "test/unittests/util/detect_test.py::test_detect_cc_versioning[cc.exe",
+    "test/unittests/util/detect_test.py::test_detect_cc_versioning[g++",
+    "test/unittests/util/detect_test.py::test_detect_cc_versioning[gcc.exe",
+    "test/unittests/util/detect_test.py::test_detect_cc_versioning[gcc",
+    "test/unittests/util/detect_test.py::test_detect_cc_versioning[clang",
+    "test/unittests/util/detect_test.py::test_detect_cc_versioning[cc1",
+    "test/unittests/util/detect_test.py::test_detect_compiler[detect_suncc_compiler-Sun",
+    "test/unittests/util/detect_test.py::test_detect_compiler[detect_intel_compiler-Intel",
+    "test/unittests/util/detect_test.py::test_detect_compiler[detect_emcc_compiler-emcc"
+  ],
+  "testFiles": [
+    "test/unittests/util/detect_test.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider test/unittests/util/detect_test.py",
+  "datasetInstall": "pip install -q -e . && pip install -q -r conans/requirements_dev.txt",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "8018b23615e5adfe054c592bb72de6942e08baa2e1750f0e17692f045d816ebc"
+  },
+  "install": "pip install -q . && pip install -q -r conans/requirements_dev.txt",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-08T01:15:04.191Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 2055,
+      "counts": {
+        "FAILED": 1,
+        "PASSED": 21
+      }
+    },
+    "reference": {
+      "ms": 1989,
+      "counts": {
+        "PASSED": 22
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "id": "copier-org__copier-2646",
+  "title": "/tmp/copier._vcs.clone... directories er not being deleted after failed update",
+  "repo": "copier-org/copier",
+  "baseCommit": "e05ddfec08bc580d3e7b6a2a3e7cb18b6c761ba5",
+  "createdAt": "2026-04-30 11:21:38",
+  "problemStatement": "/tmp/copier._vcs.clone... directories er not being deleted after failed update\n### Describe the problem\n\n/tmp/copier._vcs.clone... directories er not being deleted after failed update.\nWe run batch updates of almost 200 subprojects in CI piplines. If it fails a number of times the disk runs full.\nTo do the cleanup outside of copier requires locks because of parallel processes and unknown directory names.\n\n\n### Template\n\nAny template\n\n### To Reproduce\n\nrun `copier update` in a subproject, kill it before it finishes.\n\n\n\n### Logs\n\n```console\n\n```\n\n### Expected behavior\n\ntmp directories are always deleted (optionally left for investigation if an option is provided).\n\n### Screenshots/screencasts/logs\n\n_No response_\n\n### Operating system\n\nLinux\n\n### Operating system distribution and version\n\nFedora, CentOS, RHEL\n\n### Copier version\n\n9.14.3\n\n### Python version\n\n3.12.x,  3.13.11\n\n### Installation method\n\npip+pypi\n\n### Additional context\n\nuv installed also fails",
+  "interface": "",
+  "failToPass": [
+    "tests/test_cleanup.py::test_cleanup_on_interrupt_during_git_clone"
+  ],
+  "passToPass": [
+    "tests/test_cleanup.py::test_no_cleanup_when_template_in_parent_folder",
+    "tests/test_cleanup.py::test_no_cleanup_when_folder_existed",
+    "tests/test_cleanup.py::test_do_not_cleanup",
+    "tests/test_cleanup.py::test_cleanup",
+    "tests/test_cleanup.py::test_cleanup_on_interrupt_during_copy_task",
+    "tests/test_cleanup.py::test_cleanup_on_interrupt_during_update_task"
+  ],
+  "testFiles": [
+    "tests/test_cleanup.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/test_cleanup.py",
+  "datasetInstall": "pip install -e \".\" --quiet && pip install pytest pytest-xdist pytest-cov pytest-gitconfig inline-snapshot pexpect poethepoet --quiet",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "ff6fa29ea11c4e7da750d4c6292d2c2024c3a66246833f5972c7f4d0c17713c2"
+  },
+  "install": "pip install \".\" --quiet && pip install pytest pytest-xdist pytest-cov pytest-gitconfig inline-snapshot pexpect poethepoet --quiet",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-08T00:57:59.433Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 2945,
+      "counts": {
+        "FAILED": 1,
+        "PASSED": 6
+      }
+    },
+    "reference": {
+      "ms": 4127,
+      "counts": {
+        "PASSED": 7
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

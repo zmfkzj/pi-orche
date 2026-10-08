@@ -1,0 +1,109 @@
+{
+  "id": "tobymao__sqlglot-7479",
+  "title": "Enhancement: richer typed handling for BigQuery AI.* scalar functions",
+  "repo": "tobymao/sqlglot",
+  "baseCommit": "38357253ee1f2847bd14e0a7b68baf5a2c0a2228",
+  "createdAt": "2026-04-09 12:51:48",
+  "problemStatement": "Enhancement: richer typed handling for BigQuery AI.* scalar functions\n`AI.EMBED`, `AI.SIMILARITY`, and `AI.GENERATE` in BigQuery currently parse and round trip correctly, but they are represented through the generic function nodes rather than the richer typed AST nodes.\n\n### Minimal Reproducible Example (MRE):\n\n```python\nfrom sqlglot import parse_one\nfrom sqlglot import expressions as exp\n\nfor sql in (\n    'SELECT AI.EMBED(\"hello\")',\n    'SELECT AI.SIMILARITY(\"a\", \"b\")',\n    'SELECT AI.GENERATE(\"Write a haiku\")',\n):\n    expr = parse_one(sql, dialect=\"bigquery\")\n    node = expr.expressions[0]\n    fn = node.expression if isinstance(node, exp.Dot) else None\n    print(sql)\n    print(\"top:\", type(node).__name__)\n    print(\"fn:\", type(fn).__name__ if fn else None)\n    print(\"roundtrip:\", expr.sql(dialect=\"bigquery\"))\n```\n\n### Current behavior:\n- Parse and round trip work for common documented scalar forms.\n- `AI.*` scalar calls are currently represented generically (for example, `Dot` with an `Anonymous` function node).\n\n### Expected behavior (enhancement):\n- Keep existing parse/round trip behavior backward compatible.\n- Add richer typed AST handling for BigQuery `AI.*` scalar functions where it provides semantic value.\n\n### References:\n- `AI.EMBED`: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-embed\n- `AI.SIMILARITY`: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-similarity\n- `AI.GENERATE`: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-generate",
+  "interface": "",
+  "failToPass": [
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_ml_functions"
+  ],
+  "passToPass": [
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_annotate_timestamps",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_approx_quantiles",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_approx_quantiles_to_duckdb",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_approx_qunatiles",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_array_agg",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_array_concat",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_avoid_generating_nested_comment",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_bignumeric",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_bigquery",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_bit_aggs",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_bitwise_and",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_bitwise_not",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_cast_format_with_parentheses",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_concat",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_convert",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_declare",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_errors",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_format_temporal",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_gap_fill",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_generate_date_array",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_identifier_meta",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_inline_constructor",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_json_array",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_json_extract",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_json_extract_array",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_json_lax",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_json_object",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_md5",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_merge",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_mod",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_models",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_null_ordering",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_null_ordering_in_analytic_functions",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_override_normalization_strategy",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_pseudocolumns",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_pushdown_cte_column_names",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_quoted_identifier_meta",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_range_type",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_regexp_extract",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_remove_precision_parameterized_types",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_rename_table",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_round",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_safe_math_funcs",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_select_as_struct",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_set_operations",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_string_agg",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_to_hex",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_to_json_string",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_unix_micros",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_unix_millis",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_unix_seconds",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_unnest",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_unnest_with_offset",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_user_defined_functions",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_warnings",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_week",
+    "tests/dialects/test_bigquery.py::TestBigQuery::test_with_offset"
+  ],
+  "testFiles": [
+    "tests/dialects/test_bigquery.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/dialects/test_bigquery.py",
+  "datasetInstall": "pip install -q -e . && pip install -q pytest pytz duckdb numpy pandas",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "a9feae1b610383ea3740b061759d96611d11eefbfbde0a10e0850aed1b07d665"
+  },
+  "install": "pip install -q . && pip install -q pytest pytz duckdb numpy pandas",
+  "generatedFiles": [
+    "sqlglot/_version.py"
+  ],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-08T00:57:42.493Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 1156,
+      "counts": {
+        "FAILED": 1,
+        "PASSED": 57
+      }
+    },
+    "reference": {
+      "ms": 1164,
+      "counts": {
+        "PASSED": 58
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

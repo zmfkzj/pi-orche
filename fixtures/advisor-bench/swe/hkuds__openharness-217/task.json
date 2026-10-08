@@ -1,0 +1,57 @@
+{
+  "id": "hkuds__openharness-217",
+  "title": "[Bug]: Windows browser-open in DeviceCodeFlow uses shell=True with externally-supplied URL",
+  "repo": "HKUDS/OpenHarness",
+  "baseCommit": "1bcdc62a50db14c2f0bf5dbee05b2bdc369dffb3",
+  "createdAt": "2026-04-30 00:28:27",
+  "problemStatement": "[Bug]: Windows browser-open in DeviceCodeFlow uses shell=True with externally-supplied URL\n### What happened?\n\n`DeviceCodeFlow._try_open_browser` in `src/openharness/auth/flows.py` opens the browser on Windows by calling:\n\n```python\nsubprocess.Popen(\n    [\"start\", \"\", url],\n    shell=True,\n    stdout=subprocess.DEVNULL,\n    stderr=subprocess.DEVNULL,\n)\n```\n\nBecause `shell=True` routes the call through `cmd.exe`, characters like `&`, `|`, and `^` inside the URL are interpreted as **command separators**, not as URL data. The `url` argument here is **externally supplied** — it is the `verification_uri` returned by the GitHub device-flow endpoint, or for users who pass `enterprise_url` to the flow, it is a value derived from a user-configured (and potentially compromised) GitHub Enterprise host.\n\nA device-flow endpoint that returned `verification_uri` like:\n\n```\nhttps://github.com/login/device&calc.exe\n```\n\n…would launch `calc.exe` alongside the browser the next time a user ran `oh setup` / Copilot login on Windows.\n\nThe macOS and Linux/WSL branches in the same function correctly pass argv lists with `shell=False`, so this only affects Windows.\n\n### Steps to reproduce\n\nThe call site is reached during any GitHub OAuth device-code login (`oh setup`, Copilot login). To demonstrate the underlying primitive on a Windows machine without a real malicious server, run:\n\n```python\n# windows-repro.py — run on Windows with `python windows-repro.py`\nimport subprocess\n\nmalicious_url = \"https://example.com&calc.exe\"\nsubprocess.Popen(\n    [\"start\", \"\", malicious_url],\n    shell=True,\n)\n```\n\nThis both opens the browser **and** launches Calculator. Replace `calc.exe` with `cmd /c <anything>` to demonstrate arbitrary command execution.\n\nTo trigger it through OpenHarness end-to-end you would need a GitHub Enterprise endpoint (or a man-in-the-middle on the device-flow response) that returns a poisoned `verification_uri`; the call chain is `oh auth ... -> DeviceCodeFlow.run -> request_device_code -> _try_open_browser(dc.verification_uri)`.\n\n### Expected behavior\n\nA URL returned by the device-flow endpoint should never be parsed as a shell command line. The Windows branch should use a launcher that does not go through `cmd.exe` — e.g. `os.startfile(url)`, which calls `ShellExecuteW` directly and hands the full URL to the registered protocol handler verbatim. Non-`http(s)` schemes should also be rejected up front so `file:` / `javascript:` / a bare executable name cannot reach the launcher.\n\n### Environment\n\n- File: `src/openharness/auth/flows.py:84-91`\n- Affected platform: Windows (any Python)\n- Reachable code paths: `oh setup` (Copilot/GitHub OAuth), any caller of `DeviceCodeFlow` with a non-default `enterprise_url`, and `BrowserFlow` (which delegates to `DeviceCodeFlow._try_open_browser`).\n\n### Relevant logs or screenshots\n\nn/a — the bug is in the call construction itself.\n\n---\n\nHappy to send a PR replacing the Windows branch with `os.startfile` and adding a scheme guard plus regression tests for the four platform branches.",
+  "interface": "",
+  "failToPass": [
+    "tests/test_auth/test_flows.py::test_open_browser_windows_uses_startfile_not_shell",
+    "tests/test_auth/test_flows.py::test_open_browser_rejects_non_http_scheme[javascript:alert(1)]",
+    "tests/test_auth/test_flows.py::test_open_browser_rejects_non_http_scheme[file:///etc/passwd]",
+    "tests/test_auth/test_flows.py::test_open_browser_rejects_non_http_scheme[ftp://example.com/payload]",
+    "tests/test_auth/test_flows.py::test_open_browser_rejects_non_http_scheme[]",
+    "tests/test_auth/test_flows.py::test_open_browser_rejects_non_http_scheme[calc.exe]"
+  ],
+  "passToPass": [
+    "tests/test_auth/test_flows.py::test_open_browser_macos_uses_open_argv",
+    "tests/test_auth/test_flows.py::test_open_browser_linux_uses_xdg_open_argv"
+  ],
+  "testFiles": [
+    "tests/test_auth/test_flows.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/test_auth/test_flows.py",
+  "datasetInstall": "pip install -e \".[dev]\" -q",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "305ad2275a0d33864390fdae9e4ad9fa0a760af6d9ac86479bfd80eaf5c1c2e9"
+  },
+  "install": "pip install \".[dev]\" -q",
+  "generatedFiles": [],
+  "pythonPath": "src",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-08T01:15:34.419Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 455,
+      "counts": {
+        "ERROR": 6,
+        "PASSED": 2
+      }
+    },
+    "reference": {
+      "ms": 445,
+      "counts": {
+        "PASSED": 8
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

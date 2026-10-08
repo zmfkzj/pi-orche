@@ -1,0 +1,117 @@
+{
+  "id": "pypa__build-1027",
+  "title": "`build.check_dependency` ignores URL reqs with names that match an installed distribution",
+  "repo": "pypa/build",
+  "baseCommit": "27b67b2db1807f2547af670e4d14401a6605bf3b",
+  "createdAt": "2026-04-10 18:48:38",
+  "problemStatement": "`build.check_dependency` ignores URL reqs with names that match an installed distribution\nWhen `build.check_dependency` sees a URL req with a name that matches an installed distribution, it considers the URL req met. For example:\n\n```python\nimport importlib.metadata\n\nimport build\n\n\ndef get_version(distribution_name: str) -> str | None:\n    try:\n        return importlib.metadata.version(distribution_name)\n    except ModuleNotFoundError:\n        return None\n\n\n# Some version of packaging is installed:\npackaging_ver = importlib.metadata.version(\"packaging\")\nassert packaging_ver is not None and packaging_ver != \"24.1\"\nprint(\n    f\"{tuple(build.check_dependency(\"packaging @ git+https://github.com/pypa/packaging.git@24.1\")) = !r}\"\n)\n\n# No version of sniffio is installed:\nsniffio_ver = get_version(\"sniffio\")\nassert sniffio_ver is None\nprint(\n    f\"{tuple(build.check_dependency(\"sniffio @ git+https://github.com/python-trio/sniffio.git@v1.3.1\")) = !r}\"\n)\n```\n\nOutput (in a venv with `packaging==24.2` and without `sniffio`):\n\n```console\ntuple(build.check_dependency(\"packaging @ git+https://github.com/pypa/packaging.git@24.1\")) = ()\ntuple(build.check_dependency(\"sniffio @ git+https://github.com/python-trio/sniffio.git@v1.3.1\")) = (('sniffio@ git+https://github.com/python-trio/sniffio.git@v1.3.1',),)\n\n```\n\nThe `packaging` URL req is reported as met but it is not. The sniffio URL req is correctly reported as unmet.\n\nWith `check_dependency`'s current documentation, this seems like a bug; it should be able to verify that URL reqs are met.\n\nIs it possible via PEP 610?\n\n```diff\n     try:\n         dist = importlib.metadata.distribution(req.name)\n     except importlib.metadata.PackageNotFoundError:\n         # dependency is not installed in the environment.\n         yield (*ancestral_req_strings, normalised_req_string)\n     else:\n         if req.specifier and not req.specifier.contains(dist.version, prereleases=True):\n             # the installed version is incompatible.\n             yield (*ancestral_req_strings, normalised_req_string)\n+        elif req.url and pseudocode(dist.origin != req.url):\n+            yield (*ancestral_req_strings, normalised_req_string)\n         elif dist.requires:\n             for other_req_string in dist.requires:\n                 # yields transitive dependencies that are not satisfied.\n                 yield from check_dependency(other_req_string, (*ancestral_req_strings, normalised_req_string), req.extras)\n```",
+  "interface": "",
+  "failToPass": [
+    "tests/test_projectbuilder.py::test_check_dependency_url_no_direct_url_is_unmet[False-extras_dep",
+    "tests/test_projectbuilder.py::test_check_dependency_url_mismatched_direct_url_is_unmet[False]",
+    "tests/test_projectbuilder.py::test_check_dependency_vcs_url_mismatched_direct_url_is_unmet[False]",
+    "tests/test_projectbuilder.py::test_check_dependency_vcs_url_no_revision_mismatch_is_unmet[False]"
+  ],
+  "passToPass": [
+    "tests/test_projectbuilder.py::test_check_dependency[False-extras_dep-None]",
+    "tests/test_projectbuilder.py::test_check_dependency[False-missing_dep-expected1]",
+    "tests/test_projectbuilder.py::test_check_dependency[False-requireless_dep-None]",
+    "tests/test_projectbuilder.py::test_check_dependency[False-extras_dep[undefined_extra]-None]",
+    "tests/test_projectbuilder.py::test_check_dependency[False-extras_dep[extra-without-associated-deps]-None]",
+    "tests/test_projectbuilder.py::test_check_dependency[False-extras_dep[extra-with-unmet-deps]-expected5]",
+    "tests/test_projectbuilder.py::test_check_dependency[False-extras_dep[recursive-extra-with-unmet-deps]-expected6]",
+    "tests/test_projectbuilder.py::test_check_dependency[False-extras_dep[extra-with-met-deps]-None]",
+    "tests/test_projectbuilder.py::test_check_dependency[False-missing_dep;",
+    "tests/test_projectbuilder.py::test_check_dependency[False-extras_dep",
+    "tests/test_projectbuilder.py::test_check_dependency[False-extras_dep[extra-without-associated-deps]",
+    "tests/test_projectbuilder.py::test_check_dependency[False-prerelease_dep",
+    "tests/test_projectbuilder.py::test_check_dependency[False-circular_dep-None]",
+    "tests/test_projectbuilder.py::test_check_dependency_url_no_direct_url_is_unmet[False-missing_dep",
+    "tests/test_projectbuilder.py::test_check_dependency_url_matching_direct_url_is_met[False]",
+    "tests/test_projectbuilder.py::test_check_dependency_vcs_url_matching_direct_url_is_met[False]",
+    "tests/test_projectbuilder.py::test_check_dependency_vcs_url_no_revision_is_met[False]",
+    "tests/test_projectbuilder.py::test_bad_project[False]",
+    "tests/test_projectbuilder.py::test_init[False]",
+    "tests/test_projectbuilder.py::test_init_makes_source_dir_absolute[False]",
+    "tests/test_projectbuilder.py::test_get_requires_for_build_missing_backend[False-wheel]",
+    "tests/test_projectbuilder.py::test_get_requires_for_build_missing_backend[False-sdist]",
+    "tests/test_projectbuilder.py::test_get_requires_for_build_missing_optional_hooks[False-wheel]",
+    "tests/test_projectbuilder.py::test_get_requires_for_build_missing_optional_hooks[False-sdist]",
+    "tests/test_projectbuilder.py::test_build_missing_backend[False-wheel]",
+    "tests/test_projectbuilder.py::test_build_missing_backend[False-sdist]",
+    "tests/test_projectbuilder.py::test_check_dependencies[False]",
+    "tests/test_projectbuilder.py::test_build[False]",
+    "tests/test_projectbuilder.py::test_default_backend[False]",
+    "tests/test_projectbuilder.py::test_missing_backend[False]",
+    "tests/test_projectbuilder.py::test_missing_requires[False]",
+    "tests/test_projectbuilder.py::test_build_system_typo[False]",
+    "tests/test_projectbuilder.py::test_missing_outdir[False]",
+    "tests/test_projectbuilder.py::test_relative_outdir[False]",
+    "tests/test_projectbuilder.py::test_build_not_dir_outdir[False]",
+    "tests/test_projectbuilder.py::test_build_with_dep_on_console_script[False]",
+    "tests/test_projectbuilder.py::test_prepare[False]",
+    "tests/test_projectbuilder.py::test_prepare_no_hook[False]",
+    "tests/test_projectbuilder.py::test_prepare_error[False]",
+    "tests/test_projectbuilder.py::test_prepare_not_dir_outdir[False]",
+    "tests/test_projectbuilder.py::test_no_outdir_single[False]",
+    "tests/test_projectbuilder.py::test_no_outdir_multiple[False]",
+    "tests/test_projectbuilder.py::test_runner_user_specified[False]",
+    "tests/test_projectbuilder.py::test_metadata_path_no_prepare[False]",
+    "tests/test_projectbuilder.py::test_metadata_path_with_prepare[False]",
+    "tests/test_projectbuilder.py::test_metadata_path_legacy[False]",
+    "tests/test_projectbuilder.py::test_metadata_invalid_wheel[False]",
+    "tests/test_projectbuilder.py::test_log[False]",
+    "tests/test_projectbuilder.py::test_parse_valid_build_system_table_type[False-pyproject_toml0-parse_output0]",
+    "tests/test_projectbuilder.py::test_parse_valid_build_system_table_type[False-pyproject_toml1-parse_output1]",
+    "tests/test_projectbuilder.py::test_parse_valid_build_system_table_type[False-pyproject_toml2-parse_output2]",
+    "tests/test_projectbuilder.py::test_parse_invalid_build_system_table_type[False-pyproject_toml0-`requires`",
+    "tests/test_projectbuilder.py::test_parse_invalid_build_system_table_type[False-pyproject_toml1-`requires`",
+    "tests/test_projectbuilder.py::test_parse_invalid_build_system_table_type[False-pyproject_toml2-`requires`",
+    "tests/test_projectbuilder.py::test_parse_invalid_build_system_table_type[False-pyproject_toml3-`build-backend`",
+    "tests/test_projectbuilder.py::test_parse_invalid_build_system_table_type[False-pyproject_toml4-`backend-path`",
+    "tests/test_projectbuilder.py::test_parse_invalid_build_system_table_type[False-pyproject_toml5-`backend-path`",
+    "tests/test_projectbuilder.py::test_parse_invalid_build_system_table_type[False-pyproject_toml6-Unknown",
+    "tests/test_projectbuilder.py::test_backend_path_invalid_directory[False-nonexistent]",
+    "tests/test_projectbuilder.py::test_backend_path_invalid_directory[False-file-not-dir]"
+  ],
+  "testFiles": [
+    "tests/test_projectbuilder.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/test_projectbuilder.py",
+  "datasetInstall": "pip install filelock pytest pytest-cov pytest-mock covdefaults pytest-rerunfailures pytest-xdist wheel setuptools setuptools_scm virtualenv uv -q && pip install -e . -q",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "aab05aee90fd4206bfd323a670f6ed00129c9db500e377a159f73816171baed2"
+  },
+  "install": "pip install filelock pytest pytest-cov pytest-mock covdefaults pytest-rerunfailures pytest-xdist wheel setuptools setuptools_scm virtualenv uv -q && pip install . -q",
+  "generatedFiles": [],
+  "pythonPath": "src",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [
+    "tests/test_projectbuilder.py::test_build_with_dep_on_console_script[False]",
+    "tests/test_projectbuilder.py::test_metadata_path_legacy[False]"
+  ],
+  "validation": {
+    "at": "2026-10-08T01:01:02.023Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 1460,
+      "counts": {
+        "FAILED": 6,
+        "PASSED": 58
+      }
+    },
+    "reference": {
+      "ms": 1540,
+      "counts": {
+        "PASSED": 62,
+        "FAILED": 2
+      }
+    },
+    "excludedPassToPass": 2
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "id": "sqlfluff__sqlfluff-7617",
+  "title": "`ignore = templating` disables all rules",
+  "repo": "sqlfluff/sqlfluff",
+  "baseCommit": "a8fcdc368ae16d2e110d478369e713425faea366",
+  "createdAt": "2026-03-16 06:55:25",
+  "problemStatement": "`ignore = templating` disables all rules\n### Search before asking\n\n- [X] I searched the [issues](https://github.com/sqlfluff/sqlfluff/issues) and found no similar issues.\n\n\n### What Happened\n\nWhen disable the following two settings:\r\n```\r\n# templater = python\r\n# ignore = templating\r\n```\r\nI get the following output using `sqlfluff lint`, which is what I expect:\r\n```\r\nL: 104 | P:   1 | LT02 | Expected indent of 4 spaces. [layout.indent]\r\nL: 104 | P:  12 | LT05 | Line is too long (107 > 90).\r\n                       | [layout.long_lines]\r\nL: 104 | P:  78 | LT02 | Expected line break and no indent before 'BETWEEN'.\r\n                       | [layout.indent]\r\nL: 104 | P:  79 |  PRS | Line 104, Position 79: Found unparsable section:\r\n                       | 'BETWEEN 0 AND {target_period}\\n          ...'\r\n```\r\n\r\nIf I add the `templater = python`, then `sqlfluff lint` throws the prioritised templater error as expected:\r\n```\r\ntemplater = python\r\n# ignore = templating\r\n```\r\n```\r\nL:   0 | P:   0 |  TMP | Failure in Python templating: 'start_date'. Have you\r\n                       | configured your variables?\r\n                       | https://docs.sqlfluff.com/en/stable/configuration.html#templating-configuration\r\nAll Finished 📜 🎉!\r\n\r\n```\r\n\r\nHowever, if I add both `templater = python` and `ignore = templating`, then the linter returns success, which is not what I expect!\r\n\r\n\r\n\n\n### Expected Behaviour\n\nIn `.sqlfluff`:\r\n```\r\ntemplater = python\r\nignore = templating\r\n```\r\nThe `sqlfluff lint` returns:\r\n```\r\nL: 104 | P:   1 | LT02 | Expected indent of 4 spaces. [layout.indent]\r\nL: 104 | P:  12 | LT05 | Line is too long (107 > 90).\r\n                       | [layout.long_lines]\r\nL: 104 | P:  78 | LT02 | Expected line break and no indent before 'BETWEEN'.\r\n                       | [layout.indent]\r\n```\n\n### Observed Behaviour\n\nIn `.sqlfluff`:\r\n```\r\ntemplater = python\r\nignore = templating\r\n```\r\nThe `sqlfluff lint` returns:\r\n```\r\nAll Finished 📜 🎉!\r\n```\n\n### How to reproduce\n\nWITH stuff AS (\r\n  SELECT '2024-05-01' AS dates UNION ALL\r\n  SELECT '2023-01-01'\r\n)\r\nSELECT\r\n  stuff\r\nFROM\r\n  stuff\r\n WHERE DATE(dates) > DATE('{start_date}')\n\n### Dialect\n\nbigquery\n\n### Version\n\n3.1.0\n\n### Configuration\n\n[sqlfluff]\r\ntemplater = python\r\nignore_templated_areas = True\r\nignore = templating\r\ndialect = bigquery\r\nsql_file_exts = .sql\r\nmax_line_length = 90\r\nlarge_file_skip_byte_limit = 0\r\nfix_even_unparsable = True\r\nexclude_rules = L011, L012, L013, L020, L025, L066, L031\r\n\r\n[sqlfluff:indentation]\r\nindent_unit = space\r\ntab_space_size = 2\r\nindented_joins = False\r\nindented_ctes = True\r\nindented_using_on = True\r\nindented_on_contents = True\r\nindented_then = True\r\nindented_then_contents = False\r\nallow_implicit_indents = False\r\ntemplate_blocks_indent = True\r\nskip_indentation_in = script_content\r\ntrailing_comments = before\r\nignore_comment_lines = False\r\n\r\n[sqlfluff:layout:type:comma]\r\nspacing_within = single\r\nline_position = leading\r\n\r\n[sqlfluff:rules:layout.select_targets]\r\nwildcard_policy = single\r\n\r\n[sqlfluff:templater]\r\nunwrap_wrapped_queries = False\r\n\n\n### Are you willing to work on and submit a PR to address the issue?\n\n- [ ] Yes I am willing to submit a PR!\n\n### Code of Conduct\n\n- [X] I agree to follow this project's [Code of Conduct](https://github.com/sqlfluff/sqlfluff/blob/main/CODE_OF_CONDUCT.md)",
+  "interface": "",
+  "failToPass": [
+    "test/core/templaters/python_test.py::test__templater_python_ignore_templating[SELECT"
+  ],
+  "passToPass": [
+    "test/core/templaters/python_test.py::test__templater_python",
+    "test/core/templaters/python_test.py::test__templater_python_error",
+    "test/core/templaters/python_test.py::test__templater_python_intermediate__trim[int_slice0-foo-head_test0-tail_test0-int_test0]",
+    "test/core/templaters/python_test.py::test__templater_python_intermediate__trim[int_slice1-foo-head_test1-tail_test1-int_test1]",
+    "test/core/templaters/python_test.py::test__templater_python_intermediate__trim[int_slice2-foo1bar-head_test2-tail_test2-int_test2]",
+    "test/core/templaters/python_test.py::test__templater_python_intermediate__trim[int_slice3-foofoofoobarfoofoobarbar-head_test3-tail_test3-int_test3]",
+    "test/core/templaters/python_test.py::test__templater_python_substring_occurrences[-substrings0-positions0]",
+    "test/core/templaters/python_test.py::test__templater_python_substring_occurrences[a-substrings1-positions1]",
+    "test/core/templaters/python_test.py::test__templater_python_substring_occurrences[foobar-substrings2-positions2]",
+    "test/core/templaters/python_test.py::test__templater_python_substring_occurrences[bar",
+    "test/core/templaters/python_test.py::test__templater_python_sorted_occurrence_tuples[test0-result0]",
+    "test/core/templaters/python_test.py::test__templater_python_sorted_occurrence_tuples[test1-result1]",
+    "test/core/templaters/python_test.py::test__templater_python_sorted_occurrence_tuples[test2-result2]",
+    "test/core/templaters/python_test.py::test__templater_python_slice_template[-result0]",
+    "test/core/templaters/python_test.py::test__templater_python_slice_template[foo-result1]",
+    "test/core/templaters/python_test.py::test__templater_python_slice_template[foo",
+    "test/core/templaters/python_test.py::test__templater_python_split_invariants[raw_sliced0-literals0-raw_occurrences0-templated_occurrences0-0-result0]",
+    "test/core/templaters/python_test.py::test__templater_python_split_invariants[raw_sliced1-literals1-raw_occurrences1-templated_occurrences1-3-result1]",
+    "test/core/templaters/python_test.py::test__templater_python_split_uniques_coalesce_rest[split_file0-raw_occurrences0-templated_occurrences0--result0]",
+    "test/core/templaters/python_test.py::test__templater_python_split_uniques_coalesce_rest[split_file1-raw_occurrences1-templated_occurrences1-foo-result1]",
+    "test/core/templaters/python_test.py::test__templater_python_split_uniques_coalesce_rest[split_file2-raw_occurrences2-templated_occurrences2-SELECT",
+    "test/core/templaters/python_test.py::test__templater_python_split_uniques_coalesce_rest[split_file3-raw_occurrences3-templated_occurrences3-foo",
+    "test/core/templaters/python_test.py::test__templater_python_slice_file[--True-result0]",
+    "test/core/templaters/python_test.py::test__templater_python_slice_file[foo-foo-True-result1]",
+    "test/core/templaters/python_test.py::test__templater_python_slice_file[SELECT",
+    "test/core/templaters/python_test.py::test__templater_python_large_file_check",
+    "test/core/templaters/python_test.py::test__templater_python_dot_notation_variables[-]",
+    "test/core/templaters/python_test.py::test__templater_python_dot_notation_variables[SELECT",
+    "test/core/templaters/python_test.py::test__templater_python_dot_notation_fail[context0-magic",
+    "test/core/templaters/python_test.py::test__templater_python_dot_notation_fail[context1-'foo.bar'"
+  ],
+  "testFiles": [
+    "test/core/templaters/python_test.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider test/core/templaters/python_test.py",
+  "datasetInstall": "pip install -e . -q && pip install -r requirements_dev.txt -q && pip install -e plugins/sqlfluff-plugin-example -q",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "2b681b832babd2c82150905c8d57ec49b67bd89aacad2c39269e5b4d98469f88"
+  },
+  "install": "pip install . -q && pip install -r requirements_dev.txt -q && pip install plugins/sqlfluff-plugin-example -q",
+  "generatedFiles": [],
+  "pythonPath": "src",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-08T00:57:20.474Z",
+    "valid": false,
+    "f2pFailOnBase": false,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 2525,
+      "counts": {
+        "PASSED": 31
+      }
+    },
+    "reference": {
+      "ms": 2018,
+      "counts": {
+        "PASSED": 31
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

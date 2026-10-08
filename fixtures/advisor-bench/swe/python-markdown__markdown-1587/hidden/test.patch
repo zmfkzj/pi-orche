@@ -1,0 +1,16 @@
+diff --git a/tests/test_syntax/blocks/test_html_blocks.py b/tests/test_syntax/blocks/test_html_blocks.py
+index 3251d0fa..406de997 100644
+--- a/tests/test_syntax/blocks/test_html_blocks.py
++++ b/tests/test_syntax/blocks/test_html_blocks.py
+@@ -1698,3 +1698,11 @@ def test_multiple_unclosed_comments_no_hang(self):
+             '<!-- and <!--',
+             '<p>&lt;!-- and &lt;!--</p>'
+         )
++
++    def test_no_hang_issue_1586(self):
++        """Test no hang condition for issue #1586."""
++
++        self.assertMarkdownRenders(
++            'Test `<!--[if mso]>` and `<!--[if !mso]>`',
++            '<p>Test <code>&lt;!--[if mso]&gt;</code> and <code>&lt;!--[if !mso]&gt;</code></p>'
++        )

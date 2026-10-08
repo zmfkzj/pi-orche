@@ -1,0 +1,113 @@
+{
+  "id": "delgan__loguru-1425",
+  "title": "Incorrect hex color short code handling",
+  "repo": "Delgan/loguru",
+  "baseCommit": "36da8cca14457f6e1d1bbca25fb29ba42b2d70cb",
+  "createdAt": "2026-01-04 15:16:08",
+  "problemStatement": "Incorrect hex color short code handling\nCurrently, if you use the short code for a hex color, `#FFF` or `#abc` it produces `#FFFFFF` and `#abcabc`. While the first one is correct, the second is not. In CSS, the format is `RRGGBB`.\n\n#1425 created",
+  "interface": "",
+  "failToPass": [
+    "tests/test_ansimarkup_extended.py::test_8bit_colors[<fg",
+    "tests/test_ansimarkup_extended.py::test_hex_colors[<fg",
+    "tests/test_ansimarkup_extended.py::test_hex_colors[<bg",
+    "tests/test_ansimarkup_extended.py::test_hex_short_code_equals_long_code[fg-#abc-#aabbcc]",
+    "tests/test_ansimarkup_extended.py::test_hex_short_code_equals_long_code[fg-#f00-#ff0000]",
+    "tests/test_ansimarkup_extended.py::test_hex_short_code_equals_long_code[fg-#f12-#ff1122]",
+    "tests/test_ansimarkup_extended.py::test_hex_short_code_equals_long_code[fg-#bee-#bbeeee]",
+    "tests/test_ansimarkup_extended.py::test_hex_short_code_equals_long_code[fg-#Ace-#AAccee]",
+    "tests/test_ansimarkup_extended.py::test_hex_short_code_equals_long_code[bg-#abc-#aabbcc]",
+    "tests/test_ansimarkup_extended.py::test_hex_short_code_equals_long_code[bg-#f00-#ff0000]",
+    "tests/test_ansimarkup_extended.py::test_hex_short_code_equals_long_code[bg-#f12-#ff1122]",
+    "tests/test_ansimarkup_extended.py::test_hex_short_code_equals_long_code[bg-#bee-#bbeeee]",
+    "tests/test_ansimarkup_extended.py::test_hex_short_code_equals_long_code[bg-#Ace-#AAccee]"
+  ],
+  "passToPass": [
+    "tests/test_ansimarkup_extended.py::test_background_colors[<bg",
+    "tests/test_ansimarkup_extended.py::test_foreground_colors[<fg",
+    "tests/test_ansimarkup_extended.py::test_8bit_colors[<bg",
+    "tests/test_ansimarkup_extended.py::test_rgb_colors[<fg",
+    "tests/test_ansimarkup_extended.py::test_rgb_colors[<bg",
+    "tests/test_ansimarkup_extended.py::test_nested[<red><b><bg",
+    "tests/test_ansimarkup_extended.py::test_nested[<bg",
+    "tests/test_ansimarkup_extended.py::test_tricky_parse[<r>2",
+    "tests/test_ansimarkup_extended.py::test_tricky_parse[<r>1",
+    "tests/test_ansimarkup_extended.py::test_tricky_parse[{:",
+    "tests/test_ansimarkup_extended.py::test_tricky_parse[<r>1</r>{:",
+    "tests/test_ansimarkup_extended.py::test_tricky_parse[<1<r>2</r>3>-<1\\x1b[31m2\\x1b[0m3>]",
+    "tests/test_ansimarkup_extended.py::test_tricky_parse[</1<r>2</r>3>-</1\\x1b[31m2\\x1b[0m3>]",
+    "tests/test_ansimarkup_extended.py::test_tricky_parse[<1<r>2",
+    "tests/test_ansimarkup_extended.py::test_tricky_parse[<1<r>3",
+    "tests/test_ansimarkup_extended.py::test_invalid_color[True-<fg",
+    "tests/test_ansimarkup_extended.py::test_invalid_color[True-<bg",
+    "tests/test_ansimarkup_extended.py::test_invalid_color[True-<>1</>]",
+    "tests/test_ansimarkup_extended.py::test_invalid_color[True-<,>1</,>]",
+    "tests/test_ansimarkup_extended.py::test_invalid_color[True-<z,z>1</z,z>]",
+    "tests/test_ansimarkup_extended.py::test_invalid_color[True-<z,z,z>1</z,z,z>]",
+    "tests/test_ansimarkup_extended.py::test_invalid_color[True-<fg>1</fg>]",
+    "tests/test_ansimarkup_extended.py::test_invalid_color[False-<fg",
+    "tests/test_ansimarkup_extended.py::test_invalid_color[False-<bg",
+    "tests/test_ansimarkup_extended.py::test_invalid_color[False-<>1</>]",
+    "tests/test_ansimarkup_extended.py::test_invalid_color[False-<,>1</,>]",
+    "tests/test_ansimarkup_extended.py::test_invalid_color[False-<z,z>1</z,z>]",
+    "tests/test_ansimarkup_extended.py::test_invalid_color[False-<z,z,z>1</z,z,z>]",
+    "tests/test_ansimarkup_extended.py::test_invalid_color[False-<fg>1</fg>]",
+    "tests/test_ansimarkup_extended.py::test_invalid_hex[True-<fg",
+    "tests/test_ansimarkup_extended.py::test_invalid_hex[True-<bg",
+    "tests/test_ansimarkup_extended.py::test_invalid_hex[False-<fg",
+    "tests/test_ansimarkup_extended.py::test_invalid_hex[False-<bg",
+    "tests/test_ansimarkup_extended.py::test_invalid_8bit[True-<fg",
+    "tests/test_ansimarkup_extended.py::test_invalid_8bit[True-<bg",
+    "tests/test_ansimarkup_extended.py::test_invalid_8bit[False-<fg",
+    "tests/test_ansimarkup_extended.py::test_invalid_8bit[False-<bg",
+    "tests/test_ansimarkup_extended.py::test_invalid_rgb[True-<fg",
+    "tests/test_ansimarkup_extended.py::test_invalid_rgb[True-<bg",
+    "tests/test_ansimarkup_extended.py::test_invalid_rgb[False-<fg",
+    "tests/test_ansimarkup_extended.py::test_invalid_rgb[False-<bg",
+    "tests/test_ansimarkup_extended.py::test_strip[<fg",
+    "tests/test_ansimarkup_extended.py::test_strip[<bg",
+    "tests/test_ansimarkup_extended.py::test_tricky_strip[<r>2",
+    "tests/test_ansimarkup_extended.py::test_tricky_strip[<r>1",
+    "tests/test_ansimarkup_extended.py::test_tricky_strip[{:",
+    "tests/test_ansimarkup_extended.py::test_tricky_strip[<r>1</r>{:",
+    "tests/test_ansimarkup_extended.py::test_tricky_strip[<1<r>2</r>3>-<123>]",
+    "tests/test_ansimarkup_extended.py::test_tricky_strip[</1<r>2</r>3>-</123>]",
+    "tests/test_ansimarkup_extended.py::test_tricky_strip[<1<r>2",
+    "tests/test_ansimarkup_extended.py::test_tricky_strip[<1<r>3"
+  ],
+  "testFiles": [
+    "tests/test_ansimarkup_extended.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider -W ignore::DeprecationWarning tests/test_ansimarkup_extended.py",
+  "datasetInstall": "pip install -q -e \".[dev]\"",
+  "datasetPython": "3.12",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_01.jsonl",
+    "recordSha256": "cbc9356b262a92989e16a4280f72356b563e7ee33e35279a8faf9223c0ff7f2e"
+  },
+  "install": "pip install -q \".[dev]\"",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-08T00:56:20.925Z",
+    "valid": false,
+    "f2pFailOnBase": false,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 553,
+      "counts": {
+        "PASSED": 54,
+        "FAILED": 10
+      }
+    },
+    "reference": {
+      "ms": 606,
+      "counts": {
+        "PASSED": 64
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

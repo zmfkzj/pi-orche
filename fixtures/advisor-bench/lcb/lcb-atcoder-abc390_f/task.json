@@ -1,0 +1,14 @@
+{
+  "id": "lcb-atcoder-abc390_f",
+  "title": "Double Sum 3",
+  "prompt": "Solve the programming problem in problem.md (examples in examples.json). Write the complete Python 3 solution to `solution.py` in this directory. `solution.py` reads the input from standard input and writes the answer to standard output. Hidden tests check correctness and speed (CPython 3.14, about 6 s per test, standard library only). There is no internet access. Only `solution.py` is graded.",
+  "difficulty": "hard",
+  "contestDate": "2025-01-25T00:00:00",
+  "platform": "atcoder",
+  "tests": 43,
+  "source": {
+    "gold": "results/iso-token/gold/coding/lcb-atcoder-abc390_f.json",
+    "goldSha256": "93626418f4de8e253ac213219a913d610eecc1ff820031d116a4d7e79789cbbc",
+    "task": "results/iso-token/tasks/coding/lcb-atcoder-abc390_f"
+  }
+}

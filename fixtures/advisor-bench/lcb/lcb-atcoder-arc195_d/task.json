@@ -1,0 +1,14 @@
+{
+  "id": "lcb-atcoder-arc195_d",
+  "title": "Swap and Erase",
+  "prompt": "Solve the programming problem in problem.md (examples in examples.json). Write the complete Python 3 solution to `solution.py` in this directory. `solution.py` reads the input from standard input and writes the answer to standard output. Hidden tests check correctness and speed (CPython 3.14, about 6 s per test, standard library only). There is no internet access. Only `solution.py` is graded.",
+  "difficulty": "hard",
+  "contestDate": "2025-03-23T00:00:00",
+  "platform": "atcoder",
+  "tests": 2,
+  "source": {
+    "gold": "results/iso-token/gold/coding/lcb-atcoder-arc195_d.json",
+    "goldSha256": "aa37f945a4cedeae04336ff9f7678e53784038fc12bd8e115c85c4d93de4442b",
+    "task": "results/iso-token/tasks/coding/lcb-atcoder-arc195_d"
+  }
+}

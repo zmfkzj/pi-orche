@@ -1,0 +1,90 @@
+{
+  "id": "tobymao__sqlglot-7187",
+  "title": "DuckDB dialect parse error: `window function IGNORE NULLS`",
+  "repo": "tobymao/sqlglot",
+  "baseCommit": "0e8d0824c40ac46c5e7275180cf2eaae6810f805",
+  "createdAt": "2026-03-02 15:56:17",
+  "problemStatement": "DuckDB dialect parse error: `window function IGNORE NULLS`\n**Fully reproducible code snippet**\n```python\nfrom sqlglot import parse_one\nsql='''with \nids as ( select * as idx from generate_series( 1, 4 ) ),\ndata as ( select *, ( case when idx != 3 then idx * 1.0 else null end ) as value from ids )\nselect value, \n       last_value( value order by idx ignore nulls ) over ( order by idx rows between unbounded preceding and 0 following ) last_value\nfrom data'''\nparse_one( sql, dialect = 'duckdb' )\n```\n```\nExpecting ). Line 5, Col: 44.\n   idx * 1.0 else null end ) as value from ids )\nselect value, \n       last_value( value order by idx ignore nulls ) over ( order by idx rows between unbounded preceding and 0 following ) last_value\nfrom data\n```\n**Official Documentation**\n[Nulls](https://duckdb.org/docs/stable/sql/functions/window_functions#nulls)\n\n**Package Version**\nsqlglot 29.0.1\nsqlglotc 29.0.1",
+  "interface": "",
+  "failToPass": [
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_duckdb"
+  ],
+  "passToPass": [
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_analyze",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_approx_percentile",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_array",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_array_index",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_array_insert",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_array_remove",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_array_remove_at",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_at_sign_to_abs",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_attach_detach",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_bitwise_agg",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_cast",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_create_sequence",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_cte_using_key",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_current_database",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_current_schema",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_current_schemas",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_encode_decode",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_extract_date_parts",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_from_first_with_parentheses",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_ignore_nulls",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_install",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_isinf",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_isnan",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_map_delete",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_map_size",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_map_struct",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_parameter_token",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_prefix_aliases",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_rename_table",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_reset",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_sample",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_set_item",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_sha",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_show_tables",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_simplified_pivot_unpivot",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_time",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_timestamps_with_units",
+    "tests/dialects/test_duckdb.py::TestDuckDB::test_udf"
+  ],
+  "testFiles": [
+    "tests/dialects/test_duckdb.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/dialects/test_duckdb.py",
+  "datasetInstall": "pip install -q -e . && pip install -q pytest pytz duckdb numpy pandas",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "89207a6d5e407f8896363ab475d848a58d6c4ef9a544e8c9bc5d9adee568ac26"
+  },
+  "install": "pip install -q . && pip install -q pytest pytz duckdb numpy pandas",
+  "generatedFiles": [
+    "sqlglot/_version.py"
+  ],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-08T00:42:27.736Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 938,
+      "counts": {
+        "FAILED": 1,
+        "PASSED": 38
+      }
+    },
+    "reference": {
+      "ms": 952,
+      "counts": {
+        "PASSED": 39
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}
