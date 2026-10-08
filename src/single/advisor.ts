@@ -25,7 +25,7 @@
  * The advisor cannot edit (no edit/write/ast_rewrite; bash only through the main session's read-only policy), cannot spawn workers
  * and never gets an advisor of its own.
  */
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { InjectedMessage, SteerReceipt } from "../agent/agent-handle.js";
 import { classifyBash } from "../extension/bash-policy.js";

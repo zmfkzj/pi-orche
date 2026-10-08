@@ -1,6 +1,6 @@
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static } from "typebox";
 import type { AssistantImages, ImageApi, ImageModel, ImagesContext, ImagesOptions, Usage } from "@earendil-works/pi-ai";
 import { withFileMutationQueue, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import sharp from "sharp";

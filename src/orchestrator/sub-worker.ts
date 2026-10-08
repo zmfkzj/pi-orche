@@ -5,8 +5,8 @@
  * supported level below the orchestrator's assignment level and verify at it: docs/thinking-policy.md); game-asset and video use their
  * specialist routes (and generate_image when images are set up).
  */
-import { Type } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
+import { Type } from "typebox";
+import { Value } from "typebox/value";
 import { formatSchemaErrors } from "../orchestration/schema-errors.js";
 import type { ModelRuntime, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ModelRoute, SubWorkerModelSource, SubWorkerThinkingSource } from "../orchestration/routing.js";

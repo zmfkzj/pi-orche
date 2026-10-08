@@ -5,8 +5,8 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ModelRuntime, ToolDefinition } from '@earendil-works/pi-coding-agent';
-import { Type } from '@sinclair/typebox';
-import { Value } from '@sinclair/typebox/value';
+import { Type, type TSchema } from 'typebox';
+import { Value } from 'typebox/value';
 import { formatSchemaErrors } from '../orchestration/schema-errors.js';
 import { createSession } from '../pi/session-factory.js';
 
@@ -57,7 +57,7 @@ async function json(path: string): Promise<unknown> {
   try { return JSON.parse(await readFile(path, 'utf8')); }
   catch (error) { throw new Error(`Cannot read JSON: ${path}`, { cause: error }); }
 }
-function validate(schema: Parameters<typeof Value.Check>[0], value: unknown, path: string): void {
+function validate(schema: TSchema, value: unknown, path: string): void {
   if (!Value.Check(schema, value)) throw new Error(`Invalid ${path}: ${formatSchemaErrors(schema, value, 20)}`);
 }
 async function testFiles(root: string): Promise<string[]> {

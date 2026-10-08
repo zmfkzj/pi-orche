@@ -1,4 +1,4 @@
-import type { TSchema } from "@sinclair/typebox";
+import type { TSchema } from "typebox";
 import type { SessionOptions } from "../pi/session-factory.js";
 import type { SessionRecords } from "./records.js";
 import type { LivenessEvent } from "./liveness.js";

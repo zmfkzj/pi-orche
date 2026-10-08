@@ -10,7 +10,7 @@ import { delegationRules, guardToolCall, isMainMode, MainModeState, type MainMod
 import { contextWarning, DEFAULT_CONTEXT_WARNING, type ContextWarningSettings, type ContextWarningState } from "./context-warning.js";
 import { CONFIG_FILE, DEFAULT_SINGLE, loadOrcheConfigFile } from "./config.js";
 import { orcheTaskParameters, WORKER_CAPABILITY_CHANNEL, WorkerPool, type GoneWorker, type WorkerCapabilityAnswer } from "./workers.js";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { JOB_ENTRY_TYPE, jobResultContent, TASK_RESULT_TYPE, TaskJobs, WORKER_ENTRY_TYPE, type AttachOptions, type DetachReason, type Job, type JobEntry } from "./jobs.js";
 import { attachResult, JOB_WIDGET_KEY, jobEndNotice, jobUpdate, jobWidgetLines } from "./job-view.js";
 import { recoverOrphanRecords } from "./records.js";

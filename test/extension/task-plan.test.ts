@@ -9,13 +9,13 @@ describe("task_plan replacement DAG", () => {
     ["cycles", [node("a", ["b"]), node("b", ["a"])], /Cycle/],
     ["done with unfinished dependencies", [node("a"), node("b", ["a"], "done")], /cannot be done/],
     ["invalid status", [{ ...node("a"), status: "finished" }], /status/],
-    ["empty plan", [], /greater or equal to 1/],
-    ["too many nodes", Array.from({ length: 61 }, (_, i) => node(`n${i}`)), /less or equal to 60/],
+    ["empty plan", [], /\/nodes: must not have fewer than 1 items/],
+    ["too many nodes", Array.from({ length: 61 }, (_, i) => node(`n${i}`)), /\/nodes: must not have more than 60 items/],
     ["title over the input limit", [{ ...node("a"), title: "x".repeat(2001) }], /2000/],
     ["covers that are not bare requirement ids", [{ ...node("a"), covers: ["R3-revised"] }], /Invalid covers ids: "R3-revised" \(node a; did you mean R3\?\)/],
     ["long note", [{ ...node("a"), note: "x".repeat(501) }], /500/],
     ["two running nodes", [node("a", [], "running"), node("b", [], "running")], /At most one node/],
-    ["oversized extra field", [{ ...node("a"), arbitrary: "x".repeat(100_000) }], /Unexpected property/],
+    ["oversized extra field", [{ ...node("a"), arbitrary: "x".repeat(100_000) }], /\/nodes\/0\/arbitrary: Unexpected property/],
   ])("rejects %s with actionable errors", (_name, nodes, error) => {
     expect(() => orderTaskPlan({ nodes } as TaskPlan)).toThrow(error);
   });

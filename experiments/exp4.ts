@@ -1,7 +1,7 @@
 import { runtime, raw, bounded, text, save } from "./raw-sdk.js";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import type {
   AgentSession,
   ToolDefinition,

@@ -1,5 +1,5 @@
-import { Type, type Static } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
+import { Type, type Static } from "typebox";
+import { Value } from "typebox/value";
 import { schemaErrors } from "../orchestration/schema-errors.js";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 

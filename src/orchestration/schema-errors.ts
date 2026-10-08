@@ -1,14 +1,14 @@
-import type { TSchema } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
+import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 
 /**
  * Validation errors of `value` against `schema` as `path: message` lines, for messages shown to a model.
  *
- * Two TypeBox generations meet here: the package's own `@sinclair/typebox` 0.34 (tests, the SDK used as a library) returns a lazy
- * iterator of errors with `path`, while Pi's runtime aliases `@sinclair/typebox` to `typebox` 1.x, whose `Value.Errors` returns an
- * array of AJV-style errors with `instancePath` (and no `First()`). Reading only `error.path` turned every error into `/` under Pi
- * (seen in real worker transcripts: `/: must not have fewer than 1 characters` eight times), and `.First()` would throw. This reads
- * both shapes, keeps the first `limit` distinct lines and never throws.
+ * The package imports the host-provided `typebox` 1.x, whose `Value.Errors` returns an array of AJV-style errors with
+ * `instancePath` (and no `First()`). TypeBox 0.34 (`@sinclair/typebox`, used before the switch) returned a lazy iterator of errors
+ * with `path`. Reading only `error.path` turned every 1.x error into `/` (seen in real worker transcripts: `/: must not have fewer
+ * than 1 characters` eight times), and `.First()` would throw. This reads both shapes, keeps the first `limit` distinct lines and
+ * never throws.
  */
 export function schemaErrors(schema: TSchema, value: unknown, limit = 8): string[] {
   const lines: string[] = [];
@@ -27,9 +27,11 @@ export function schemaErrors(schema: TSchema, value: unknown, limit = 8): string
 
 /** One error object of either TypeBox generation as `path: message`. */
 export function formatError(error: unknown): string {
-  const record = (error && typeof error === "object" ? error : {}) as { path?: unknown; instancePath?: unknown; message?: unknown; params?: unknown };
+  const record = (error && typeof error === "object" ? error : {}) as { path?: unknown; instancePath?: unknown; message?: unknown; params?: unknown; keyword?: unknown; schemaPath?: unknown };
   const path = typeof record.path === "string" && record.path ? record.path : typeof record.instancePath === "string" && record.instancePath ? record.instancePath : "/";
-  const message = typeof record.message === "string" ? record.message : "invalid value";
+  // TypeBox 1.x reports a property rejected by `additionalProperties: false` as `schema is false` at the property's path; say what it means.
+  const extra = record.keyword === "boolean" && typeof record.schemaPath === "string" && record.schemaPath.endsWith("/additionalProperties");
+  const message = extra ? "Unexpected property" : typeof record.message === "string" ? record.message : "invalid value";
   // AJV-style required errors name the missing property only in params.
   const params = record.params && typeof record.params === "object" ? record.params as Record<string, unknown> : undefined;
   const missing = Array.isArray(params?.requiredProperties) ? ` (${(params.requiredProperties as unknown[]).join(", ")})`

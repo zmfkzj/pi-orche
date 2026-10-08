@@ -161,7 +161,7 @@ describe("orche_task git grant: guidance to the main session", () => {
     const schema = JSON.stringify(orcheTaskParameters);
     expect(schema).toContain("Set it only when the user explicitly asked in this conversation to commit and/or push");
     expect(schema).toContain("Scope the commit to this task's files where possible");
-    expect(orcheTaskParameters.properties.git.additionalProperties).toBe(false);
+    expect((orcheTaskParameters.properties.git as { additionalProperties?: unknown }).additionalProperties).toBe(false);
   });
 });
 

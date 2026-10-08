@@ -329,7 +329,7 @@ pi remove /path/to/pi-orche       # uninstall (same source string as installed)
 pi -e /path/to/pi-orche           # try for one invocation without installing
 ```
 
-A local path is loaded in place (not copied or modified), so run `npm install` in the repository once: the package's runtime dependencies (`@ast-grep/napi`, `@sinclair/typebox`, `typescript`) come from its `node_modules`. The `@earendil-works/*` packages are `peerDependencies` (Pi supplies its own copies to extensions) and also `devDependencies` so the standalone CLI and the tests keep working.
+A local path is loaded in place (not copied or modified), so run `npm install` in the repository once: the package's runtime dependencies (`@ast-grep/napi`, `sharp`, `typescript`, `pi-gateway-images`) come from its `node_modules`. The host-provided packages (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `@earendil-works/pi-agent-core` and `typebox`) are `peerDependencies` (Pi supplies its own copies to extensions) and also `devDependencies`, pinned to the Pi release they are tested against (currently 1.1.0, `typebox` 1.3.27), so the standalone CLI and the tests keep working.
 
 ## Verification status
 

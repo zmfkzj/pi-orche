@@ -59,6 +59,17 @@ describe("(e) model output marks a session active; an idle session is not", () =
     expect(verdict.sessions[0]).toMatchObject({ state: "idle", active: false, lastSignalAt: T0 + SECOND, detail: "idle, last signal 2s ago" });
   });
 
+  it.each([true, false])("agent_settled clears a run in flight whatever its pi 1.1.0 aborted flag (%s)", aborted => {
+    const tracker = track();
+    tracker.observe({ type: "agent_start" }, T0);
+    tracker.observe(start("t1"), T0 + SECOND);
+    expect(tracker.liveness(T0 + 2 * SECOND, WINDOW).active).toBe(true);
+    tracker.observe({ type: "agent_settled", aborted }, T0 + 2 * SECOND);
+    const verdict = tracker.liveness(T0 + 3 * SECOND, WINDOW);
+    expect(verdict.active).toBe(false);
+    expect(verdict.sessions[0]).toMatchObject({ state: "idle", active: false });
+  });
+
   it("the owner can force the idle verdict (a worker without an assignment)", () => {
     const tracker = track();
     tracker.observe({ type: "turn_start" }, T0);

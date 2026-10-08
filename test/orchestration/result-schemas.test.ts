@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Value } from "@sinclair/typebox/value";
+import { Value } from "typebox/value";
 import { answerResultSchema, checklistSchema, implementResultSchema, orchestrationResultSchemas, requirementIds, requiredChecklistError } from "../../src/orchestration/result-schemas.js";
 
 describe.each(["game-asset", "video"])("%s result schema", kind => {

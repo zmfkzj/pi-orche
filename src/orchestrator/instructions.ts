@@ -8,8 +8,8 @@
  * p4 (three independent ports of 15-25 minutes each); `checklist-sized` split it and finished 11% sooner at 1.6x the cost, which is
  * the trade the checklist's cost sentence describes, so the checklist stays. test/orchestrator/spawn.test.ts keeps the texts identical.
  */
-import { Type } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
+import { Type } from "typebox";
+import { Value } from "typebox/value";
 import { formatSchemaErrors } from "../orchestration/schema-errors.js";
 
 export const SPLIT_JUDGMENT = `Not splitting is the default: do the task yourself unless one of the three criteria below clearly holds. Every sub-worker starts cold and re-reads what it needs, and you still integrate and check its work. On this code base a multi-worker split measured about twice the cost of one worker for about 10% less wall time; splitting coupled work costs more and breaks more.

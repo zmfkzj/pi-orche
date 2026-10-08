@@ -1,6 +1,6 @@
 import { lstat, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, sep } from "node:path";
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static } from "typebox";
 import { Lang, parse, type SgNode } from "@ast-grep/napi";
 import { withFileMutationQueue, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { resolveWorkspacePath } from "./anchors.js";

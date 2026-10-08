@@ -3,7 +3,7 @@ import { access } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static } from "typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { resolveWorkspacePath } from "./anchors.js";
 

@@ -1,6 +1,6 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import * as sessionFactory from "../../src/pi/session-factory.js";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import {
   fauxAssistantMessage as reply,
   fauxToolCall as call,
@@ -679,6 +679,68 @@ describe("real AgentSession deterministic races", () => {
       m.assign("a", "explore", "two");
       expect(await m.wait("a", 2000)).toMatchObject({ type: "outcome", outcome: { status: "completed" } });
       expect(events.filter(event => event.type === "request_budget")).toEqual([]);
+    });
+  });
+  /**
+   * Pi 1.1.0 adds `agent_settled.aborted` (any abort of the run). The manager deliberately keeps classifying a settled run by its own
+   * state: its own budget stop aborts the run and must still lead to the forced report, and a stop has already finalized the outcome.
+   */
+  describe("agent_settled.aborted (pi 1.1.0) does not change the outcome", () => {
+    const settledFlags = (m: AgentManager) => {
+      const flags: unknown[] = [];
+      m.session("a").subscribe(event => { if (event.type === "agent_settled") flags.push(event.aborted); });
+      return flags;
+    };
+    const workTool = {
+      name: "work", label: "work", description: "work", parameters: Type.Object({}),
+      execute: async () => ({ content: [{ type: "text" as const, text: "worked" }], details: {} }),
+    };
+    const work = () => reply([call("work", {})], { stopReason: "toolUse" });
+    it("a normal run settles with aborted false and completes", async () => {
+      const { m } = await setup([result("plain")]);
+      const flags = settledFlags(m);
+      m.assign("a", "explore", "start");
+      expect(await m.wait("a", 2000)).toMatchObject({ type: "outcome", outcome: { status: "completed" } });
+      await m.session("a").waitForIdle();
+      expect(flags).toEqual([false]);
+    });
+    it("the budget stop settles with aborted true and still gets the forced report", async () => {
+      const { m, faux } = await setup([work(), work(), work(), result("partial")], [workTool], { requestBudget: 2 });
+      const flags = settledFlags(m);
+      const events: ManagerEvent[] = [];
+      m.subscribe(event => events.push(event));
+      m.assign("a", "explore", "start");
+      expect(await m.wait("a", 2000)).toMatchObject({ type: "outcome", outcome: { status: "completed", result: { summary: "partial" } } });
+      await m.session("a").waitForIdle();
+      expect(flags).toEqual([true, false]);
+      expect(events.filter(event => event.type === "assignment_nudged")).toEqual([]);
+      expect(faux.state.callCount).toBe(4);
+      expect(m.workerLiveness("a")).toMatchObject({ active: false, state: "idle" });
+    });
+    it("a stop settles with aborted true, stays stopped and sends nothing more", async () => {
+      const entered = deferred();
+      const { m, faux } = await setup([work(), result("never")], [{
+        ...workTool,
+        execute: async (_id: string, _args: unknown, signal?: AbortSignal) => {
+          entered.resolve();
+          await new Promise<void>(resolve => signal?.addEventListener("abort", () => resolve(), { once: true }));
+          return { content: [{ type: "text" as const, text: "stopped" }], details: {} };
+        },
+      }]);
+      const flags = settledFlags(m);
+      const events: ManagerEvent[] = [];
+      m.subscribe(event => events.push(event));
+      m.assign("a", "explore", "start");
+      await entered.promise;
+      await m.stop("a");
+      expect(await m.wait("a", 2000)).toMatchObject({ type: "outcome", outcome: { status: "stopped" } });
+      await m.session("a").waitForIdle();
+      expect(flags).toEqual([true]);
+      expect(events.filter(event => event.type === "assignment_nudged")).toEqual([]);
+      expect(events.filter(event => event.type === "assignment_outcome")).toHaveLength(1);
+      expect(faux.state.callCount).toBe(1);
+      expect(m.get("a").status).toBe("idle");
+      expect(m.workerLiveness("a")).toMatchObject({ active: false, state: "idle" });
     });
   });
 });

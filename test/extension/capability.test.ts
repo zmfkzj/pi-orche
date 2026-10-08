@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import type { FauxResponseStep } from "@earendil-works/pi-ai";
 import { AgentManager } from "../../src/agent/agent-manager.js";

@@ -8,7 +8,7 @@
  * workspace snapshot before and after the call reports changes outside every worker's files (bash writes, other sessions).
  * Depth is 1: the tool is registered only in orchestrator sessions, never in a sub-worker's, and a sub-worker's guard refuses it.
  */
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static, type TLiteral } from "typebox";
 import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { isAbsolute } from "node:path";
 import { normalizeOwnedPath, validateBacklog, type TaskItem } from "../orchestration/backlog.js";
@@ -26,11 +26,14 @@ export type SubWorkerRole = (typeof SUB_WORKER_ROLES)[number];
 /** The guard's answer when a sub-worker tries to spawn (it never has the tool; this is the second line). */
 export const DEPTH_LIMIT_MESSAGE = "Blocked: sub-workers cannot spawn workers (orche_spawn depth is 1). Do the work yourself or report what is missing.";
 
+/** One `Type.Literal` per value, typed as a tuple so TypeBox 1.x `Static` yields the literal union (a plain array maps to `never`). */
+const literals = <const T extends readonly string[]>(values: T) => values.map(value => Type.Literal(value)) as unknown as { -readonly [K in keyof T]: TLiteral<T[K]> };
+
 export const spawnParameters = Type.Object({
-  reason: Type.Union(SPAWN_REASONS.map(reason => Type.Literal(reason)), { description: "Why you split: parallelism (independent parts at the same time), isolation (a game-asset/video specialist or a part that must run apart), verification (fresh independent verifiers, role verify only)." }),
+  reason: Type.Union(literals(SPAWN_REASONS), { description: "Why you split: parallelism (independent parts at the same time), isolation (a game-asset/video specialist or a part that must run apart), verification (fresh independent verifiers, role verify only)." }),
   workers: Type.Array(Type.Object({
     name: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$", description: "Short unit name, unique in this call (e.g. csv, cache, verify)." }),
-    role: Type.Union(SUB_WORKER_ROLES.map(role => Type.Literal(role)), { description: "implement (writes its own files), answer (read-only investigation), verify (read-only independent verification), game-asset or video (specialists)." }),
+    role: Type.Union(literals(SUB_WORKER_ROLES), { description: "implement (writes its own files), answer (read-only investigation), verify (read-only independent verification), game-asset or video (specialists)." }),
     request: Type.String({ minLength: 1, description: "Self-contained request: the sub-worker sees nothing else. Goal, acceptance criteria, constraints, file references and the user's wording where it matters; not your reasoning." }),
     files: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Owned files or directories (dir/ or dir/**) of a writing role; required for implement, game-asset and video; ignored for read-only roles." })),
   }, { additionalProperties: false }), { minItems: 1, maxItems: MAX_SUB_WORKERS }),

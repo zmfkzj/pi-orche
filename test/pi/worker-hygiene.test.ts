@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { fauxAssistantMessage as reply, fauxToolCall as call, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { AgentManager } from "../../src/agent/agent-manager.js";
 import { orchestrationResultSchemas } from "../../src/orchestration/result-schemas.js";
@@ -28,9 +28,16 @@ describe("schema errors under both TypeBox generations", () => {
     expect(formatError({ instancePath: "", message: "must have required properties evidence", params: { requiredProperties: ["evidence"] } })).toBe("/: must have required properties evidence");
     expect(formatError({ path: "/status", message: "Expected union value" })).toBe("/status: Expected union value");
   });
-  it("lists distinct errors with paths for the 0.34 iterator too", () => {
+  it("lists distinct errors with paths from the typebox Value.Errors the package imports", () => {
     const schema = Type.Object({ a: Type.String({ minLength: 1 }), b: Type.Number() });
     expect(schemaErrors(schema, { a: "", b: "x" })).toEqual(expect.arrayContaining([expect.stringMatching(/^\/a: /), expect.stringMatching(/^\/b: /)]));
+  });
+  it("names a property rejected by additionalProperties: false instead of 'schema is false'", () => {
+    const schema = Type.Object({ a: Type.String() }, { additionalProperties: false });
+    const lines = schemaErrors(schema, { a: "x", extra: 1 });
+    expect(lines[0]).toBe("/extra: Unexpected property");
+    expect(lines.join("\n")).not.toContain("schema is false");
+    expect(formatError({ keyword: "boolean", schemaPath: "#/properties/x", instancePath: "/x", message: "schema is false" })).toBe("/x: schema is false");
   });
 });
 

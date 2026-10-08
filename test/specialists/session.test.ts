@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { fauxAssistantMessage as reply, fauxToolCall as call } from "@earendil-works/pi-ai";
 import { runSpecialistSession, SpecialistError } from "../../src/specialists/session.js";
 import { fauxRuntime } from "../helpers/faux.js";
@@ -18,7 +18,8 @@ async function run(steps: Parameters<typeof fauxRuntime>[0], options: { maxTurns
 
 describe("specialist session", () => {
   it("sends an invalid or rejected report back to the model and returns the first valid one with its cost", async () => {
-    const result = await run([tool("report_answer", { answer: "42" }), tool("report_answer", { answer: 13 }), tool("report_answer", { answer: 42 })]);
+    // "forty-two": TypeBox 1.x Value.Convert (Pi's argument validation) would coerce a numeric string such as "42", so the invalid report is non-numeric.
+    const result = await run([tool("report_answer", { answer: "forty-two" }), tool("report_answer", { answer: 13 }), tool("report_answer", { answer: 42 })]);
     expect(result.value).toEqual({ answer: 42 });
     expect(result.stats).toMatchObject({ actor: "framer:W1", requests: 3 });
     expect(Object.values(result.stats.models)).toEqual([3]);

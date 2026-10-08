@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { extname } from "node:path";
 import { Lang, parseAsync } from "@ast-grep/napi";
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static } from "typebox";
 import { withFileMutationQueue, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
   anchorMatches, formatTaggedLine, isBlankLine, lineTag, parseAnchor, parseFileText,

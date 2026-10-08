@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static } from "typebox";
 import { createReadToolDefinition, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { formatTaggedLine, parseFileText, resolveWorkspacePath } from "./anchors.js";
 import { AnchorRegistry } from "./anchor-registry.js";
@@ -21,6 +21,12 @@ const readSchema = Type.Object({
   symbol: Type.Optional(Type.String({ description: "Read exact name, dotted name or Markdown heading (case-insensitive); excludes outline and offset/limit" })),
 });
 
+/**
+ * A text result. `structuredContent` repeats the text for programmatic callers (codemode scripts), matching Pi's read
+ * `outputSchema`: the text for text files, an image block for images.
+ */
+const textResult = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined, structuredContent: text });
+
 /** Replaces Pi's read with anchored text, declaration outlines and symbol reads. */
 export function createReadTool(cwd: string, registry = new AnchorRegistry()): ToolDefinition {
   const pi = createReadToolDefinition(cwd);
@@ -34,6 +40,8 @@ export function createReadTool(cwd: string, registry = new AnchorRegistry()): To
       "Use read, not cat/sed, to examine files; use offset/limit or outline then symbol instead of reading huge files whole.",
     ],
     parameters: readSchema,
+    // Pi's read contract (string | { type: "image", data, mimeType, note }); codemode uses structuredContent only with it.
+    outputSchema: pi.outputSchema,
     // Models sometimes send offset/limit as strings ("290"); pi validates after this hook.
     prepareArguments: coerceIntegerArguments(["offset", "limit"]),
     async execute(toolCallId, params: Static<typeof readSchema>, signal, onUpdate, ctx) {
@@ -51,7 +59,7 @@ export function createReadTool(cwd: string, registry = new AnchorRegistry()): To
         if (typeError) throw new Error(typeError);
         const error = outlineTargetError(params.path, (await stat(absolute)).size);
         if (error) throw new Error(error);
-      } else if (IMAGE_PATH.test(params.path)) return pi.execute(toolCallId, params, signal, onUpdate, ctx);
+      } else if (IMAGE_PATH.test(params.path)) return pi.execute(toolCallId, params, signal, onUpdate, ctx); // structuredContent: Pi's image block (or text when the image cannot be processed)
       const buffer = await readFile(absolute, { signal });
       if (buffer.subarray(0, 8000).includes(0))
         throw new Error(`${params.path} looks like a binary file; read only supports text and images`);
@@ -59,7 +67,7 @@ export function createReadTool(cwd: string, registry = new AnchorRegistry()): To
       const { lines } = parseFileText(raw);
       if (declarationRead) {
         const entries = await buildOutline(params.path, raw);
-        if (params.outline) return { content: [{ type: "text", text: formatOutline(params.path, lines.length, entries) }], details: undefined };
+        if (params.outline) return textResult(formatOutline(params.path, lines.length, entries));
         const matches = findSymbols(entries, params.symbol!);
         if (!matches.length) {
           const names = similarNames(entries, params.symbol!);
@@ -67,10 +75,10 @@ export function createReadTool(cwd: string, registry = new AnchorRegistry()): To
         }
         const result = symbolRead(lines, matches);
         registry.recordShown(absolute, raw, lines, result.shown);
-        return { content: [{ type: "text", text: result.text }], details: undefined };
+        return textResult(result.text);
       }
       registry.recordShown(absolute, raw, lines, []);
-      if (lines.length === 0) return { content: [{ type: "text", text: "(empty file)" }], details: undefined };
+      if (lines.length === 0) return textResult("(empty file)");
       const start = Math.max(1, Math.floor(params.offset ?? 1));
       if (start > lines.length)
         throw new Error(`Offset ${start} is beyond the end of the file (${lines.length} lines)`);
@@ -94,7 +102,7 @@ export function createReadTool(cwd: string, registry = new AnchorRegistry()): To
         ? "\n[Hint: use outline: true, then symbol to read a declaration or heading.]"
         : "";
       registry.recordShown(absolute, raw, lines, Array.from({ length: last - start + 1 }, (_, i) => start + i));
-      return { content: [{ type: "text", text: out.join("\n") + notice + hint }], details: undefined };
+      return textResult(out.join("\n") + notice + hint);
     },
   };
 }

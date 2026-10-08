@@ -14,7 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { ModelRuntime, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { loadProviderExtensions } from "../../src/pi/provider-extensions.ts";
 import { createSession } from "../../src/pi/session-factory.ts";

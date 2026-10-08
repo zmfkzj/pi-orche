@@ -4,7 +4,7 @@
  * out or was cancelled rejects with TaskFailedError (the message a plain Error would have had, plus structured details);
  * executeTool() is execute() as a tool result, with such a failure returned as an isError result that keeps the details.
  * formatWorkers(), stop(id|"all") and roster() implement the pool slash commands. */
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static } from "typebox";
 import { getAgentDir, type AgentToolResult, type ExtensionFactory, type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { execFile } from "node:child_process";

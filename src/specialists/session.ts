@@ -5,8 +5,8 @@
  * repair instead of ending the call, and usage is returned for the caller's record.
  */
 import type { LengthRecoveryOptions } from "../pi/length-recovery.js";
-import type { Static, TSchema } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
+import type { Static, TSchema } from "typebox";
+import { Value } from "typebox/value";
 import { formatSchemaErrors } from "../orchestration/schema-errors.js";
 import type { ModelRuntime, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createSession, type ToolGuard } from "../pi/session-factory.js";

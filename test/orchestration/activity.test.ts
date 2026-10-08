@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { fauxAssistantMessage as reply, fauxToolCall as call } from "@earendil-works/pi-ai";
 import { AgentManager } from "../../src/agent/agent-manager.js";
 import type { ManagerEvent, ToolExecutionEvent } from "../../src/agent/agent-handle.js";
