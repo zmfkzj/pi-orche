@@ -26,6 +26,7 @@ import { dirname, resolve } from "node:path";
 import { ensurePrivateDir, ensurePrivateFile } from "../agent/private-files.js";
 import type { createAssignmentProjector } from "./context-projection.js";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { projectImageContext } from "./image-context.js";
 import { lengthRecoveryHandlers, type LengthRecoveryOptions } from "./length-recovery.js";
 import { outputCapHandler } from "./output-cap.js";
 import { thinkingPolicyOf } from "./thinking-policy.js";
@@ -180,13 +181,13 @@ function createGuardExtension(guard: ToolGuard): Extension {
     shortcuts: new Map(),
   };
 }
-/** Never persisted: raw results remain in the agent state and session JSONL. */
+/** Never persisted: assignment clears and rolling image limits leave raw agent/session history intact. */
 function createContextProjectionExtension(getProjector: () => SessionOptions["contextProjection"]): Extension {
   const path = "<orche:task-context>";
   return {
     path, resolvedPath: path, hidden: true,
     sourceInfo: createSyntheticSourceInfo(path, { source: "orche" }),
-    handlers: new Map([["context", [((event: { messages: AgentMessage[] }) => ({ messages: getProjector()?.project(event.messages) ?? event.messages })) as never]]]),
+    handlers: new Map([["context", [((event: { messages: AgentMessage[] }) => ({ messages: projectImageContext(getProjector()?.project(event.messages) ?? event.messages) })) as never]]]),
     tools: new Map(), messageRenderers: new Map(), entryRenderers: new Map(),
     commands: new Map(), flags: new Map(), shortcuts: new Map(),
   };
