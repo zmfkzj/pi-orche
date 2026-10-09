@@ -506,15 +506,15 @@ describe("formatting (j)", () => {
     expect(formatExtensionSummary([], { maxExtensions: 3, extensionMs: 1_800_000 })).toEqual([]);
     const second: DeadlineExtension = { ...first, n: 2, scope: "phase", stage: "Coordinator decision", at: 5_400_000, elapsedMs: 5_400_000, overallExtended: true, reasons: ["coordinator streaming 3s ago"] };
     expect(formatExtensionSummary([first, second], { maxExtensions: 3, extensionMs: 1_800_000 })).toEqual([
-      "Timeout extensions: 2/3 used (+30m each)",
-      "  1/3 at 30m, overall \"implement backlog\": W2 bash running 12m, cpu progressing; coordinator streaming",
-      "  2/3 at 1h30m, phase \"Coordinator decision\" (overall extended too): coordinator streaming 3s ago",
+      "Timeout extensions: 2/3 used (+30m each), +1h in total",
+      "  1/3 at 30m (+30m), overall \"implement backlog\": W2 bash running 12m, cpu progressing; coordinator streaming",
+      "  2/3 at 1h30m (+30m), phase \"Coordinator decision\" (overall extended too): coordinator streaming 3s ago",
     ]);
     expect(formatExtensionSummary([first], { maxExtensions: 3, extensionMs: 1_800_000, notExtended: { reason: "idle", n: 1, max: 3, windowMs: 120_000 } })[0])
-      .toBe("Timeout extensions: 1/3 used (+30m each); not extended: no activity in the last 2m");
+      .toBe("Timeout extensions: 1/3 used (+30m each), +30m in total; not extended: no activity in the last 2m");
     expect(formatExtensionSummary([], { maxExtensions: 3, notExtended: { reason: "idle", n: 0, max: 3, windowMs: 120_000 } })).toEqual(["Timeout extensions: 0/3 used; not extended: no activity in the last 2m"]);
     expect(formatExtensionSummary([], { maxExtensions: 0, notExtended: { reason: "disabled", n: 0, max: 0, windowMs: 120_000 } })).toEqual([]);
-    expect(formatExtensionLine(first)).toBe("1/3 at 30m, overall \"implement backlog\": W2 bash running 12m, cpu progressing; coordinator streaming");
+    expect(formatExtensionLine(first)).toBe("1/3 at 30m (+30m), overall \"implement backlog\": W2 bash running 12m, cpu progressing; coordinator streaming");
   });
 
   it("the deadline writes its own summary", () => {
@@ -524,11 +524,11 @@ describe("formatting (j)", () => {
     clock.set(1_800_000);
     deadline.tryExtend({ scope: "overall", stage: "run", liveness: ACTIVE });
     expect(deadline.summary()).toEqual([
-      "Timeout extensions: 1/3 used (+30m each)",
-      "  1/3 at 30m, overall \"run\": W2 bash running 12m, cpu progressing; coordinator streaming 5s ago",
+      "Timeout extensions: 1/3 used (+30m each), +30m in total",
+      "  1/3 at 30m (+30m), overall \"run\": W2 bash running 12m, cpu progressing; coordinator streaming 5s ago",
     ]);
     expect(deadline.summary(notExtended({ extended: false, reason: "idle", n: 1, max: 3, windowMs: 120_000, message: undefined })).at(0))
-      .toBe("Timeout extensions: 1/3 used (+30m each); not extended: no activity in the last 2m");
+      .toBe("Timeout extensions: 1/3 used (+30m each), +30m in total; not extended: no activity in the last 2m");
   });
 
   it("builds the deadline_extended run event", () => {

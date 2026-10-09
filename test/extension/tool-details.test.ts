@@ -46,6 +46,19 @@ describe("deadline info helpers", () => {
     expect(initialDeadline(BASE, { extensionMs: 0, maxExtensions: 5 }, 0).hardLimitMs).toBe(BASE);
   });
 
+  it("the UI ceiling of the default linear schedule is 30 min + 10 + 20 + ... + 100 min = 580 min, also from a live deadline", async () => {
+    const { resolveRunLimits } = await import("../../src/orchestration/limits.js");
+    const limits = resolveRunLimits();
+    expect(initialDeadline(limits.assignmentMs, limits, 0)).toEqual({ baseMs: BASE, capMs: BASE, deadlineAt: BASE, extensionMs: 10 * MINUTE, extensionStepMs: 10 * MINUTE, extensionsUsed: 0, maxExtensions: 10, hardLimitMs: 580 * MINUTE });
+    let now = 0;
+    const live = ExtendableDeadline.fromLimits(limits, { baseMs: limits.assignmentMs, startedAt: 0, now: () => now });
+    const active = { active: true, reasons: ["W1 streaming"], sessions: [] };
+    now = BASE; live.tryExtend({ scope: "assignment", stage: "s", liveness: active });
+    now = BASE + 10 * MINUTE; live.tryExtend({ scope: "assignment", stage: "s", liveness: active });
+    // The live view shows the latest extension's length (20 min) and the cap 30 + 10 + 20 = 60 min.
+    expect(deadlineInfoOf(live)).toEqual({ baseMs: BASE, capMs: 60 * MINUTE, deadlineAt: 60 * MINUTE, extensionMs: 20 * MINUTE, extensionStepMs: 10 * MINUTE, extensionsUsed: 2, maxExtensions: 10, hardLimitMs: 580 * MINUTE });
+  });
+
   it("moves the cap by the overall deadline of the event; without it overall/assignment grow by one extension and a phase cap stays", () => {
     const start = initialDeadline(BASE, { extensionMs: BASE, maxExtensions: 10 }, 1000);
     const exact = extendDeadline(start, { n: 1, max: 10, extensionMs: BASE, scope: "overall", overallDeadline: 1000 + 2 * BASE }, 1000);
@@ -231,11 +244,12 @@ describe("orche_task (worker pool): timing callbacks and details", () => {
     const error = await run().then(() => undefined, (caught: unknown) => caught);
     expect(error).toBeInstanceOf(TaskFailedError);
     const failed = error as TaskFailedError;
-    expect(failed.message).toBe("Worker W1 timed out after 150ms");
+    expect(failed.message.split("\n")[0]).toBe("Worker W1 timed out after 150ms");
+    expect(failed.message).toContain('Resume: a timeout is not an unmet result');
     expect(failed.details).toMatchObject({ status: "timeout", startedAt: expect.any(Number), deadline: { baseMs: 150, capMs: 150, extensionsUsed: 0, maxExtensions: 0, hardLimitMs: 150 } });
     expect(failed.details.finishedAt! - failed.details.startedAt!).toBe(failed.details.durationMs);
     const asTool = failed.toolResult();
-    expect(asTool).toMatchObject({ isError: true, content: [{ type: "text", text: "Worker W1 timed out after 150ms" }], details: { startedAt: failed.details.startedAt } });
+    expect(asTool).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Worker W1 timed out after 150ms\nCheckpoint at the timeout/) }], details: { startedAt: failed.details.startedAt } });
     expect(workers.list()[0]?.status).toBe("idle");
   });
 

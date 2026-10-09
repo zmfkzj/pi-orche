@@ -42,9 +42,10 @@ describe("orche config discovery", () => {
     const files = await layout({ user: { ...cfg("u/user"), limits } });
     const found = await discoverOrcheConfig({ ...files, projectTrusted: false, session });
     expect(found.routes.limits).toEqual(limits); // explicit values only: nothing is prefilled
-    expect(resolveRunLimits(found.routes.limits)).toMatchObject({ ...limits, explorationMs: 200000, assignmentMs: 600000, decisionMs: 300000 });
-    // Absent keys resolve to the defaults (30 minutes, 10 extensions of 30 minutes, a 2 minute activity window); 0 turns extension off.
-    expect(resolveRunLimits(undefined)).toMatchObject({ overallMs: 1_800_000, assignmentMs: 1_800_000, extensionMs: 1_800_000, maxExtensions: 10, activityWindowMs: 120_000 });
+    // An explicit extensionMs without a step keeps its fixed meaning.
+    expect(resolveRunLimits(found.routes.limits)).toMatchObject({ ...limits, extensionStepMs: 0, explorationMs: 200000, assignmentMs: 600000, decisionMs: 300000 });
+    // Absent keys resolve to the defaults (30 minutes, 10 extensions of 10, 20, ... 100 minutes, a 2 minute activity window, a check every 5 minutes); 0 turns extension off.
+    expect(resolveRunLimits(undefined)).toMatchObject({ overallMs: 1_800_000, assignmentMs: 1_800_000, extensionMs: 600_000, extensionStepMs: 600_000, maxExtensions: 10, activityWindowMs: 120_000, observeMs: 300_000 });
     const off = await layout({ user: { ...cfg("u/user"), limits: { maxExtensions: 0 } } });
     expect(resolveRunLimits((await discoverOrcheConfig({ ...off, projectTrusted: false, session })).routes.limits).maxExtensions).toBe(0);
 

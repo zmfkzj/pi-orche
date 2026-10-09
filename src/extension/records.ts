@@ -102,8 +102,9 @@ export interface RunManifestFields {
   cleanup?: unknown;
   /**
    * Timeout extensions granted to the run / task assignment (a deadline that expired while the work was still active, pushed out by
-   * `limits.extensionMs`; at most `limits.maxExtensions`), in order: `DeadlineExtension[]` of orchestration/run/extension.ts (n, max,
-   * scope, stage, extensionMs, elapsedMs, newDeadline, reasons, ...). Absent when there were none.
+   * extension n = `limits.extensionMs + (n - 1) × limits.extensionStepMs`; at most `limits.maxExtensions`), in order: `DeadlineExtension[]`
+   * of orchestration/run/extension.ts (n, max, scope, stage, extensionMs of that round, elapsedMs, newDeadline, reasons, progress, ...).
+   * Absent when there were none.
    */
   extensions?: unknown;
   /** Names relative to the record directory. */

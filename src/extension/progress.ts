@@ -1,4 +1,5 @@
 import { formatExtensionProgress, type DeadlineExtension, type ExtendableDeadline } from "../orchestration/run/extension.js";
+import { extensionBudgetMs } from "../orchestration/limits.js";
 
 /**
  * Timing of a running or finished orche_run / orche_task, for the TUI timer (render.ts). UI-only data: it travels in `details`
@@ -11,12 +12,14 @@ export interface DeadlineInfo {
   capMs: number;
   /** The overall deadline now (epoch ms): the clock the cap is counted from, plus {@link DeadlineInfo.capMs}. */
   deadlineAt: number;
-  /** Length of one extension, ms. */
+  /** Length of the latest extension granted (before any: the first one of the schedule), ms. */
   extensionMs: number;
+  /** Added per further extension (0 or absent: fixed extensions). */
+  extensionStepMs?: number;
   /** Extensions granted so far / allowed (`limits.maxExtensions`; 0 when extending is off). Shown as `ext 1/10`. */
   extensionsUsed: number;
   maxExtensions: number;
-  /** The most the call can last: the base plus the whole extension budget (`overallMs + maxExtensions × extensionMs`), ms. */
+  /** The most the call can last: the base plus the whole extension budget (`overallMs + extensionBudgetMs(schedule)`; defaults 30 min + 550 min), ms. */
   hardLimitMs: number;
 }
 
@@ -31,11 +34,10 @@ export interface RunTiming {
 }
 
 /** The deadline of a call that has just started: the base cap, no extension granted yet. `startedAt` is the clock the cap is counted from. */
-export function initialDeadline(baseMs: number, policy: { extensionMs: number; maxExtensions: number }, startedAt: number): DeadlineInfo {
-  const enabled = policy.maxExtensions > 0 && policy.extensionMs > 0;
+export function initialDeadline(baseMs: number, policy: { extensionMs: number; extensionStepMs?: number; maxExtensions: number }, startedAt: number): DeadlineInfo {
   return {
-    baseMs, capMs: baseMs, deadlineAt: startedAt + baseMs, extensionMs: policy.extensionMs,
-    extensionsUsed: 0, maxExtensions: policy.maxExtensions, hardLimitMs: baseMs + (enabled ? policy.maxExtensions * policy.extensionMs : 0),
+    baseMs, capMs: baseMs, deadlineAt: startedAt + baseMs, extensionMs: policy.extensionMs, ...(policy.extensionStepMs ? { extensionStepMs: policy.extensionStepMs } : {}),
+    extensionsUsed: 0, maxExtensions: policy.maxExtensions, hardLimitMs: baseMs + extensionBudgetMs(policy),
   };
 }
 
@@ -56,9 +58,10 @@ export function extendDeadline(deadline: DeadlineInfo, extension: ExtensionStep,
 }
 
 /** The deadline of a live {@link ExtendableDeadline} (an orche_task assignment's own deadline): its base, cap and extensions as they stand. */
-export function deadlineInfoOf(deadline: Pick<ExtendableDeadline, "baseOverallMs" | "overallCapMs" | "overallDeadline" | "extensionMs" | "used" | "maxExtensions" | "hardLimitMs">): DeadlineInfo {
+export function deadlineInfoOf(deadline: Pick<ExtendableDeadline, "baseOverallMs" | "overallCapMs" | "overallDeadline" | "extensionMs" | "used" | "maxExtensions" | "hardLimitMs"> & Partial<Pick<ExtendableDeadline, "extensionStepMs" | "extensions">>): DeadlineInfo {
+  const latest = deadline.used > 0 ? deadline.extensions?.at(-1)?.extensionMs : undefined;
   return {
-    baseMs: deadline.baseOverallMs, capMs: deadline.overallCapMs, deadlineAt: deadline.overallDeadline, extensionMs: deadline.extensionMs,
+    baseMs: deadline.baseOverallMs, capMs: deadline.overallCapMs, deadlineAt: deadline.overallDeadline, extensionMs: latest ?? deadline.extensionMs, ...(deadline.extensionStepMs ? { extensionStepMs: deadline.extensionStepMs } : {}),
     extensionsUsed: deadline.used, maxExtensions: deadline.maxExtensions, hardLimitMs: deadline.hardLimitMs,
   };
 }

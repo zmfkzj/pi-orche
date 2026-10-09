@@ -43,6 +43,9 @@
  *   heartbeats (every 15 s) and any streamed token fit well inside it, while a stalled session leaves it quickly.
  * - {@link REQUEST_WAIT_MAX_MS} (5 min): the longest a request is believed to be working without a sign of life. Slow reasoning
  *   models and provider retry backoff stay inside it; a hung connection does not count forever.
+ * - {@link COMPACTION_MAX_MS} (15 min): a compaction in flight (its summary request) counts as working for at most this long
+ *   after it started, even without events: a long summary of a large context is work, not a stall; a stuck one stops counting.
+ *   How OFTEN a session compacts is never judged here (a long task compacts many times).
  * - {@link TOOL_INFLIGHT_MAX_MS} (10 min): the longest a silent non-bash tool is believed to be working; long type-checks or
  *   AST rewrites fit, a deadlocked tool does not count forever.
  * - {@link KNOWN_TOOL_TIMEOUTS_MS} / {@link TOOL_TIMEOUT_GRACE_MS}: a tool with its own timeout is bounded by it (plus a grace)
@@ -60,6 +63,8 @@
 export const DEFAULT_LIVENESS_WINDOW_MS = 2 * 60_000;
 /** A model request (or retry backoff, or the gap between steps) with no sign of life counts as working for at most this long. */
 export const REQUEST_WAIT_MAX_MS = 5 * 60_000;
+/** A compaction in flight counts as working for at most this long after its start, events or not. */
+export const COMPACTION_MAX_MS = 15 * 60_000;
 /** A non-bash tool without updates counts as working for at most this long after it started. */
 export const TOOL_INFLIGHT_MAX_MS = 10 * 60_000;
 /** Added to a tool's own known timeout: the tool is given this long to report its failure after its timer fired. */
@@ -241,6 +246,7 @@ export class LivenessTracker {
   private lastSignalAt: number | undefined;
   private retry: { attempt: number; maxAttempts: number; delayMs: number } | undefined;
   private compaction: string | undefined;
+  private compactionSince: number | undefined;
   private reported: LivenessState = "idle";
 
   constructor(options: LivenessTrackerOptions) {
@@ -288,7 +294,8 @@ export class LivenessTracker {
     }
     // streaming / request-wait: a request is in flight (or about to be).
     const lastLife = Math.max(this.lastEventAt ?? 0, this.requestSince ?? 0);
-    const waiting = now - lastLife <= REQUEST_WAIT_MAX_MS;
+    const compacting = this.compaction !== undefined && this.compactionSince !== undefined && now - this.compactionSince <= COMPACTION_MAX_MS;
+    const waiting = now - lastLife <= REQUEST_WAIT_MAX_MS || compacting;
     const active = recent || waiting;
     let detail: string;
     if (state === "streaming" && this.lastOutputAt !== undefined && now - this.lastOutputAt <= window) {
@@ -296,7 +303,7 @@ export class LivenessTracker {
     } else if (this.retry) {
       detail = `provider retry backoff (attempt ${this.retry.attempt}/${this.retry.maxAttempts}, ${formatDuration(this.retry.delayMs)})`;
     } else if (this.compaction !== undefined) {
-      detail = `compaction (${this.compaction})`;
+      detail = `compaction (${this.compaction})${this.compactionSince !== undefined && now - this.compactionSince >= 60_000 ? ` running ${formatDuration(now - this.compactionSince)}` : ""}`;
     } else if (state === "streaming" && this.lastOutputAt !== undefined) {
       detail = `request in flight ${formatDuration(now - (this.requestSince ?? this.lastOutputAt))}, last output ${formatDuration(now - this.lastOutputAt)} ago`;
     } else {
@@ -446,6 +453,7 @@ export class LivenessTracker {
         this.streamed = false;
         this.retry = undefined;
         this.compaction = undefined;
+        this.compactionSince = undefined;
         this.lastEventAt = now;
         break;
       case "auto_retry_start":
@@ -465,10 +473,12 @@ export class LivenessTracker {
         break;
       case "compaction_start":
         this.compaction = typeof event.reason === "string" ? event.reason : "compaction";
+        this.compactionSince = now;
         this.lastEventAt = now;
         break;
       case "compaction_end":
         this.compaction = undefined;
+        this.compactionSince = undefined;
         this.lastEventAt = now;
         break;
       default:

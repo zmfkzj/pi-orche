@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  createLedger, isLedgerEvent, latestLedgers, LEDGER_ENTRY_TYPE, LEDGER_LIMITS, originalRequestOf, recordCheck, recordFailure, recordHandoff, recordRecheck, recordResult,
-  renderLedgerForWorker, renderLedgerSummary, renderResumeBriefing, replayLedgerEvents, startLedger, SUMMARY_TASKS, WORKER_ORIGINAL_CHARS,
+  createLedger, isLedgerEvent, latestLedgers, LEDGER_ENTRY_TYPE, LEDGER_LIMITS, originalRequestOf, planProgress, recordCheck, recordFailure, recordHandoff, recordPlan, recordRecheck, recordResult,
+  renderLedgerForWorker, renderLedgerSummary, renderResumeBriefing, renderTimeoutResume, replayLedgerEvents, startLedger, SUMMARY_TASKS, WORKER_ORIGINAL_CHARS,
   type LedgerEvent, type TaskLedger,
 } from "../../src/single/ledger.js";
 
@@ -206,5 +206,61 @@ describe("task ledger: v2 pipeline events", () => {
     const handoffEvent = { ...base, event: "handoff", requirements: [], primary: { worker: "W1" } };
     expect(isLedgerEvent({ ...handoffEvent, decisions: [{ assignment: 1, readings: ["a", "b"], chosen: "a", by: "framer" }] })).toBe(true);
     expect(isLedgerEvent({ ...handoffEvent, decisions: [{ assignment: 1, readings: ["a", "b"], chosen: "a", by: "oracle" }] })).toBe(false);
+  });
+});
+
+describe("task ledger: the persisted Task DAG (resume checkpoint)", () => {
+  const nodes = [
+    { id: "impl", title: "Implement", status: "done", covers: ["R1"], dependsOn: [], note: "done when tests pass", checkpoint: { result: "parser rewritten", evidence: ["T3 npm test -> 12 pass"], verification: "passed" } },
+    { id: "docs", title: "Document", status: "pending", covers: ["R2"], dependsOn: ["impl"] },
+    { id: "final", title: "Integrate", status: "running", covers: ["R1", "R2"], dependsOn: ["docs"], phase: "integrate" },
+  ];
+  const started = () => {
+    const { ledger } = startLedger("T1", "/repo", 1);
+    recordHandoff(ledger, { request: handoff("R1: parser\nR2: docs"), primary, at: 2 });
+    return ledger;
+  };
+
+  it("records a compact copy (statuses, coverage, checkpoints; no notes or dependencies) that replays from session entries", () => {
+    const ledger = started();
+    const event = recordPlan(ledger, { worker: "W1", plan: { nodes }, at: 3 });
+    expect(event).toMatchObject({ event: "plan", assignment: 1, worker: "W1" });
+    expect(ledger.plan).toEqual({ assignment: 1, worker: "W1", at: 3, nodes: [
+      { id: "impl", title: "Implement", status: "done", covers: ["R1"], checkpoint: { result: "parser rewritten", verification: "passed", evidence: ["T3 npm test -> 12 pass"] } },
+      { id: "docs", title: "Document", status: "pending", covers: ["R2"] },
+      { id: "final", title: "Integrate", status: "running", covers: ["R1", "R2"], phase: "integrate" },
+    ] });
+    expect(JSON.stringify(event)).not.toContain("done when tests pass");
+    expect(isLedgerEvent(JSON.parse(JSON.stringify(event)))).toBe(true);
+    const [restored] = latestLedgers([entry({ v: 1, event: "create", taskId: "T1", cwd: "/repo", at: 1 }), ...[recordHandoff(createLedger("T1", "/repo", 1), { request: handoff("R1: parser\nR2: docs"), primary, at: 2 }), event].map(entry)]);
+    expect(restored?.plan).toEqual(ledger.plan);
+    // Malformed plan events are skipped like any other untrusted entry.
+    expect(isLedgerEvent({ ...event, nodes: [{ id: "x" }] })).toBe(false);
+    expect(isLedgerEvent({ ...event, worker: 1 })).toBe(false);
+    expect(planProgress(ledger.plan!)).toMatchObject({ done: 1, total: 3 });
+  });
+
+  it("renders it for the worker that continues, keeps it out of the compaction copy of the same assignment, and drops evidence when too large", () => {
+    const ledger = started();
+    recordPlan(ledger, { worker: "W1", plan: { nodes }, at: Date.UTC(2026, 9, 9, 10, 0) });
+    const rendered = renderLedgerForWorker(ledger);
+    expect(rendered).toContain("Last recorded Task DAG of task (assignment a1, worker W1, 2026-10-09 10:00:00Z): 1/3 nodes done.");
+    expect(rendered).toContain("Not done:\n- pending docs: Document (R2)\n- running final {integrate}: Integrate (R1, R2)");
+    expect(rendered).toContain("- done impl [passed]: Implement (R1) — parser rewritten [T3 npm test -> 12 pass]");
+    expect(renderLedgerForWorker(ledger, undefined, { skipPlanOf: 1 })).not.toContain("Last recorded Task DAG");
+    expect(renderResumeBriefing(ledger, { worker: "W1", live: false })).toContain("Resume from the last recorded Task DAG in the ledger below");
+    // A timeout of W1: only W1 gets the timeout resume block.
+    recordFailure(ledger, { role: "implement", worker: "W1", status: "timeout", reason: "Worker W1 timed out after 34800000ms (extension budget 10/10 used)" });
+    expect(renderTimeoutResume(ledger, "W1")).toContain("## Resuming task T1 after a timeout");
+    expect(renderTimeoutResume(ledger, "W1")).toContain("1/3 nodes done");
+    expect(renderTimeoutResume(ledger, "W2")).toBe("");
+    expect(renderResumeBriefing(ledger, { worker: "W1", live: true })).toContain("Its last assignment a1 was stopped by the time limit, not by an unmet result.");
+    expect(renderLedgerSummary([ledger])).toContain("Task DAG a1 (W1): 1/3 done");
+    // A huge plan: evidence is left out of the event, statuses and results stay.
+    const big = Array.from({ length: 60 }, (_, index) => ({ id: `n${index}`, title: "t".repeat(160), status: "done", covers: ["R1"], checkpoint: { result: "r".repeat(300), evidence: Array(4).fill("e".repeat(160)), verification: "passed" } }));
+    const event = recordPlan(ledger, { worker: "W1", plan: { nodes: big } });
+    expect(event.nodes).toHaveLength(60);
+    expect(event.nodes.every(node => node.checkpoint && !node.checkpoint.evidence && node.checkpoint.result.length === 300)).toBe(true);
+    expect(renderLedgerForWorker(ledger).length).toBeLessThanOrEqual(LEDGER_LIMITS.workerChars);
   });
 });

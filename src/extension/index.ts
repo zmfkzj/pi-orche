@@ -20,7 +20,7 @@ import { createOrcheRenderers, orcheTaskRenderers, renderJobResultMessage } from
 import { partialUpdate } from "./progress.js";
 import { formatSplitSummary, readSplitLog, summarizeSplits } from "../orchestrator/split-log.js";
 import { applyMainModel, formatModelTiers, type ModelTiersView } from "./main-model.js";
-import { defaultRunLimits } from "../orchestration/limits.js";
+import { defaultRunLimits, extensionBudgetMs, extensionLengthMs } from "../orchestration/limits.js";
 import { formatDuration } from "../agent/liveness.js";
 import { LEDGER_ENTRY_TYPE, LEDGER_SUMMARY_TYPE, latestLedgers, type TaskLedger } from "../single/ledger.js";
 
@@ -54,15 +54,18 @@ async function discoverConfiguredMainMode(options: { cwd: string; agentDir: stri
 }
 /**
  * The time-budget sentence of the orche_task description, written from the default limits (so that it cannot drift from limits.ts):
- * base cap, extension length and count, and the ceiling they make. `limits` in orche.config.json override the defaults.
+ * base cap, the extension schedule and count, and the ceiling they make. `limits` in orche.config.json override the defaults.
  */
 function timeBudget(): string {
-  const { assignmentMs, extensionMs, maxExtensions } = defaultRunLimits;
+  const { assignmentMs, extensionMs, extensionStepMs, maxExtensions, observeMs } = defaultRunLimits;
   const minutes = (ms: number) => ms / 60_000;
   const base = `base ${minutes(assignmentMs)} minutes per assignment`;
   const active = "worker";
-  const ceiling = formatDuration(assignmentMs + maxExtensions * extensionMs);
-  return `${base}; when the deadline passes while the ${active} is still actively working (using tools or producing output) it is extended by ${minutes(extensionMs)} minutes, at most ${maxExtensions} times (${maxExtensions}×${minutes(extensionMs)} minutes at most, ${ceiling} in total; these are the defaults, limits.maxExtensions / limits.extensionMs in orche.config.json change them);`;
+  const schedule = { extensionMs, extensionStepMs, maxExtensions };
+  const ceiling = formatDuration(assignmentMs + extensionBudgetMs(schedule));
+  const last = minutes(extensionLengthMs(schedule, maxExtensions));
+  const lengths = extensionStepMs ? `by ${minutes(extensionMs)} minutes the first time and ${minutes(extensionStepMs)} minutes more each time after (${minutes(extensionMs)}, ${minutes(extensionLengthMs(schedule, 2))} … ${last} minutes)` : `by ${minutes(extensionMs)} minutes`;
+  return `${base}; when the deadline passes while the ${active} is still actively working (using tools or producing output) it is extended ${lengths}, at most ${maxExtensions} times (${formatDuration(extensionBudgetMs(schedule))} of extensions at most, ${ceiling} in total; these are the defaults, limits.maxExtensions / limits.extensionMs / limits.extensionStepMs in orche.config.json change them); the worker is checked every ${minutes(observeMs)} minutes whatever the extension length, and one with no sign of life in 2 consecutive checks during an extension is stopped (missing progress alone never stops it); a timeout is not an unmet result: continue it with the same worker (and task) as the result says;`;
 }
 
 /** How long a one-turn override waits for the session to start the turn it just queued before giving up. */

@@ -100,10 +100,11 @@ const EXTENDED_LINE = /^⏱ timeout extended (\d+)\/(\d+)\b/;
 
 function deadlineOf(value: unknown): DeadlineInfo | undefined {
   if (!isRecord(value)) return undefined;
-  const { baseMs, capMs, deadlineAt, extensionMs, extensionsUsed, maxExtensions, hardLimitMs } = value;
+  const { baseMs, capMs, deadlineAt, extensionMs, extensionStepMs, extensionsUsed, maxExtensions, hardLimitMs } = value;
   if (!finite(capMs) || !finite(extensionsUsed) || !finite(maxExtensions)) return undefined;
   return {
     baseMs: finite(baseMs) ? baseMs : capMs, capMs, deadlineAt: finite(deadlineAt) ? deadlineAt : 0, extensionMs: finite(extensionMs) ? extensionMs : 0,
+    ...(finite(extensionStepMs) && extensionStepMs > 0 ? { extensionStepMs } : {}),
     extensionsUsed, maxExtensions, hardLimitMs: finite(hardLimitMs) ? hardLimitMs : capMs,
   };
 }

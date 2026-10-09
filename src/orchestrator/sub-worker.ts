@@ -14,8 +14,8 @@ import type { TaskItem } from "../orchestration/backlog.js";
 import { checkWriteRealPath, WRITE_TOOLS } from "../orchestration/ownership.js";
 import { orchestrationResultSchemas } from "../orchestration/result-schemas.js";
 import { WORKER_TOOL_NAMES } from "../tools/index.js";
-import { runSpecialistSession, SpecialistError, type SpecialistReport, type SpecialistStats } from "../specialists/session.js";
-import { DEPTH_LIMIT_MESSAGE, SPAWN_TOOL, type PlannedWorker, type RunSubWorker, type SubWorkerOutcome, type SubWorkerRole } from "./spawn.js";
+import { runSpecialistSession, SpecialistError, type SpecialistDeadline, type SpecialistReport, type SpecialistStats } from "../specialists/session.js";
+import { DEPTH_LIMIT_MESSAGE, SPAWN_TOOL, subWorkerDeadline, type PlannedWorker, type RunSubWorker, type SubWorkerOutcome, type SubWorkerRole } from "./spawn.js";
 
 export const SUB_WORKER_INSTRUCTIONS = "You are a sub-worker of an orchestrator in a coding agent. Work only on your one assignment; you cannot see the orchestrator's conversation and you cannot spawn workers. Use the available tools to establish evidence. Never edit outside your owned files. Never commit or push. Reply in the language of the request. Complete the assignment with report_result, called alone.";
 
@@ -44,9 +44,19 @@ export interface SubWorkerEnvironment {
   imageTool?(): ToolDefinition | undefined;
   /** The assignment prompt of one sub-worker (src/extension/workers.ts builds it like an orche_task prompt). */
   prompt(worker: PlannedWorker, imagesAvailable: boolean): string;
+  /** Fixed time cap of a sub-worker; only without `deadline`. */
   timeoutMs: number;
+  /**
+   * The activity-aware deadline of every sub-worker: the orchestrator assignment's resolved limits (base `assignmentMs`, the
+   * extension schedule, activity window, observation period), counted from each sub-worker's own start and judged by its own
+   * session only. The orchestrator's assignment still bounds it: when that stops, the sub-worker is cancelled.
+   */
+  deadline?: Pick<SpecialistDeadline, "limits" | "toolTimeoutsMs">;
   maxTurns: number;
   sessionFile?(id: string): string | undefined;
+  /** Every event of a sub-worker's session (its orchestrator's liveness tracks it), and the end of that session. Throws are ignored. */
+  onSessionEvent?(id: string, event: { type: string; [key: string]: unknown }): void;
+  onSessionEnd?(id: string): void;
 }
 
 const reportSchema = Type.Object({ kind: Type.String(), summary: Type.String({ minLength: 1 }), data: Type.Optional(Type.Unknown()) });
@@ -86,7 +96,7 @@ export function subWorkerGuard(worker: PlannedWorker, siblings: readonly Planned
 }
 
 export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
-  return async (worker, siblings, signal, onTool, onModel) => {
+  return async (worker, siblings, signal, onTool, onModel, onDeadline) => {
     const specialist = worker.role === "game-asset" || worker.role === "video";
     const verifyRoute = worker.role === "verify" && env.verifyRoute ? env.verifyRoute : undefined;
     const route = specialist ? env.specialistRoute(worker.role as "game-asset" | "video") : verifyRoute ?? env.route;
@@ -95,14 +105,16 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
     const sessionFile = env.sessionFile?.(worker.id);
     const base = { id: worker.id, name: worker.name, role: worker.role, reason: worker.reason, ...(worker.files ? { files: [...worker.files] } : {}), changes: [] as string[], modelSource: specialist ? "route" as const : env.routeSource, thinkingSource: specialist ? "route" as const : verifyRoute ? env.verifyThinkingSource ?? env.thinkingSource : env.thinkingSource };
     let started = false;
-    const fromStats = (stats: SpecialistStats) => ({ model: stats.model, ...(stats.thinking ? { thinking: stats.thinking } : {}), ...(started ? {} : { notStarted: true as const }), requests: stats.requests, models: { ...stats.models }, startedAt: stats.startedAt, durationMs: stats.durationMs, costUSD: stats.usage.cost, ...(stats.sessionFile ? { sessionFile: stats.sessionFile } : {}) });
+    const fromStats = (stats: SpecialistStats) => ({ model: stats.model, ...(stats.thinking ? { thinking: stats.thinking } : {}), ...(started ? {} : { notStarted: true as const }), requests: stats.requests, models: { ...stats.models }, startedAt: stats.startedAt, durationMs: stats.durationMs, costUSD: stats.usage.cost, ...(stats.sessionFile ? { sessionFile: stats.sessionFile } : {}), ...(stats.deadline ? { deadline: subWorkerDeadline(stats.deadline) } : {}) });
     try {
       const { value, stats } = await runSpecialistSession({
         actor: worker.id, route, runtime: env.runtime, cwd: env.cwd, instructions: SUB_WORKER_INSTRUCTIONS, prompt: env.prompt(worker, !!image),
         tools: [...WORKER_TOOL_NAMES, ...(image ? [image.name] : [])], ...(image ? { customTools: [image] } : {}), report: reportFor(worker.role),
         toolGuard: guard, writeFileGuard: (file, abort) => abort?.aborted ? "cancelled" : guard("ast_rewrite", { path: file }),
         maxTurns: env.maxTurns, timeoutMs: env.timeoutMs, signal, nudges: 1, onTool,
+        ...(env.deadline ? { deadline: { ...env.deadline, onExtended: extension => onDeadline?.({ type: "extended", extension }), onObservation: observation => onDeadline?.({ type: "observation", observation }) } } : {}),
         onSession: use => { started = true; onModel?.(use); },
+        ...(env.onSessionEvent ? { onEvent: (event: { type: string; [key: string]: unknown }) => env.onSessionEvent!(worker.id, event) } : {}),
         ...(sessionFile ? { sessionFile } : {}), ...(!specialist && env.inheritedContextWindow ? { inheritedContextWindow: env.inheritedContextWindow } : {}),
         ...(!specialist && env.lengthLadder ? { lengthRecovery: { ladder: env.lengthLadder } } : {}),
       });
@@ -115,6 +127,8 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
         ...base, status: cancelled ? "cancelled" : "failed", summary: "", error: error instanceof Error ? error.message : String(error),
         ...(stats ? fromStats(stats) : { model: route.model, ...(route.thinking ? { thinking: route.thinking } : {}), ...(started ? {} : { notStarted: true as const }), requests: 0, models: {}, startedAt: Date.now(), durationMs: 0, costUSD: 0 }),
       } satisfies SubWorkerOutcome;
+    } finally {
+      try { env.onSessionEnd?.(worker.id); } catch { /* an observer cannot alter the outcome */ }
     }
   };
 }

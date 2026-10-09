@@ -150,8 +150,12 @@ describe("orche_task failure keeps its details", () => {
     // A worker waiting for the model counts as active, so with the default extension budget this wait would be extended: this test is about the plain timeout (see task-extension.test.ts).
     const { pool, execute } = await fixture(() => [blocked(entered)], { limits: { assignmentMs: 150, maxExtensions: 0 } });
     const error = await failure(execute());
-    expect(error.message).toBe("Worker W1 timed out after 150ms");
+    const [headline, ...rest] = error.message.split("\n");
+    expect(headline).toBe("Worker W1 timed out after 150ms");
+    // The resume guidance follows: the same worker is retained with its context, and no Task DAG was recorded.
+    expect(rest).toEqual([expect.stringMatching(/^Checkpoint at the timeout: no Task DAG was recorded in this assignment\./), expect.stringMatching(/^Resume: a timeout is not an unmet result .* W1 stays idle with its context until about .* \(idle expiry 30 min\).* Continue with orche_task worker "W1", handing over only the remaining work\. Once W1 is gone, pass worker "W1": a new worker is briefed from its transcript and last record; its unrecorded context is lost\.$/)]);
     expect(error.failure).toEqual({ kind: "failed", status: "timeout", reason: "Worker W1 timed out after 150ms" });
+    expect(error.details.resume).toEqual({ worker: "W1", retainedUntil: expect.any(Number) });
     expect(error.details).toMatchObject({ worker: "W1", status: "timeout", changes: [], otherChanges: [] });
     expect(pool.list()[0]?.status).toBe("idle");
   });

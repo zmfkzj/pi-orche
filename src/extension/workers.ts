@@ -27,7 +27,7 @@ import { formatModelUse } from "../orchestration/model-use.js";
 import { WorkspaceAudit, type GitlinkChange, type WorkspaceChange } from "../orchestration/workspace.js";
 import { CHANGED_WHILE_QUIET, WorkspaceActivity } from "../orchestration/run/activity.js";
 import { WORKER_TOOL_NAMES } from "../tools/index.js";
-import { DEFAULT_LIVENESS_WINDOW_MS, KNOWN_TOOL_TIMEOUTS_MS, mergeLiveness, type Liveness, type SessionLiveness } from "../agent/liveness.js";
+import { DEFAULT_LIVENESS_WINDOW_MS, KNOWN_TOOL_TIMEOUTS_MS, LivenessTracker, mergeLiveness, type Liveness, type SessionLiveness } from "../agent/liveness.js";
 import { createGenerateImageTool } from "../tools/generate-image.js";
 import { loadProviderExtensions, type ProviderExtensionHost } from "../pi/provider-extensions.js";
 import { InheritedProviders } from "../pi/inherit-providers.js";
@@ -39,9 +39,9 @@ import { errorToolResult, failureReason, type ErrorToolResult, type ToolFailure,
 import { deadlineInfoOf, initialDeadline, type DeadlineInfo, type RunTiming } from "./progress.js";
 import { createRunRecord, pruneRecordsOnce, resolveRecords, workerSessionFile, type RunRecord } from "./records.js";
 import type { InjectedMessage, Outcome, SteerReceipt } from "../agent/agent-handle.js";
-import { ExtendableDeadline, extensionEvent, formatExtensionProgress, formatExtensionSummary, waitExtendable, withNotExtended, type DeadlineExtension } from "../orchestration/run/extension.js";
+import { ExtendableDeadline, extensionEvent, formatExtensionProgress, formatExtensionSummary, formatObservation, waitExtendable, withNotExtended, type DeadlineExtension, type ProgressSample, type WaitObservation } from "../orchestration/run/extension.js";
 import { createAssignmentProjector, type ContextClearedStats } from "../pi/context-projection.js";
-import { recordFailure, recordHandoff, recordResult, renderLedgerForWorker, renderLedgerSummary, renderResumeBriefing, startLedger, type LedgerEvent, type TaskLedger } from "../single/ledger.js";
+import { planProgress, recordFailure, recordHandoff, recordPlan, recordResult, renderLedgerForWorker, renderLedgerSummary, renderResumeBriefing, renderTimeoutResume, startLedger, type LedgerEvent, type TaskLedger } from "../single/ledger.js";
 import { appendSplitLog } from "../orchestrator/split-log.js";
 import { ORCHESTRATOR_TEAM_LINE, orchestratorSection, SPLIT_FORMAT, splitError, splitOf, unresolvedError, MAX_VERIFICATION_ROUNDS, type SplitDecision } from "../orchestrator/instructions.js";
 import { createSpawnTool, outcomeModelUse, scopePaths, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnReason, type SubWorkerOutcome } from "../orchestrator/spawn.js";
@@ -163,8 +163,12 @@ export interface TaskDetails {
   extensions?: DeadlineExtension[];
   /** Newly cleared original results/reasoning at this assignment's start. */
   contextCleared?: ContextClearedStats;
-  /** Present when the assignment timed out with extensions enabled: why the expired deadline was not extended (`idle`: no activity in the activity window; `budget`: all extensions used). */
-  notExtended?: { reason: "idle" | "budget"; message: string };
+  /** Present when the assignment timed out with extensions enabled: why the expired deadline was not extended (`idle`: no activity in the activity window; `budget`: all extensions used; `stalled`: consecutive observations during an extension found no activity). */
+  notExtended?: { reason: "idle" | "budget" | "stalled"; message: string };
+  /** The periodic observations of the assignment (limits.observeMs): how many ran, and the last one (liveness and recorded progress kept apart). */
+  observations?: { count: number; everyMs: number; last: WaitObservation };
+  /** A timed-out assignment: how to continue it (the same worker while it is retained, else the task ledger), and the checkpoint it left. */
+  resume?: { worker: string; task?: string; retainedUntil: number; checkpoint?: { assignment: number; worker: string; done: number; total: number; remaining: string[] } };
   /** The task ledger this assignment belongs to (single workflow with `single.ledger`; see src/single/ledger.ts). */
   task?: string;
   /** Present when the named worker was gone and the task continued with this new worker, briefed from its ledger. */
@@ -263,6 +267,8 @@ interface Worker {
   unmetStreak?: Map<string, number>;
   compactions?: CompactionStats[];
   recordEvent?: (event: Record<string, unknown>) => void;
+  /** The assignment in flight's hook for every accepted task_plan (persists the task ledger's resume checkpoint at once); cleared when it ends. */
+  onPlan?: (plan: TaskPlan) => void;
   /** Tool-activity tracker of the assignment in flight (write roles only; the spawn callbacks resolve it at event time). */
   activity?: WorkspaceActivity;
   /** HEAD at the end of the previous assignment (`sha` absent: unborn), for the stale-context prefix. */
@@ -305,6 +311,8 @@ function taskPlanToolFor(worker: Worker, session: () => AgentSession) {
   return createTaskPlanTool(plan => {
     worker.plan = plan;
     worker.recordEvent?.({ type: "task_plan", timestamp: Date.now(), worker: worker.id, plan });
+    // Persisted right away (task ledger): a later timeout or reload keeps every checkpoint recorded up to here.
+    try { worker.onPlan?.(plan); } catch { /* persistence is best effort */ }
     // The plan advisor (single.advisor) starts at the first accepted plan of the assignment; later plans do not restart it.
     worker.advisor?.trigger("task_plan", plan);
     return onTaskPlan(session(), plan);
@@ -373,7 +381,8 @@ function taskCompactionFor(worker: Worker) {
   return {
     essentials: () => {
       const ledger = worker.ledger?.();
-      return `Requirements checklist and original request, verbatim:\n${worker.request ?? ""}\n\nTask DAG at compaction time:\n${worker.plan ? renderTaskPlan(worker.plan) : "No Task DAG recorded in this assignment."}${ledger ? `\n\n${renderLedgerForWorker(ledger)}` : ""}`;
+      // The live plan of this assignment is shown verbatim; the ledger's copy is shown only when it is an earlier assignment's (the resume checkpoint).
+      return `Requirements checklist and original request, verbatim:\n${worker.request ?? ""}\n\nTask DAG at compaction time:\n${worker.plan ? renderTaskPlan(worker.plan) : "No Task DAG recorded in this assignment."}${ledger ? `\n\n${renderLedgerForWorker(ledger, undefined, worker.plan ? { skipPlanOf: ledger.assignments } : {})}` : ""}`;
     },
     onCompact: (stats: CompactionStats) => { (worker.compactions ??= []).push(stats); worker.recordEvent?.({ type: "compaction", timestamp: Date.now(), worker: worker.id, ...stats }); },
   };
@@ -1322,6 +1331,9 @@ export class WorkerPool {
         if (ledger.primary && ledger.primary.worker !== meta.id) {
           handedFrom = { worker: ledger.primary.worker, ...(ledger.primary.sessionFile ? { sessionFile: ledger.primary.sessionFile } : {}), live: this.workers.has(ledger.primary.worker) };
           briefing = renderResumeBriefing(ledger, handedFrom);
+        } else if (ledger.primary?.worker === meta.id) {
+          // The same worker continues after its timeout: the stop is no unmet result, and its recorded checkpoint says where it stood.
+          briefing = renderTimeoutResume(ledger, meta.id);
         }
       } else {
         const created = startLedger(`T${this.nextTaskId++}`, args.cwd, started);
@@ -1423,6 +1435,64 @@ export class WorkerPool {
       ...(extensions.length ? { extensions: extensions.map(extension => ({ ...extension, reasons: [...extension.reasons] })) } : {}),
       ...(notExtended ? { notExtended: { ...notExtended } } : {}),
     });
+    /** The periodic observations of this assignment (limits.observeMs): liveness and recorded progress, kept apart. */
+    let observationCount = 0;
+    let lastObservation: WaitObservation | undefined;
+    const observationDetails = (): Pick<TaskDetails, "observations"> => lastObservation ? { observations: { count: observationCount, everyMs: limits.observeMs, last: { ...lastObservation, reasons: [...lastObservation.reasons] } } } : {};
+    /**
+     * Recorded progress EVIDENCE of this assignment: accepted task_plan calls (a node finished, a checkpoint) and file edits. Tool
+     * calls and compactions are activity, not evidence; a long build or render records none while it runs, which is why the
+     * evidence is reported and never used to stop the worker.
+     */
+    const tally = { evidence: 0, tools: 0, lastEvidenceAt: undefined as number | undefined, last: undefined as string | undefined, done: new Set<string>() };
+    const noteEvidence = (what: string) => { tally.evidence++; tally.lastEvidenceAt = Date.now(); tally.last = what; };
+    const progressSample = (): ProgressSample => {
+      const compactions = meta.compactions?.length ?? 0;
+      const nodes = meta.plan?.nodes ?? [];
+      const finished = nodes.filter(node => node.status === "done" || node.status === "skipped").length;
+      return {
+        evidence: tally.evidence, ...(tally.lastEvidenceAt !== undefined ? { lastEvidenceAt: tally.lastEvidenceAt } : {}), ...(tally.last ? { last: tally.last } : {}),
+        activity: `${meta.plan ? `Task DAG ${finished}/${nodes.length} done` : "no Task DAG yet"}, ${tally.tools} tool call${tally.tools === 1 ? "" : "s"}, ${compactions} compaction${compactions === 1 ? "" : "s"}`,
+      };
+    };
+    /** Liveness of the orche_spawn sub-workers of this assignment, fed by their own session events (they run inside its deadline). */
+    const subTrackers = new Map<string, LivenessTracker>();
+    const assignmentLiveness = (now: number, windowMs: number): Liveness | SessionLiveness | undefined => {
+      const own = this.workerLiveness(meta.id, now, windowMs);
+      if (!subTrackers.size) return own;
+      const ownPart: Liveness | undefined = own ? { active: own.active, reasons: own.active ? [`${own.id} ${own.detail}`] : [], sessions: [own] } : undefined;
+      return mergeLiveness(ownPart, ...[...subTrackers.values()].map(tracker => tracker.liveness(now, windowMs)));
+    };
+    /** How a timed-out assignment continues: the retained worker (idle expiry), the task ledger, and the checkpoint it left. */
+    const idleTtlMs = this.options.idleTtlMs ?? 30 * 60_000;
+    const resumeInfo = (): NonNullable<TaskDetails["resume"]> => {
+      const plan = meta.plan;
+      const nodes = plan?.nodes ?? [];
+      const remaining = nodes.filter(node => node.status !== "done" && node.status !== "skipped");
+      return {
+        worker: meta.id, ...(ledger ? { task: ledger.taskId } : {}), retainedUntil: Date.now() + idleTtlMs,
+        ...(plan ? { checkpoint: { assignment: ledger?.assignments ?? 0, worker: meta.id, done: nodes.length - remaining.length, total: nodes.length, remaining: remaining.map(node => `${node.id} (${node.status})`) } } : {}),
+      };
+    };
+    const resumeLines = (info: NonNullable<TaskDetails["resume"]>): string[] => {
+      const until = new Date(info.retainedUntil).toISOString().replace("T", " ").replace(/:\d{2}\.\d+Z$/, "Z");
+      const checkpoint = info.checkpoint;
+      return [
+        `Checkpoint at the timeout: ${checkpoint ? `Task DAG ${checkpoint.done}/${checkpoint.total} nodes done${checkpoint.remaining.length ? `; not done: ${checkpoint.remaining.join(", ")}` : ""}${ledger ? `; every accepted task_plan of it is persisted in task ledger ${ledger.taskId}` : "; no task ledger, so it is kept only in this result, the record and the worker's context"}` : "no Task DAG was recorded in this assignment"}. Only what task_plan recorded survives a worker that is gone; nothing after its last accepted call.`,
+        `Resume: a timeout is not an unmet result and does not count towards the 2-consecutive-unmet rule. ${meta.id} stays idle with its context until about ${until} (idle expiry ${Math.round(idleTtlMs / 60_000)} min), unless it is retired earlier: a new worker needing its slot (pool cap 3, least-recently-used idle first), /orche stop, or the end of this pi session. Continue with orche_task worker "${meta.id}"${ledger ? ` and task "${ledger.taskId}"` : ""}, handing over only the remaining work. Once ${meta.id} is gone, ${ledger ? `pass task "${ledger.taskId}": a new worker is briefed from the task ledger and its last recorded Task DAG` : `pass worker "${meta.id}": a new worker is briefed from its transcript and last record`}; its unrecorded context is lost.`,
+      ];
+    };
+    // Every accepted task_plan: progress evidence (a node finished, or the plan changed) and, with a task ledger, the resume
+    // checkpoint persisted at once, so a timeout, an eviction or a reload keeps what was recorded.
+    meta.onPlan = plan => {
+      const newlyDone = plan.nodes.filter(node => node.status === "done" && !tally.done.has(node.id));
+      for (const node of plan.nodes) if (node.status === "done") tally.done.add(node.id); else tally.done.delete(node.id);
+      const finished = plan.nodes.filter(node => node.status === "done" || node.status === "skipped").length;
+      noteEvidence(newlyDone.length ? `node${newlyDone.length === 1 ? "" : "s"} ${newlyDone.map(node => node.id).join(", ")} done (${finished}/${plan.nodes.length})` : `task_plan update (${finished}/${plan.nodes.length} done)`);
+      if (ledger) this.persist(recordPlan(ledger, { worker: meta.id, plan }));
+    };
+    /** Ends every orche_spawn sub-worker of this assignment when it stops (timeout, failure, completion), whatever their own deadlines say. */
+    const assignmentEnd = new AbortController();
     let audit: WorkspaceAudit | undefined;
     let before: string | undefined;
     /** Changed by the worker, and the rest of what changed in the workspace meanwhile. */
@@ -1435,7 +1505,7 @@ export class WorkerPool {
     const progress = () => {
       const snapshot = this.manager!.get(meta.id);
       // The extension lines stay (they are part of how the task is going), ahead of the live status line, which stays last: the UI status shows the last line.
-      args.onProgress?.([...(warning ? [warning] : []), ...extensions.map(extension => formatExtensionProgress(extension)), `${meta.id} ${args.role} · ${modelUse()} · ${requests} requests${snapshot.lastToolName ? ` · last tool: ${snapshot.lastToolName}` : ""}${advisor?.state ? ` · ${advisor.state}` : ""}`], timingNow());
+      args.onProgress?.([...(warning ? [warning] : []), ...extensions.map(extension => formatExtensionProgress(extension)), ...(lastObservation ? [formatObservation(lastObservation)] : []), `${meta.id} ${args.role} · ${modelUse()} · ${requests} requests${snapshot.lastToolName ? ` · last tool: ${snapshot.lastToolName}` : ""}${advisor?.state ? ` · ${advisor.state}` : ""}`], timingNow());
     };
     const unsubscribe = this.manager.subscribe(event => {
       if (!("agentId" in event) || event.agentId !== meta.id) return;
@@ -1448,6 +1518,7 @@ export class WorkerPool {
       // New instructions from main mid-assignment: plan again at the baseline until the next accepted task_plan.
       if (event.type === "injected_message" && event.status === "delivered") requireReplan(this.manager!.session(meta.id), advisor?.messageId === event.id ? "advisor notes" : "message from main");
       if (event.type === "usage") { requests++; answered[event.model] = (answered[event.model] ?? 0) + 1; meta.latestInput = event.input + event.cacheRead; if (event.costUSD !== undefined) ownCostUSD = (ownCostUSD ?? 0) + event.costUSD; }
+      if (event.type === "tool_started") { tally.tools++; if (WRITE_TOOLS.has(event.toolName)) noteEvidence(`${event.toolName} started`); }
       progress();
     });
     /** The workspace and git part of a result, as of now: the worker is not running any more when this is called. */
@@ -1504,7 +1575,7 @@ export class WorkerPool {
         worker: meta.id, role: args.role, status, ...(meta.model ? { model: meta.model, modelSource, thinkingSource } : {}), ...workflowDetails(), durationMs: finishedAt - started, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...report, roster: this.roster(),
         ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(),
         ...(record ? { record: record.dir } : {}),
-        ...contextDetails(), ...ledgerDetails(), ...outcomeDetails(),
+        ...contextDetails(), ...ledgerDetails(), ...outcomeDetails(), ...observationDetails(),
       };
     };
     /** The final `run.json` of this assignment, with this worker's entry (the lifetime totals of its one session). */
@@ -1566,7 +1637,7 @@ export class WorkerPool {
         const tracked = audit;
         let sub = 0;
         meta.spawn = {
-          orchestrator: meta.id, ...(files ? { scope: files } : {}), ...(readOnly ? { readOnly: true } : {}), signal,
+          orchestrator: meta.id, ...(files ? { scope: files } : {}), ...(readOnly ? { readOnly: true } : {}), signal: AbortSignal.any([signal, assignmentEnd.signal]),
           nextId: () => `${meta.id}.${++sub}`,
           runWorker: createSubWorkerRunner({
             orchestrator: meta.id, cwd: args.cwd, runtime, route: standardSubRoute, routeSource: subSource, thinkingSource: standardSubRoute === subRoute ? subThinkingSource : "orchestrator:step", ...(subWindow ? { inheritedContextWindow: subWindow } : {}),
@@ -1576,6 +1647,16 @@ export class WorkerPool {
             imageTool: () => config.routes.images ? createGenerateImageTool({ cwd: args.cwd, runtime, images: config.routes.images }) : undefined,
             prompt: (planned, imagesAvailable) => subWorkerPrompt(planned, meta.id, config.routes.verifyCommands ?? [], imagesAvailable),
             timeoutMs: limits.assignmentMs, maxTurns: Math.max(50, Math.round((limits.assignmentRequests ?? 200) * 1.5)),
+            // Every sub-worker gets the same activity-aware deadline as this assignment (the resolved limits: base, linear or fixed
+            // extensions, activity window, observation), from its own start and judged by its own session; this assignment still bounds it.
+            deadline: { limits, ...(config.routes.images ? { toolTimeoutsMs: { generate_image: config.routes.images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } } : {}) },
+            // The sub-workers' own session events keep this assignment's liveness (and so its deadline) informed while orche_spawn runs.
+            onSessionEvent: (id, event) => {
+              let tracker = subTrackers.get(id);
+              if (!tracker) { tracker = new LivenessTracker({ id, role: "sub-worker" }); subTrackers.set(id, tracker); }
+              tracker.observe(event);
+            },
+            onSessionEnd: id => { subTrackers.delete(id); },
             sessionFile: id => resolved.enabled ? workerSessionFile(resolved, { ...(args.currentSession?.id ? { parentSessionId: args.currentSession.id } : {}), workerId: id, spawnedAt: Date.now() }) : undefined,
           }),
           ...(tracked ? { snapshot: () => tracked.snapshot(), diff: async (from: string, to: string) => (await tracked.compare(from, to)).changes } : {}),
@@ -1584,7 +1665,7 @@ export class WorkerPool {
             spawnedReasons.add(reason);
             spawned.push(...outcomes);
             spawnWarnings.push(...warnings);
-            record?.appendEvent({ type: "spawn", timestamp: Date.now(), worker: meta.id, reason, workers: outcomes.map(outcome => ({ id: outcome.id, name: outcome.name, role: outcome.role, status: outcome.status, requests: outcome.requests, durationMs: outcome.durationMs, ...(outcome.files ? { files: outcome.files } : {}) })), ...(warnings.length ? { warnings: [...warnings] } : {}) });
+            record?.appendEvent({ type: "spawn", timestamp: Date.now(), worker: meta.id, reason, workers: outcomes.map(outcome => ({ id: outcome.id, name: outcome.name, role: outcome.role, status: outcome.status, requests: outcome.requests, durationMs: outcome.durationMs, ...(outcome.files ? { files: outcome.files } : {}), ...(outcome.error ? { error: outcome.error } : {}), ...(outcome.deadline ? { deadline: { baseMs: outcome.deadline.baseMs, hardLimitMs: outcome.deadline.hardLimitMs, extensions: outcome.deadline.extensions.length, maxExtensions: outcome.deadline.maxExtensions, extendedMs: outcome.deadline.extendedMs, observations: outcome.deadline.observations, ...(outcome.deadline.notExtended ? { notExtended: outcome.deadline.notExtended } : {}) } } : {}) })), ...(warnings.length ? { warnings: [...warnings] } : {}) });
           },
           ...(args.verificationRounds !== undefined ? { maxVerificationRounds: args.verificationRounds } : {}),
           onVerificationRefused: (rounds, cap) => {
@@ -1637,7 +1718,16 @@ export class WorkerPool {
         const waited = await waitExtendable({
           deadline: current, signal, stage, scope: "assignment",
           wait: ms => manager.wait(meta.id, ms),
-          liveness: (now, windowMs) => this.workerLiveness(meta.id, now, windowMs),
+          liveness: assignmentLiveness,
+          // Observation at a fixed period, independent of how long the current extension is: liveness and recorded progress.
+          observeEveryMs: limits.observeMs, progress: progressSample,
+          onObservation: observation => {
+            observationCount++;
+            lastObservation = observation;
+            record?.appendEvent({ type: "observation", timestamp: observation.at, worker: meta.id, ...observation });
+            record?.update({ observation: { count: observationCount, everyMs: limits.observeMs, last: observation } });
+            progress();
+          },
           onExtended: extension => {
             extensions.push({ ...extension, reasons: [...extension.reasons] });
             record?.appendEvent(extensionEvent(extension));
@@ -1652,10 +1742,14 @@ export class WorkerPool {
           if (why.message && why.reason !== "disabled") notExtended = { reason: why.reason, message: why.message };
           // A report held for the advisor (report_result's guard awaits it) must not keep the stopping worker waiting.
           advisor?.cancel();
+          // The sub-workers end with this assignment (cancelled), their remaining extensions notwithstanding.
+          assignmentEnd.abort(new Error(`${meta.id} timed out`));
           await manager.stop(meta.id); await manager.wait(meta.id, 0);
           // `overallCapMs` is the base plus the extensions it received; the first line carries why it was not extended, the rest what was extended.
-          const history = formatExtensionSummary(extensions, { maxExtensions: current.maxExtensions, extensionMs: current.extensionMs });
-          const headline = withNotExtended(`Worker ${meta.id} timed out after ${current.overallCapMs}ms`, why);
+          const history = formatExtensionSummary(extensions, { maxExtensions: current.maxExtensions, extensionMs: current.extensionMs, extensionStepMs: current.extensionStepMs });
+          // A stall ends an extension early: the time it really ran, not the cap it was extended to.
+          const ranMs = why.reason === "stalled" ? Math.max(0, current.elapsedMs()) : current.overallCapMs;
+          const headline = withNotExtended(`Worker ${meta.id} timed out after ${ranMs}ms`, why);
           throw new WorkerFailure(history.length ? `${headline}\n${history.join("\n")}` : headline, "failed", "timeout");
         }
         if (waited.type !== "outcome") throw new WorkerFailure(`Worker ${meta.id} returned no result`, "failed", "no_result");
@@ -1712,7 +1806,7 @@ export class WorkerPool {
       const details: TaskDetails = {
         worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, ...(meta.model ? { model: meta.model, modelSource, thinkingSource } : {}), ...workflowDetails(), ...(orchestrating && splitOf(data) ? { split: splitOf(data)! } : {}), ...(checklist ? { checklist } : {}), ...(Array.isArray(data.ambiguities) && data.ambiguities.length ? { ambiguities: data.ambiguities as Ambiguity[] } : {}), durationMs, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...changeReport, roster,
         ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(), ...(record ? { record: record.dir } : {}),
-        ...contextDetails(), ...ledgerDetails(), ...outcomeDetails(),
+        ...contextDetails(), ...ledgerDetails(), ...outcomeDetails(), ...observationDetails(),
       };
       finishRecord("done", details, { summary: meta.summary });
       const planNotes = singleWorkflow && !meta.plan ? ["Note: no Task DAG recorded in this assignment."] : [];
@@ -1728,7 +1822,9 @@ export class WorkerPool {
       }
       // The worker ran: same message as ever (warning first), now with the details of what it did. The details come first: they re-check
       // for other sessions, which the warning in the message must know about.
-      meta.unmetStreak = new Map();
+      // A timeout is no unmet result: it neither counts towards nor resets the 2-consecutive-unmet streak (the worker continues).
+      if (error.status !== "timeout") meta.unmetStreak = new Map();
+      const resume = error.status === "timeout" ? resumeInfo() : undefined;
       if (ledger) {
         this.persist(recordFailure(ledger, { role: args.role, worker: meta.id, status: error.status, reason: failureReason(base), ...(record ? { record: record.dir } : {}) }));
       }
@@ -1736,8 +1832,9 @@ export class WorkerPool {
       if (advisor) advisorDetails = await advisor.finish({ reported: false, ...(lastOutcome?.injected ? { injected: lastOutcome.injected } : {}) });
       const details = await failedDetails(error.status);
       const thrown = warning ? withConcurrentWarning(error, warning) : error;
+      if (resume) { details.resume = resume; record?.update({ resume }); }
       finishRecord(error.kind === "cancelled" ? "cancelled" : "failed", details, { failure: failureReason(base) });
-      throw new TaskFailedError([thrown instanceof Error ? thrown.message : base, ...modelWarnings, ...contextLine(), ...taskLines(), ...advisorResultLines()].join("\n"), details, { kind: error.kind, status: error.status, reason: failureReason(base) });
+      throw new TaskFailedError([thrown instanceof Error ? thrown.message : base, ...modelWarnings, ...contextLine(), ...taskLines(), ...(resume ? resumeLines(resume) : []), ...advisorResultLines()].join("\n"), details, { kind: error.kind, status: error.status, reason: failureReason(base) });
     } finally {
       signal.removeEventListener("abort", abort);
       // An advisor still running here (an unexpected error) is stopped and awaited: it never outlives its assignment.
@@ -1755,7 +1852,10 @@ export class WorkerPool {
       // Nothing may snapshot on the private index while the tracker still has jobs queued.
       meta.activity = undefined;
       meta.recordEvent = undefined;
+      meta.onPlan = undefined;
+      subTrackers.clear();
       meta.roundCheck = undefined;
+      assignmentEnd.abort(new Error(`${meta.id} assignment ended`));
       meta.spawn = undefined;
       // Idle at the baseline: a step level or a recovery step-down of this assignment never outlives it.
       try { const ended = this.manager.session(meta.id); thinkingStateOf(ended).onSwitch = undefined; setThinkingPhase(ended, "baseline", "assignment end"); } catch { /* disposed */ }
@@ -1771,7 +1871,8 @@ export class WorkerPool {
       args.onProgress?.([], timingNow());
     }
     } catch (error) {
-      if (worker) { worker.unmetStreak = new Map(); worker.roundCheck = undefined; }
+      const timedOut = error instanceof TaskFailedError && error.failure?.status === "timeout";
+      if (worker) { if (!timedOut) worker.unmetStreak = new Map(); worker.roundCheck = undefined; }
       // Failed before its assignment started (e.g. cancelled during startup): an idle worker still gets its idle expiry.
       if (worker && this.workers.has(worker.id) && this.manager?.get(worker.id).status === "idle") this.idle(worker);
       throw error;

@@ -24,7 +24,9 @@ afterEach(async () => {
 
 const MINUTE = 60_000;
 const BASE = 30 * MINUTE; // default base cap
-const DEFAULT_EXT = 30 * MINUTE;
+/** The default schedule: the first extension 10 min, each further one 10 min longer (10, 20, ... 100 min). */
+const DEFAULT_EXT = 10 * MINUTE;
+const DEFAULT_STEP = 10 * MINUTE;
 
 /** The user-level file the harness writes has no `limits`; these rewrite it (or add the project file) with the given `limits`. */
 const configOf = (h: Harness, limits?: unknown) => JSON.stringify({
@@ -42,9 +44,13 @@ function recordDeadlines() {
   return () => spy.mock.results.flatMap(entry => entry.type === "return" ? [entry.value as ExtendableDeadline] : []);
 }
 const settingsOf = (deadline: ExtendableDeadline) => ({
-  baseMs: deadline.baseOverallMs, extensionMs: deadline.extensionMs, maxExtensions: deadline.maxExtensions, hardLimitMs: deadline.hardLimitMs,
+  baseMs: deadline.baseOverallMs, extensionMs: deadline.extensionMs, extensionStepMs: deadline.extensionStepMs, maxExtensions: deadline.maxExtensions, hardLimitMs: deadline.hardLimitMs,
 });
-const expected = (baseMs: number, extensionMs: number, maxExtensions: number) => ({ baseMs, extensionMs, maxExtensions, hardLimitMs: baseMs + maxExtensions * extensionMs });
+/** `step` 0: a fixed schedule (an explicit extensionMs without extensionStepMs keeps that meaning). */
+const expected = (baseMs: number, extensionMs: number, maxExtensions: number, step = 0) => ({
+  baseMs, extensionMs, extensionStepMs: step, maxExtensions,
+  hardLimitMs: baseMs + (maxExtensions > 0 && extensionMs > 0 ? maxExtensions * extensionMs + step * maxExtensions * (maxExtensions - 1) / 2 : 0),
+});
 
 interface ToolResultMessage { role: string; toolName?: string; isError?: boolean; content: { type: string; text?: string }[]; details?: Record<string, any> }
 const resultsOf = (h: Harness, name: string) => h.session.messages.filter(message => message.role === "toolResult" && (message as unknown as ToolResultMessage).toolName === name) as unknown as ToolResultMessage[];
@@ -85,15 +91,15 @@ async function harness(path: Path, options: { calls?: number; mainSteps?: FauxRe
 }
 
 describe.each(paths)("limits in orche.config.json reach the deadline of $name", path => {
-  it("without a `limits` key the product defaults apply: 30 min base + 10 × 30 min = a 5h30m ceiling", async () => {
+  it("without a `limits` key the product defaults apply: 30 min base + 10, 20, ... 100 min = a 9h40m ceiling", async () => {
     const h = await harness(path);
     const deadlines = recordDeadlines();
     await h.session.prompt("delegate");
     const [result] = resultsOf(h, path.toolName);
     expect(result?.isError).toBeFalsy();
     expect(deadlines().length).toBeGreaterThan(0);
-    for (const deadline of deadlines()) expect(settingsOf(deadline)).toEqual(expected(BASE, DEFAULT_EXT, 10));
-    expect(settingsOf(deadlines()[0]!).hardLimitMs).toBe(5.5 * 60 * MINUTE);
+    for (const deadline of deadlines()) expect(settingsOf(deadline)).toEqual(expected(BASE, DEFAULT_EXT, 10, DEFAULT_STEP));
+    expect(settingsOf(deadlines()[0]!).hardLimitMs).toBe(580 * MINUTE);
     expect(defaultRunLimits.maxExtensions).toBe(10);
   });
 
@@ -113,7 +119,8 @@ describe.each(paths)("limits in orche.config.json reach the deadline of $name", 
   });
 
   it.each([
-    ["only maxExtensions", { maxExtensions: 5 }, expected(BASE, DEFAULT_EXT, 5)],
+    ["only maxExtensions: the default linear schedule, 5 rounds (10 + ... + 50 min)", { maxExtensions: 5 }, expected(BASE, DEFAULT_EXT, 5, DEFAULT_STEP)],
+    ["extensionMs with extensionStepMs: linear", { extensionMs: 300_000, extensionStepMs: 60_000, maxExtensions: 4 }, expected(BASE, 300_000, 4, 60_000)],
     ["only extensionMs", { extensionMs: 600_000 }, expected(BASE, 600_000, 10)],
     ["maxExtensions 0 turns extension off: the ceiling is the base", { maxExtensions: 0, extensionMs: 600_000 }, expected(BASE, 600_000, 0)],
     ["a smaller base cap lowers the ceiling by the same formula (overallMs + maxExtensions × extensionMs)", { overallMs: 15 * MINUTE, maxExtensions: 5, extensionMs: 600_000 }, expected(15 * MINUTE, 600_000, 5)],
@@ -144,7 +151,7 @@ describe.each(paths)("limits in orche.config.json reach the deadline of $name", 
     await h.session.prompt("delegate again");
     expect(resultsOf(h, path.toolName)[1]?.isError).toBeFalsy();
     expect(deadlines().length).toBeGreaterThan(seen);
-    for (const deadline of deadlines().slice(seen)) expect(settingsOf(deadline)).toEqual(expected(BASE, DEFAULT_EXT, 10));
+    for (const deadline of deadlines().slice(seen)) expect(settingsOf(deadline)).toEqual(expected(BASE, DEFAULT_EXT, 10, DEFAULT_STEP));
   });
 
   it("an untrusted project file is ignored: the user file's limits apply", async () => {

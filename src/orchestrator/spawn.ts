@@ -17,6 +17,9 @@ import type { SubWorkerModelSource, SubWorkerThinkingSource } from "../orchestra
 import type { WorkspaceChange } from "../orchestration/workspace.js";
 import { MAX_SUB_WORKERS, MAX_VERIFICATION_ROUNDS } from "./instructions.js";
 import { formatModelUse } from "../orchestration/model-use.js";
+import { formatDuration } from "../agent/liveness.js";
+import type { DeadlineExtension, NotExtendedReason, WaitObservation } from "../orchestration/run/extension.js";
+import type { SpecialistDeadlineStats } from "../specialists/session.js";
 
 export const SPAWN_TOOL = "orche_spawn";
 export const SPAWN_REASONS = ["parallelism", "isolation", "verification"] as const;
@@ -118,6 +121,46 @@ export interface SubWorkerOutcome {
   sessionFile?: string;
   /** Workspace paths changed during the call inside this worker's owned files. */
   changes: string[];
+  /** The sub-worker's activity-aware deadline (absent with a fixed cap): extensions, observations and why it stopped, if it did. */
+  deadline?: SubWorkerDeadline;
+}
+
+/**
+ * The deadline of one sub-worker as it ran: counted from its own start, extended only by its own activity, by the orchestrator
+ * assignment's limits. `hardLimitMs` is its own ceiling; the orchestrator's assignment can end it earlier (it is then `cancelled`).
+ */
+export interface SubWorkerDeadline {
+  baseMs: number;
+  hardLimitMs: number;
+  maxExtensions: number;
+  extensions: DeadlineExtension[];
+  /** Total time the extensions added. */
+  extendedMs: number;
+  observations: number;
+  /** The last periodic observation: liveness and recorded progress, kept apart. */
+  lastObservation?: WaitObservation;
+  /** Why the deadline stopped the sub-worker (its status is then `failed`): idle at an expiry, budget used up, or stalled. */
+  notExtended?: { reason: NotExtendedReason; message: string };
+}
+
+/** The outcome's deadline part from a specialist call's deadline stats. */
+export function subWorkerDeadline(stats: SpecialistDeadlineStats): SubWorkerDeadline {
+  return {
+    baseMs: stats.baseMs, hardLimitMs: stats.hardLimitMs, maxExtensions: stats.maxExtensions, extensions: stats.extensions.map(extension => ({ ...extension, reasons: [...extension.reasons] })),
+    extendedMs: stats.extensions.reduce((sum, extension) => sum + extension.extensionMs, 0), observations: stats.observations,
+    ...(stats.lastObservation ? { lastObservation: { ...stats.lastObservation, reasons: [...stats.lastObservation.reasons] } } : {}),
+    ...(stats.notExtended ? { notExtended: { reason: stats.notExtended.reason, message: stats.notExtended.message ?? stats.notExtended.reason } } : {}),
+  };
+}
+
+/** One deadline event of a running sub-worker: an extension granted, or a periodic observation. */
+export type SubWorkerDeadlineEvent = { type: "extended"; extension: DeadlineExtension } | { type: "observation"; observation: WaitObservation };
+
+/** `ext 2/10 (+30m in total) · stopped: not extended: no activity in the last 2m`: the deadline line of a sub-worker in the orche_spawn result. */
+export function formatSubWorkerDeadline(deadline: SubWorkerDeadline): string | undefined {
+  if (!deadline.extensions.length && !deadline.notExtended) return undefined;
+  const used = `${deadline.extensions.length}/${deadline.maxExtensions} extension${deadline.maxExtensions === 1 ? "" : "s"}${deadline.extensions.length ? ` (+${formatDuration(deadline.extendedMs)}: ${deadline.extensions.map(extension => `+${formatDuration(extension.extensionMs)}`).join(", ")})` : ""}`;
+  return `Deadline: base ${formatDuration(deadline.baseMs)}, ${used}${deadline.notExtended ? `; stopped: ${deadline.notExtended.message}` : ""}`;
 }
 
 /** `provider/id · thinking high` of one sub-worker as it ran (see model-use.ts); unknown when its session never started. */
@@ -125,7 +168,8 @@ export const outcomeModelUse = (outcome: Pick<SubWorkerOutcome, "model" | "think
   formatModelUse(outcome.notStarted ? {} : { model: outcome.model, thinking: outcome.thinking, answered: outcome.models });
 
 /** `onModel`: once the sub-worker's session exists, the model and thinking level it really runs on (the live progress lines show them). */
-export type RunSubWorker = (worker: PlannedWorker, siblings: readonly PlannedWorker[], signal: AbortSignal, onTool: (name: string) => void, onModel?: (use: { model: string; thinking?: string }) => void) => Promise<SubWorkerOutcome>;
+/** `onDeadline`: each extension of the sub-worker's own deadline and each periodic observation (status lines and records only). */
+export type RunSubWorker = (worker: PlannedWorker, siblings: readonly PlannedWorker[], signal: AbortSignal, onTool: (name: string) => void, onModel?: (use: { model: string; thinking?: string }) => void, onDeadline?: (event: SubWorkerDeadlineEvent) => void) => Promise<SubWorkerOutcome>;
 
 /** What the orchestrator's assignment provides to one orche_spawn call (src/extension/workers.ts). */
 export interface SpawnContext {
@@ -174,6 +218,8 @@ export function formatSpawn(details: SpawnDetails): string {
     const data = dataLine(worker.data);
     if (data) lines.push(data);
     if (worker.files) lines.push(`Owned: ${worker.files.join(", ")}; changed: ${worker.changes.length ? worker.changes.join(", ") : "none"}`);
+    const deadline = worker.deadline ? formatSubWorkerDeadline(worker.deadline) : undefined;
+    if (deadline) lines.push(deadline);
   }
   if (details.warnings.length) lines.push("", ...details.warnings.map(warning => `Warning: ${warning}`));
   lines.push("", "You own the result: review each report, check the changed files, run the project checks yourself, then fix or finish what is missing.");
@@ -190,18 +236,38 @@ export async function executeSpawn(context: SpawnContext, params: SpawnParameter
   const status = new Map(workers.map(worker => [worker.id, "starting"]));
   /** What each sub-worker's session runs on, once it exists. */
   const used = new Map<string, string>();
+  /** Each sub-worker's deadline state: `ext 2/10`, the last check. */
+  const timing = new Map<string, string>();
   let lastUpdate = 0;
+  const linesNow = () => workers.map(worker => `${context.orchestrator} → ${worker.id} ${worker.name} (${worker.role}${used.has(worker.id) ? ` · ${used.get(worker.id)}` : ""}): ${status.get(worker.id)}${timing.has(worker.id) ? ` · ${timing.get(worker.id)}` : ""}`);
   const publish = (force = false) => {
-    const lines = workers.map(worker => `${context.orchestrator} → ${worker.id} ${worker.name} (${worker.role}${used.has(worker.id) ? ` · ${used.get(worker.id)}` : ""}): ${status.get(worker.id)}`);
+    const lines = linesNow();
     context.onProgress?.(lines);
     // Partial tool output keeps the orchestrator "active" for its deadline while its sub-workers work (liveness counts tool output).
     if (force || Date.now() - lastUpdate >= 3_000) { lastUpdate = Date.now(); onUpdate?.(lines.join("\n")); }
   };
+  /**
+   * Deadline events of a sub-worker go to the status lines only, never to the tool's partial output: a periodic observation is
+   * produced whether or not the sub-worker is alive, so it must not count as the orchestrator's activity (its liveness merges the
+   * sub-workers' own session events instead).
+   */
+  const showTiming = (id: string, event: SubWorkerDeadlineEvent) => {
+    if (event.type === "extended") {
+      const { extension } = event;
+      timing.set(id, `ext ${extension.n}/${extension.max} (+${formatDuration(extension.extensionMs)}): ${extension.reasons[0] ?? "still active"}`);
+    } else {
+      const { observation } = event;
+      const ext = observation.extensionsUsed ? `ext ${observation.extensionsUsed} · ` : "";
+      timing.set(id, `${ext}check ${observation.n}: ${observation.alive ? "alive" : `NOT alive${observation.inExtension ? ` (${observation.inactiveStreak} consecutive)` : ""}`}`);
+    }
+    context.onProgress?.(linesNow());
+  };
   publish(true);
   const outcomes = await Promise.all(workers.map(async worker => {
-    const outcome = await context.runWorker(worker, workers, abort, name => { status.set(worker.id, `last tool ${name}`); publish(); }, use => { used.set(worker.id, formatModelUse(use)); publish(true); });
+    const outcome = await context.runWorker(worker, workers, abort, name => { status.set(worker.id, `last tool ${name}`); publish(); }, use => { used.set(worker.id, formatModelUse(use)); publish(true); }, event => showTiming(worker.id, event));
     used.set(worker.id, outcomeModelUse(outcome));
     status.set(worker.id, outcome.status);
+    timing.delete(worker.id);
     publish(true);
     return outcome;
   }));

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   aggregateLiveness, DEFAULT_LIVENESS_WINDOW_MS, formatDuration, heartbeatOfEvent, isIdleHeartbeat, KNOWN_TOOL_TIMEOUTS_MS, LivenessTracker,
-  mergeLiveness, parseBashHeartbeat, REQUEST_WAIT_MAX_MS, TOOL_INFLIGHT_MAX_MS, TOOL_TIMEOUT_GRACE_MS, toolInflightBoundMs,
+  COMPACTION_MAX_MS, mergeLiveness, parseBashHeartbeat, REQUEST_WAIT_MAX_MS, TOOL_INFLIGHT_MAX_MS, TOOL_TIMEOUT_GRACE_MS, toolInflightBoundMs,
   type BashHeartbeatSample, type LivenessEvent,
 } from "../../src/agent/liveness.js";
 
@@ -420,5 +420,47 @@ describe("formatting and defaults", () => {
     expect(DEFAULT_LIVENESS_WINDOW_MS).toBe(2 * MINUTE);
     expect(tracker.liveness(T0 + MINUTE, Number.NaN).sessions[0]!.detail).toBe("streaming 1m ago");
     expect(tracker.liveness(T0 + MINUTE, -1).active).toBe(true);
+  });
+});
+
+describe("compaction in flight (long tasks compact many times)", () => {
+  it("a compaction counts as working for up to COMPACTION_MAX_MS after its start, events or not, then stops counting", () => {
+    expect(COMPACTION_MAX_MS).toBe(15 * MINUTE);
+    const tracker = track();
+    tracker.observe({ type: "agent_start" }, T0);
+    tracker.observe({ type: "compaction_start", reason: "threshold" }, T0);
+    // Past the 5-minute request bound, still inside the compaction bound: active.
+    const slow = tracker.session(T0 + 12 * MINUTE, WINDOW);
+    expect(slow).toMatchObject({ state: "request-wait", active: true, detail: "compaction (threshold) running 12m" });
+    expect(REQUEST_WAIT_MAX_MS).toBeLessThan(12 * MINUTE);
+    // A stuck compaction stops counting after the bound.
+    const stuck = tracker.session(T0 + 16 * MINUTE, WINDOW);
+    expect(stuck.active).toBe(false);
+    expect(stuck.detail).toMatch(/^compaction \(threshold\) running 16m \(no sign of life for 16m, past the 5m bound\)$/);
+  });
+
+  it("repeated compactions are judged one at a time: how often a session compacts never makes it idle", () => {
+    const tracker = track();
+    tracker.observe({ type: "agent_start" }, T0);
+    let now = T0;
+    for (let round = 0; round < 6; round++) {
+      tracker.observe({ type: "compaction_start", reason: "threshold" }, now);
+      expect(tracker.session(now + 8 * MINUTE, WINDOW).active).toBe(true);
+      now += 9 * MINUTE;
+      tracker.observe({ type: "compaction_end" }, now);
+      tracker.observe(delta, now + SECOND);
+      expect(tracker.session(now + 30 * SECOND, WINDOW)).toMatchObject({ active: true, state: "streaming" });
+      now += MINUTE;
+    }
+    // A compaction that ended releases its bound: a later silent request is judged by the request bound again.
+    expect(tracker.session(now + REQUEST_WAIT_MAX_MS + MINUTE, WINDOW).active).toBe(false);
+  });
+
+  it("a silent bash without /proc data and without a declared timeout is not counted as working, however long it runs", () => {
+    const tracker = track();
+    tracker.observe({ type: "agent_start" }, T0);
+    tracker.observe(start("b1"), T0);
+    tracker.observe(heartbeat("b1", { procAvailable: false }), T0 + 15 * SECOND);
+    expect(tracker.session(T0 + 10 * MINUTE, WINDOW).active).toBe(false);
   });
 });

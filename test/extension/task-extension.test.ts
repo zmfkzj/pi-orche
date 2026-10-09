@@ -56,6 +56,8 @@ async function fixture(steps: FauxResponseStep[], options: { limits: Record<stri
   return { h, pool, controller, execute, lines };
 }
 /** The distinct progress lines shown so far that announce an extension (every later update repeats them). */
+/** The timeout message without its Checkpoint/Resume lines (they follow the headline and the extension history). */
+const timeoutLines = (message: string) => { const lines = message.split("\n"); const cut = lines.findIndex(line => line.startsWith("Checkpoint at the timeout")); return cut < 0 ? lines : lines.slice(0, cut); };
 const extensionLines = (lines: string[][]) => [...new Set(lines.flat().filter(line => line.startsWith("⏱")))];
 const rejection = async (promise: Promise<unknown>): Promise<TaskFailedError> => {
   const error = await promise.then(() => undefined, (caught: unknown) => caught);
@@ -85,13 +87,13 @@ describe("(f) orche_task: the assignment wait is extended while the worker is ac
     const entered = deferred();
     const { pool, execute } = await fixture([blocked(entered)], { limits: { assignmentMs: 100, extensionMs: 100, maxExtensions: 2 } });
     const error = await rejection(execute());
-    const [headline, ...history] = error.message.split("\n");
+    const [headline, ...history] = timeoutLines(error.message);
     // base 100 ms + 2 extensions of 100 ms; the reason it was not extended a third time is in the first line.
     expect(headline).toBe("Worker W1 timed out after 300ms (extension budget 2/2 used)");
-    expect(history[0]).toBe("Timeout extensions: 2/2 used (+0s each)");
+    expect(history[0]).toBe("Timeout extensions: 2/2 used (+0s each), +0s in total");
     expect(history).toHaveLength(3);
-    expect(history[1]).toMatch(/^ {2}1\/2 at \d+s, assignment "W1 explore": W1 request in flight/);
-    expect(history[2]).toMatch(/^ {2}2\/2 at \d+s, assignment "W1 explore": W1 request in flight/);
+    expect(history[1]).toMatch(/^ {2}1\/2 at \d+s \(\+0s\), assignment "W1 explore": W1 request in flight/);
+    expect(history[2]).toMatch(/^ {2}2\/2 at \d+s \(\+0s\), assignment "W1 explore": W1 request in flight/);
     expect(error.failure).toEqual({ kind: "failed", status: "timeout", reason: "Worker W1 timed out after 300ms (extension budget 2/2 used)" });
     expect(error.details).toMatchObject({ worker: "W1", status: "timeout", notExtended: { reason: "budget", message: "extension budget 2/2 used" } });
     expect(error.details.extensions).toHaveLength(2);
@@ -103,7 +105,7 @@ describe("(f) orche_task: the assignment wait is extended while the worker is ac
     const { pool, execute, lines } = await fixture([blocked(entered)], { limits: { assignmentMs: 150, extensionMs: 1000, maxExtensions: 3 } });
     const liveness = vi.spyOn(pool, "workerLiveness").mockImplementation(() => verdict(false, "idle, last signal 3m ago"));
     const error = await rejection(execute());
-    expect(error.message).toBe("Worker W1 timed out after 150ms (not extended: no activity in the last 2m)");
+    expect(timeoutLines(error.message)).toEqual(["Worker W1 timed out after 150ms (not extended: no activity in the last 2m)"]);
     expect(error.failure).toEqual({ kind: "failed", status: "timeout", reason: "Worker W1 timed out after 150ms (not extended: no activity in the last 2m)" });
     expect(error.details).toMatchObject({ status: "timeout", notExtended: { reason: "idle", message: "not extended: no activity in the last 2m" } });
     expect(error.details).not.toHaveProperty("extensions");
@@ -121,10 +123,10 @@ describe("(f) orche_task: the assignment wait is extended while the worker is ac
       .mockImplementationOnce(() => verdict(true, "bash running 12m, cpu progressing"))
       .mockImplementation(() => verdict(false, "idle, last signal 1m ago"));
     const error = await rejection(execute());
-    const [headline, ...history] = error.message.split("\n");
+    const [headline, ...history] = timeoutLines(error.message);
     expect(headline).toBe("Worker W1 timed out after 1150ms (not extended: no activity in the last 45s)"); // 150 base + 1000 extension
-    expect(history[0]).toBe("Timeout extensions: 1/3 used (+1s each)");
-    expect(history[1]).toMatch(/^ {2}1\/3 at \d+s, assignment "W1 explore": W1 bash running 12m, cpu progressing$/);
+    expect(history[0]).toBe("Timeout extensions: 1/3 used (+1s each), +1s in total");
+    expect(history[1]).toMatch(/^ {2}1\/3 at \d+s \(\+1s\), assignment "W1 explore": W1 bash running 12m, cpu progressing · progress: none recorded yet; no Task DAG yet, 0 tool calls, 0 compactions; not a stop reason$/);
     expect(error.details).toMatchObject({ notExtended: { reason: "idle" }, extensions: [{ n: 1, max: 3 }] });
     expect(liveness).toHaveBeenCalledTimes(2);
     for (const call of liveness.mock.calls) expect(call).toEqual(["W1", expect.any(Number), 45_000]);
@@ -135,7 +137,7 @@ describe("(f) orche_task: the assignment wait is extended while the worker is ac
     const entered = deferred();
     const { execute, lines } = await fixture([blocked(entered)], { limits: { assignmentMs: 150, maxExtensions: 0 } });
     const error = await rejection(execute());
-    expect(error.message).toBe("Worker W1 timed out after 150ms");
+    expect(timeoutLines(error.message)).toEqual(["Worker W1 timed out after 150ms"]);
     expect(error.details).toMatchObject({ status: "timeout" });
     expect(error.details).not.toHaveProperty("extensions");
     expect(error.details).not.toHaveProperty("notExtended");
@@ -200,7 +202,7 @@ describe("(j) orche_task: extensions are reported in progress, result, details a
 
     // Result text and details.
     expect(text).toContain("Timeout extensions: 1/3 used (+1s each)");
-    expect(text).toMatch(/\n {2}1\/3 at \d+s, assignment "W1 explore": W1 request in flight/);
+    expect(text).toMatch(/\n {2}1\/3 at \d+s \(\+1s\), assignment "W1 explore": W1 request in flight/);
     expect(text.indexOf("Timeout extensions")).toBeLessThan(text.indexOf("Workers: "));
     expect(details.extensions).toHaveLength(1);
     expect(details.extensions![0]).toMatchObject({ n: 1, max: 3, scope: "assignment", extensionMs: 1000 });

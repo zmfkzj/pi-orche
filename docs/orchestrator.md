@@ -32,7 +32,7 @@ User ⇄ main (single 모드: 대화·요구사항 정리·보고서 검토, 편
 
 - **main**: 사용자의 요구사항을 구체화하고 명확하게 정리해 orchestrator 하나에게 넘긴다(인계 형식은 지금 single 그대로). 단순 응답은 직접 답한다. 결과는 보고서로 검토한다(코드 재확인·check 재실행 없음).
 - **orchestrator**: 세 기준으로 분할 여부를 판단한다. 나눌 필요가 없으면 직접 작업하고(기본값), 필요하면 `orche_spawn`으로 sub-worker를 띄운 뒤 결과를 통합하고 확인한다. 판단과 근거를 보고서의 `data.split`에 짧게 남긴다.
-- **sub-worker**: 한 번 쓰고 버리는 세션. 자기 요청만 보고, 자기 소유 파일만 쓸 수 있고, spawn 도구가 없다.
+- **sub-worker**: 한 번 쓰고 버리는 세션. 자기 요청만 보고, 자기 소유 파일만 쓸 수 있고, spawn 도구가 없다. 시간 제한은 orchestrator assignment와 같은 활동 기반 기한이다(같은 `limits`: 기본 30분 + 10, 20, … 100분, 명시적 고정 `extensionMs` 호환, `observeMs` 관측). 기한은 자기 시작 시각부터 세고 자기 세션 활동으로만 연장된다. 자기 타임아웃은 그 sub-worker만 `failed`로 만들고(사유 idle/budget/stalled), orchestrator assignment가 끝나면 남은 연장과 관계없이 즉시 `cancelled`된다(README "`orche_spawn` sub-workers get the same deadline").
 
 ## 3. 구현 요점
 
