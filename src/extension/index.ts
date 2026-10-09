@@ -1,11 +1,11 @@
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 
-import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type InputEvent, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createOrcheTools } from "../tools/index.js";
 import { spillToolResult } from "../tools/spill.js";
 import { OrcheController, type OrcheControllerOptions } from "./controller.js";
-import { inheritsMain, tierThinking, type MainMode, type ModelTiers } from "../orchestration/routing.js";
+import { inheritsMain, isDelegatingMode, MAIN_MODES, modeTiers, tierThinking, type MainMode, type ModelTiers } from "../orchestration/routing.js";
 import { delegationRules, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
 import { contextWarning, DEFAULT_CONTEXT_WARNING, type ContextWarningSettings, type ContextWarningState } from "./context-warning.js";
 import { CONFIG_FILE, DEFAULT_SINGLE, loadOrcheConfigFile } from "./config.js";
@@ -23,6 +23,7 @@ import { applyMainModel, formatModelTiers, type ModelTiersView } from "./main-mo
 import { defaultRunLimits, extensionBudgetMs, extensionLengthMs } from "../orchestration/limits.js";
 import { formatDuration } from "../agent/liveness.js";
 import { LEDGER_ENTRY_TYPE, LEDGER_SUMMARY_TYPE, latestLedgers, type TaskLedger } from "../single/ledger.js";
+import { completeOrcheArguments } from "./completions.js";
 
 export const RESULT_MESSAGE_TYPE = "orche-result";
 /** Pi built-ins that stay Pi's own but are switched on next to our tools. */
@@ -84,9 +85,9 @@ const NOTE_PENDING_MS = 60_000;
 export const SESSION_BUS_MESSAGE_EVENT = "session-bus:message";
 const SESSION_BUS_MESSAGE_TYPE = "session-bus.message";
 
-export const ORCHE_USAGE = "Usage: /orche single|direct <PROMPT> | /orche mode [single|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche splits [DAYS] | /orche models | /orche cancel | /orche detach";
+export const ORCHE_USAGE = "Usage: /orche single|strong|ultra|direct <PROMPT> | /orche mode [single|strong|ultra|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche splits [DAYS] | /orche models | /orche cancel | /orche detach";
 export type OrcheCommand =
-  | { mode: "single" | "direct"; prompt: string }
+  | { mode: MainMode; prompt: string }
   | { mode: "cancel" }
   | { mode: "detach" }
   | { mode: "workers" }
@@ -95,6 +96,34 @@ export type OrcheCommand =
   | { mode: "models" }
   | { mode: "stop"; worker: string }
   | { mode: "mode"; value?: MainMode };
+/** What each mode does to the request of a one-shot `/orche <mode> <prompt>` (usage and refusal texts). */
+const ONE_SHOT_EFFECT: Record<MainMode, string> = {
+  single: "delegates it to one worker on the general model tiers (models.orchestrator, models.worker)",
+  strong: "delegates it to one worker on the strong model tiers (models.strong-orchestrator, models.strong-worker)",
+  ultra: "runs it with the quality-first ultra orchestration on the strong model tiers",
+  direct: "lets main edit directly, without workers",
+};
+/**
+ * The usage of `/orche strong` or `/orche ultra` given without a prompt (or only whitespace): what the one-shot command does, and that
+ * the session's mode stays unless `/orche mode <mode>` sets it. Undefined for anything else (`single`/`direct` keep the general usage).
+ */
+export function oneShotUsage(args: string): string | undefined {
+  const mode = /^\s*(\S+)\s*$/.exec(args)?.[1];
+  if (mode !== "strong" && mode !== "ultra") return undefined;
+  return `Usage: /orche ${mode} <PROMPT>: ${ONE_SHOT_EFFECT[mode]} for this one request (the prompt may span lines). The session's mode does not change; /orche mode ${mode} switches it.`;
+}
+/**
+ * Why a one-shot command is refused while main is busy: it starts only from an idle session, so its own run (prompt, tools, workers)
+ * is in its mode; a queued turn would run as an ordinary prompt and lose it, also when the session's mode happens to be the same.
+ */
+export function busyRefusal(requested: MainMode, session: MainMode): string {
+  const alternative = requested === session
+    ? `, or send the prompt without "/orche ${requested}" to queue it as an ordinary follow-up in the session's mode (${session})`
+    : `, or switch the session with /orche mode ${requested}`;
+  return `orche ${requested}: refused. The agent is busy, and a one-shot /orche ${requested} request starts only when the session is idle, so that its run and its workers use ${requested} mode (it ${ONE_SHOT_EFFECT[requested]}); a queued turn would lose that. Send it again when the current run has ended${alternative}.`;
+}
+/** The system prompt section with main's delegation rules for its mode. */
+const DELEGATION_SECTION = "orche-delegation";
 /** Strict command grammar: extra tokens on control commands never start work. */
 export function parseOrcheCommand(args: string): OrcheCommand | undefined {
   if (/^\s*cancel\s*$/.test(args)) return { mode: "cancel" };
@@ -111,8 +140,8 @@ export function parseOrcheCommand(args: string): OrcheCommand | undefined {
     if (switchMode[1] === undefined) return { mode: "mode" };
     return isMainMode(switchMode[1]) ? { mode: "mode", value: switchMode[1] } : undefined;
   }
-  const match = /^\s*(single|direct)(?:\s+([\s\S]*\S))?\s*$/.exec(args);
-  return match?.[2] ? { mode: match[1] as "single" | "direct", prompt: match[2] } : undefined;
+  const match = new RegExp(`^\\s*(${MAIN_MODES.join("|")})(?:\\s+([\\s\\S]*\\S))?\\s*$`).exec(args);
+  return match?.[2] ? { mode: match[1] as MainMode, prompt: match[2] } : undefined;
 }
 
 export interface OrcheExtensionOptions extends OrcheControllerOptions {
@@ -159,11 +188,9 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       pool,
       persist: entry => { try { pi.appendEntry(JOB_ENTRY_TYPE, entry); } catch { /* best effort */ } },
       deliver: (job: Job) => {
-        pi.sendMessage(
-          { customType: TASK_RESULT_TYPE, content: jobResultContent(job), display: true, details: { job: job.id, worker: job.worker, role: job.role, status: job.status, startedAt: job.startedAt, ...(job.finishedAt ? { finishedAt: job.finishedAt } : {}), ...(job.record ? { record: job.record } : {}), ...(job.result?.details ? { task: job.result.details } : {}) } },
-          // Starts main's next turn when it is idle; queued behind the current turn when main is talking with the user.
-          { triggerTurn: true, deliverAs: "followUp" },
-        );
+        // The result of a job that another request started does not enter a one-shot run: it waits for that run to end (heldBack).
+        if (oneShot && !oneShot.jobs.has(job.id)) heldBack.push({ kind: "result", job });
+        else deliverResult(job);
         const notice = jobEndNotice(job);
         try { lastUi?.notify(notice.text, notice.level); } catch { /* the UI may be gone */ }
       },
@@ -173,6 +200,24 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       },
     }));
 
+    const deliverResult = (job: Job, triggerTurn = true) => pi.sendMessage(
+      { customType: TASK_RESULT_TYPE, content: jobResultContent(job), display: true, details: { job: job.id, worker: job.worker, role: job.role, status: job.status, startedAt: job.startedAt, ...(job.finishedAt ? { finishedAt: job.finishedAt } : {}), ...(job.record ? { record: job.record } : {}), ...(job.result?.details ? { task: job.result.details } : {}) } },
+      // Starts main's next turn when it is idle; queued behind the current turn when main is talking with the user.
+      triggerTurn ? { triggerTurn: true, deliverAs: "followUp" } : { triggerTurn: false },
+    );
+    /**
+     * The one-shot `/orche <mode> <prompt>` request whose run is going on (docs/orchestrator.md 14.5): main's mode is its override until
+     * that run settles, and only what belongs to the request enters the run: its prompt and the context Pi sends with it, user steers
+     * (they correct the request), results of the jobs it started. Other requests are held back (`heldBack`) and each runs afterwards
+     * as its own run in the session's mode. Anything else that still arrives once main answers (a peer session's note, another
+     * extension's message) cannot be told apart from a new request: the override ends there, conservatively, and the rest of the run
+     * follows the session's mode (prompt, tools, guard, dispatch).
+     */
+    let oneShot: { mode: MainMode; jobs: Set<string>; answering: boolean } | undefined;
+    /** Follow-up prompts and job results of other requests that arrived during a one-shot run, in arrival order. */
+    const heldBack: ({ kind: "input"; text: string; images?: InputEvent["images"] } | { kind: "result"; job: Job })[] = [];
+    /** The notice about background jobs a crash interrupted: it goes with the next prompt that is not a one-shot request. */
+    let interruptedNotice: { customType: string; content: string; display: boolean; details: unknown } | undefined;
     // The job widget above the editor: running (attached / detached) with its elapsed time, then its end until the next user input.
     /** The ended job whose last state the widget still shows. */
     let endedShown: string | undefined;
@@ -266,11 +311,42 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     let spawn: boolean = DEFAULT_SINGLE.spawn;
     /** `models.main` at the last session start: what the config set and what was applied (for /orche models). */
     let mainModel: ModelTiersView["atStart"] = {};
-    /** `models.orchestrator` names a model / a thinking level of its own (main's hand-off rule then says so instead of "inherit main's"). */
-    let orchestratorModel = false;
-    let orchestratorThinking = false;
+    /** The config's model tiers at the last session start: the mode's orchestrator tier decides main's hand-off rule (its own model or
+     * thinking level, or "inherit main's"); strong and ultra read models.strong-orchestrator, with models.orchestrator as its fallback. */
+    let configuredTiers: ModelTiers | undefined;
     const showMode = (ctx: Pick<ExtensionContext, "ui">) =>
       ctx.ui.setStatus("orche-mode", `orche: ${state.session}${state.overriding ? ` (one-turn ${state.effective})` : ""}`);
+    const endOneShot = (ui: ExtensionContext["ui"]) => {
+      if (!oneShot) return;
+      oneShot = undefined;
+      state.setOverride();
+      try { showMode({ ui }); } catch { /* the UI may be gone */ }
+    };
+    /**
+     * Send what a one-shot run held back, in order, once it has settled: called from `agent_settled`, where Pi runs each prompt and
+     * triggered message as its own run after the other (a fresh `before_agent_start`, the session's mode). After Esc (aborted) nothing
+     * starts: held prompts go back to the editor like Pi's own queue, held results are shown without a turn.
+     */
+    const releaseHeldBack = (ui: ExtensionContext["ui"], aborted: boolean) => {
+      const items = heldBack.splice(0);
+      const returned: string[] = [];
+      for (const item of items) {
+        if (item.kind === "result") { deliverResult(item.job, !aborted); continue; }
+        if (aborted) { returned.push(item.text); continue; }
+        pi.sendUserMessage(item.images?.length ? [{ type: "text", text: item.text }, ...item.images] : item.text, { deliverAs: "followUp", expandPromptTemplates: true });
+      }
+      if (!returned.length) return;
+      try {
+        const current = ui.getEditorText();
+        ui.setEditorText([...returned, ...(current ? [current] : [])].join("\n\n"));
+      } catch { /* no editor */ }
+      try { ui.notify(`orche: the one-shot run was aborted; ${returned.length === 1 ? "the prompt queued during it was" : `${returned.length} prompts queued during it were`} not sent (back in the editor).`, "info"); } catch { /* no UI */ }
+    };
+    /** The `orche-delegation` prompt section of a mode (the rules main follows in it). */
+    const delegationSection = (mode: MainMode) => {
+      const head = modeTiers(configuredTiers, mode).orchestrators[0];
+      return delegationRules(mode, { spawn, orchestratorModel: !!head && !inheritsMain(head.tier), orchestratorThinking: !!tierThinking(head?.tier), ...(head ? { orchestratorKey: head.key } : {}) });
+    };
 
     // (1) Our tools replace Pi's read/edit by name; they are bound to the cwd of the call, not of the process.
     const byCwd = new Map<string, Map<string, ToolDefinition>>();
@@ -308,8 +384,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       spawn = found.spawn ?? DEFAULT_SINGLE.spawn;
       // Only a model or a thinking level of its own changes main's hand-off rule; `{ "model": "main" }` and `thinking: "main"` keep
       // the earlier sentence's "main's CURRENT" for what they inherit.
-      orchestratorModel = !!found.models?.orchestrator && !inheritsMain(found.models.orchestrator);
-      orchestratorThinking = !!tierThinking(found.models?.orchestrator);
+      configuredTiers = found.models;
       // Removed settings (e.g. single.pipeline, single.mainReview) are ignored: the file still loads; say so once per session start.
       for (const warning of found.warnings ?? []) ctx.ui.notify(warning, "warning");
       // models.main: the Pi session's model and thinking, once at a fresh session start; the user's own choices are kept.
@@ -324,6 +399,10 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       endedShown = undefined;
       pendingNotes.clear();
       resetQueued();
+      oneShot = undefined;
+      heldBack.length = 0;
+      // Like a message Pi keeps for the next turn, the notice outlives a reload (not a switch to another session).
+      if (event.reason !== "reload") interruptedNotice = undefined;
       stopWidgetTimer();
       if (widgetText !== undefined) { widgetText = undefined; try { ctx.ui.setWidget(JOB_WIDGET_KEY, undefined); } catch { /* no UI */ } }
       // Jobs and gone workers of this branch: a job that never ended belonged to a process that is gone (crash): it ends now, once.
@@ -336,7 +415,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         const lines = restored.interrupted.map(job => `${job.id} (${job.worker ?? "?"} ${job.role}: ${job.request})${job.record ? ` record ${job.record}` : ""}`);
         const text = `orche: ${restored.interrupted.length === 1 ? "a background task was" : "background tasks were"} still running when the previous pi process ended, and ${restored.interrupted.length === 1 ? "is" : "are"} now marked interrupted: ${lines.join("; ")}. Naming its worker in orche_task continues the work with a new worker briefed from its transcript.`;
         ctx.ui.notify(text, "warning");
-        pi.sendMessage({ customType: "orche-job-interrupted", content: text, display: true, details: { jobs: restored.interrupted.map(job => job.id) } }, { deliverAs: "nextTurn" });
+        // With the next prompt (before_agent_start), but not with a one-shot request's: those jobs are not part of it.
+        interruptedNotice = { customType: "orche-job-interrupted", content: text, display: true, details: { jobs: restored.interrupted.map(job => job.id) } };
       }
       // run.json records of this session left at "running" by a process that is gone: close them as interrupted (best effort, async).
       void controller.recordsFor({ cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted(), ...(ctx.model ? { model: ctx.model } : {}) })
@@ -346,10 +426,35 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       state.apply();
       showMode(ctx);
       if (found.error) ctx.ui.notify(`orche: ${found.error}; using the default mode ${state.session}`, "warning");
-      if (found.legacyMode && !found.error) ctx.ui.notify(`orche: mainMode "${found.legacyMode}" in ${found.path} was removed (multi-agent orche_run delegation); using "single". Set mainMode to "single" or "direct".`, "warning");
+      if (found.legacyMode && !found.error) ctx.ui.notify(`orche: mainMode "${found.legacyMode}" in ${found.path} was removed (multi-agent orche_run delegation); using "single". Set mainMode to one of ${MAIN_MODES.join(", ")}.`, "warning");
     });
     pi.on("before_agent_start", event => {
-      event.systemPromptOptions.sections["orche-delegation"] = delegationRules(state.effective, { spawn, orchestratorModel, orchestratorThinking });
+      event.systemPromptOptions.sections[DELEGATION_SECTION] = delegationSection(state.effective);
+      if (!interruptedNotice || oneShot) return undefined;
+      const message = interruptedNotice;
+      interruptedNotice = undefined;
+      return { message };
+    });
+    // Pi writes the prompt sections once per run (before_agent_start) and keeps them for runs it starts itself (a triggered job
+    // result): every model request carries the section of the mode in force NOW, so a one-shot mode never outlives its request in
+    // the prompt (a run after it, an override that ended mid-run). Request-local: the transcript keeps what Pi recorded.
+    pi.on("context_with_system", event => {
+      // As Pi records a custom section in the transcript (buildSystemPromptSections wraps it in its name's tags).
+      const wanted = `<${DELEGATION_SECTION}>\n${delegationSection(state.effective)}\n</${DELEGATION_SECTION}>`;
+      let current: string | undefined;
+      for (const message of event.messages) {
+        const sections = message.role === "system" ? (message as { sections?: Record<string, string | null> }).sections : undefined;
+        if (sections && DELEGATION_SECTION in sections) current = sections[DELEGATION_SECTION] ?? undefined;
+      }
+      if (current === wanted) return undefined;
+      // Where Pi puts its own prompt updates: after the last answer and its tool results (never between a call and its result), before
+      // the input of the request being answered.
+      const messages = [...event.messages];
+      const lastAnswer = messages.map(message => message.role).lastIndexOf("assistant");
+      let at = lastAnswer < 0 ? messages.length : lastAnswer + 1;
+      while (at < messages.length && messages[at]!.role === "toolResult") at++;
+      messages.splice(at, 0, { role: "system", content: "", sections: { [DELEGATION_SECTION]: wanted }, timestamp: Date.now() } as (typeof messages)[number]);
+      return { messages };
     });
     // Direct mode keeps the whole task in the main window: advise the user (not the model) when it fills up.
     pi.on("turn_end", (_event, ctx) => {
@@ -360,7 +465,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     });
     // Single mode: the main session's own compaction drops the task results it saw; put the task ledgers' state back once.
     pi.on("session_compact", () => {
-      if (state.effective !== "single") return;
+      if (!isDelegatingMode(state.effective)) return;
       const summary = workers?.ledgerSummary();
       if (summary) pi.sendMessage({ customType: LEDGER_SUMMARY_TYPE, content: summary, display: false }, { triggerTurn: false });
     });
@@ -374,7 +479,16 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.on("input", (event, ctx) => {
       if (endedShown && !jobs?.running) { endedShown = undefined; paintJob(); }
       if (event.streamingBehavior) lastQueuedInput = Date.now();
-      if (event.streamingBehavior === "followUp") { queued.followUp++; return undefined; }
+      if (event.streamingBehavior === "followUp") {
+        // Another request: during a one-shot run it waits for that run to end and then runs as its own, in the session's mode.
+        if (oneShot) {
+          heldBack.push({ kind: "input", text: event.text, ...(event.images?.length ? { images: event.images } : {}) });
+          ctx.ui.notify(`orche: queued until the one-shot /orche ${oneShot.mode} request has ended; it then runs as its own turn in the session's mode (${state.session}).`, "info");
+          return { action: "handled" as const };
+        }
+        queued.followUp++;
+        return undefined;
+      }
       if (event.streamingBehavior === "steer") queued.steer++;
       if (jobs?.attached) detachOnInput(ctx);
       return undefined;
@@ -387,9 +501,22 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       if (typeof note.id === "string") pendingNotes.set(note.id, Date.now());
       jobs?.detach("session-bus");
     });
-    pi.on("message_start", event => {
+    pi.on("message_start", (event, ctx) => {
+      const message = event.message as { role?: string; customType?: string; details?: { job?: unknown } };
+      if (message.role === "assistant" && oneShot) oneShot.answering = true;
+      // A message main did not ask for that arrives in a one-shot run once main answers (the prompt's own context came before) and is
+      // not part of the request: a peer note, another extension's message. Not attributable, so the request's mode ends here.
+      if (message.role === "custom" && oneShot?.answering) {
+        const own = message.customType === LEDGER_SUMMARY_TYPE
+          || (message.customType === TASK_RESULT_TYPE && typeof message.details?.job === "string" && oneShot.jobs.has(message.details.job));
+        if (!own) {
+          const mode = oneShot.mode;
+          endOneShot(ctx.ui);
+          ctx.ui.notify(`orche: a message from outside the one-shot /orche ${mode} request arrived (${message.customType ?? "custom"}); the rest of this run follows the session's mode (${state.session}).`, "info");
+        }
+      }
       // Pi takes a queued user prompt out of its queue as it delivers it, steers first.
-      if ((event.message as { role?: string }).role !== "user") return undefined;
+      if (message.role !== "user") return undefined;
       if (queued.steer > 0) queued.steer--; else if (queued.followUp > 0) queued.followUp--;
       return undefined;
     });
@@ -401,7 +528,13 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     // A run that ended has taken every steered message (or Esc dropped them): nothing it queued is still waiting.
     pi.on("agent_end", () => { pendingNotes.clear(); });
     // A settled session runs no queued continuation: no user prompt is still queued (Esc returned them to the editor).
-    pi.on("agent_settled", () => { resetQueued(); });
+    // A one-shot request ends with its run; what it held back runs next, each as its own run (Pi starts them after this event).
+    pi.on("agent_settled", (event, ctx) => {
+      resetQueued();
+      if (!oneShot && !heldBack.length) return;
+      endOneShot(ctx.ui);
+      releaseHeldBack(ctx.ui, event.aborted);
+    });
     pi.registerMessageRenderer(TASK_RESULT_TYPE, renderJobResultMessage);
     pi.on("session_shutdown", async () => {
       // Running background jobs end as interrupted (entry + run record), never silently left "running"; an attached call returns.
@@ -411,6 +544,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       endedShown = undefined;
       pendingNotes.clear();
       resetQueued();
+      oneShot = undefined;
+      heldBack.length = 0;
       jobs = undefined;
       controller.cancel();
       await workers?.dispose();
@@ -419,11 +554,18 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
 
     // (2) Delegation, one-turn overrides and worker/session controls.
     pi.registerCommand("orche", {
-      description: "/orche single <prompt>: delegate to one worker for one turn. /orche direct <prompt>: edit directly for one turn. /orche mode [single|direct]: show/set delegation. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche splits [days]: the orchestrator's split decisions over all sessions (split rate, criteria, cost and time), optionally of the last N days. /orche models: the main, orchestrator, worker and advisor models now and where each comes from (config, inherited, Pi), and whether the advisor (single.advisor) is on. /orche cancel: stop the active task. /orche detach: stop waiting for the background task (it keeps running; its result arrives as a message).",
+      description: "/orche single <prompt>: delegate one request to one worker. /orche strong <prompt>: the same on the strong tiers (models.strong-orchestrator, models.strong-worker). /orche ultra <prompt>: one request with quality-first ultra orchestration on the strong tiers. /orche direct <prompt>: edit directly for one turn. These one-shot commands leave the session's mode as it is and start only when the session is idle; with task ledgers (single.ledger) a task started by such a request keeps its mode when continued, otherwise later turns run in the session's mode. /orche mode [single|strong|ultra|direct]: show/set the session's delegation mode. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche splits [days]: the orchestrator's split decisions over all sessions (split rate, criteria, cost and time), optionally of the last N days. /orche models: the main, orchestrator, worker, advisor, strong-orchestrator and strong-worker models now and where each comes from (config, inherited, Pi), and whether the advisor (single.advisor) is on. /orche cancel: stop the active task. /orche detach: stop waiting for the background task (it keeps running; its result arrives as a message).",
+      // Read-only: the current roster supplies `stop <id>`; completion never creates, starts or stops workers.
+      getArgumentCompletions: prefix => {
+        let ids: string[] = [];
+        try { ids = workers?.list().map(worker => worker.id) ?? []; } catch { /* no live pool: static candidates only */ }
+        return completeOrcheArguments(prefix, ids);
+      },
       handler: async (args, ctx: ExtensionCommandContext) => {
         const parsed = parseOrcheCommand(args);
         if (!parsed) {
-          ctx.ui.notify(ORCHE_USAGE, "warning");
+          // `/orche ultra` without a prompt: the one-shot usage (nothing starts, the mode stays); anything else: the full usage.
+          ctx.ui.notify(oneShotUsage(args) ?? ORCHE_USAGE, "warning");
           return;
         }
         if (parsed.mode === "cancel") {
@@ -494,17 +636,14 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           return;
         }
         {
-          // Override only an idle turn. Queued turns retain the session mode, so refuse incompatible modes.
-          if (!ctx.isIdle()) {
-            const compatible = state.session === parsed.mode;
-            if (!compatible) {
-              ctx.ui.notify(`orche ${parsed.mode}: refused. The agent is busy and this session is in mode ${state.session}, where a queued turn could not ${parsed.mode === "direct" ? "edit files" : "delegate to one worker"}. Wait for the current turn, or switch with /orche mode ${parsed.mode}.`, "warning");
-              return;
-            }
-            pi.sendUserMessage(parsed.prompt, { deliverAs: "followUp" });
-            ctx.ui.notify(`orche ${parsed.mode}: the agent is busy; the prompt is queued as a follow-up turn.`, "info");
+          // A one-shot request starts only from an idle session (its own run, in its mode); while busy it is refused, never queued as an
+          // ordinary prompt that would lose its mode (busyRefusal).
+          if (!ctx.isIdle() || oneShot) {
+            ctx.ui.notify(busyRefusal(parsed.mode, state.session), "warning");
             return;
           }
+          const request = { mode: parsed.mode, jobs: new Set<string>(), answering: false };
+          oneShot = request;
           state.setOverride(parsed.mode);
           showMode(ctx);
           // Keep the command pending until the turn it started has settled: one-shot modes (--print / --mode json)
@@ -526,8 +665,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           } finally {
             clearTimeout(startTimer);
             for (const off of unsubscribe) off();
-            state.setOverride();
-            showMode(ctx);
+            // Its run's agent_settled ended it already; a prompt that started no run (or one the override ended) ends it here.
+            if (oneShot === request) endOneShot(ctx.ui);
           }
           return;
         }
@@ -556,6 +695,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         const base = {
           ...params,
           mainMode: state.effective,
+          // A one-shot `/orche <mode> <prompt>` run: the assignment runs in that request's mode (with task ledgers its task keeps it).
+          ...(state.overriding ? { oneShot: { session: state.session } } : {}),
           cwd: ctx.cwd,
           model: ctx.model,
           ...(options.inheritProviders !== false ? { modelRegistry: ctx.modelRegistry } : {}),
@@ -568,6 +709,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         // when the turn ends, so they (and an explicit wait:true) keep the blocking call.
         if (params.wait !== true && (ctx.mode === "tui" || ctx.mode === "rpc")) {
           let started = false;
+          // The one-shot request this call belongs to: its job's result may enter its run (and continue it), unlike other jobs'.
+          const request = oneShot;
           const tasks = taskJobs();
           endedShown = undefined;
           const { job, outcome } = await tasks.start({
@@ -577,6 +720,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
             onProgress: (lines, timing) => { if (!started) onUpdate?.(partialUpdate(lines, timing)); },
           }, signal, params.wait === false ? undefined : attachOptions(signal, ctx, onUpdate));
           started = true;
+          request?.jobs.add(job.id);
           // A steer or woken peer note that arrived while the worker started is answered first; a queued follow-up waits for the result.
           if (outcome && tasks.attached === job && inputWaiting(ctx)) tasks.detach("input");
           if (outcome) onUpdate?.(jobUpdate(job));
@@ -587,6 +731,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         return pool().executeTool({
           ...params,
           mainMode: state.effective,
+          // A one-shot `/orche <mode> <prompt>` run: the assignment runs in that request's mode (with task ledgers its task keeps it).
+          ...(state.overriding ? { oneShot: { session: state.session } } : {}),
           cwd: ctx.cwd,
           model: ctx.model,
           ...(options.inheritProviders !== false ? { modelRegistry: ctx.modelRegistry } : {}),

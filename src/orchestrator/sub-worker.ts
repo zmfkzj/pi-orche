@@ -1,7 +1,7 @@
 /**
  * One sub-worker of an orche_spawn call: a fresh one-shot session (src/specialists/session.ts) that sees only its own request, works
  * with the worker tool set, may write only its own files, cannot spawn, and ends with one report_result. Standard roles inherit the
- * orchestrator's model and thinking unless the config sets `models.worker` (under `"thinkingPolicy": "phase"` implement/answer run one
+ * orchestrator's model and thinking unless the config sets `models.worker` (strong/ultra: `models.strong-worker`; under `"thinkingPolicy": "phase"` implement/answer run one
  * supported level below the orchestrator's assignment level and verify at it: docs/thinking-policy.md); game-asset and video use their
  * specialist routes (and generate_image when images are set up).
  */
@@ -11,7 +11,9 @@ import { formatSchemaErrors } from "../orchestration/schema-errors.js";
 import type { ModelRuntime, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ModelRoute, SubWorkerModelSource, SubWorkerThinkingSource } from "../orchestration/routing.js";
 import type { TaskItem } from "../orchestration/backlog.js";
+import { relative, resolve, sep } from "node:path";
 import { checkWriteRealPath, WRITE_TOOLS } from "../orchestration/ownership.js";
+import { checkBashWrites } from "../orchestration/bash-writes.js";
 import { orchestrationResultSchemas } from "../orchestration/result-schemas.js";
 import { WORKER_TOOL_NAMES } from "../tools/index.js";
 import { runSpecialistSession, SpecialistError, type SpecialistDeadline, type SpecialistReport, type SpecialistStats } from "../specialists/session.js";
@@ -85,13 +87,30 @@ function statusOf(role: SubWorkerRole, data: unknown): string {
   return record.status === "blocked" ? "blocked" : "done";
 }
 
-/** The guard of one sub-worker: no spawning; writes only inside its own files and never into a sibling's (symlinks resolved). */
+/**
+ * The guard of one sub-worker: no spawning; writes only inside its own files and never into a sibling's (symlinks resolved). An
+ * ultra candidate works in its own workspace copy: its siblings' copies are elsewhere, so only its own files count, the protected
+ * verification basis is refused, and literal shell writes outside its copy are blocked.
+ */
 export function subWorkerGuard(worker: PlannedWorker, siblings: readonly PlannedWorker[], cwd: string) {
-  const tasks: TaskItem[] = siblings.map(sibling => ({ id: sibling.id, owner: sibling.id, description: sibling.name, files: sibling.files ?? [], status: "running" }));
+  const root = worker.workspace ?? cwd;
+  const tasks: TaskItem[] = (worker.workspace ? [worker] : siblings).map(sibling => ({ id: sibling.id, owner: sibling.id, description: sibling.name, files: sibling.files ?? [], status: "running" }));
+  const protectedPaths = worker.protectedPaths ?? [];
+  const outsidePaths = worker.outsidePaths ?? [];
+  const under = (path: string, owned: string) => path === owned || path.startsWith(`${owned.replace(/\/$/, "")}/`);
   return async (toolName: string, input: Record<string, unknown>): Promise<string | undefined> => {
     if (toolName === SPAWN_TOOL) return DEPTH_LIMIT_MESSAGE;
+    if (worker.workspace && toolName === "bash" && typeof input.command === "string") {
+      const verdict = checkBashWrites(input.command, { cwd: root, roots: [], readOnly: false });
+      if (!verdict.allowed) return `${verdict.reason} (a candidate writes only inside its workspace copy ${root})`;
+    }
     if (!WRITE_TOOLS.has(toolName)) return undefined;
-    return (await checkWriteRealPath({ toolName, input, cwd, agentId: worker.id, assignmentKind: worker.role, tasks }))?.reason;
+    if ((protectedPaths.length || outsidePaths.length) && typeof input.path === "string") {
+      const path = relative(root, resolve(root, input.path)).split(sep).join("/");
+      if (protectedPaths.some(owned => under(path, owned))) return `Blocked: ${path} is part of the protected verification basis of this ultra task; implement against it, never change it (report a basis problem in your result instead).`;
+      if (outsidePaths.some(owned => under(path, owned))) return `Blocked: ${path} is inside a submodule, which ultra candidate copies do not contain; a candidate cannot change submodules (report what it would need there instead).`;
+    }
+    return (await checkWriteRealPath({ toolName, input, cwd: root, agentId: worker.id, assignmentKind: worker.role, tasks }))?.reason;
   };
 }
 
@@ -102,13 +121,14 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
     const route = specialist ? env.specialistRoute(worker.role as "game-asset" | "video") : verifyRoute ?? env.route;
     const image = specialist ? env.imageTool?.() : undefined;
     const guard = subWorkerGuard(worker, siblings, env.cwd);
+    const cwd = worker.workspace ?? env.cwd;
     const sessionFile = env.sessionFile?.(worker.id);
-    const base = { id: worker.id, name: worker.name, role: worker.role, reason: worker.reason, ...(worker.files ? { files: [...worker.files] } : {}), changes: [] as string[], modelSource: specialist ? "route" as const : env.routeSource, thinkingSource: specialist ? "route" as const : verifyRoute ? env.verifyThinkingSource ?? env.thinkingSource : env.thinkingSource };
+    const base = { id: worker.id, name: worker.name, role: worker.role, reason: worker.reason, ...(worker.files ? { files: [...worker.files] } : {}), ...(worker.workspace ? { workspace: worker.workspace } : {}), changes: [] as string[], modelSource: specialist ? "route" as const : env.routeSource, thinkingSource: specialist ? "route" as const : verifyRoute ? env.verifyThinkingSource ?? env.thinkingSource : env.thinkingSource };
     let started = false;
     const fromStats = (stats: SpecialistStats) => ({ model: stats.model, ...(stats.thinking ? { thinking: stats.thinking } : {}), ...(started ? {} : { notStarted: true as const }), requests: stats.requests, models: { ...stats.models }, startedAt: stats.startedAt, durationMs: stats.durationMs, costUSD: stats.usage.cost, ...(stats.sessionFile ? { sessionFile: stats.sessionFile } : {}), ...(stats.deadline ? { deadline: subWorkerDeadline(stats.deadline) } : {}) });
     try {
       const { value, stats } = await runSpecialistSession({
-        actor: worker.id, route, runtime: env.runtime, cwd: env.cwd, instructions: SUB_WORKER_INSTRUCTIONS, prompt: env.prompt(worker, !!image),
+        actor: worker.id, route, runtime: env.runtime, cwd, instructions: SUB_WORKER_INSTRUCTIONS, prompt: env.prompt(worker, !!image),
         tools: [...WORKER_TOOL_NAMES, ...(image ? [image.name] : [])], ...(image ? { customTools: [image] } : {}), report: reportFor(worker.role),
         toolGuard: guard, writeFileGuard: (file, abort) => abort?.aborted ? "cancelled" : guard("ast_rewrite", { path: file }),
         maxTurns: env.maxTurns, timeoutMs: env.timeoutMs, signal, nudges: 1, onTool,

@@ -95,7 +95,8 @@ export interface SessionOptions {
    */
   lengthRecovery?: LengthRecoveryOptions;
 }
-export type ToolGuard = (toolName: string, input: Record<string, unknown>) => string | undefined | Promise<string | undefined>;
+/** `toolCallId`: the call's id, for owners that pair the guard with the call's end (the ultra integrity probes in src/orchestrator/ultra.ts). */
+export type ToolGuard = (toolName: string, input: Record<string, unknown>, toolCallId?: string) => string | undefined | Promise<string | undefined>;
 export interface CompactionStats { tokensBefore: number; tokensAfter: number }
 export function taskCompactionSettings(contextWindow: number) {
   const reserveTokens = Math.floor(contextWindow * 0.5);
@@ -163,8 +164,8 @@ function createWorkerHygieneExtension(options: SessionOptions, getSession: () =>
 /** Session extension applying a {@link ToolGuard} through Pi's public, blocking `tool_call` hook. */
 function createGuardExtension(guard: ToolGuard): Extension {
   const path = "<orche:guard>";
-  const handler = async (event: { toolName: string; input: Record<string, unknown> }) => {
-    const reason = await guard(event.toolName, event.input);
+  const handler = async (event: { toolName: string; input: Record<string, unknown>; toolCallId?: string }) => {
+    const reason = await guard(event.toolName, event.input, event.toolCallId);
     return reason === undefined ? undefined : { block: true, reason };
   };
   return {

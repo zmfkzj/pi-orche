@@ -359,17 +359,22 @@ describe("orche_task persistent session workers", () => {
   it("lists and disposes workers with slash commands and rejects malformed stop", async () => {
     capturePool();
     const h = await harness({ mainSteps: [tool("orche_task", { role: "explore", request: "one" }), reply("ok"), tool("orche_task", { role: "explore", request: "two" }), reply("ok")], orcheSteps: [result(), result()] });
+    const stopCompletions = async () => ((await h.session.extensionRunner.getCommand("orche")!.getArgumentCompletions!("stop ")) ?? []).map(item => item.value);
+    expect(await stopCompletions()).toEqual(["stop all"]);
     await h.session.prompt("/orche workers");
     expect(h.notifications.at(-1)?.message).toBe("no workers");
     await h.session.prompt("first");
     await h.session.prompt("/orche workers");
     expect(h.notifications.at(-1)?.message).toMatch(/W1 idle · explore · [^ ]+\/[^ ]+ · thinking off · 1 assignments · last: Evidence found · idle 0m/);
+    // The roster feeds `/orche stop <id>` completions read-only; the completed value runs as typed.
+    expect(await stopCompletions()).toEqual(["stop all", "stop W1"]);
     await h.session.prompt("/orche stop");
     expect(h.notifications.at(-1)?.message).toBe(ORCHE_USAGE);
     await h.session.prompt("/orche stop W99");
     expect(h.notifications.at(-1)?.message).toBe("unknown worker W99");
     await h.session.prompt("/orche stop W1");
     expect(h.notifications.at(-1)?.message).toContain("Disposed workers: W1");
+    expect(await stopCompletions()).toEqual(["stop all"]);
     await h.session.prompt("second");
     await h.session.prompt("/orche stop all");
     expect(h.notifications.at(-1)?.message).toContain("Disposed workers: W2");

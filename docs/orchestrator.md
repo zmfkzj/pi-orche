@@ -689,3 +689,115 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
   - 잡힌 보고 중 취소와 다음 독립 assignment에서 advisor 재허용, worker 시간 초과 시 unprocessed, pool 종료.
   - orche_spawn sub-worker 비적용, advisor의 쓰기 시도 차단, 확장을 거친 detach 최종 결과 정확히 한 번(잡힌 초안 보고는 전달되지 않음).
 - **확인하지 못한 것**: 제품 경로로 실제 모델(cliproxyapi)에서 다시 측정하지 않았다. 벤치는 늦은 조언을 같은 worker의 후속 assignment로 줬다. 제품은 같은 assignment 안에서 보고를 잡아 두고 처리하게 하므로 동작은 비슷하지만 측정된 방식과 같지는 않다.
+
+## 14. strong · ultra 모드
+
+### 14.1 모드와 모델 계층
+
+| 모드 | orchestrator 모델 | sub-worker 모델 | 흐름 |
+|---|---|---|---|
+| `single` (기본) | `models.orchestrator` → 미설정·해석 불가 시 main | `models.worker` → 미설정 시 orchestrator 상속 | single workflow (§1~13) |
+| `strong` | `models.strong-orchestrator` → 미설정·해석 불가 시 `models.orchestrator` → main | `models.strong-worker` → 미설정·해석 불가 시 실제 strong orchestrator 상속 (`models.worker`는 쓰지 않음) | single과 동일 (hand-off, prompt, 도구, 계획, 검증, 권한) |
+| `ultra` | strong과 같음 | strong과 같음 | 아래 ultra 단계 계약 |
+| `direct` | 해당 없음 | 해당 없음 | main이 직접 편집 |
+
+상속되는 필드: 상속 시 `model`과 `thinking`(계층에 thinking이 없으면 상위의 현재 수준, `"main"`이면 main의 현재 수준), main 모델을 상속할 때의 context window. `extendedContext`는 계층마다 자기 값(없으면 `config.extendedContext`)을 쓴다. phase thinking policy에서 상속한 sub-worker의 한 단계 낮춤, specialist(game-asset/video)의 route, `models.advisor`(미설정 시 그 모드의 orchestrator 상속) 규칙은 single과 같다. `strongOrchestrator`/`strongWorker` camelCase도 받지만 두 표기를 함께 쓰면 config 오류다.
+
+```json
+{
+  "mainMode": "strong",
+  "models": {
+    "orchestrator": { "model": "provider/general-model", "thinking": "high" },
+    "worker": { "model": "provider/general-worker" },
+    "strong-orchestrator": { "model": "provider/strongest-model", "thinking": "max" },
+    "strong-worker": { "model": "provider/strong-worker-model", "thinking": "high" }
+  }
+}
+```
+
+`strong-worker`를 빼면 strong/ultra의 sub-worker는 `strongest-model`을 상속한다. 결과에는 `Mode: strong (orchestrator: models.strong-orchestrator; sub-workers: ...)` 줄, `details.mode`/`details.modelTier`, run.json `assignment.mode`/`assignment.tier`가 남는다. 같은 worker를 single↔strong 사이에 재사용하면 모델이 바뀌고 결과에 `Note: W1 switched from single to strong mode ...`가 붙는다. ultra 경계를 넘으면(도구 집합이 세션 생성 때 고정되므로) 기존 worker를 은퇴시키고 새 worker가 그 transcript로 handover를 받는다.
+
+### 14.2 ultra 단계 계약
+
+1. 요구사항·합격 기준: Task DAG와 `data.ultra.criteria`.
+2. exploration (`orche_spawn reason "exploration"`, 2~4명, 최대 2라운드, 첫 후보 이전): 검증 기준 작성자(role implement, 소유 파일에 테스트/검사만)와 가설 분석가(role answer). 검증 기준 작성자가 바꾼 파일은 **보호된 검증 기준**이 된다.
+3. candidates (`reason "candidates"`, 2~4명, 최대 2라운드, 요청은 서로 달라야 함): implement 후보는 각자 git 스냅샷으로 만든 **격리된 작업 사본**에서만 쓴다(같은 파일 소유 허용, 서로의 작업을 볼 수 없음). 2라운드는 `from`으로 이전 후보에서 시작하는 수정 후보(이전 후보는 incumbent로 보존). 사본 구성은 14.3.
+4. 평가: orchestrator가 각 사본에서 같은 검사를 직접, 한 응답에 한 호출씩 실행(`cd '<workspace>' && <checks>`). 검사의 유효성은 14.4의 fingerprint로 판정한다.
+5. 선택·채택: `orche_adopt {candidate}`. 성공한 검사 중 그 사본의 **현재 내용과 같은 내용**을 검사 전후 모두 본 것이 없거나(검사 뒤 셸·다른 프로세스로 바뀐 경우 포함), 보호 기준을 바꾼 후보이거나, 그 라운드에 격리 위반이 감지됐거나, 후보의 base 이후 작업공간의 같은 경로가 바뀌었으면 거부한다(blind merge 없음). 변경 목록과 보호 기준 침범은 채택 시점에 다시 계산하고, 복사 후 작업공간 내용이 후보와 같은지와 복사 중 후보가 바뀌지 않았는지 확인해 아니면 롤백한다. 채택 전에는 orchestrator가 작업공간을 직접 편집할 수 없다.
+6. 반례 검토: `reason "verification"`(기존 2라운드 상한 유지)을 채택 이후에 실행. 발견 사항은 `reproduced-fixed`/`reproduced-open`/`unverified`/`refuted`로 분류.
+7. 통합 재검증: 작업공간의 마지막 변경 이후 단독으로 실행해 성공한 검사이며, 그 검사 전후의 작업공간 fingerprint가 보고 시점의 fingerprint와 같아야 한다.
+
+보고서 게이트(`data.ultra`)는 런타임 기록과 대조한다: 단계 실행 여부, 후보 2개 이상, 모든 후보의 판정, 선택 후보의 채택, 선택 근거 = 그 사본에서 orchestrator가 실행해 성공하고 **채택된 내용을 본** bash 호출의 `[orche ref Tn]`, 채택 이후 검증 라운드, 통합 근거 = 보고 시점 작업공간과 같은 내용을 검사 전후에 본 검사 ref(마지막 채택·편집 이후), report_result 단독 실행, `reproduced-open`이면 done 불가, 보호 기준 무결성. 다수결·후보 자기 보고는 근거가 아니다. fingerprint를 얻지 못하면 통과시키지 않고 거부한다. 완료하지 못한 단계는 `status:"blocked"` + `data.ultra.stage` + `reason`(answer는 `data.unresolved`)으로 끝낸다. 게이트 거절 횟수는 기존 result 재시도 상한을 따른다.
+
+read-only answer 변형: 모든 sub-worker가 answer/verify, `orche_adopt` 거부, 후보 답변의 주장을 orchestrator가 출처로 직접 확인하고 `data.ultra.claims[{claim,sources,status}]`로 보고(코드 테스트 불필요). `single.spawn: false`는 ultra에 적용되지 않으며 결과에 그 사실이 표시된다.
+
+런타임 강제: 단계 순서·상한·역할, 후보 격리(작업 사본, 의존성 디렉터리 사본, 링크 fail-closed 검사, guard, 사본 밖 literal shell 쓰기 차단, 라운드 전후 탈출 감지), 보호 기준(쓰기 거부, 셸 변경 감지), 내용 fingerprint에 묶인 채택 조건과 보고서 게이트. 프롬프트 의존: 검증 기준이 합격 기준을 실제로 담는지, 가설·후보의 의미적 다양성, 성공한 검사가 주장을 실제로 뒷받침하는지(exit 0만 증명하며, 어느 사본을 검사했는지는 명령 문자열의 사본 경로로 판단), 동점 시 선택 기준, 발견 사항 분류의 타당성.
+
+### 14.3 후보 사본과 의존성 디렉터리
+
+- 사본은 작업공간 subtree의 git tree(추적 + 무시되지 않은 미추적, `.orche` 제외)를 사본 전용 index로 checkout한 것이다. 사용자 index의 assume-unchanged/skip-worktree는 private index에서 해제하고, fsmonitor·untracked cache는 끈다.
+- git이 무시하는 `node_modules`/`.venv`/`venv`는 후보마다 **별도 사본**으로 만든다(`cp -a --reflink=auto`: CoW 지원 파일시스템은 복제, 아니면 전체 복사). 원본으로의 symlink는 만들지 않는다. 사본 안에서 작업공간(또는 `from`의 이전 사본)을 가리키던 링크는 사본 안으로 다시 연결한다. Python 환경은 작업공간 경로를 담은 파일(shebang, activate, `pyvenv.cfg`, `.pth`, editable finder, `direct_url.json`)을 사본 경로로 고친다. 후보가 의존성을 바꿔도 채택되지 않으므로 통합 때 작업공간에서 설치한다.
+- 링크 검사(fail-closed, 후보 실행 전): 사본의 모든 링크를 `realpath`로 끝까지 따라간다(링크 체인 포함). 사본 안이면 허용한다. 사본 밖이면 다음과 같이 처리한다.
+  - 이 사용자가 쓸 수 없는 파일, 또는 전체 트리를 걸어 쓰기 가능한 항목과 링크가 하나도 없음을 확인한 디렉터리(최대 20,000개 항목): 읽기 전용 공유로 허용하고 보고한다.
+  - 의존성 디렉터리 안에서 쓰기 가능한 파일을 가리키는 링크: 그 파일의 사본으로 바꾼다(`venv --copies`와 같은 방식).
+  - 그 외(쓰기 가능하거나 확인할 수 없는 디렉터리, 추적 영역의 링크, 사본 밖 쓰기 가능한 곳에 파일을 만들 dangling 링크): 사본을 거부한다. candidates 호출은 아무 후보도 실행하지 않고 거부되며, 경로와 사유가 결과에 남는다.
+- 탈출 감지: candidates 라운드 전후로 작업공간 내용 manifest와 작업공간 자체 의존성 디렉터리(경로·종류·크기·mtime·mode·링크 대상, `.cache`/`.vite`/`.vitest`/`__pycache__`/`.pytest_cache` 제외)를 비교한다. 바뀌었으면 그 라운드의 후보는 모두 채택할 수 없다(`Isolation breach`).
+
+### 14.4 내용 fingerprint와 검사 유효성
+
+- manifest는 범위 안의 모든 파일(git이 범위를 정함: 추적 또는 무시되지 않은 미추적, `.orche`·의존성 디렉터리 제외)의 **원시 바이트 SHA-256과 권한 비트**, 또는 링크 대상이다. 따라서 index 플래그, clean filter, 줄바꿈 정규화가 바이트 변경을 숨기지 못한다. 해시는 (크기, mtime, ctime, inode, mode)로 캐시하고, 최근 2초 안에 바뀐 파일은 매번 다시 해시한다. 작업공간 fingerprint와 후보 fingerprint 모두 이 manifest의 digest다.
+- orchestrator의 모든 허용된 도구 호출은 probe로 추적한다. guard에서 열고(`tool_call`), 호출이 끝나면(`tool_execution_end`, worker가 다음으로 넘어가기 전에 await) 닫는다. bash 호출은 실행 전후에 작업공간과 끝난 모든 후보 사본의 fingerprint를 기록한다.
+- 다음 검사는 증거로 인정하지 않는다: 같은 시간에 파일을 바꿀 수 있는 다른 호출과 겹친 검사(Pi는 한 응답의 호출을 병렬 실행), probe가 없거나 실패한 검사, 실행 전후 fingerprint가 다른 검사(예: `tests && printf … > file`).
+- report_result의 guard에서 그 호출에 묶인 현재 작업공간 fingerprint를 구한다. 통합 검사의 fingerprint가 이것과 다르면 거부한다(셸·편집·다른 세션의 변경 모두 포함). 기존 dirty 파일이나 다른 세션의 변경을 되돌려 맞추지 않는다. 다시 검사해야 한다.
+- 비용: 후보가 생긴 뒤에는 bash 호출마다 manifest 계산(git ls-files + 파일 stat, 바뀐 파일만 해시)이 전후로 붙는다.
+
+재개: `single.ledger`가 켜져 있고 같은 worker가 같은 task를 이어 받으면(타임아웃·blocked 이후) 후보·사본·채택(채택한 fingerprint 포함)·보호 기준과 라운드 수가 이어진다. evidence ref와 probe는 assignment마다 새로 시작하므로 검사는 다시 실행한다. 그 외에는 새로 시작한다. 완료(done)된 run은 사본을 삭제해 공간을 돌려준다. blocked·timeout은 이어받기와 확인을 위해 사본을 남긴다. 다음 ultra run이 새로 시작할 때 지운다.
+
+한계(OS sandbox가 아님):
+- 후보의 셸은 이 사용자가 쓸 수 있는 어디든 절대 경로로 쓸 수 있다. 그중 작업공간 범위 파일과 작업공간 의존성 디렉터리 쓰기는 라운드 뒤에 감지해 채택을 막는다. 홈·전역 캐시 등 그 밖의 쓰기는 감지하지 못한다.
+- 읽기 전용 공유는 OS 권한에 기댄다(root는 모두 쓰기 가능으로 판정되어 fail-closed가 된다). 의존성 탈출 감지는 stat 기반이라, mtime까지 되돌리는 의도적 변경은 놓칠 수 있다.
+- 어느 사본을 검사했는지는 명령 문자열의 사본 경로로 판단한다.
+- git work tree가 아니면 implement 후보를 만들 수 없어 blocked로 끝난다.
+- submodule 내용은 사본에 없다. 후보의 파일 도구는 그 경로에서 막히고, 결과에 명시된다.
+- 의존성 디렉터리 외에 git이 무시하는 파일(빌드 산출물, `.env` 같은 로컬 설정)은 사본·채택 대상이 아니며, 결과에 명시된다.
+- 실제 외부 모델 E2E는 수행하지 않았고 faux 모델과 실제 git·bash로 검증했다.
+
+### 14.5 one-shot 명령 `/orche strong <PROMPT>` · `/orche ultra <PROMPT>`
+
+```text
+/orche strong src/parser.ts의 줄바꿈 처리 버그를 고쳐줘
+/orche ultra 결제 모듈의 환불 계산을 다시 구현해줘.
+요구사항:
+- "부분 환불" 지원 / 기존 API 유지
+```
+
+- **프롬프트**: 모드 단어와 그 뒤 공백을 뺀 나머지 전부다. 내부 공백·여러 줄·따옴표·슬래시를 그대로 보존한다(앞뒤 공백만 다듬음). `/`로 시작해도 명령이 아닌 본문으로 보낸다. 프롬프트가 없거나 공백뿐이면 이 모드의 사용법만 보여 주고, 턴과 설정 변경은 일어나지 않는다.
+- **요청 = 하나의 실행(run)**: 요청은 자기만의 run으로 실행되고, run이 끝날(settle) 때까지 main의 위임 규칙(system prompt section)·도구 집합·guard가 그 모드의 것이 된다.
+  - run에 들어가는 것은 그 요청에 속한 것뿐이다. 프롬프트와 Pi가 함께 보내는 문맥, run 중에 사용자가 넣은 steer(요청을 고치는 입력), 그 요청이 시작한 job의 결과가 여기에 해당한다.
+  - run 중에 큐에 들어온 follow-up(사용자 입력이든 다른 확장의 `sendUserMessage`든)은 다른 요청이다. orche가 붙잡아 두고(`orche: queued until the one-shot /orche strong request has ended; …`), run이 끝나면 각각 자기 run으로 세션 모드에서 실행한다. 그 run은 `before_agent_start`부터 다시 시작하므로 프롬프트·도구·dispatch가 모두 세션 모드다.
+  - 그 요청과 무관한 이전 job의 결과(`orche-task-result`)도 붙잡았다가 run이 끝난 뒤 전달한다. 크래시로 중단된 job 안내(`orche-job-interrupted`)는 one-shot 요청이 아닌 다음 일반 프롬프트와 함께 보낸다.
+  - Esc로 run을 중단하면 붙잡아 둔 프롬프트는 Pi의 큐처럼 편집기로 돌아가고, 붙잡아 둔 결과는 턴 없이 표시만 된다.
+  - main이 답하기 시작한 뒤 출처를 가릴 수 없는 메시지(pi-session-bus의 다른 세션 메모, 다른 확장의 custom 메시지)가 run에 들어오면 보수적으로 그 시점에 요청 모드를 끝낸다. 남은 run은 세션 모드의 프롬프트·도구·guard·dispatch로 진행된다(`orche: a message from outside the one-shot … request arrived (<type>); the rest of this run follows the session's mode (<mode>).`).
+  - **프롬프트 일치**: Pi는 prompt section을 run 시작 때 기록하고, Pi가 스스로 시작한 run(예: one-shot 뒤 도착한 job 결과의 run)에서는 이전 section을 그대로 쓴다. 그래서 orche는 모델 요청마다 `context_with_system`으로 지금 적용 중인 모드의 section을 확인하고, 다르면 그 요청에만 패치를 붙인다. transcript 기록은 바꾸지 않는다.
+- **그 요청이 시작한 `orche_task`**: 모든 assignment가 그 모드로 실행된다. strong은 strong 계층 + single 흐름, ultra는 strong 계층 + ultra 흐름이다. strong-worker 미설정 시 strong orchestrator를 상속하는 등 라우팅 규칙은 14.1 그대로다. run보다 오래 도는 background job도 끝날 때까지 시작할 때의 모드로 돈다(같은 job에 attach해도 새 assignment가 아니므로 그대로다).
+- **나중 턴에서의 모드**: 같은 요청임을 증명할 수 있는 경우에만 모드를 유지한다.
+  - `single.ledger`가 켜져 있으면 task id가 증명이다. 그 task를 이어가면(`task`) 다른 worker나 새 worker가 맡아도 모드를 유지하고, 이 고정은 ledger hand-off 이벤트에 저장되어 재시작 뒤에도 남는다. 새 task나 고정이 없는 task는 그 요청이 쓰던 worker에서 실행돼도 세션 모드다.
+  - ledger가 꺼져 있으면 run 밖에서 요청을 식별할 수단이 없다. worker는 요청이 아니다. 그 worker를 나중에 재사용하거나(`worker`), 사라진 뒤 후임자가 이어받거나(handover), 재시작 뒤 복원된 gone 항목으로 이어가도 세션 모드로 실행된다. 그 모드로 계속하려면 사용자가 one-shot 명령을 다시 쓴다.
+  - 우선순위: 지금 run 중인 one-shot 요청 > (ledger 켬) task의 고정 > 세션 모드.
+  - 결과 기록:
+    - `Request mode: ultra (one-shot /orche ultra; the session stays in single). After this request, assignments to W1 (worker "W1") run in the session's mode; to continue in ultra, the user repeats /orche ultra <PROMPT>.` 줄. ledger가 켜져 있으면 `Task T1 keeps ultra for its continuations (task "T1"); other tasks run in the session's mode.`이다. 요청 모드가 세션 모드와 다를 때만 붙는다.
+    - `details.requestMode`
+    - run.json `assignment.requestMode`
+    - job 시작 항목. 기록일 뿐 고정이 아니다.
+- **세션 모드는 바뀌지 않는다**: 저장된 `/orche mode` 항목과 config 모두 그대로다. 지속적으로 바꾸려면 `/orche mode strong|ultra`를 쓴다.
+- **busy이면 거부한다**: one-shot 명령(`single`·`direct` 포함)은 세션이 idle일 때만 시작한다.
+  - 세션 모드가 같아도 거부한다. 큐에 넣으면 일반 프롬프트가 되어 명시한 모드를 잃기 때문이다.
+  - 거부 메시지는 run이 끝난 뒤 다시 보내라고 안내한다. 세션 모드가 같으면 `/orche <mode>` 없이 보내 일반 follow-up으로 큐에 넣을 수 있다고, 다르면 `/orche mode <mode>`로 전환할 수 있다고 덧붙인다.
+  - 일반 follow-up과 steer의 큐 동작은 그대로다. 단, one-shot run 중의 follow-up은 위처럼 그 run 뒤로 미룬다.
+  - 한 번에 한 작업만 실행, 취소(`/orche cancel`), 권한, `git` grant(그 assignment에만 적용)는 일반 `orche_task`와 같다.
+- **한계**:
+  - `direct` 세션에서는 run이 끝난 뒤 위임 도구가 꺼진다. 같은 worker로 이어가려면 `/orche strong|ultra <PROMPT>`를 다시 쓴다.
+  - main이 답하기 전에 run의 첫 steering 확인에 들어온 메시지는 그 요청의 문맥으로 취급한다(프롬프트와 같은 시점).
+  - 출처를 가릴 수 없는 메시지로 요청 모드가 끝난 그 run의 첫 다음 모델 요청에서는, Pi가 이미 선언한 도구 목록이 한 번 늦게 바뀔 수 있다. guard는 호출 시점의 모드로 막고, 프롬프트는 그 요청부터 세션 모드다.
+  - 실제 외부 모델 E2E는 하지 않았다. faux 모델로 실제 Pi 세션·확장·job 경로를 검증했다.
+

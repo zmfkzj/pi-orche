@@ -286,7 +286,7 @@ export class AgentManager {
       this.assertOpen(signal);
       const session = await createSession({
         ...options, ...target, modelRuntime, tools,
-        toolGuard: (name, input) => options.toolGuard?.(name, input),
+        toolGuard: (name, input, toolCallId) => options.toolGuard?.(name, input, toolCallId),
         writeFileGuard: (file, signal) => options.writeFileGuard
           ? options.writeFileGuard(file, signal)
           : options.toolGuard ? "Directory ast_rewrite requires a per-file write guard in a guarded session" : undefined,

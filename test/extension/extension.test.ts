@@ -72,7 +72,7 @@ describe("pi-orche as a Pi extension (real AgentSession, faux providers)", () =>
     expect(h.notifications).toEqual([]);
   });
 
-  it("/orche direct while the agent is busy in direct is queued as a follow-up turn, not dropped or run concurrently", async () => {
+  it("/orche direct while the agent is busy (even in direct) is refused, not queued without its mode or run concurrently; a plain follow-up still queues", async () => {
     const gate = deferred();
     const entered = deferred();
     const seen: string[] = [];
@@ -87,14 +87,16 @@ describe("pi-orche as a Pi extension (real AgentSession, faux providers)", () =>
     const first = h.session.prompt("first request");
     await entered.promise;
     await h.session.prompt("/orche direct second request");
-    expect(h.notifications.map(n => n.message).join()).toContain("queued");
+    expect(h.notifications.map(n => n.message).join()).toContain("orche direct: refused. The agent is busy");
+    await h.session.followUp("third request");
     expect(h.main.faux.state.callCount).toBe(1);
     gate.resolve();
     await first;
     await h.session.agent.waitForIdle();
     expect(h.main.faux.state.callCount).toBe(2);
     expect(seen[0]).not.toContain("second request");
-    expect(seen[1]).toContain("second request");
+    expect(seen.join()).not.toContain("second request");
+    expect(seen[1]).toContain("third request");
   });
 
   it("invalid commands print usage and start nothing", async () => {

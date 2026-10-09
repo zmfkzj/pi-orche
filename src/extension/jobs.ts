@@ -18,6 +18,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { formatDuration } from "../agent/liveness.js";
 import { TaskFailedError, type GoneWorker, type TaskDetails, type TaskStartedInfo, type WorkerPool } from "./workers.js";
 import type { RunTiming } from "./progress.js";
+import type { DelegatingMode } from "../orchestration/routing.js";
 
 export const JOB_ENTRY_TYPE = "orche-job";
 export const WORKER_ENTRY_TYPE = "orche-worker";
@@ -27,7 +28,7 @@ export type JobStatus = "running" | "done" | "failed" | "cancelled" | "interrupt
 
 /** One `orche-job` session entry: the start of a job, or its end. Small; never sent to the model. */
 export type JobEntry =
-  | { event: "start"; job: string; role: string; worker: string; at: number; request: string; record?: string; sessionFile?: string; model?: string; thinking?: ThinkingLevel }
+  | { event: "start"; job: string; role: string; worker: string; at: number; request: string; record?: string; sessionFile?: string; model?: string; thinking?: ThinkingLevel; requestMode?: DelegatingMode }
   | { event: "end"; job: string; worker?: string; at: number; status: Exclude<JobStatus, "running">; summary?: string; record?: string };
 
 export interface Job {
@@ -255,7 +256,7 @@ export class TaskJobs {
         didStart = true;
         Object.assign(job, { worker: info.worker, ...(info.model ? { model: info.model } : {}), ...(info.thinking ? { thinking: info.thinking } : {}), ...(info.record ? { record: info.record } : {}), ...(info.sessionFile ? { sessionFile: info.sessionFile } : {}) });
         this.jobs.set(id, job);
-        this.deps.persist({ event: "start", job: id, role: args.role, worker: info.worker, at: job.startedAt, request: job.request, ...(info.record ? { record: info.record } : {}), ...(info.sessionFile ? { sessionFile: info.sessionFile } : {}), ...(info.model ? { model: info.model } : {}), ...(info.thinking ? { thinking: info.thinking } : {}) });
+        this.deps.persist({ event: "start", job: id, role: args.role, worker: info.worker, at: job.startedAt, request: job.request, ...(info.record ? { record: info.record } : {}), ...(info.sessionFile ? { sessionFile: info.sessionFile } : {}), ...(info.model ? { model: info.model } : {}), ...(info.thinking ? { thinking: info.thinking } : {}), ...(info.requestMode ? { requestMode: info.requestMode } : {}) });
         if (attach) waiter = this.wait(job, attach); else this.changed(job);
         started.resolve(info);
       },

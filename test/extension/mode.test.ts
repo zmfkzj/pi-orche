@@ -337,7 +337,7 @@ describe("/orche mode", () => {
 
     for (const removed of ["auto", "multi"]) {
       await h.session.prompt(`/orche mode ${removed}`);
-      expect(notes(h).at(-1)).toContain("/orche mode [single|direct]");
+      expect(notes(h).at(-1)).toContain("/orche mode [single|strong|ultra|direct]");
     }
     await h.session.prompt("/orche mode single");
     await h.session.reload();
@@ -351,7 +351,7 @@ describe("/orche mode", () => {
   it("rejects unknown modes with the usage text and changes nothing", async () => {
     const h = await harness({ mainSteps: [], orcheSteps: [], mainMode: "single" });
     await h.session.prompt("/orche mode turbo");
-    expect(notes(h)).toEqual([expect.stringContaining("/orche mode [single|direct]")]);
+    expect(notes(h)).toEqual([expect.stringContaining("/orche mode [single|strong|ultra|direct]")]);
     for (const name of MUTATORS) expect(h.session.getActiveToolNames()).not.toContain(name);
   });
 });
@@ -464,7 +464,7 @@ describe("mainMode config discovery", () => {
     const bad = await layout({ user: cfg({ mainMode: "turbo" }) });
     const found = await discoverMainMode({ ...bad, projectTrusted: true });
     expect(found.mode).toBeUndefined();
-    expect(found.error).toContain("config.mainMode: expected single, direct");
+    expect(found.error).toContain("config.mainMode: expected single, strong, ultra, direct");
     expect(() => parseRouteConfig({ routes: {}, mainMode: 3 })).toThrow("config.mainMode");
     for (const mainMode of ["single", "direct"] as const) expect(parseRouteConfig({ routes: {}, mainMode }).mainMode).toBe(mainMode);
     // The removed modes are still read, as single, and flagged so the extension can warn.
@@ -518,6 +518,7 @@ describe("single-worker mode and one-turn override", () => {
     expect(h.session.getActiveToolNames()).not.toContain("orche_task");
   });
 
+  // A one-shot request starts only from an idle session: while busy it is refused in every mode (a queued turn would lose its mode).
   it.each(["single", "direct"] as const)("/orche single busy rules in %s", async mainMode => {
     const entered = deferred();
     const gate = deferred();
@@ -527,12 +528,12 @@ describe("single-worker mode and one-turn override", () => {
     const first = h.session.prompt("first");
     await entered.promise;
     await h.session.prompt("/orche single follow-up");
-    const compatible = mainMode === "single";
-    expect(notes(h).at(-1)).toContain(compatible ? "queued" : "refused");
+    expect(notes(h).at(-1)).toContain("orche single: refused. The agent is busy");
+    expect(notes(h).at(-1)).toContain(mainMode === "single" ? 'send the prompt without "/orche single"' : "/orche mode single");
     gate.resolve();
     await first;
     await h.session.agent.waitForIdle();
-    expect(h.main.faux.state.callCount).toBe(compatible ? 2 : 1);
+    expect(h.main.faux.state.callCount).toBe(1);
   });
 
   it.each(["single", "direct"] as const)("/orche direct busy rules in %s", async mainMode => {
@@ -544,11 +545,11 @@ describe("single-worker mode and one-turn override", () => {
     const first = h.session.prompt("first");
     await entered.promise;
     await h.session.prompt("/orche direct follow-up");
-    expect(notes(h).at(-1)).toContain(mainMode === "direct" ? "queued" : "refused");
+    expect(notes(h).at(-1)).toContain("orche direct: refused. The agent is busy");
     gate.resolve();
     await first;
     await h.session.agent.waitForIdle();
-    expect(h.main.faux.state.callCount).toBe(mainMode === "direct" ? 2 : 1);
+    expect(h.main.faux.state.callCount).toBe(1);
   });
 
   it.each([

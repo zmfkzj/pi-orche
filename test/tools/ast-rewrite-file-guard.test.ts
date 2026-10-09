@@ -125,7 +125,8 @@ describe("directory ast_rewrite file guards", () => {
     const session = await createSession({ cwd, route: f.route, modelRuntime: f.runtime, tools: ["ast_rewrite"], instructions: "test", toolGuard, writeFileGuard });
     try {
       await session.prompt("go");
-      expect(toolGuard.mock.calls).toEqual([["ast_rewrite", input]]);
+      // Once for the call (with its tool call id, which ultra's integrity probes pair with the call's end), never per file.
+      expect(toolGuard.mock.calls).toEqual([["ast_rewrite", input, expect.any(String)]]);
       expect(writeFileGuard).toHaveBeenCalledTimes(2);
       const result = session.messages.find(m => m.role === "toolResult");
       expect(result).toMatchObject({ isError: false, content: [{ type: "text", text: expect.stringContaining("src/a-blocked.ts: session ownership block") }] });

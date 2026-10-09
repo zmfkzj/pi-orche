@@ -23,7 +23,14 @@ import type { SpecialistDeadlineStats } from "../specialists/session.js";
 
 export const SPAWN_TOOL = "orche_spawn";
 export const SPAWN_REASONS = ["parallelism", "isolation", "verification"] as const;
-export type SpawnReason = (typeof SPAWN_REASONS)[number];
+/**
+ * The reasons of the ultra flow (src/orchestrator/ultra.ts): `exploration` (independent verification basis and hypotheses before
+ * any candidate exists), `candidates` (independent implementations or answers, each implementation in its own workspace copy),
+ * `verification` (fresh verifiers, the same cap) and `isolation` (game-asset/video specialists only). No `parallelism`: parallel
+ * writers in the shared workspace would bypass the candidate/adoption contract.
+ */
+export const ULTRA_SPAWN_REASONS = ["exploration", "candidates", "verification", "isolation"] as const;
+export type SpawnReason = (typeof SPAWN_REASONS)[number] | (typeof ULTRA_SPAWN_REASONS)[number];
 export const SUB_WORKER_ROLES = ["implement", "answer", "verify", "game-asset", "video"] as const;
 export type SubWorkerRole = (typeof SUB_WORKER_ROLES)[number];
 /** The guard's answer when a sub-worker tries to spawn (it never has the tool; this is the second line). */
@@ -42,6 +49,19 @@ export const spawnParameters = Type.Object({
   }, { additionalProperties: false }), { minItems: 1, maxItems: MAX_SUB_WORKERS }),
 }, { additionalProperties: false });
 export type SpawnParameters = Static<typeof spawnParameters>;
+/** orche_spawn of an ultra orchestrator: the ultra reasons and, for a fix candidate, `from` (an earlier candidate to start from). */
+export const ultraSpawnParameters = Type.Object({
+  reason: Type.Union(literals(ULTRA_SPAWN_REASONS), { description: "exploration (before any candidate: independent verification-basis builders, role implement owning the test/check files they write, and hypothesis analysts, role answer), candidates (2-4 independent implementations, each in its own workspace copy, or independent answers for a read-only task), verification (fresh verifiers, role verify only), isolation (a game-asset/video specialist)." }),
+  workers: Type.Array(Type.Object({
+    name: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$", description: "Short unit name, unique in this call (e.g. basis, cause, cand-a, verify)." }),
+    role: Type.Union(literals(SUB_WORKER_ROLES), { description: "implement (writes its own files; a candidate writes only in its workspace copy), answer (read-only), verify (read-only independent verification), game-asset or video (specialists)." }),
+    request: Type.String({ minLength: 1, description: "Self-contained request: the sub-worker sees nothing else. Goal, acceptance criteria, constraints, file references and the user's wording where it matters; not your reasoning and, for exploration and first-round candidates, never another worker's conclusions." }),
+    files: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Owned files or directories of a writing role (for a candidate: inside its own workspace copy; candidates may own the same paths)." })),
+    from: Type.Optional(Type.String({ minLength: 1, description: "candidates only: id of an earlier candidate (e.g. W1.3) whose workspace this fix candidate starts from; the earlier one stays unchanged." })),
+  }, { additionalProperties: false }), { minItems: 1, maxItems: MAX_SUB_WORKERS }),
+}, { additionalProperties: false });
+/** One orche_spawn call of either tool variant. */
+export interface SpawnCall { reason: SpawnReason; workers: { name: string; role: SubWorkerRole; request: string; files?: string[]; from?: string }[] }
 
 /** Canonical ownership paths: concrete files or directory prefixes (`dir/`, `dir/**`, `dir/**\/*` → `dir/`); globs, absolute and outside paths are errors. */
 export function scopePaths(files: readonly string[]): string[] {
@@ -53,13 +73,21 @@ export function scopePaths(files: readonly string[]): string[] {
   }))];
 }
 
-export interface PlannedWorker { id: string; name: string; role: SubWorkerRole; request: string; reason: SpawnReason; files?: string[] }
+/**
+ * One validated sub-worker. `workspace` (ultra candidates): its private workspace copy, its cwd; `from`: the earlier candidate it
+ * starts from; `protectedPaths`: workspace-relative paths of the verification basis it may not write.
+ */
+export interface PlannedWorker {
+  id: string; name: string; role: SubWorkerRole; request: string; reason: SpawnReason; files?: string[]; workspace?: string; from?: string; protectedPaths?: readonly string[];
+  /** Ultra candidate: submodule paths, empty in its copy and never adopted (its file tools are blocked there). */
+  outsidePaths?: readonly string[];
+}
 
 /**
  * Validate one call and give the workers their ids (only after it is valid, so a refused call uses none). Throws an Error whose
  * message tells the orchestrator what to change.
  */
-export function planSpawn(params: SpawnParameters, options: { scope?: readonly string[]; readOnly?: boolean; nextId: () => string }): { workers: PlannedWorker[]; notes: string[] } {
+export function planSpawn(params: SpawnCall, options: { scope?: readonly string[]; readOnly?: boolean; ultra?: boolean; nextId: () => string }): { workers: PlannedWorker[]; notes: string[] } {
   const { reason, workers } = params;
   const notes: string[] = [];
   if (!workers.length || workers.length > MAX_SUB_WORKERS) throw new Error(`orche_spawn takes 1 to ${MAX_SUB_WORKERS} workers per call.`);
@@ -71,10 +99,27 @@ export function planSpawn(params: SpawnParameters, options: { scope?: readonly s
   if (reason === "verification" && workers.some(worker => worker.role !== "verify")) throw new Error('reason "verification" takes role verify only: a fresh read-only verifier.');
   if (reason !== "verification" && workers.some(worker => worker.role === "verify")) throw new Error('role verify is an independent verifier: use reason "verification".');
   if (reason === "parallelism" && workers.length < 2) throw new Error('reason "parallelism" needs two or more workers; do a single part yourself.');
-  const planned = workers.map(worker => {
+  const candidates = reason === "candidates";
+  if ((candidates || reason === "exploration") && !options.ultra) throw new Error(`reason "${reason}" belongs to ultra mode; use parallelism, isolation or verification.`);
+  if (options.ultra) {
+    if (reason === "parallelism") throw new Error('ultra mode has no reason "parallelism": independent implementations are candidates (reason "candidates", each in its own workspace copy), and the verification basis and hypotheses are exploration.');
+    if (reason === "isolation" && workers.some(worker => worker.role !== "game-asset" && worker.role !== "video")) throw new Error('in ultra mode reason "isolation" is for game-asset and video specialists only; other work goes through exploration and candidates.');
+    if (reason === "exploration" && (workers.length < 2 || workers.some(worker => worker.role !== "implement" && worker.role !== "answer"))) throw new Error('reason "exploration" takes two or more independent workers: verification-basis builders (role implement, owning the test or check files they write) and hypothesis/approach analysts (role answer).');
+    if (candidates) {
+      if (workers.length < 2) throw new Error('reason "candidates" takes 2 to 4 independent candidates; one attempt is no comparison.');
+      const role = workers[0]!.role;
+      if ((role !== "implement" && role !== "answer") || workers.some(worker => worker.role !== role)) throw new Error('candidates are all role implement (implementations, each in its own workspace copy) or all role answer (independent answers of a read-only task).');
+      const requests = new Set(workers.map(worker => worker.request.trim().replace(/\s+/g, " ")));
+      if (requests.size !== workers.length) throw new Error("candidate requests must differ: give each candidate its own approach or hypothesis, so the candidates are diverse.");
+    }
+  }
+  if (!candidates && workers.some(worker => worker.from !== undefined)) throw new Error('from (start from an earlier candidate) is for reason "candidates" only.');
+  const planned = workers.map((worker): Omit<PlannedWorker, "id"> => {
     const writes = WRITING_KINDS.has(worker.role);
+    const from = worker.from !== undefined ? { from: worker.from } : {};
     if (!writes) {
       if (worker.files?.length) notes.push(`files ignored for read-only ${worker.name}.`);
+      if (worker.from !== undefined) throw new Error(`${worker.name}: from applies to implement candidates only (an answer candidate has no workspace).`);
       return { name: worker.name, role: worker.role, request: worker.request, reason };
     }
     if (options.readOnly) throw new Error(`${worker.name} (${worker.role}) would write files, but this assignment is read-only: spawn answer or verify workers only.`);
@@ -84,11 +129,14 @@ export function planSpawn(params: SpawnParameters, options: { scope?: readonly s
       const outside = files.filter(path => !options.scope!.some(owned => ownsPath(owned, path.replace(/\/$/, ""))));
       if (outside.length) throw new Error(`${worker.name} would own ${outside.join(", ")} outside your own write scope (${options.scope.join(", ")}).`);
     }
-    return { name: worker.name, role: worker.role, request: worker.request, reason, files };
+    return { name: worker.name, role: worker.role, request: worker.request, reason, files, ...from };
   });
-  const tasks: TaskItem[] = planned.map(worker => ({ id: worker.name, owner: worker.name, description: worker.name, files: worker.files ?? [], status: "pending" }));
-  const overlaps = validateBacklog(tasks, planned.map(worker => worker.name)).filter(issue => issue.type === "file_overlap");
-  if (overlaps.length) throw new Error(`Owned files overlap: ${overlaps.map(issue => issue.type === "file_overlap" ? `${issue.taskIds[0]} (${issue.files[0]}) and ${issue.taskIds[1]} (${issue.files[1]})` : "").join("; ")}. Give every file to one worker, or do coupled parts in one worker.`);
+  // Candidates work in separate workspace copies: they may own the same paths. Everyone else shares the workspace.
+  if (!candidates) {
+    const tasks: TaskItem[] = planned.map(worker => ({ id: worker.name, owner: worker.name, description: worker.name, files: worker.files ?? [], status: "pending" }));
+    const overlaps = validateBacklog(tasks, planned.map(worker => worker.name)).filter(issue => issue.type === "file_overlap");
+    if (overlaps.length) throw new Error(`Owned files overlap: ${overlaps.map(issue => issue.type === "file_overlap" ? `${issue.taskIds[0]} (${issue.files[0]}) and ${issue.taskIds[1]} (${issue.files[1]})` : "").join("; ")}. Give every file to one worker, or do coupled parts in one worker.`);
+  }
   return { workers: planned.map(worker => ({ ...worker, id: options.nextId() })), notes };
 }
 
@@ -119,10 +167,14 @@ export interface SubWorkerOutcome {
   durationMs: number;
   costUSD: number;
   sessionFile?: string;
-  /** Workspace paths changed during the call inside this worker's owned files. */
+  /** Workspace paths changed during the call inside this worker's owned files (an ultra candidate: in its own workspace copy). */
   changes: string[];
   /** The sub-worker's activity-aware deadline (absent with a fixed cap): extensions, observations and why it stopped, if it did. */
   deadline?: SubWorkerDeadline;
+  /** Ultra candidate: its workspace copy (absolute path). */
+  workspace?: string;
+  /** Ultra candidate: it changed protected verification-basis files in its copy, so it cannot be adopted. */
+  tampered?: string[];
 }
 
 /**
@@ -196,9 +248,23 @@ export interface SpawnContext {
   maxVerificationRounds?: number;
   /** A verification call refused at the cap (the result then has to state what stays unresolved; see workers.ts). */
   onVerificationRefused?(rounds: number, cap: number): void;
+  /** Ultra mode: the stage contract of this assignment (src/orchestrator/ultra.ts); absent in single and strong. */
+  ultra?: UltraSpawnHooks;
 }
 
-export interface SpawnDetails { reason: SpawnReason; workers: SubWorkerOutcome[]; warnings: string[]; durationMs: number }
+/**
+ * The ultra stage contract around one orche_spawn call. `prepare` checks the call against the stages and caps and gives candidates
+ * their workspace copies (it throws with what to change, before anything runs); `finish` records the outcomes (candidate diffs,
+ * the protected verification basis, stage progress) and returns lines for the tool result.
+ */
+export interface UltraSpawnHooks {
+  /** Stage order, caps and roles, checked before any id is given out (a refused call uses none); throws with what to change. */
+  validate(reason: SpawnReason, workers: readonly { role: string; name: string; from?: string }[]): void;
+  prepare(reason: SpawnReason, workers: PlannedWorker[], signal: AbortSignal): Promise<PlannedWorker[]>;
+  finish(reason: SpawnReason, workers: readonly PlannedWorker[], outcomes: SubWorkerOutcome[]): Promise<string[]>;
+}
+
+export interface SpawnDetails { reason: SpawnReason; workers: SubWorkerOutcome[]; warnings: string[]; durationMs: number; ultra?: string[] }
 
 const clip = (text: string, max: number) => text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 const dataLine = (data: unknown): string | undefined => {
@@ -218,20 +284,26 @@ export function formatSpawn(details: SpawnDetails): string {
     const data = dataLine(worker.data);
     if (data) lines.push(data);
     if (worker.files) lines.push(`Owned: ${worker.files.join(", ")}; changed: ${worker.changes.length ? worker.changes.join(", ") : "none"}`);
+    if (worker.workspace) lines.push(`Workspace (candidate copy): ${worker.workspace}${worker.tampered?.length ? `; changed protected basis files ${worker.tampered.join(", ")}: not adoptable` : ""}`);
     const deadline = worker.deadline ? formatSubWorkerDeadline(worker.deadline) : undefined;
     if (deadline) lines.push(deadline);
   }
   if (details.warnings.length) lines.push("", ...details.warnings.map(warning => `Warning: ${warning}`));
+  if (details.ultra?.length) lines.push("", ...details.ultra);
   lines.push("", "You own the result: review each report, check the changed files, run the project checks yourself, then fix or finish what is missing.");
   return lines.join("\n");
 }
 
 /** Run one validated call: all workers at once, then the conflict check. Never rejects for a sub-worker's failure (that is its outcome). */
-export async function executeSpawn(context: SpawnContext, params: SpawnParameters, signal: AbortSignal | undefined, onUpdate?: (text: string) => void): Promise<{ text: string; details: SpawnDetails }> {
-  const { workers, notes } = planSpawn(params, { ...(context.scope ? { scope: context.scope } : {}), ...(context.readOnly ? { readOnly: true } : {}), nextId: () => context.nextId() });
+export async function executeSpawn(context: SpawnContext, params: SpawnCall, signal: AbortSignal | undefined, onUpdate?: (text: string) => void): Promise<{ text: string; details: SpawnDetails }> {
+  context.ultra?.validate(params.reason, params.workers);
+  const planned = planSpawn(params, { ...(context.scope ? { scope: context.scope } : {}), ...(context.readOnly ? { readOnly: true } : {}), ...(context.ultra ? { ultra: true } : {}), nextId: () => context.nextId() });
+  const notes = planned.notes;
   const started = Date.now();
   const signals = [signal, context.signal].filter((item): item is AbortSignal => !!item);
   const abort = signals.length ? AbortSignal.any(signals) : new AbortController().signal;
+  // Ultra: the stage contract may refuse the call (nothing ran yet) and gives candidates their workspace copies.
+  const workers = context.ultra ? await context.ultra.prepare(params.reason, planned.workers, abort) : planned.workers;
   const before = context.snapshot && context.diff ? await context.snapshot().catch(() => undefined) : undefined;
   const status = new Map(workers.map(worker => [worker.id, "starting"]));
   /** What each sub-worker's session runs on, once it exists. */
@@ -278,14 +350,20 @@ export async function executeSpawn(context: SpawnContext, params: SpawnParameter
       const changes = await context.diff(before, after);
       const unowned: string[] = [];
       for (const change of changes) {
-        const owners = outcomes.filter(outcome => outcome.files?.some(owned => ownsPath(owned, change.path)));
+        // A candidate writes only in its own copy: whatever changed here is nobody's.
+        const owners = outcomes.filter(outcome => !outcome.workspace && outcome.files?.some(owned => ownsPath(owned, change.path)));
         for (const owner of owners) owner.changes.push(change.path);
         if (!owners.length) unowned.push(change.path);
       }
       if (unowned.length) warnings.push(`changed during orche_spawn outside every sub-worker's owned files: ${unowned.slice(0, 30).join(", ")}${unowned.length > 30 ? `, … ${unowned.length - 30} more` : ""} (a shell write of a sub-worker or another session; check them)`);
     } catch { warnings.push("workspace check after orche_spawn failed; check the changed files yourself"); }
   }
-  const details: SpawnDetails = { reason: params.reason, workers: outcomes, warnings, durationMs: Date.now() - started };
+  // Ultra: candidate diffs, the protected verification basis and the stage record, after the shared-workspace check above.
+  let ultra: string[] | undefined;
+  if (context.ultra) {
+    try { ultra = await context.ultra.finish(params.reason, workers, outcomes); } catch (error) { ultra = [`Ultra: recording this call failed (${error instanceof Error ? error.message : String(error)}); its candidates cannot be adopted.`]; }
+  }
+  const details: SpawnDetails = { reason: params.reason, workers: outcomes, warnings, durationMs: Date.now() - started, ...(ultra?.length ? { ultra } : {}) };
   context.onSpawned?.(params.reason, outcomes, warnings);
   return { text: formatSpawn(details), details };
 }
@@ -301,17 +379,19 @@ export async function executeSpawn(context: SpawnContext, params: SpawnParameter
  */
 const verificationRounds = new WeakMap<SpawnContext, number>();
 
-export function createSpawnTool(context: () => SpawnContext | string): ToolDefinition {
+export function createSpawnTool(context: () => SpawnContext | string, options: { ultra?: boolean } = {}): ToolDefinition {
   return {
     name: SPAWN_TOOL,
     label: "orche spawn",
-    description: `Start up to ${MAX_SUB_WORKERS} sub-workers in fresh sessions at the same time and wait for all of them: independent parallel parts (each writer owns disjoint files), an isolated game-asset/video specialist, or fresh read-only verifiers. Sub-workers see only their request and cannot spawn. Use it only when the orchestration rules of your assignment say the task should be split.`,
-    parameters: spawnParameters,
+    description: options.ultra
+      ? `Start up to ${MAX_SUB_WORKERS} sub-workers in fresh sessions at the same time and wait for all of them, by the ultra stage contract of your assignment: exploration (independent verification basis and hypotheses), candidates (independent implementations, each in its own workspace copy, or independent answers), verification (fresh read-only verifiers) or isolation (a game-asset/video specialist). Sub-workers see only their request and cannot spawn.`
+      : `Start up to ${MAX_SUB_WORKERS} sub-workers in fresh sessions at the same time and wait for all of them: independent parallel parts (each writer owns disjoint files), an isolated game-asset/video specialist, or fresh read-only verifiers. Sub-workers see only their request and cannot spawn. Use it only when the orchestration rules of your assignment say the task should be split.`,
+    parameters: options.ultra ? ultraSpawnParameters : spawnParameters,
     executionMode: "sequential",
     execute: async (_id, params, signal, onUpdate): Promise<AgentToolResult<SpawnDetails | undefined>> => {
       const current = context();
       if (typeof current === "string") return { content: [{ type: "text", text: current }], details: undefined, isError: true } as AgentToolResult<undefined>;
-      if ((params as SpawnParameters).reason === "verification") {
+      if ((params as SpawnCall).reason === "verification") {
         const rounds = verificationRounds.get(current) ?? 0;
         const cap = current.maxVerificationRounds ?? MAX_VERIFICATION_ROUNDS;
         if (rounds >= cap) {
@@ -320,7 +400,7 @@ export function createSpawnTool(context: () => SpawnContext | string): ToolDefin
         }
         verificationRounds.set(current, rounds + 1);
       }
-      const result = await executeSpawn(current, params as SpawnParameters, signal, text => onUpdate?.({ content: [{ type: "text", text }], details: undefined }));
+      const result = await executeSpawn(current, params as SpawnCall, signal, text => onUpdate?.({ content: [{ type: "text", text }], details: undefined }));
       return { content: [{ type: "text", text: result.text }], details: result.details };
     },
   } as ToolDefinition;

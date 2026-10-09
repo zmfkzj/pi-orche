@@ -22,7 +22,7 @@ import { createTaskPlanTool, renderTaskPlan, type TaskPlan } from "../tools/task
 import { configureTaskWorkflow, enableTaskWorkflow, taskCompactionSettings, type CompactionStats } from "../pi/session-factory.js";
 import { withExtendedContext } from "../pi/extended-context.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { inheritsMain, inheritsMainThinking, resolveRoute, resolveSpecialistRoute, tierThinking, type AssignmentModelSource, type AssignmentThinkingSource, type MainMode, type ModelRoute, type SubWorkerModelSource, type SubWorkerThinkingSource, type TierSettings } from "../orchestration/routing.js";
+import { inheritsMain, inheritsMainThinking, isDelegatingMode, modeTiers, type DelegatingMode, resolveRoute, resolveSpecialistRoute, tierThinking, usesStrongTiers, type AssignmentModelSource, type AssignmentThinkingSource, type MainMode, type ModelRoute, type SubWorkerModelSource, type SubWorkerThinkingSource, type TierSettings } from "../orchestration/routing.js";
 import { formatModelUse } from "../orchestration/model-use.js";
 import { WorkspaceAudit, type GitlinkChange, type WorkspaceChange } from "../orchestration/workspace.js";
 import { CHANGED_WHILE_QUIET, WorkspaceActivity } from "../orchestration/run/activity.js";
@@ -46,6 +46,8 @@ import { appendSplitLog } from "../orchestrator/split-log.js";
 import { ORCHESTRATOR_TEAM_LINE, orchestratorSection, SPLIT_FORMAT, splitError, splitOf, unresolvedError, MAX_VERIFICATION_ROUNDS, type SplitDecision } from "../orchestrator/instructions.js";
 import { createSpawnTool, outcomeModelUse, scopePaths, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnReason, type SubWorkerOutcome } from "../orchestrator/spawn.js";
 import { createSubWorkerRunner } from "../orchestrator/sub-worker.js";
+import { ADOPT_UNAVAILABLE, createAdoptTool, ultraSection, UltraRun, type UltraState, type UltraSummary } from "../orchestrator/ultra.js";
+import { evidenceLedgerOf } from "../pi/tool-evidence.js";
 import { clampThinkingLevel, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { beginThinkingPolicy, checkPolicyPlan, DEFAULT_THINKING_POLICY, onTaskPlan, reportGateError, reportRewriteReason, requireReplan, thinkingPolicySummary, type ThinkingPolicySettings, type ThinkingPolicySummary } from "../pi/thinking-policy.js";
@@ -80,6 +82,11 @@ export type TaskRole = TaskParameters["role"];
 // Extension-supplied effective mode; omitted SDK callers retain legacy routing/instructions.
 type TaskArgs = Omit<OrcheRunArgs, "model"> & TaskParameters & {
   mainMode?: MainMode; model?: { provider: string; id: string; contextWindow?: number }; modelRegistry?: ModelRegistry;
+  /**
+   * Set while main runs a one-shot `/orche <mode> <prompt>` turn: `mainMode` is that request's mode and `session` the session's own.
+   * The assignment runs in the request's mode, and with task ledgers pins it to its task (see {@link RequestMode}).
+   */
+  oneShot?: { session: MainMode };
   /** Called once, the moment the worker has its assignment (before it runs): the background job's "started" point. */
   onStarted?: (info: TaskStartedInfo) => void;
 };
@@ -94,7 +101,15 @@ export interface TaskStartedInfo {
   continuedFrom?: string;
   /** The worker's transcript (a pi session JSONL), when persisted. */
   sessionFile?: string;
+  /** The one-shot request mode the assignment runs in (recorded with the job; not a pin of the worker). */
+  requestMode?: DelegatingMode;
 }
+/**
+ * The mode of an assignment that did not simply follow the session's mode (docs/orchestrator.md 14.5): `one-shot` (it ran in a one-shot
+ * `/orche <mode> <prompt>` turn) or `task` (it continued, with task ledgers, a task such a request pinned; `by` names it).
+ * `session` is the session's own mode at that moment.
+ */
+export interface RequestMode { mode: DelegatingMode; source: "one-shot" | "task"; by?: string; session?: MainMode }
 /** Why a worker is gone, and what is left of it for a successor's briefing. */
 export interface GoneWorker {
   id: string;
@@ -122,6 +137,8 @@ export interface TaskDetails {
   worker: string;
   role: TaskRole;
   status: string;
+  /** The assignment ran in a one-shot request's mode, or in the mode pinned to the task or worker it continued (not the session's). */
+  requestMode?: RequestMode;
   /** Model of the worker's session (`provider/model`) during this assignment, when known. */
   model?: string;
   /** The thinking level (reasoning effort) the session ran on, after Pi's clamp to the model. */
@@ -177,6 +194,11 @@ export interface TaskDetails {
   modelSource?: AssignmentModelSource;
   /** Where `thinking` came from (AssignmentThinkingSource); `thinking` is the level the session runs on, after Pi's clamp. */
   thinkingSource?: AssignmentThinkingSource;
+  /** strong and ultra: the mode, and the `models` key whose model the assignment runs on (absent: inherited from main or a route). */
+  mode?: MainMode;
+  modelTier?: string;
+  /** Ultra: the stages that ran, the candidates, adoptions and the report gate (src/orchestrator/ultra.ts). */
+  ultra?: UltraSummary;
   /** The orchestrator's split decision (single workflow with `single.spawn`, implement/answer): none, or the criteria it split by and why. */
   split?: SplitDecision;
   /** The sub-workers its orche_spawn calls ran (docs/orchestrator.md), in order; their transcripts are in the record. */
@@ -291,6 +313,16 @@ interface Worker {
   spawnTool?: boolean;
   /** The orche_spawn context of the orchestrator assignment in flight; absent otherwise (the tool then refuses). */
   spawn?: SpawnContext;
+  /** The mode of the worker's last assignment (a reused worker switching modes says so in its result). */
+  mode?: MainMode;
+  /** The one-shot request mode of the worker's current assignment (recorded with its job start); never a pin for later assignments. */
+  requestMode?: DelegatingMode;
+  /** The session has the ultra tool set (orche_spawn with the ultra reasons, orche_adopt): created in ultra mode. */
+  ultraTools?: boolean;
+  /** The ultra run of the orchestrator assignment in flight (orche_adopt, write guard, report gate); cleared when it ends. */
+  ultra?: UltraRun;
+  /** The ultra state the worker's last ultra assignment left, continued by its next ultra assignment of the same task unless it reported done. */
+  ultraCarry?: { task: string; state: UltraState };
   /** The worker's private scratch directory (outside the workspace), created at its first assignment. */
   scratch?: string;
   /** Write roots outside the workspace of the assignment in flight (scratch + configured/assigned roots); cleared when it ends. */
@@ -721,12 +753,15 @@ const dataOf = (data: unknown): Record<string, unknown> => data && typeof data =
 export function assignmentPrompt(args: Pick<TaskParameters, "role" | "request" | "context" | "files"> & { mainMode?: MainMode; orchestrate?: boolean }, commands: readonly string[], imagesAvailable = false, grant?: GitGrant, extraInstructions = ""): string {
   const task = args.context?.trim() ? `${args.request}\n\n## Context from the requesting session\n${args.context.trim()}` : args.request;
   const scope = args.files === undefined ? "anywhere inside the workspace" : JSON.stringify(args.files);
-  const split = args.orchestrate ? `,${SPLIT_FORMAT}` : "";
+  // The single workflow's prompt; strong is the same workflow on other models, ultra replaces the split decision with its stages.
+  const workflow = isDelegatingMode(args.mainMode);
+  const ultra = args.orchestrate && args.mainMode === "ultra";
+  const split = ultra ? ",ultra:{…, see Ultra mode below}" : args.orchestrate ? `,${SPLIT_FORMAT}` : "";
   const instructions: Record<TaskRole, string> = {
     explore: 'Investigate independently, read source and reproduce. DO NOT EDIT. Report findings with concrete evidence and optionally data.cause. report_result {kind:"explore",summary,data:{cause,evidence}}.',
-    answer: `Strictly read-only.${args.orchestrate ? " First decide whether to split the question (Orchestration below; sub-workers of a read-only task are read-only too)." : ""} Inspect relevant files and provide an evidence-backed answer, concrete code references and explanations. Never change files. report_result {kind:"answer",summary:FULL_EVIDENCED_ANSWER,data:{evidence${args.mainMode === "single" ? ',checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence"}]' : ""}${split}}}.${args.mainMode === "single" ? " Checklist is required when the request contains R-ids." : ""}`,
-    implement: args.mainMode === "single"
-      ? `Own the task end to end${args.orchestrate ? " as its orchestrator: first decide whether to split it (Orchestration below), then" : ": first"} analyse the requirements and create the Task DAG with task_plan, covering every requirement id. If a requirement can be read more than one way with observably different behaviour, choose the reading closest to the Original request text, implement it, and report it in data.ambiguities. Then execute nodes sequentially in dependency order, updating statuses, implementing completely, adding or updating tests, running the project's relevant checks and iterating until they pass, preserving unrelated changes. Main does not intervene while you run. Write scope: ${scope}. Finish with report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks],checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence",verifiedBy:"test name or check command that asserts this requirement's acceptance and passed"}],ambiguities:[{id:"R2",readings:["reading A","reading B"],chosen:"reading A"}]${split}}}. Checklist is required when the request contains R-ids; every met item needs verifiedBy, otherwise report it partial. ambiguities may be omitted when there are none.`
+    answer: `Strictly read-only.${ultra ? " Run the Ultra mode stages below (sub-workers of a read-only task are read-only too)." : args.orchestrate ? " First decide whether to split the question (Orchestration below; sub-workers of a read-only task are read-only too)." : ""} Inspect relevant files and provide an evidence-backed answer, concrete code references and explanations. Never change files. report_result {kind:"answer",summary:FULL_EVIDENCED_ANSWER,data:{evidence${workflow ? ',checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence"}]' : ""}${split}}}.${workflow ? " Checklist is required when the request contains R-ids." : ""}`,
+    implement: workflow
+      ? `Own the task end to end${ultra ? " as its ultra orchestrator (Ultra mode below): the candidates implement, you" : args.orchestrate ? " as its orchestrator: first decide whether to split it (Orchestration below), then" : ": first"} analyse the requirements and create the Task DAG with task_plan, covering every requirement id. If a requirement can be read more than one way with observably different behaviour, choose the reading closest to the Original request text, implement it, and report it in data.ambiguities. Then execute nodes sequentially in dependency order, updating statuses, implementing completely, adding or updating tests, running the project's relevant checks and iterating until they pass, preserving unrelated changes. Main does not intervene while you run. Write scope: ${scope}. Finish with report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks],checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence",verifiedBy:"test name or check command that asserts this requirement's acceptance and passed"}],ambiguities:[{id:"R2",readings:["reading A","reading B"],chosen:"reading A"}]${split}}}. Checklist is required when the request contains R-ids; every met item needs verifiedBy, otherwise report it partial. ambiguities may be omitted when there are none.`
       : `Implement completely, preserving unrelated changes. Write scope: ${scope}. Run local checks on touched files. report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks]}}.`,
     "game-asset": `Game asset production. Create or modify game assets (sprites, sprite sheets/atlases, tilesets, textures, icons/UI art, 3D models, animations, VFX, SFX/music, fonts, and their engine import/metadata files) inside the write scope ${scope}. First detect the engine and the project's conventions (Unity .meta, Godot .import/.tres, Unreal, Phaser/Pixi atlas JSON; existing naming, folder layout, resolution/pixels-per-unit, palette, pivot/origin, power-of-two, compression). Produce assets with locally available tools via bash (check command -v first: ImageMagick, Inkscape, Blender --background with Python, Aseprite --batch, ffmpeg, sox, Python Pillow/numpy, or hand-written SVG/procedural scripts); keep reusable generator scripts with the assets when the project has a place for them, and leave no temp files in the workspace. Never hand-fabricate binary bytes. Verify every output is valid (identify/file/ffprobe/blender), and view raster outputs or rendered previews with the read tool. Do not download third-party assets unless the request allows it; record source and license when you do. report_result {kind:"game-asset",summary,data:{status:"done" or "blocked",reason,outputs:[{path,type,spec}],evidence:[checks]}}. spec is a descriptive string.`,
     video: `Video production. Plan and produce video deliverables inside the write scope ${scope}: script/storyboard/shot list, editing and compositing, motion graphics (code-based such as Remotion, Motion Canvas or manim when the project uses them), subtitles (SRT/VTT), audio mixing and loudness normalization, thumbnails and final encodes. Use locally available tools via bash (check command -v first: ffmpeg/ffprobe, the project's own video tooling, Python, ImageMagick, sox). Render a short draft before long renders; make final encode settings explicit (container, video codec, resolution, fps, CRF/bitrate, pixel format, audio codec/sample rate, loudness target). Verify every output with ffprobe (duration, streams, resolution, fps) and inspect extracted frames with the read tool. Leave no intermediate files in the workspace unless requested. report_result {kind:"video",summary,data:{status:"done" or "blocked",reason,outputs:[{path,type,spec}],evidence:[checks]}}. spec is a descriptive string.`,
@@ -743,10 +778,22 @@ export function workerSystemInstructions(spawn: boolean): string {
 }
 
 /** The prompt of one orche_spawn sub-worker: its role text, who spawned it and why, and (verification) that it has not seen the work. */
-export function subWorkerPrompt(worker: PlannedWorker, orchestrator: string, commands: readonly string[], imagesAvailable: boolean): string {
-  const preface = `You are sub-worker ${worker.id} ("${worker.name}") of orchestrator ${orchestrator}, spawned for ${worker.reason}. You cannot spawn workers.${worker.reason === "verification" ? " You have not seen how the work was done: judge only from the request below, the repository and your own checks." : ""}`;
+export function subWorkerPrompt(worker: PlannedWorker, orchestrator: string, commands: readonly string[], imagesAvailable: boolean, ultra = false): string {
+  const preface = `You are sub-worker ${worker.id} ("${worker.name}") of orchestrator ${orchestrator}, spawned for ${worker.reason}. You cannot spawn workers.${worker.reason === "verification" ? " You have not seen how the work was done: judge only from the request below, the repository and your own checks." : ""}${ultra ? ` ${ultraPreface(worker)}` : ""}`;
   return assignmentPrompt({ role: worker.role, request: `${preface}\n\n${worker.request}`, ...(worker.files ? { files: worker.files } : {}) }, commands, imagesAvailable)
     .replace("You work alone; there are no peers or backlog.", "You work alone on this assignment.");
+}
+
+/** What an ultra sub-worker is for (src/orchestrator/ultra.ts); independence is part of the job, not a courtesy. */
+function ultraPreface(worker: PlannedWorker): string {
+  if (worker.reason === "exploration") return worker.role === "implement"
+    ? "Ultra exploration, verification basis: from the requirements and acceptance criteria below alone, write tests or executable checks in your owned files that pass only for a correct solution (they may fail on the current code). Do not implement the solution. Report which criterion each check covers and the command that runs it. Your files become the protected basis that every candidate is judged by."
+    : "Ultra exploration, independent analysis: propose cause or approach hypotheses (for a question: the sources and evaluation criteria a complete answer needs), each with its evidence, a prediction and a concrete check that would falsify it. You cannot see the other workers and must not guess their conclusions.";
+  if (worker.reason === "candidates") return worker.workspace
+    ? `Ultra candidate: you are one of several independent candidates and work in your own copy of the workspace, ${worker.workspace} (your cwd; nobody else writes it, and other candidates' work is invisible to you). Implement completely there, run the project's checks and the protected verification basis there${worker.protectedPaths?.length ? ` (${worker.protectedPaths.join(", ")}; you cannot change these files)` : ""}, and report the evidence. Never write outside your copy.`
+    : "Ultra candidate answer: answer independently from your own investigation; give every claim its sources (file:line, command and outcome, or URL) and say which claims you could not verify.";
+  if (worker.reason === "verification") return "Ultra counterexample review: look for concrete counterexamples (inputs, commands, scenarios) that make the result violate the requirements, each with a reproduction command and its observed outcome; a suspicion you could not reproduce is reported as unverified.";
+  return "";
 }
 
 export class WorkerPool {
@@ -852,7 +899,7 @@ export class WorkerPool {
       },
       // Phase thinking policy: the report is written at the baseline effort; one whose response ran below it is rewritten at it.
       reviseResult: () => { try { return reportRewriteReason(this.manager!.session(worker.id)); } catch { return undefined; } },
-      toolGuard: async (name, input) => {
+      toolGuard: async (name, input, toolCallId) => {
         if (name === "task_plan" && !worker.singleWorkflow) return "task_plan is available only for standard single-workflow task assignments.";
         if (name === SPAWN_TOOL && !worker.spawn) return SPAWN_UNAVAILABLE;
         // The worker reports: the advisor closes for the rest of the assignment and a running one is awaited (bounded), so the
@@ -863,11 +910,18 @@ export class WorkerPool {
         await worker.activity?.enter(worker.id, name);
         // A worker that edits before it plans starts the plan advisor at that first edit (single.advisor).
         if (WRITE_TOOLS.has(name)) worker.advisor?.trigger("first_edit");
+        // Ultra: open the call's integrity probe (what the workspace and the candidate copies were before it ran; src/orchestrator/ultra.ts).
+        await worker.ultra?.beginCall(toolCallId, name).catch(() => undefined);
         return undefined;
       },
       writeFileGuard: (file, signal) => signal?.aborted ? "cancelled" : this.guard(worker, "ast_rewrite", { path: file }),
       // Resolve the current assignment's tracker at event time, including its closing snapshot.
-      onToolExecution: event => worker.activity?.record(worker.id, event),
+      onToolExecution: event => {
+        const pending = worker.activity?.record(worker.id, event);
+        // Ultra: the end of a call closes its probe (fingerprints after it ran); awaited like the activity snapshot, before the worker goes on.
+        const ultra = event.phase === "end" && event.toolCallId ? worker.ultra?.endCall(event.toolCallId).catch(() => undefined) : undefined;
+        return ultra ? Promise.all([pending, ultra]).then(() => undefined) : pending;
+      },
     };
   }
   list(): AgentSnapshot[] {
@@ -951,6 +1005,9 @@ export class WorkerPool {
     return this.disposal;
   }
   private async guard(worker: Worker, toolName: string, input: Record<string, unknown>): Promise<string | undefined> {
+    // Ultra: candidate copies, the protected basis, and the workspace before an adoption are not the orchestrator's to write.
+    const ultra = worker.ultra?.guardWrite(toolName, input);
+    if (ultra) return ultra;
     // Worker bash is not a sandbox; its obvious literal write targets follow the same outside-workspace policy as the file tools.
     if (toolName === "bash" && typeof input.command === "string") {
       const verdict = checkBashWrites(input.command, { cwd: worker.cwd, roots: worker.roots ?? [], readOnly: !WRITING_KINDS.has(worker.role) });
@@ -1009,11 +1066,29 @@ export class WorkerPool {
       throw error;
     }
   }
+  /**
+   * The mode an assignment runs in when it is not the session's (docs/orchestrator.md 14.5): a one-shot `/orche <mode> <prompt>` turn
+   * gives its mode to the assignments it starts. Later, only a provable continuation of that request keeps it: with task ledgers
+   * (`ledgerOn`) continuing its task (`task`, also on another or a new worker). A worker is not a request: reusing one (`worker`, live or
+   * handed over after it went) for a later turn, or a new or unpinned task, runs in the session's mode. Only for calls from a
+   * delegating session (SDK callers without a mode keep their routing).
+   */
+  private requestModeOf(args: TaskArgs, ledgerOn: boolean): RequestMode | undefined {
+    if (!isDelegatingMode(args.mainMode)) return undefined;
+    if (args.oneShot) return { mode: args.mainMode, source: "one-shot", session: args.oneShot.session };
+    if (!ledgerOn) return undefined;
+    // Ledgers come from session entries (untrusted): only a valid mode counts.
+    const task = args.task !== undefined ? this.ledgers.get(args.task) : undefined;
+    return isDelegatingMode(task?.requestMode) ? { mode: task.requestMode, source: "task", by: task.taskId, session: args.mainMode } : undefined;
+  }
+
   private async executeAssignment(args: TaskArgs, signal: AbortSignal): Promise<{ text: string; details: TaskDetails }> {
     if (this.disposed) throw new Error("Worker pool is disposed");
     const grant = resolveGitGrant(args.role, args.git); // before any worker is touched: a bad grant spawns and changes nothing
     const started = Date.now();
-    const workflowMode = args.mainMode === "single";
+    // single, strong and ultra share the single workflow; strong and ultra run it on the strong tiers, ultra orchestrates by its stages.
+    // (A request mode, resolved once the config is known, is a delegating mode too: these three do not depend on which one.)
+    const workflowMode = isDelegatingMode(args.mainMode);
     const singleWorkflow = workflowMode && ["explore", "answer", "implement", "verify"].includes(args.role);
     const inheritMain = singleWorkflow;
     const modelWarnings: string[] = [];
@@ -1045,10 +1120,16 @@ export class WorkerPool {
     signal.throwIfAborted();
     // Task ledgers (single.ledger): `task` continues a task, also with another or a new worker; without it every assignment starts a new task.
     const ledgerOn = singleWorkflow && config.single.ledger;
+    // Everything below (tiers, prompts, tools, ultra) reads the request's mode, never the session's, for such assignments.
+    const requestMode = this.requestModeOf(args, ledgerOn);
+    if (requestMode) args = { ...args, mainMode: requestMode.mode };
+    const ultraMode = args.mainMode === "ultra";
     const ledgerNotes: string[] = [];
     // The orchestrator (docs/orchestrator.md): implement/answer workers of the single workflow decide whether to split and may run
-    // sub-workers with orche_spawn. `single.spawn: false` keeps the earlier single worker.
-    const orchestrate = singleWorkflow && config.single.spawn && (args.role === "implement" || args.role === "answer");
+    // sub-workers with orche_spawn. `single.spawn: false` keeps the earlier single worker; ultra always orchestrates (its stages
+    // are orche_spawn calls), which the result says when single.spawn is off.
+    const orchestrate = singleWorkflow && (config.single.spawn || ultraMode) && (args.role === "implement" || args.role === "answer");
+    if (orchestrate && ultraMode && !config.single.spawn) ledgerNotes.push("Note: single.spawn: false does not apply in ultra mode: the ultra stages run with orche_spawn (single and strong keep it off).");
     let continued: TaskLedger | undefined;
     if (args.task !== undefined && ledgerOn) {
       continued = this.ledgers.get(args.task);
@@ -1129,19 +1210,39 @@ export class WorkerPool {
       retirementLines.push(`${worker.id} retired: GUI desktop ${gui ? (worker.gui ? "configuration changed" : "requested") : "no longer requested"}; starting a fresh worker.`);
       worker = undefined;
     }
+    // The ultra tool set (orche_spawn with the ultra reasons, orche_adopt) is installed when a session is created and cannot be
+    // removed: a worker crosses the ultra boundary as a fresh worker, briefed from the transcript of the one it replaces.
+    let modeHandover: GoneWorker | undefined;
+    if (worker && singleWorkflow && !!worker.ultraTools !== ultraMode) {
+      const from = worker.mode ?? "single";
+      await this.retire(worker.id, `replaced: mode changed (${from} -> ${args.mainMode})`);
+      retired.push(worker.id);
+      retirementLines.push(`${worker.id} retired: ${ultraMode ? "ultra mode needs" : "leaving ultra mode drops"} the ultra tool set (orche_spawn stages, orche_adopt); a fresh worker continues, briefed from ${worker.id}'s transcript.`);
+      modeHandover = this.gone.get(worker.id);
+      worker = undefined;
+    }
     const reusedContext = !!worker;
+    /** A reused worker whose previous assignment ran in another mode (single <-> strong): the same tools, other model tiers. */
+    const previousMode = worker && worker.mode && worker.mode !== args.mainMode ? worker.mode : undefined;
     this.manager ??= new AgentManager(runtime, { resultSchemas: orchestrationResultSchemas, stopTimeoutMs: this.options.stopTimeoutMs });
     this.manager.setRequestBudget(limits.assignmentRequests);
     const routeRole = args.role === "answer" ? "analyst" : args.role === "explore" ? config.routes.workers?.explorerRoles?.[0] ?? "explorer-path" : args.role === "implement" ? "implementer" : args.role === "verify" ? "verifier" : args.role;
     // `models.orchestrator` (docs/orchestrator.md 12) replaces main's model for the standard roles; unresolvable: inherit main.
+    // strong and ultra try `models.strong-orchestrator` first, then `models.orchestrator` (unset or unresolvable strong tier).
     // `{ "model": "main" }` (INHERIT_MAIN) names main's model explicitly: the inheritance below, with the tier's thinking if it sets one.
     // `thinking: "main"` (or none) takes main's CURRENT thinking at this hand-off; Pi clamps it to the model (meta.thinking records the result).
-    const tier = inheritMain ? config.routes.models?.orchestrator : undefined;
+    const tiers = modeTiers(config.routes.models, args.mainMode);
+    let tier: TierSettings | undefined;
+    let tierKey: string | undefined;
+    if (inheritMain) for (const [index, candidate] of tiers.orchestrators.entries()) {
+      const slash = candidate.tier.model.indexOf("/");
+      if (inheritsMain(candidate.tier) || runtime.getModel(candidate.tier.model.slice(0, slash), candidate.tier.model.slice(slash + 1))) { tier = candidate.tier; tierKey = candidate.key; break; }
+      const next = tiers.orchestrators[index + 1];
+      modelWarnings.push(`Warning: models.${candidate.key} ${candidate.tier.model} is unresolvable in orche's runtime; ${next ? `falling back to models.${next.key} ${next.tier.model}` : "inheriting main's model instead"}.`);
+    }
     const tierMain = inheritsMain(tier);
     const tierLevel = tierThinking(tier);
-    const tierModel = tier && !tierMain ? runtime.getModel(tier.model.slice(0, tier.model.indexOf("/")), tier.model.slice(tier.model.indexOf("/") + 1)) : undefined;
-    if (tier && !tierMain && !tierModel) modelWarnings.push(`Warning: models.orchestrator ${tier.model} is unresolvable in orche's runtime; inheriting main's model instead.`);
-    const configured = tier && tierModel ? tier : undefined;
+    const configured = tier && !tierMain ? tier : undefined;
     const mainModel = inheritMain && !configured && args.model ? runtime.getModel(args.model.provider, args.model.id) : undefined;
     const mainWindow = args.model?.contextWindow ?? mainModel?.contextWindow ?? 0;
     const tierExtended = configured?.extendedContext ?? config.routes.extendedContext;
@@ -1196,15 +1297,18 @@ export class WorkerPool {
       // The worker's one transcript, for all of its assignments: <records>/<session>/workers/<id>-<spawn time>.jsonl.
       const sessionFile = workerSessionFile(resolved, { ...(args.currentSession?.id ? { parentSessionId: args.currentSession.id } : {}), workerId: id, spawnedAt: Date.now() });
       // orche_spawn only with `single.spawn` on: `single.spawn: false` keeps the earlier single worker's tool set exactly.
-      const spawnTool = singleWorkflow && config.single.spawn;
-      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool, ...(gui ? { gui: gui.key } : {}) };
+      // Ultra workers get the ultra tool set (orche_spawn with the ultra reasons, orche_adopt) whatever single.spawn says.
+      const spawnTool = singleWorkflow && (config.single.spawn || ultraMode);
+      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool, ...(singleWorkflow && ultraMode ? { ultraTools: true } : {}), ...(gui ? { gui: gui.key } : {}) };
       const meta = worker;
       meta.model = route.model;
       meta.thinking = route.thinking ?? "off";
       baselineLevel = route.thinking ?? "off";
       const customTools = [...(images ? [createGenerateImageTool({ cwd: args.cwd, runtime, images })] : []), ...(singleWorkflow ? [taskPlanToolFor(meta, () => this.manager!.session(meta.id))] : []),
       // orche_spawn: registered once per session; usable only while an orchestrator assignment set `meta.spawn` (the guard refuses it otherwise).
-      ...(spawnTool ? [createSpawnTool(() => meta.spawn ?? SPAWN_UNAVAILABLE)] : [])];
+      ...(spawnTool ? [createSpawnTool(() => meta.spawn ?? SPAWN_UNAVAILABLE, { ultra: !!meta.ultraTools })] : []),
+      // orche_adopt (ultra): usable only while an ultra implement assignment runs (`meta.ultra`); the tool refuses otherwise.
+      ...(meta.ultraTools ? [createAdoptTool(() => meta.ultra ?? ADOPT_UNAVAILABLE)] : [])];
       // generate_image has its own timeout (images.timeoutMs, 180 s by default): liveness bounds a silent call by it, not by the generic tool bound.
       // GUI tools likewise (the first call of a desktop starts it).
       const toolTimeoutsMs = { ...(images ? { generate_image: images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } : {}), ...gui?.toolTimeoutsMs };
@@ -1235,6 +1339,9 @@ export class WorkerPool {
     const meta = worker;
     if (meta.taskWorkflowInstalled) configureTaskWorkflow(this.manager.session(meta.id), singleWorkflow ? taskCompactionFor(meta) : undefined);
     meta.singleWorkflow = singleWorkflow;
+    meta.mode = args.mainMode;
+    // The mode of this assignment's request (job start entry); a later assignment resolves its own (requestModeOf), never from this.
+    meta.requestMode = requestMode?.mode;
     const activeSession = this.manager.session(meta.id);
     // The assignment's thinking: B fixed now (Pi clamps it to the model), S one supported level below; the Task DAG policy switches
     // between them from the next request on (src/pi/thinking-policy.ts). Always from B: never from a level the previous assignment
@@ -1264,6 +1371,10 @@ export class WorkerPool {
     const handoffRequest = args.request;
     // Orchestrator assignment: the sub-workers its orche_spawn calls ran, and the reasons it used (its split decision must name them).
     const orchestrating = orchestrate && !!meta.spawnTool;
+    /** Ultra: the stage contract of this orchestrator assignment (created with its spawn context; src/orchestrator/ultra.ts). */
+    let ultraRun: UltraRun | undefined;
+    /** The ultra outcome: a report accepted with stage complete (the next ultra assignment of the task then starts afresh). */
+    let ultraDone = false;
     const spawned: SubWorkerOutcome[] = [];
     const spawnedReasons = new Set<SpawnReason>();
     const spawnWarnings: string[] = [];
@@ -1274,15 +1385,17 @@ export class WorkerPool {
     // current model and thinking; specialists on their own routes. Resolved before the run record is written, so that its
     // warnings include an unresolvable models.worker.
     const current: ModelRoute = { role: routeRole, model: meta.model ?? route.model, ...(meta.thinking ?? route.thinking ? { thinking: (meta.thinking ?? route.thinking) as ThinkingLevel } : {}), ...(configured && tierExtended !== undefined ? { extendedContext: tierExtended } : {}) };
-    const workerTier = orchestrating ? config.routes.models?.worker : undefined;
+    // strong and ultra: `models.strong-worker`, else the (strong) orchestrator's route; `models.worker` never applies there.
+    const workerKey = tiers.workerKey;
+    const workerTier = orchestrating ? tiers.worker?.tier : undefined;
     const workerMain = inheritsMain(workerTier);
     const workerLevel = tierThinking(workerTier);
     const workerTierModel = !workerTier ? undefined
       : workerMain ? (args.model ? runtime.getModel(args.model.provider, args.model.id) : undefined)
       : runtime.getModel(workerTier.model.slice(0, workerTier.model.indexOf("/")), workerTier.model.slice(workerTier.model.indexOf("/") + 1));
     if (workerTier && !workerTierModel) modelWarnings.push(workerMain
-      ? `Warning: models.worker "main": ${sessionModel ? `main's model ${sessionModel} is unresolvable in orche's runtime` : "main's model is absent"}; sub-workers inherit the orchestrator's model instead.`
-      : `Warning: models.worker ${workerTier.model} is unresolvable in orche's runtime; sub-workers inherit the orchestrator's model instead.`);
+      ? `Warning: models.${workerKey} "main": ${sessionModel ? `main's model ${sessionModel} is unresolvable in orche's runtime` : "main's model is absent"}; sub-workers inherit the orchestrator's model instead.`
+      : `Warning: models.${workerKey} ${workerTier.model} is unresolvable in orche's runtime; sub-workers inherit the orchestrator's model instead.`);
     const workerExtended = workerTier?.extendedContext ?? config.routes.extendedContext;
     const subSource: Exclude<SubWorkerModelSource, "route"> = workerTier && workerTierModel ? (workerMain ? "config:main" : "config") : "orchestrator";
     /** The sub-workers' thinking (SubWorkerThinkingSource): models.worker's level, main's CURRENT thinking named by it
@@ -1344,7 +1457,7 @@ export class WorkerPool {
       const taskId = ledger.taskId;
       meta.taskId = taskId;
       meta.ledger = () => this.ledgers.get(taskId);
-      this.persist(recordHandoff(ledger, { request: handoffRequest, at: Date.now(),
+      this.persist(recordHandoff(ledger, { request: handoffRequest, at: Date.now(), ...(requestMode ? { requestMode: requestMode.mode } : {}),
         primary: { worker: meta.id, ...(meta.model ? { model: meta.model } : {}), ...(meta.thinking ? { thinking: meta.thinking } : {}), ...(workerFile ? { sessionFile: workerFile } : {}) } }));
     } else {
       meta.taskId = undefined;
@@ -1352,11 +1465,15 @@ export class WorkerPool {
     }
     // A gone worker named without a ledger: the new worker is briefed from what the gone one left (transcript, last record, summary).
     if (handover && !handedFrom) briefing = renderHandover(handover, meta.id);
-    const continuedFrom = handedFrom?.worker ?? handover?.id;
+    // A worker replaced at the ultra boundary: its successor is briefed from it (unless the task ledger briefs it already).
+    else if (modeHandover && !handedFrom) briefing = renderHandover(modeHandover, meta.id);
+    const continuedFrom = handedFrom?.worker ?? handover?.id ?? modeHandover?.id;
     const ledgerDetails = (): Pick<TaskDetails, "task" | "continuedFrom"> => ({ ...(ledger ? { task: ledger.taskId } : {}), ...(continuedFrom ? { continuedFrom } : {}) });
     const taskLines = (): string[] => [
       ...(ledger ? [`Task ledger ${ledger.taskId}, assignment ${ledger.assignments}: pass task "${ledger.taskId}" for a follow-up of this task (also when another or a new worker takes it over); omit it for a different task.`] : []),
       ...(ledger && handedFrom ? [`Note: ${meta.id} took task ${ledger.taskId} over from ${handedFrom.worker}${handedFrom.live ? "" : " (not live)"}, briefed from its task ledger.`] : []),
+      ...(modeHandover && !handedFrom ? [`Note: ${meta.id} continues the work of ${modeHandover.id} in ${args.mainMode} mode, briefed from ${modeHandover.id}'s transcript. Name ${meta.id} from now on.`] : []),
+      ...(previousMode ? [`Note: ${meta.id} switched from ${previousMode} to ${args.mainMode} mode for this assignment: it runs on ${meta.model ?? "its model"}${tierKey ? ` (models.${tierKey})` : ""}.`] : []),
       ...(handover && !handedFrom ? [`Note: ${handover.id} was gone (${handover.reason}); ${meta.id} continued its work, briefed from ${handover.id}'s transcript${handover.record ? " and last record" : ""}. Name ${meta.id} from now on.`] : []),
       ...ledgerNotes,
     ];
@@ -1367,7 +1484,7 @@ export class WorkerPool {
       manifest: {
         config: describeSource(config.source), routes: routesSummary(config.routes),
         worker: { id: meta.id, role: args.role, ...(workerFile ? { sessionFile: workerFile } : {}) },
-        assignment: { role: args.role, reusedWorker: reusedContext, model: meta.model, thinking: meta.thinking, modelSource, thinkingSource, ...(files ? { files } : {}), ...(grant ? { git: grant } : {}), ...(meta.gui ? { gui: true } : {}), ...(advisorRoute ? { advisor: { model: advisorRoute.route.model, ...(advisorRoute.route.thinking ? { thinking: advisorRoute.route.thinking } : {}), modelSource: advisorRoute.source, thinkingSource: advisorRoute.thinkingSource } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}) },
+        assignment: { role: args.role, reusedWorker: reusedContext, model: meta.model, thinking: meta.thinking, modelSource, thinkingSource, ...(files ? { files } : {}), ...(grant ? { git: grant } : {}), ...(meta.gui ? { gui: true } : {}), ...(advisorRoute ? { advisor: { model: advisorRoute.route.model, ...(advisorRoute.route.thinking ? { thinking: advisorRoute.route.thinking } : {}), modelSource: advisorRoute.source, thinkingSource: advisorRoute.thinkingSource } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(usesStrongTiers(args.mainMode) ? { mode: args.mainMode, ...(tierKey ? { tier: tierKey } : {}) } : {}), ...(requestMode ? { requestMode } : {}) },
         ...(concurrent ? { concurrentSessions: concurrent.activity } : {}),
         // The process that runs it: a later session start tells an orphan (that process is gone) from a record still being written.
         owner: { pid: process.pid },
@@ -1398,10 +1515,11 @@ export class WorkerPool {
     /** The Split line of the result (and the sub-workers it ran); empty unless this is an orchestrator assignment. */
     const splitLines = (split: SplitDecision | undefined): string[] => {
       if (!orchestrating) return [];
-      const head = split ? `Split: ${split.decision === "none" ? "none" : (split.criteria ?? []).join(" + ") || "split"} — ${split.reason.replace(/\s+/g, " ")}` : "Split: none (not reported)";
-      if (!spawned.length) return [head];
+      // Ultra: the stages that ran and the report gate instead of a split decision.
+      const head = ultraRun ? ultraRun.lines() : [split ? `Split: ${split.decision === "none" ? "none" : (split.criteria ?? []).join(" + ") || "split"} — ${split.reason.replace(/\s+/g, " ")}` : "Split: none (not reported)"];
+      if (!spawned.length) return head;
       const cost = spawned.reduce((sum, outcome) => sum + outcome.costUSD, 0);
-      return [head, `Sub-workers: ${spawned.map(outcome => `${outcome.id} ${outcome.name} (${outcome.role}, ${outcome.reason}; ${outcomeModelUse(outcome)}): ${outcome.status}`).join("; ")} — ${spawned.reduce((sum, outcome) => sum + outcome.requests, 0)} requests${cost ? `, $${cost.toFixed(2)}` : ""}`, ...spawnWarnings.map(warning => `Warning (orche_spawn): ${warning}`), ...verificationLines()];
+      return [...head, `Sub-workers: ${spawned.map(outcome => `${outcome.id} ${outcome.name} (${outcome.role}, ${outcome.reason}; ${outcomeModelUse(outcome)}): ${outcome.status}`).join("; ")} — ${spawned.reduce((sum, outcome) => sum + outcome.requests, 0)} requests${cost ? `, $${cost.toFixed(2)}` : ""}`, ...spawnWarnings.map(warning => `Warning (orche_spawn): ${warning}`), ...verificationLines()];
     };
     /** Rounds refused at the verification cap: the review did not converge, so the result never reads as a clean pass. */
     const verificationLines = (): string[] => verificationRefused
@@ -1420,7 +1538,25 @@ export class WorkerPool {
       if (!summary) return [];
       return [`Thinking policy: ${summary.mode}${summary.mode === "phase" ? ` (baseline ${summary.baseline ?? "?"}, steps ${summary.step ?? "?"}): ${summary.switches} level switch${summary.switches === 1 ? "" : "es"}` : " (checkpoints)"}${summary.escalated?.length ? `; at baseline: ${summary.escalated.map(item => `${item.node} (${item.reason})`).join(", ")}` : ""}${summary.redecompositions ? `; ${summary.redecompositions} re-decomposition${summary.redecompositions === 1 ? "" : "s"}` : ""}${summary.falseRedecompositions ? `; ${summary.falseRedecompositions} plan update${summary.falseRedecompositions === 1 ? "" : "s"} did not split the node as asked` : ""}${summary.reportRewrites ? `; ${summary.reportRewrites} report${summary.reportRewrites === 1 ? "" : "s"} written below the baseline rewritten at it` : ""}`];
     };
-    const workflowDetails = () => ({ thinking: meta.thinking, ...(Object.keys(answered).length ? { models: { ...answered } } : {}), ...(meta.plan ? { plan: structuredClone(meta.plan) } : {}), ...policyDetails(),
+    /** strong and ultra: the mode, the tier the model came from, and (ultra) the stage summary; nothing in single (unchanged details). */
+    const modeDetails = (): Pick<TaskDetails, "mode" | "modelTier" | "ultra" | "requestMode"> => ({
+      ...(usesStrongTiers(args.mainMode) ? { mode: args.mainMode, ...(tierKey && modelSource !== "route" ? { modelTier: tierKey } : {}), ...(ultraRun ? { ultra: ultraRun.summary() } : {}) } : {}),
+      ...(requestMode ? { requestMode } : {}),
+    });
+    /** A request mode that differs from the session's: where it came from and how the work keeps it (or leaves it). */
+    const requestLine = (): string[] => {
+      if (!requestMode || requestMode.mode === requestMode.session) return [];
+      // With task ledgers the task is the request; without them nothing outside the one-shot turn identifies it.
+      const keep = ledger
+        ? `Task ${ledger.taskId} keeps ${requestMode.mode} for its continuations (task "${ledger.taskId}"); other tasks run in the session's mode`
+        : `After this request, assignments to ${meta.id} (worker "${meta.id}") run in the session's mode; to continue in ${requestMode.mode}, the user repeats /orche ${requestMode.mode} <PROMPT>`;
+      return [requestMode.source === "one-shot"
+        ? `Request mode: ${requestMode.mode} (one-shot /orche ${requestMode.mode}; the session stays in ${requestMode.session ?? "its mode"}). ${keep}.`
+        : `Request mode: ${requestMode.mode} (kept from the one-shot /orche ${requestMode.mode} request that ${requestMode.source} ${requestMode.by} belongs to; the session is in ${requestMode.session ?? "another mode"}). ${keep}.`];
+    };
+    const modeLines = (): string[] => [...requestLine(), ...(usesStrongTiers(args.mainMode)
+      ? [`Mode: ${args.mainMode} (orchestrator: ${tierKey && modelSource !== "route" ? `models.${tierKey}` : modelSource === "route" ? "a configured route" : "main's model"}${orchestrating ? `; sub-workers: ${subSource === "orchestrator" ? "the orchestrator's model" : `models.${workerKey}`}` : ""})`] : [])];
+    const workflowDetails = () => ({ ...modeDetails(), thinking: meta.thinking, ...(Object.keys(answered).length ? { models: { ...answered } } : {}), ...(meta.plan ? { plan: structuredClone(meta.plan) } : {}), ...policyDetails(),
       ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(meta.gui ? { gui: true as const } : {}), ...spawnedDetails() });
     let requests = 0;
     /** Provider-reported cost of this assignment's own requests (the split log); undefined while none was reported. */
@@ -1474,6 +1610,10 @@ export class WorkerPool {
         ...(plan ? { checkpoint: { assignment: ledger?.assignments ?? 0, worker: meta.id, done: nodes.length - remaining.length, total: nodes.length, remaining: remaining.map(node => `${node.id} (${node.status})`) } } : {}),
       };
     };
+    /** Ultra after a failure: what survives for a continuation and what must be redone. */
+    const ultraResumeLine = (): string => ledger
+      ? `Ultra resume: the candidates, their workspace copies (in ${meta.id}'s scratch directory) and the adoptions of task ${ledger.taskId} continue in ${meta.id}'s next ultra assignment of that task (worker "${meta.id}", task "${ledger.taskId}"); evidence refs are per assignment, so the checks are run again. A new worker starts the stages afresh.`
+      : `Ultra resume: without a task ledger the next assignment starts the stages afresh; the workspace keeps what was adopted.`;
     const resumeLines = (info: NonNullable<TaskDetails["resume"]>): string[] => {
       const until = new Date(info.retainedUntil).toISOString().replace("T", " ").replace(/:\d{2}\.\d+Z$/, "Z");
       const checkpoint = info.checkpoint;
@@ -1589,7 +1729,7 @@ export class WorkerPool {
         ...(extra.summary ? { summary: extra.summary } : {}),
         ...(extra.failure ? { failure: extra.failure } : {}),
         ...(status === "cancelled" && this.options.controller.cancelledByUser ? { cancelledByUser: true } : {}),
-        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs, model: details.model, thinking: details.thinking, ...(details.models ? { models: { ...details.models } } : {}), modelSource, thinkingSource, checklist: details.checklist, plan: details.plan, compactions: details.compactions, warnings: details.warnings, ...(details.split ? { split: details.split } : {}), ...(details.thinkingPolicy ? { thinkingPolicy: details.thinkingPolicy } : {}) },
+        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs, model: details.model, thinking: details.thinking, ...(details.models ? { models: { ...details.models } } : {}), modelSource, thinkingSource, checklist: details.checklist, plan: details.plan, compactions: details.compactions, warnings: details.warnings, ...(details.split ? { split: details.split } : {}), ...(details.thinkingPolicy ? { thinkingPolicy: details.thinkingPolicy } : {}), ...(details.mode ? { mode: details.mode } : {}), ...(details.ultra ? { ultra: details.ultra } : {}) },
         workspace: { changes: details.changes, otherChanges: details.otherChanges, ...(details.submodules ? { submodules: details.submodules } : {}), ...(details.headMoved ? { headMoved: details.headMoved } : {}) },
         ...(details.git ? { git: details.git } : {}),
         ...(retired.length ? { retired } : {}),
@@ -1636,8 +1776,18 @@ export class WorkerPool {
       if (orchestrating) {
         const tracked = audit;
         let sub = 0;
+        if (ultraMode) {
+          // The same worker continuing the same task (after a timeout or a blocked report) keeps its candidates and their copies.
+          const carried = reusedContext && ledger && meta.ultraCarry?.task === ledger.taskId ? meta.ultraCarry.state : undefined;
+          const session = this.manager.session(meta.id);
+          ultraRun = new UltraRun({ orchestrator: meta.id, cwd: args.cwd, readOnly, ...(meta.scratch ? { scratch: meta.scratch } : {}), ledger: () => evidenceLedgerOf(session), verifyCommands: config.routes.verifyCommands ?? [], ...(carried ? { carried } : {}), onEvent: event => record?.appendEvent(event) });
+          meta.ultra = ultraRun;
+          meta.ultraCarry = undefined;
+          // Refs on every tool result: the ultra gate checks the cited [orche ref Tn] against this session's calls.
+          evidenceLedgerOf(session).tag = true;
+        }
         meta.spawn = {
-          orchestrator: meta.id, ...(files ? { scope: files } : {}), ...(readOnly ? { readOnly: true } : {}), signal: AbortSignal.any([signal, assignmentEnd.signal]),
+          orchestrator: meta.id, ...(files ? { scope: files } : {}), ...(readOnly ? { readOnly: true } : {}), ...(ultraRun ? { ultra: ultraRun } : {}), signal: AbortSignal.any([signal, assignmentEnd.signal]),
           nextId: () => `${meta.id}.${++sub}`,
           runWorker: createSubWorkerRunner({
             orchestrator: meta.id, cwd: args.cwd, runtime, route: standardSubRoute, routeSource: subSource, thinkingSource: standardSubRoute === subRoute ? subThinkingSource : "orchestrator:step", ...(subWindow ? { inheritedContextWindow: subWindow } : {}),
@@ -1645,7 +1795,7 @@ export class WorkerPool {
             ...(thinkingPolicy.mode === "phase" ? { lengthLadder: thinkingPolicy.lengthRecovery } : {}),
             specialistRoute: role => resolveSpecialistRoute(config.routes, role, (provider, id) => !!runtime.getModel(provider, id)),
             imageTool: () => config.routes.images ? createGenerateImageTool({ cwd: args.cwd, runtime, images: config.routes.images }) : undefined,
-            prompt: (planned, imagesAvailable) => subWorkerPrompt(planned, meta.id, config.routes.verifyCommands ?? [], imagesAvailable),
+            prompt: (planned, imagesAvailable) => subWorkerPrompt(planned, meta.id, config.routes.verifyCommands ?? [], imagesAvailable, !!ultraRun),
             timeoutMs: limits.assignmentMs, maxTurns: Math.max(50, Math.round((limits.assignmentRequests ?? 200) * 1.5)),
             // Every sub-worker gets the same activity-aware deadline as this assignment (the resolved limits: base, linear or fixed
             // extensions, activity window, observation), from its own start and judged by its own session; this assignment still bounds it.
@@ -1673,7 +1823,8 @@ export class WorkerPool {
             record?.appendEvent({ type: "verification_refused", timestamp: Date.now(), worker: meta.id, rounds, cap } as never);
           },
         } satisfies SpawnContext;
-        meta.roundCheck = (_kind, data) => splitError(data, spawnedReasons) ?? unresolvedError(data, verificationRefused);
+        // Ultra replaces the split decision with its report gate; the verification cap's data.unresolved rule applies to both.
+        meta.roundCheck = (kind, data) => (ultraRun ? ultraRun.gateError(kind, data) : splitError(data, spawnedReasons)) ?? unresolvedError(data, verificationRefused);
       }
       // The scratch dir / extra write roots sentence goes last, after the git line: the role instructions stay as they were.
       const rootsLine = [
@@ -1682,7 +1833,7 @@ export class WorkerPool {
         // The DAG is required for implement; an answer worker that plans gets the same rules from task_plan's own errors and notes.
         singleWorkflow && args.role === "implement" ? thinkingPolicyInstructions(thinkingPolicy) : "",
       ].filter(Boolean).join("\n");
-      const prompt = `${assignmentPrompt({ ...args, request: handoffRequest, orchestrate: orchestrating, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant, orchestrating ? orchestratorSection() : "")}${rootsLine ? `\n${rootsLine}` : ""}`;
+      const prompt = `${assignmentPrompt({ ...args, request: handoffRequest, orchestrate: orchestrating, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant, orchestrating ? (ultraRun ? ultraSection(readOnly) : orchestratorSection()) : "")}${rootsLine ? `\n${rootsLine}` : ""}`;
       const handoff = reusedContext && workflowMode ? prompt.replace(/^(Assignment[^\n]*\n)/, "$1This Assignment message supersedes earlier requirement ids and plans, including any assignment preserved at compaction time. Use only this round's requirements and Task DAG.\n") : prompt;
       // The plan advisor (single.advisor): armed before the hand-off, started by the worker's first accepted task_plan (or first edit).
       if (advisorRoute) {
@@ -1704,7 +1855,7 @@ export class WorkerPool {
       assigned = true;
       try {
         const sessionFile = workerFile;
-        args.onStarted?.({ worker: meta.id, role: args.role, ...(meta.model ? { model: meta.model } : {}), ...(meta.thinking ? { thinking: meta.thinking } : {}), ...(record ? { record: record.dir } : {}), ...(ledger ? { task: ledger.taskId } : {}), ...(continuedFrom ? { continuedFrom } : {}), ...(sessionFile ? { sessionFile } : {}) });
+        args.onStarted?.({ worker: meta.id, role: args.role, ...(meta.model ? { model: meta.model } : {}), ...(meta.thinking ? { thinking: meta.thinking } : {}), ...(record ? { record: record.dir } : {}), ...(ledger ? { task: ledger.taskId } : {}), ...(continuedFrom ? { continuedFrom } : {}), ...(sessionFile ? { sessionFile } : {}), ...(meta.requestMode ? { requestMode: meta.requestMode } : {}) });
       } catch { /* an observer cannot stop the assignment */ }
       if (signal.aborted) abort();
       progress();
@@ -1775,6 +1926,7 @@ export class WorkerPool {
       const finishedAt = Date.now();
       const durationMs = finishedAt - started;
       const data = dataOf(outcome.result.data);
+      if (ultraRun) ultraDone = data.status !== "blocked" && dataOf(data.ultra).stage === "complete";
       const checklist = Array.isArray(data.checklist) ? data.checklist as ChecklistItem[] : undefined;
       const checklistLines: string[] = [];
       if (checklist) {
@@ -1810,7 +1962,7 @@ export class WorkerPool {
       };
       finishRecord("done", details, { summary: meta.summary });
       const planNotes = singleWorkflow && !meta.plan ? ["Note: no Task DAG recorded in this assignment."] : [];
-      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, ...modelWarnings, modelLineOf(details), ...contextLine(),
+      const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, ...modelWarnings, modelLineOf(details), ...modeLines(), ...contextLine(),
         ...taskLines(), "", meta.summary, ...roleData, ...checklistLines, ...outcomeLines(), ...policyLines(), ...splitLines(splitOf(data)), "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
         ...planNotes, ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: follow up with the same worker — ${note}`] : [])].join("\n");
       return { text: withRecordLine(text, record?.dir), details };
@@ -1834,7 +1986,7 @@ export class WorkerPool {
       const thrown = warning ? withConcurrentWarning(error, warning) : error;
       if (resume) { details.resume = resume; record?.update({ resume }); }
       finishRecord(error.kind === "cancelled" ? "cancelled" : "failed", details, { failure: failureReason(base) });
-      throw new TaskFailedError([thrown instanceof Error ? thrown.message : base, ...modelWarnings, ...contextLine(), ...taskLines(), ...(resume ? resumeLines(resume) : []), ...advisorResultLines()].join("\n"), details, { kind: error.kind, status: error.status, reason: failureReason(base) });
+      throw new TaskFailedError([thrown instanceof Error ? thrown.message : base, ...modelWarnings, ...modeLines(), ...contextLine(), ...taskLines(), ...(resume ? resumeLines(resume) : []), ...(ultraRun ? [...ultraRun.lines(), ultraResumeLine()] : []), ...advisorResultLines()].join("\n"), details, { kind: error.kind, status: error.status, reason: failureReason(base) });
     } finally {
       signal.removeEventListener("abort", abort);
       // An advisor still running here (an unexpected error) is stopped and awaited: it never outlives its assignment.
@@ -1857,6 +2009,13 @@ export class WorkerPool {
       meta.roundCheck = undefined;
       assignmentEnd.abort(new Error(`${meta.id} assignment ended`));
       meta.spawn = undefined;
+      // Ultra: what an unfinished run leaves (candidates, copies, adoptions) continues with this worker's next assignment of the same task;
+      // a completed run frees the space of its copies.
+      if (ultraRun) {
+        meta.ultraCarry = ledger && !ultraDone ? { task: ledger.taskId, state: structuredClone(ultraRun.state) } : undefined;
+        meta.ultra = undefined;
+        await ultraRun.end(ultraDone).catch(() => undefined);
+      }
       // Idle at the baseline: a step level or a recovery step-down of this assignment never outlives it.
       try { const ended = this.manager.session(meta.id); thinkingStateOf(ended).onSwitch = undefined; setThinkingPhase(ended, "baseline", "assignment end"); } catch { /* disposed */ }
       meta.files = files;

@@ -45,7 +45,7 @@ export async function createHarness(options: {
   /** `mainMode` in the user config (default single delegates; unset omits the key). */
   /** Resolve the main provider in the worker runtime; default tests keep separate scripts/routes. */
   inheritMainModel?: boolean;
-  mainMode?: "single" | "direct" | "unset";
+  mainMode?: "single" | "strong" | "ultra" | "direct" | "unset";
   /**
    * `records` in the user config. The default is OFF here (`{ enabled: false }`), unlike the extension's own default (on): suites that do not
    * look at records keep their exact result texts and write nothing. Pass `true` for the defaults, or a `records` object (`dir`, `retentionDays`,

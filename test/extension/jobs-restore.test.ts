@@ -75,8 +75,9 @@ describe("recoverOrphanRecords", () => {
 
 describe("session start after a crash", () => {
   it("announces an interrupted job once, continues its worker with a briefed successor, and never reuses ids", async () => {
+    let notice = "";
     const h = await createHarness({
-      mainSteps: [tool("orche_task", { role: "explore", request: "look again", worker: "W4", wait: true }), reply("continued")],
+      mainSteps: [context => { notice = JSON.stringify(context.messages); return tool("orche_task", { role: "explore", request: "look again", worker: "W4", wait: true }); }, reply("continued")],
       orcheSteps: [tool("report_result", { kind: "explore", summary: "Found it again" })],
       mode: "tui", mainMode: "single", single: { spawn: false },
     });
@@ -94,6 +95,8 @@ describe("session start after a crash", () => {
     expect(h.notifications.filter(note => note.message.includes("J5 (W4")).length).toBe(1);
     // Naming the gone W4 continues with a NEW worker (W5, never W1) briefed from W4's transcript.
     await h.session.prompt("continue W4's work");
+    // The notice goes with the next prompt (kept over the reload), once.
+    expect(notice).toContain("still running when the previous pi process ended");
     const result = h.session.messages.find(message => message.role === "toolResult" && message.toolName === "orche_task");
     expect(result).toMatchObject({ isError: false, details: { worker: "W5", continuedFrom: "W4" } });
     expect(JSON.stringify(result)).toContain("W4 was gone (the pi process that ran it ended without a clean shutdown");

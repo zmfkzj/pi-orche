@@ -21,9 +21,9 @@ export function isMainMode(value: unknown): value is MainMode {
 export function isLegacyMainMode(value: unknown): value is (typeof LEGACY_MAIN_MODES)[number] {
   return typeof value === "string" && (LEGACY_MAIN_MODES as readonly string[]).includes(value);
 }
-/** Tools that are switched off (removed from the active set) in `mode`. */
+/** Tools that are switched off (removed from the active set) in `mode`: single, strong and ultra delegate every change. */
 export function blockedTools(mode: MainMode): readonly string[] {
-  return mode === "single" ? EDIT_TOOLS : DELEGATION_TOOLS;
+  return mode === "direct" ? DELEGATION_TOOLS : EDIT_TOOLS;
 }
 
 /**
@@ -46,14 +46,19 @@ const ORCHESTRATOR_SUPERVISION = `${SUPERVISION_BASE} The Split line says whethe
  * split the task across orche_task calls; it states the user's own wishes (e.g. an explicit independent review) in the request.
  */
 const ORCHESTRATOR_RULE = "The implement or answer worker is an orchestrator: it decides itself whether the task needs sub-workers (independent parallel parts, an isolated game-asset or video specialist, a fresh independent verifier), runs them, integrates their results and reports its decision on a `Split:` line. Do not split the task across orche_task calls and do not tell it how to split; put the user's own wishes, such as an explicit request for independent review or verification, into the request in the user's words.";
+/** Ultra (src/orchestrator/ultra.ts): the same one hand-off; the worker runs the enforced quality-first stages itself. */
+const ULTRA_RULE = "The implement or answer worker is an ultra orchestrator: it runs an independent verification basis and hypotheses (exploration), 2-4 independent candidates (implementations in isolated workspace copies, or answers), execution-based evaluation, adoption of the best verified candidate, an independent counterexample review and integration checks; a report gate enforces the stages and its result carries `Ultra:` lines (stages, candidates, adoption, gate). Do not split the task across orche_task calls and do not prescribe the stages; ultra takes much longer and costs several times a single task, which the user chose for quality.";
+const ULTRA_SUPERVISION = `${SUPERVISION_BASE} The Ultra lines say which stages ran, which candidate was adopted and whether the report gate passed; report a blocked stage with its reason and what was preserved. Send a separate verify assignment only when the user asks for verification after the result; otherwise send problems to the same worker with what is wrong.`;
 export interface DelegationOptions {
   /** `single.spawn` (default true): the worker is an orchestrator that may spawn sub-workers. */
   spawn?: boolean;
-  /** `models.orchestrator` names a model of its own (not `{ "model": "main" }`): standard roles run on it instead of main's model
+  /** The mode's orchestrator tier names a model of its own (not `{ "model": "main" }`): standard roles run on it instead of main's model
    * (docs/orchestrator.md 12). */
   orchestratorModel?: boolean;
-  /** `models.orchestrator` sets a thinking level of its own (not `"main"`, not omitted): standard roles do not take main's thinking. */
+  /** That tier sets a thinking level of its own (not `"main"`, not omitted): standard roles do not take main's thinking. */
   orchestratorThinking?: boolean;
+  /** The `models` key of that tier (default `orchestrator`; strong/ultra: `strong-orchestrator`, or `orchestrator` as its fallback). */
+  orchestratorKey?: string;
 }
 /**
  * How standard roles get their model and thinking. Without a model or level of `models.orchestrator`'s own (unset, `"main"`, or
@@ -65,25 +70,32 @@ const MODEL_SENTENCE = {
   configured: "Standard roles run on the orchestrator model configured in the orche config (models.orchestrator), not on main's model, with main's CURRENT thinking at hand-off,",
   configuredBoth: "Standard roles run on the orchestrator model and thinking level configured in the orche config (models.orchestrator), not on main's,",
 };
-const modelSentence = (options: DelegationOptions) => options.orchestratorModel
+const modelSentence = (options: DelegationOptions) => (options.orchestratorModel
   ? options.orchestratorThinking ? MODEL_SENTENCE.configuredBoth : MODEL_SENTENCE.configured
-  : options.orchestratorThinking ? MODEL_SENTENCE.inheritedModel : MODEL_SENTENCE.inherited;
+  : options.orchestratorThinking ? MODEL_SENTENCE.inheritedModel : MODEL_SENTENCE.inherited).replace("(models.orchestrator)", `(models.${options.orchestratorKey ?? "orchestrator"})`);
+/** The first sentence per delegating mode: strong and ultra are the single workflow on the strong tiers. */
+const MODE_HEAD: Record<Exclude<MainMode, "direct">, string> = {
+  single: "orche mode: single.",
+  strong: "orche mode: strong (the single workflow on the strong model tiers: models.strong-orchestrator and models.strong-worker).",
+  ultra: "orche mode: ultra (the single workflow with the quality-first ultra orchestration, on the strong model tiers).",
+};
 /** Stable per effective mode and config: never include session state or a worker roster here. */
 export function delegationRules(mode: MainMode, options: DelegationOptions = {}): string {
   if (mode === "direct")
     return "orche mode: direct. Delegation tools are disabled; make changes directly with your own tools. You may edit user-requested paths outside the cwd/workspace, including absolute paths and ../ paths. Delegated workers' workspace confinement does not restrict this main direct session; their scope remains unchanged. Existing OS permissions and other policies still apply; direct mode does not grant elevated OS privileges or bypass those restrictions.";
-  const spawn = options.spawn ?? true;
+  // ultra always orchestrates (its stages are orche_spawn calls); single and strong follow single.spawn.
+  const spawn = mode === "ultra" || (options.spawn ?? true);
   return [
-    "orche mode: single. You cannot edit files in this session: edit, write and ast_rewrite are disabled; explicit shell mutations and unverified shell syntax are blocked. You keep the conversation, requirements and acceptance, with limited inspection to state the task precisely; acceptance rests on the checks the worker reports. Do not explore or implement the codebase yourself; delegate with orche_task.",
+    `${MODE_HEAD[mode]} You cannot edit files in this session: edit, write and ast_rewrite are disabled; explicit shell mutations and unverified shell syntax are blocked. You keep the conversation, requirements and acceptance, with limited inspection to state the task precisely; acceptance rests on the checks the worker reports. Do not explore or implement the codebase yourself; delegate with orche_task.`,
     "orche_task (single): one persistent worker; available roles: explore | answer | implement | verify | game-asset | video. For this workflow choose implement for changes, answer for read-only questions. The worker owns the whole task end to end: investigate, implement completely, add or update tests, run relevant project checks and iterate until they pass, then report.",
     WORK_TYPE_RULE,
     "Git: workers never commit or push on their own, and this session cannot run commits itself. Only when the user explicitly asked in this conversation to commit or push, pass `git` ({commit:true} or {push:true, remote?, branch?}) to an implement, game-asset or video orche_task; explore, answer and verify reject it. The grant covers that assignment only, so scope the commit to the task's files where possible (pass `files` and name the paths in `request`) and check the commits listed in the result before reporting.",
     "Single workflow: refine the requirements with the user: goal, constraints and acceptance criteria. Inspect only what is needed to state the task precisely. Ask the user only about decisions you cannot reasonably make; without a UI, make a reasonable assumption and state it in the request and final report. Hand the whole task to ONE orche_task in ONE end-to-end assignment, even when it is large or risky: role implement for changes, answer for read-only questions. Do not split the task into explore/implement/verify phases, and never send an explore before an implement for the same request. Never stop to ask the user to switch modes in order to proceed, and never end a turn without attempting the requested change because of its size or risk. This workflow is the same with and without a UI.",
-    ...(spawn ? [ORCHESTRATOR_RULE] : []),
+    ...(spawn ? [mode === "ultra" ? ULTRA_RULE : ORCHESTRATOR_RULE] : []),
     `Single hand-off: main analyses the user's intent, purpose and requirements. Write \`request\` as: Intent/Purpose; numbered requirements checklist R1..Rn as lines \`R1: …\`, each testable with acceptance criteria; Constraints and non-goals; Assumptions (explicit when there is no UI); and a final Original request section containing the user's ORIGINAL request text verbatim. Put relevant background and file/evidence references in \`context\`. One end-to-end assignment per round: implement for changes, answer for read-only questions. The worker analyses requirements, creates a Task DAG with task_plan and executes nodes sequentially without main intervention while it runs. ${modelSentence(options)} and compact above 50% context, preserving requirements, original request and the assignment's plan. Specialists keep their routes and do not receive task_plan or 50% compaction.`,
     ASYNC_RULE,
     "Reuse: problems and user follow-ups go to the SAME worker (pass its id in `worker`). Review the result, its evidence and checklist. Restate additional or corrected requirements in the same hand-off format with new R-ids or revised ones and repeat. When a requirement remains unmet or partial in 2 consecutive REPORTED results of that worker, hand ONLY the unmet items to a NEW worker (omit worker), with their requirements, relevant file references and the previous worker's evidence; do not resend the whole task. A timeout is not an unmet result and never counts towards that rule: continue a timed-out assignment with the SAME worker and task (pass both) and only the remaining work, as its result's Resume line says; the worker keeps its context while it is live, and the task ledger keeps its last recorded Task DAG checkpoint for whichever worker continues. When a result names a task ledger (`Task ledger T…`), pass that id in `task` for every follow-up of the same task, including the new worker that takes over unmet items; omit `task` for a different user task, even when you reuse the worker. Never claim a reuse that did not happen: unknown ids are errors, and a worker that is gone (idle expiry, eviction, reload) is continued by a NEW worker briefed from its transcript; the result names the new id, use it from then on.",
-    spawn ? ORCHESTRATOR_SUPERVISION : SUPERVISION,
+    mode === "ultra" ? ULTRA_SUPERVISION : spawn ? ORCHESTRATOR_SUPERVISION : SUPERVISION,
     REFERENCE_RULE,
   ].join("\n");
 }
@@ -162,7 +174,8 @@ type ModeHost = Pick<ExtensionAPI, "getActiveTools" | "setActiveTools" | "getAll
 
 /**
  * The main session's delegation mode and the tool set that goes with it. The effective mode is, in order:
- * a one-turn `/orche single` or `/orche direct` override, the mode chosen with `/orche mode` (persisted in the session), `mainMode` from the
+ * a one-shot `/orche <mode> <prompt>` override (for the run of that request only; with task ledgers its tasks keep the mode, see workers.ts RequestMode),
+ * the mode chosen with `/orche mode` (persisted in the session), `mainMode` from the
  * orche config, `direct`. Only tools this class removed are ever restored (and the removed set is recorded in the session, because
  * Pi carries the reduced active set over a reload), so an explicit `--tools` selection is respected.
  */
