@@ -124,7 +124,12 @@ export function busyRefusal(requested: MainMode, session: MainMode): string {
 }
 /** The system prompt section with main's delegation rules for its mode. */
 const DELEGATION_SECTION = "orche-delegation";
-/** Strict command grammar: extra tokens on control commands never start work. */
+/**
+ * Strict command grammar: extra tokens on control commands never start work. A one-shot command `<mode> <PROMPT>` is the mode word
+ * (after optional leading whitespace), ONE whitespace character as the delimiter (a space, a tab or a line break), then the prompt:
+ * everything after the delimiter, verbatim (its own leading and trailing whitespace, lines, quotes and slashes included). A missing or
+ * whitespace-only prompt is no command (the caller shows the usage).
+ */
 export function parseOrcheCommand(args: string): OrcheCommand | undefined {
   if (/^\s*cancel\s*$/.test(args)) return { mode: "cancel" };
   if (/^\s*detach\s*$/.test(args)) return { mode: "detach" };
@@ -140,8 +145,9 @@ export function parseOrcheCommand(args: string): OrcheCommand | undefined {
     if (switchMode[1] === undefined) return { mode: "mode" };
     return isMainMode(switchMode[1]) ? { mode: "mode", value: switchMode[1] } : undefined;
   }
-  const match = new RegExp(`^\\s*(${MAIN_MODES.join("|")})(?:\\s+([\\s\\S]*\\S))?\\s*$`).exec(args);
-  return match?.[2] ? { mode: match[1] as MainMode, prompt: match[2] } : undefined;
+  const match = new RegExp(`^\\s*(${MAIN_MODES.join("|")})(?:\\s([\\s\\S]*))?$`).exec(args);
+  const prompt = match?.[2];
+  return prompt !== undefined && /\S/.test(prompt) ? { mode: match![1] as MainMode, prompt } : undefined;
 }
 
 export interface OrcheExtensionOptions extends OrcheControllerOptions {

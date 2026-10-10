@@ -38,17 +38,24 @@ const tierProvider = (provider: string, id: string, responses: FauxResponseStep[
 const MODELS = { orchestrator: { model: "tier-orch/o1" }, "strong-orchestrator": { model: "strong-orch/s1" } };
 
 describe("one-shot commands: grammar, usage and refusals", () => {
-  it("parses /orche strong|ultra <PROMPT> verbatim: inner whitespace, lines, quotes and slashes survive", () => {
+  it("parses /orche strong|ultra <PROMPT> verbatim: one whitespace character delimits; the prompt's own leading/trailing whitespace, lines, quotes and slashes survive", () => {
     const prompt = 'fix "src/a b.ts"  and\n  keep  \'quotes\' / slashes\\n\n\n- item: /orche mode direct';
     for (const mode of ["strong", "ultra"] as const) {
       expect(parseOrcheCommand(`${mode} ${prompt}`)).toEqual({ mode, prompt });
-      expect(parseOrcheCommand(`  ${mode}\n${prompt}  \n`)).toEqual({ mode, prompt });
+      // Only the delimiter (one space, tab or line break after the mode word) is syntax; everything after it is the prompt.
+      expect(parseOrcheCommand(`  ${mode}\n${prompt}  \n`)).toEqual({ mode, prompt: `${prompt}  \n` });
+      expect(parseOrcheCommand(`${mode}   keep me  \n`)).toEqual({ mode, prompt: "  keep me  \n" });
+      expect(parseOrcheCommand(`${mode}\t\tindented\n\t- item\t`)).toEqual({ mode, prompt: "\tindented\n\t- item\t" });
+      expect(parseOrcheCommand(`${mode} /not-a-command "x" `)).toEqual({ mode, prompt: '/not-a-command "x" ' });
     }
-    // Neither a missing prompt, a literal "strong/ultra", nor another case starts work; existing commands keep their grammar.
+    // Neither a missing prompt, a whitespace-only one, a literal "strong/ultra", nor another case starts work; existing commands keep their grammar.
     for (const input of ["strong", "ultra", "strong   ", "ultra \n\t ", "strong/ultra fix it", "Strong fix", "ultrafix", "mode ultra now"]) expect(parseOrcheCommand(input)).toBeUndefined();
     expect(parseOrcheCommand("mode ultra")).toEqual({ mode: "mode", value: "ultra" });
+    // single and direct use the same grammar (verbatim prompt after one delimiter).
     expect(parseOrcheCommand("single fix the bug")).toEqual({ mode: "single", prompt: "fix the bug" });
+    expect(parseOrcheCommand("single  fix the bug ")).toEqual({ mode: "single", prompt: " fix the bug " });
     expect(parseOrcheCommand("direct fix it")).toEqual({ mode: "direct", prompt: "fix it" });
+    expect(parseOrcheCommand("direct \n")).toBeUndefined();
     expect(parseOrcheCommand("stop W1")).toEqual({ mode: "stop", worker: "W1" });
   });
 
@@ -201,13 +208,15 @@ const modeEntries = (h: Harness) => h.session.sessionManager.getBranch().filter(
 
 describe("one-shot commands through the extension", () => {
   it.each([["blocking call", undefined], ["background job (TUI)", "tui"]] as const)("/orche strong <PROMPT> (%s): the turn runs in strong with the prompt verbatim, its worker on the strong tier; the session's mode is untouched", async (_label, mode) => {
-    const prompt = 'Inspect "greeting.txt" / report\n  two  spaces stay';
+    // Leading and trailing whitespace of the prompt are its own (only the one space after "strong" is the delimiter).
+    const prompt = '  Inspect "greeting.txt" / report\n  two  spaces stay \n';
     let system = "";
-    let userText = "";
+    let userText: unknown;
     const { h, strong } = await session({
       mainSteps: [context => {
         system = promptOf(context);
-        userText = JSON.stringify(context.messages.filter(message => message.role === "user").at(-1));
+        const content = (context.messages.filter(message => message.role === "user").at(-1) as { content: unknown }).content;
+        userText = typeof content === "string" ? content : (content as { type: string; text?: string }[]).filter(part => part.type === "text").map(part => part.text).join("");
         return tool("orche_task", { role: "answer", request: "Inspect greeting.txt without changing files" });
       }, context => { expect(promptOf(context)).toContain(STRONG_HEAD); return reply("done"); }],
       strongSteps: [answered("inspected on the strong tier")],
@@ -216,7 +225,7 @@ describe("one-shot commands through the extension", () => {
     await h.session.prompt(`/orche strong ${prompt}`);
     expect(system).toContain(STRONG_HEAD);
     expect(system).not.toContain(SINGLE_HEAD);
-    expect(userText).toContain(JSON.stringify(prompt).slice(1, -1));
+    expect(userText).toBe(prompt);
     const result = JSON.stringify(toolResults(h).at(-1));
     expect(result).toContain("inspected on the strong tier");
     expect(result).toContain("Mode: strong (orchestrator: models.strong-orchestrator");
@@ -225,6 +234,20 @@ describe("one-shot commands through the extension", () => {
     await h.session.prompt("/orche mode");
     expect(notes(h).at(-1)).toMatch(/^orche mode: single \(config /);
     expect(modeEntries(h)).toEqual([]);
+  });
+
+  it.each([["strong"], ["ultra"], ["single"], ["direct"]] as const)("/orche %s <PROMPT>: main receives exactly the text after the one delimiter (leading/trailing whitespace, lines, tabs, quotes, slashes)", async mode => {
+    const prompt = "  /keep this \"quoted\" path\n\tindented line\n\n trailing \t\n";
+    const users: string[] = [];
+    const { h } = await session({
+      mainSteps: [context => {
+        const content = (context.messages.filter(message => message.role === "user").at(-1) as { content: unknown }).content;
+        users.push(typeof content === "string" ? content : (content as { type: string; text?: string }[]).filter(part => part.type === "text").map(part => part.text).join(""));
+        return reply("ok");
+      }],
+    });
+    await h.session.prompt(`/orche ${mode} ${prompt}`);
+    expect(users).toEqual([prompt]);
   });
 
   it("/orche ultra <PROMPT>: ultra orchestration on the strong tier; a later plain turn reusing W1 is another request: the session's mode, prompt and dispatch alike", async () => {

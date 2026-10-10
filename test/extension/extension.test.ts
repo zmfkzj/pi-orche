@@ -114,7 +114,7 @@ describe("pi-orche as a Pi extension (real AgentSession, faux providers)", () =>
 
   it("parses the mode token strictly and keeps the prompt verbatim", () => {
     expect(parseOrcheCommand("single fix the bug")).toEqual({ mode: "single", prompt: "fix the bug" });
-    expect(parseOrcheCommand("  single   line one\n  line two  ")).toEqual({ mode: "single", prompt: "line one\n  line two" });
+    expect(parseOrcheCommand("  single   line one\n  line two  ")).toEqual({ mode: "single", prompt: "  line one\n  line two  " }); // one delimiter after the mode word; the rest verbatim
     expect(parseOrcheCommand("multi fix")).toBeUndefined();
     expect(parseOrcheCommand("mode auto")).toBeUndefined();
     expect(parseOrcheCommand("mode multi")).toBeUndefined();
