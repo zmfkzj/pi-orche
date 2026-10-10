@@ -1,0 +1,32 @@
+{
+ "out": "results/ultra-ab/pilot",
+ "phase": "pilot",
+ "prereg": "experiments/ultra-ab/PREREGISTRATION.md",
+ "tasks": [
+  {
+   "task": "nesquena__hermes-webui-2056",
+   "stratum": "hard",
+   "kind": "swe"
+  },
+  {
+   "task": "pypa__build-1027",
+   "stratum": "medium",
+   "kind": "swe"
+  },
+  {
+   "task": "python-scim__scim2-models-126",
+   "stratum": "easy",
+   "kind": "swe"
+  }
+ ],
+ "conditions": [
+  "A",
+  "B",
+  "C"
+ ],
+ "repeats": 1,
+ "k": 2,
+ "seed": "ultra-ab-2026-10-10",
+ "concurrency": 6,
+ "scratch": "/tmp/pi-orche/01a11fc6-a75e-71d7-8c05-63070fd8b1a1/W4/runs"
+}

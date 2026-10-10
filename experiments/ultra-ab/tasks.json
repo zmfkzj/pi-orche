@@ -1,0 +1,535 @@
+{
+  "seed": "ultra-ab-2026-10-10",
+  "perStratum": 4,
+  "pilotPerStratum": {
+    "hard": 1,
+    "medium": 1,
+    "easy": 1
+  },
+  "drawnAt": "2026-10-09T20:34:16.049Z",
+  "main": [
+    {
+      "task": "sqlfluff__sqlfluff-7615",
+      "stratum": "hard",
+      "kind": "swe"
+    },
+    {
+      "task": "pycqa__isort-2491",
+      "stratum": "hard",
+      "kind": "swe"
+    },
+    {
+      "task": "d1-transactional-outbox",
+      "stratum": "hard",
+      "kind": "suite"
+    },
+    {
+      "task": "scientific-python__docstub-123",
+      "stratum": "hard",
+      "kind": "swe"
+    },
+    {
+      "task": "tox-dev__tox-3904",
+      "stratum": "medium",
+      "kind": "swe"
+    },
+    {
+      "task": "youssofal__mtplx-21",
+      "stratum": "medium",
+      "kind": "swe"
+    },
+    {
+      "task": "holoviz__param-1117",
+      "stratum": "medium",
+      "kind": "swe"
+    },
+    {
+      "task": "d8-build-graph",
+      "stratum": "medium",
+      "kind": "suite"
+    },
+    {
+      "task": "a7-auth-rotation",
+      "stratum": "easy",
+      "kind": "suite"
+    },
+    {
+      "task": "stravalib__stravalib-709_interface",
+      "stratum": "easy",
+      "kind": "swe"
+    },
+    {
+      "task": "tobymao__sqlglot-7187",
+      "stratum": "easy",
+      "kind": "swe"
+    },
+    {
+      "task": "marshmallow-code__marshmallow-2925_interface",
+      "stratum": "easy",
+      "kind": "swe"
+    }
+  ],
+  "pilot": [
+    {
+      "task": "nesquena__hermes-webui-2056",
+      "stratum": "hard",
+      "kind": "swe"
+    },
+    {
+      "task": "pypa__build-1027",
+      "stratum": "medium",
+      "kind": "swe"
+    },
+    {
+      "task": "python-scim__scim2-models-126",
+      "stratum": "easy",
+      "kind": "swe"
+    }
+  ],
+  "eligible": [
+    {
+      "task": "a7-auth-rotation",
+      "kind": "suite",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.237
+    },
+    {
+      "task": "conan-io__conan-19735_interface",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass"
+      ],
+      "meanCostUsd": 0.18
+    },
+    {
+      "task": "copier-org__copier-2646",
+      "kind": "swe",
+      "stratum": "medium",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 1.461
+    },
+    {
+      "task": "cpp-linter__cpp-linter-hooks-206_interface",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.32
+    },
+    {
+      "task": "d1-transactional-outbox",
+      "kind": "suite",
+      "stratum": "hard",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "meanCostUsd": 0.478
+    },
+    {
+      "task": "d2-keyed-queue",
+      "kind": "suite",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.29
+    },
+    {
+      "task": "d4-cache-fencing",
+      "kind": "suite",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.358
+    },
+    {
+      "task": "d6-snapshot-pagination",
+      "kind": "suite",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.433
+    },
+    {
+      "task": "d8-build-graph",
+      "kind": "suite",
+      "stratum": "medium",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.635
+    },
+    {
+      "task": "delgan__loguru-1451",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.424
+    },
+    {
+      "task": "harumiweb__exstruct-113",
+      "kind": "swe",
+      "stratum": "medium",
+      "outcomes": [
+        "pass"
+      ],
+      "meanCostUsd": 1.215
+    },
+    {
+      "task": "hkuds__openharness-217",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass"
+      ],
+      "meanCostUsd": 0.264
+    },
+    {
+      "task": "holoviz__param-1117",
+      "kind": "swe",
+      "stratum": "medium",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.956
+    },
+    {
+      "task": "joke2k__django-environ-592",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.296
+    },
+    {
+      "task": "macbre__sql-metadata-625_interface",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.58
+    },
+    {
+      "task": "marshmallow-code__marshmallow-2925_interface",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.304
+    },
+    {
+      "task": "nesquena__hermes-webui-2056",
+      "kind": "swe",
+      "stratum": "hard",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "meanCostUsd": 0.446
+    },
+    {
+      "task": "nesquena__hermes-webui-330_interface",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.498
+    },
+    {
+      "task": "olofk__fusesoc-776_interface",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.326
+    },
+    {
+      "task": "omni-us__jsonargparse-839",
+      "kind": "swe",
+      "stratum": "medium",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.66
+    },
+    {
+      "task": "pallets__click-3239",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.432
+    },
+    {
+      "task": "psf__black-4952",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.276
+    },
+    {
+      "task": "pycqa__isort-2491",
+      "kind": "swe",
+      "stratum": "hard",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "meanCostUsd": 0.996
+    },
+    {
+      "task": "pypa__build-1027",
+      "kind": "swe",
+      "stratum": "medium",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.68
+    },
+    {
+      "task": "python-markdown__markdown-1587",
+      "kind": "swe",
+      "stratum": "medium",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.698
+    },
+    {
+      "task": "python-scim__scim2-models-126",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.347
+    },
+    {
+      "task": "python-scim__scim2-models-139_interface",
+      "kind": "swe",
+      "stratum": "medium",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 1.361
+    },
+    {
+      "task": "scientific-python__docstub-123",
+      "kind": "swe",
+      "stratum": "hard",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "meanCostUsd": 0.334
+    },
+    {
+      "task": "sciunto-org__python-bibtexparser-515",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.35
+    },
+    {
+      "task": "sqlfluff__sqlfluff-7615",
+      "kind": "swe",
+      "stratum": "hard",
+      "outcomes": [
+        "fail",
+        "fail"
+      ],
+      "meanCostUsd": 0.878
+    },
+    {
+      "task": "sqlfluff__sqlfluff-7622",
+      "kind": "swe",
+      "stratum": "medium",
+      "outcomes": [
+        "pass"
+      ],
+      "meanCostUsd": 1.057
+    },
+    {
+      "task": "stravalib__stravalib-709_interface",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.211
+    },
+    {
+      "task": "tobymao__sqlglot-7187",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.381
+    },
+    {
+      "task": "tobymao__sqlglot-7457",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.467
+    },
+    {
+      "task": "tobymao__sqlglot-7479",
+      "kind": "swe",
+      "stratum": "medium",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 1.769
+    },
+    {
+      "task": "tox-dev__tox-3904",
+      "kind": "swe",
+      "stratum": "medium",
+      "outcomes": [
+        "pass"
+      ],
+      "meanCostUsd": 1.23
+    },
+    {
+      "task": "ucfopen__canvasapi-716",
+      "kind": "swe",
+      "stratum": "easy",
+      "outcomes": [
+        "pass",
+        "pass"
+      ],
+      "meanCostUsd": 0.488
+    },
+    {
+      "task": "youssofal__mtplx-21",
+      "kind": "swe",
+      "stratum": "medium",
+      "outcomes": [
+        "pass"
+      ],
+      "meanCostUsd": 0.908
+    }
+  ],
+  "ineligible": [
+    {
+      "task": "lcb-atcoder-abc389_g",
+      "reason": "kind lcb (LiveCodeBench: public 2025 problems, all passed in calibration)"
+    },
+    {
+      "task": "lcb-atcoder-abc390_f",
+      "reason": "kind lcb (LiveCodeBench: public 2025 problems, all passed in calibration)"
+    },
+    {
+      "task": "lcb-atcoder-abc391_g",
+      "reason": "kind lcb (LiveCodeBench: public 2025 problems, all passed in calibration)"
+    },
+    {
+      "task": "lcb-atcoder-abc393_e",
+      "reason": "kind lcb (LiveCodeBench: public 2025 problems, all passed in calibration)"
+    },
+    {
+      "task": "lcb-atcoder-abc394_g",
+      "reason": "kind lcb (LiveCodeBench: public 2025 problems, all passed in calibration)"
+    },
+    {
+      "task": "lcb-atcoder-abc397_g",
+      "reason": "kind lcb (LiveCodeBench: public 2025 problems, all passed in calibration)"
+    },
+    {
+      "task": "lcb-atcoder-abc398_g",
+      "reason": "kind lcb (LiveCodeBench: public 2025 problems, all passed in calibration)"
+    },
+    {
+      "task": "lcb-atcoder-abc399_f",
+      "reason": "kind lcb (LiveCodeBench: public 2025 problems, all passed in calibration)"
+    },
+    {
+      "task": "lcb-atcoder-arc192_d",
+      "reason": "kind lcb (LiveCodeBench: public 2025 problems, all passed in calibration)"
+    },
+    {
+      "task": "lcb-atcoder-arc194_d",
+      "reason": "kind lcb (LiveCodeBench: public 2025 problems, all passed in calibration)"
+    },
+    {
+      "task": "lcb-atcoder-arc195_d",
+      "reason": "kind lcb (LiveCodeBench: public 2025 problems, all passed in calibration)"
+    },
+    {
+      "task": "lcb-atcoder-arc196_c",
+      "reason": "kind lcb (LiveCodeBench: public 2025 problems, all passed in calibration)"
+    },
+    {
+      "task": "nolar__kopf-1225",
+      "reason": "excluded by the calibration study: spec gap: hidden tests require an exact log text (\"termination pending: <reason>: <message>\") the issue never mentions"
+    },
+    {
+      "task": "pallets-eco__wtforms-892_interface",
+      "reason": "excluded by the calibration study: spec gap: failing hidden tests require render-time label override and default->value attribute semantics not stated in the issue or interface"
+    },
+    {
+      "task": "pypa__twine-1309",
+      "reason": "excluded by the calibration study: spec gap: hidden test requires the exact phrase \"Unknown Status\" for an unknown HTTP code; the issue does not state any output"
+    },
+    {
+      "task": "pytest-dev__pyfakefs-1286",
+      "reason": "excluded by the calibration study: unreliable calibration: one run lost to a grader copy error (fixed afterwards), one pass, one later pass; not a baseline failure"
+    },
+    {
+      "task": "python-scim__scim2-models-120",
+      "reason": "excluded by the calibration study: spec gap: hidden test matches the error text \"Multiple values marked as primary\", not in the issue or the codebase"
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+{
+ "out": "results/ultra-ab/main",
+ "phase": "main",
+ "prereg": "experiments/ultra-ab/PREREGISTRATION.md",
+ "sweCache": "/tmp/pi-orche/01a11fc6-a75e-71d7-8c05-63070fd8b1a1/W4/swe-cache",
+ "tasks": [
+  {
+   "task": "sqlfluff__sqlfluff-7615",
+   "stratum": "hard",
+   "kind": "swe"
+  },
+  {
+   "task": "pycqa__isort-2491",
+   "stratum": "hard",
+   "kind": "swe"
+  },
+  {
+   "task": "d1-transactional-outbox",
+   "stratum": "hard",
+   "kind": "suite"
+  },
+  {
+   "task": "scientific-python__docstub-123",
+   "stratum": "hard",
+   "kind": "swe"
+  },
+  {
+   "task": "tox-dev__tox-3904",
+   "stratum": "medium",
+   "kind": "swe"
+  },
+  {
+   "task": "youssofal__mtplx-21",
+   "stratum": "medium",
+   "kind": "swe"
+  },
+  {
+   "task": "holoviz__param-1117",
+   "stratum": "medium",
+   "kind": "swe"
+  },
+  {
+   "task": "d8-build-graph",
+   "stratum": "medium",
+   "kind": "suite"
+  },
+  {
+   "task": "a7-auth-rotation",
+   "stratum": "easy",
+   "kind": "suite"
+  },
+  {
+   "task": "stravalib__stravalib-709_interface",
+   "stratum": "easy",
+   "kind": "swe"
+  },
+  {
+   "task": "tobymao__sqlglot-7187",
+   "stratum": "easy",
+   "kind": "swe"
+  },
+  {
+   "task": "marshmallow-code__marshmallow-2925_interface",
+   "stratum": "easy",
+   "kind": "swe"
+  }
+ ],
+ "conditions": [
+  "A",
+  "B",
+  "C"
+ ],
+ "repeats": 2,
+ "k": 4,
+ "seed": "ultra-ab-2026-10-10",
+ "concurrency": 8,
+ "scratch": "/tmp/pi-orche/01a11fc6-a75e-71d7-8c05-63070fd8b1a1/W4/runs-main"
+}
