@@ -21,17 +21,23 @@
  *    (as `venv --copies` does with an interpreter); a writable or unverifiable directory, a tracked link, or a dangling link that would
  *    create a file outside is refused. Only targets verified read-only stay shared (a file this user cannot write; a directory whose
  *    whole tree, walked within a bound, has no writable entry and no link). `materialize(id, tree, from)` copies an earlier candidate's
- *    directory instead (a fix candidate; the earlier stays);
+ *    directory instead (a fix candidate; the earlier stays). An id that already has a copy or any of its files is refused
+ *    (`CandidateIdConflictError`): a new candidate never replaces or removes an existing one;
  *  - `changes(id)`: the copy's manifest against the manifest it had right after materializing; `adopt(id, paths, base, verify)`:
  *    refused when any of those paths differs between the workspace's manifest at the candidate's base and now (no blind merge), then
  *    the candidate's files (bytes, mode, links, deletions) are copied in; a failed write, or a `verify` that finds the candidate or the
  *    workspace changed meanwhile, restores every path written;
- *  - `dependencyFingerprint()`: the workspace's own dependency directories (paths, types, sizes, modification times, modes, link
- *    targets; tool caches excluded), compared around a candidates round to detect a write that escaped a copy anyway.
+ *  - dependency manifests (`dependencyManifest`, of the workspace and of each copy): the contents of the dependency directories (top
+ *    level, a linked store's target, and nested ones git does not track; every file, tool caches included, nothing exempt by name;
+ *    links followed unless they lead into those directories)
+ *    by raw bytes and modes, fail-closed when unreadable. They are NOT adoption scope (`changes` and `adopt` never touch a dependency
+ *    directory) but part of the verification state: `fingerprint(id)` and `workspaceState()` combine files and dependencies
+ *    (`stateDigest`), so a check is tied to the dependencies it ran with; `dependencyFingerprint()` is the escape check around a
+ *    candidates round.
  * Not an OS sandbox: a candidate's shell can still write anywhere this user can by an absolute path. Such writes into the workspace's
  * in-scope files or its dependency directories are detected after the round (ultra.ts); writes elsewhere (home, global caches) are not.
- * Submodule contents are not copied (empty in a copy; ultra.ts blocks the candidates' file tools there); other ignored files are neither
- * copied nor adopted.
+ * Submodule contents are not copied (empty in a copy; ultra.ts blocks the candidates' file tools there); other ignored files (build
+ * outputs, `.env`) are neither copied, adopted nor fingerprinted.
  */
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -46,8 +52,9 @@ const execFileAsync = promisify(execFile);
 export const DEPENDENCY_DIRS: readonly string[] = ["node_modules", ".venv", "venv"];
 const PYTHON_ENVS = new Set([".venv", "venv"]);
 const EXCLUDED_TOP = new Set([".orche", ...DEPENDENCY_DIRS]);
-/** Caches tools write inside dependency directories during ordinary runs: not part of the escape check. */
-const CACHE_DIRS = new Set([".cache", ".vite", ".vitest", "__pycache__", ".pytest_cache"]);
+
+/** Entries walked for one dependency fingerprint; beyond it the fingerprint fails (fail-closed). */
+const DEPENDENCY_WALK_LIMIT = 2_000_000;
 const MAX_TEXT_BYTES = 4 * 1024 * 1024;
 /** Entries walked to verify that a shared directory outside a copy is read-only; beyond it the directory counts as unverifiable. */
 const READ_ONLY_WALK_LIMIT = 20_000;
@@ -85,6 +92,13 @@ export type Manifest = Record<string, string>;
 export const manifestDigest = (manifest: Manifest): string => {
   const hash = createHash("sha256");
   for (const path of Object.keys(manifest).sort()) hash.update(`${path}\0${manifest[path]}\n`);
+  return hash.digest("hex").slice(0, 40);
+};
+
+/** The digest of a verification state: in-scope files and dependency contents (two namespaces, so no path of one can stand for the other). */
+export const stateDigest = (files: Manifest, dependencies: Manifest): string => {
+  const hash = createHash("sha256");
+  hash.update(`files ${manifestDigest(files)}\ndependencies ${manifestDigest(dependencies)}\n`);
   return hash.digest("hex").slice(0, 40);
 };
 
@@ -130,6 +144,13 @@ async function readState(path: string): Promise<State> {
     if (info.isFile()) return { kind: "file", data: await readFile(path), mode: info.mode & 0o777 };
     return { kind: "absent" };
   } catch { return { kind: "absent" }; }
+}
+
+/** A new candidate's id belongs to an existing candidate (its copy or one of its files): refused, the existing one is left as it is. */
+export class CandidateIdConflictError extends Error {
+  constructor(readonly id: string, readonly existing: readonly string[]) {
+    super(`candidate id ${id} is taken: ${existing.join(", ")} exists already (an existing candidate is never replaced or removed by a new one)`);
+  }
 }
 
 const sameState = (a: State, b: State) => a.kind === b.kind && (a.kind === "absent" || a.kind === "link" && a.target === (b as { target: string }).target || a.kind === "file" && a.mode === (b as Entry).mode && a.data.equals((b as Entry).data));
@@ -306,6 +327,9 @@ export class CandidateWorkspaces {
   path(id: string): string { return join(this.root, id); }
   private index(id: string): string { return join(this.root, `${id}.index`); }
   private baseFile(id: string): string { return join(this.root, `${id}.base.json`); }
+  private depsFile(id: string): string { return join(this.root, `${id}.deps.json`); }
+  /** Every file and directory that belongs to candidate `id` (its copy, index, base manifest and base dependency manifest). */
+  private owned(id: string): string[] { return [this.path(id), this.index(id), this.baseFile(id), this.depsFile(id)]; }
   private env(id: string): Record<string, string> { return { GIT_DIR: this.gitDir, GIT_WORK_TREE: this.path(id), GIT_INDEX_FILE: this.index(id) }; }
 
   /** One file's manifest entry from its bytes (cached by stat; a file changed in the last two seconds is hashed again). */
@@ -357,11 +381,14 @@ export class CandidateWorkspaces {
 
   /**
    * A fresh copy of `tree`, or of the earlier candidate `from`, with private copies of the workspace's dependency directories, every link
-   * verified (fail-closed: `UnsafeLinksError`), and its base manifest recorded. Nothing is left behind when it fails.
+   * verified (fail-closed: `UnsafeLinksError`), and its base manifests recorded. Nothing is left behind when it fails. An id that has a
+   * copy (or any of its files) already is refused (`CandidateIdConflictError`) before anything is written: an existing candidate is
+   * never replaced or removed by a new one.
    */
   async materialize(id: string, tree: string, from?: string, signal?: AbortSignal): Promise<MaterializeReport> {
     const target = this.path(id);
-    await this.remove(id);
+    const existing = (await Promise.all(this.owned(id).map(async path => await lstat(path).then(() => path, () => undefined)))).filter((path): path is string => !!path);
+    if (existing.length || from === id) throw new CandidateIdConflictError(id, existing.length ? existing : [target]);
     const report: MaterializeReport = { dependencies: [], relinked: 0, rewritten: 0, privatized: [], readOnly: [], submodules: await this.submodules(tree, signal) };
     try {
       if (from) {
@@ -395,6 +422,8 @@ export class CandidateWorkspaces {
         }
       }
       await this.verifyLinks(id, report);
+      // The dependency contents the copy starts with: what `dependencyChanges` reports the candidate changed there (never adopted).
+      await writeFile(this.depsFile(id), JSON.stringify(await this.copyDependencies(id, signal)));
       return report;
     } catch (error) {
       await this.remove(id);
@@ -443,11 +472,9 @@ export class CandidateWorkspaces {
     if (unsafe.length) throw new UnsafeLinksError(unsafe);
   }
 
-  /** Remove one copy, its index and its base manifest. */
+  /** Remove one copy, its index and its base manifests. */
   async remove(id: string): Promise<void> {
-    await rm(this.path(id), { recursive: true, force: true }).catch(() => undefined);
-    await rm(this.index(id), { force: true }).catch(() => undefined);
-    await rm(this.baseFile(id), { force: true }).catch(() => undefined);
+    for (const path of this.owned(id)) await rm(path, { recursive: true, force: true }).catch(() => undefined);
   }
 
   /** What candidate `id` changed in its copy against the copy as it was made (content, mode, links; additions and deletions). */
@@ -456,27 +483,123 @@ export class CandidateWorkspaces {
     return manifestDiff(base, await this.copyManifest(id, signal));
   }
 
-  /** The content state of candidate `id`'s copy: equal fingerprints mean the same files a check saw and an adoption would write. */
+  /**
+   * The verification state of candidate `id`'s copy: its in-scope files (`copyManifest`) and the contents of its dependency directories
+   * (`dependencyManifest`). Equal fingerprints mean the same files and dependencies a check saw; adoption still writes only the in-scope
+   * changes (`changes`), never a dependency directory.
+   */
   async fingerprint(id: string, signal?: AbortSignal): Promise<string> {
-    return manifestDigest(await this.copyManifest(id, signal));
+    return (await this.copyState(id, signal)).digest;
   }
 
-  /** The workspace's own dependency directories (entries, types, sizes, modification times, modes, link targets; tool caches excluded). */
-  async dependencyFingerprint(): Promise<string> {
-    const hash = createHash("sha256");
-    for (const name of DEPENDENCY_DIRS) {
-      const source = join(this.cwd, name);
-      const info = await lstat(source).catch(() => undefined);
-      if (!info) continue;
-      const real = info.isSymbolicLink() ? await realpath(source).catch(() => undefined) : source;
-      hash.update(`${name}\0${real ?? "dangling"}\n`);
-      if (!real) continue;
-      await walk(real, async (path, entry) => {
-        const link = entry.isSymbolicLink() ? await readlink(path).catch(() => "") : "";
-        hash.update(`${relative(real, path)}\0${entry.isDirectory() ? "d" : entry.isSymbolicLink() ? "l" : "f"}\0${entry.isDirectory() ? 0 : entry.size}\0${entry.isDirectory() ? 0 : entry.mtimeMs}\0${entry.mode}\0${link}\n`);
-      }, CACHE_DIRS);
+  /** Candidate `id`'s verification state (`fingerprint`) with its dependency manifest (to name what a check changed there). */
+  async copyState(id: string, signal?: AbortSignal): Promise<{ digest: string; dependencies: Manifest }> {
+    const manifest = await this.copyManifest(id, signal);
+    const dependencies = await this.copyDependencies(id, signal);
+    return { digest: stateDigest(manifest, dependencies), dependencies };
+  }
+
+  /** The workspace's verification state: its in-scope manifest (also returned, for the basis check) and its dependency contents. */
+  async workspaceState(signal?: AbortSignal): Promise<{ manifest: Manifest; dependencies: Manifest; digest: string }> {
+    const manifest = await this.workspaceManifest(signal);
+    const dependencies = await this.workspaceDependencies(signal);
+    return { manifest, dependencies, digest: stateDigest(manifest, dependencies) };
+  }
+
+  /** The workspace's own dependency directories by content (`dependencyManifest`); throws when any part cannot be read. */
+  workspaceDependencies(signal?: AbortSignal): Promise<Manifest> {
+    return this.dependencyManifest(this.cwd, { GIT_INDEX_FILE: this.mainIndex }, signal);
+  }
+
+  /** Candidate `id`'s dependency directories by content (`dependencyManifest`). */
+  copyDependencies(id: string, signal?: AbortSignal): Promise<Manifest> {
+    return this.dependencyManifest(this.path(id), this.env(id), signal);
+  }
+
+  /** What candidate `id` changed in its private dependency directories since its copy was made (never adopted). */
+  async dependencyChanges(id: string, signal?: AbortSignal): Promise<CandidateChange[]> {
+    const base = JSON.parse(await readFile(this.depsFile(id), "utf8")) as Manifest;
+    return manifestDiff(base, await this.copyDependencies(id, signal));
+  }
+
+  /** The workspace's own dependency directories by content (the escape check around a candidates round); throws when unreadable. */
+  async dependencyFingerprint(signal?: AbortSignal): Promise<string> {
+    return manifestDigest(await this.workspaceDependencies(signal));
+  }
+
+  /** The dependency directories under `root` (root-relative): see `dependencyManifest`. */
+  private async dependencyDirs(root: string, env: Record<string, string>, signal?: AbortSignal): Promise<string[]> {
+    const found = new Set<string>();
+    for (const name of DEPENDENCY_DIRS) if (await lstat(join(root, name)).catch(() => undefined)) found.add(name);
+    // Nested ones git does not track: ignored (by the ignore rules seen from `root`), or untracked as a whole (a copy of a
+    // subdirectory lacks the ignore files above it). `--directory` lists such a directory once instead of its files.
+    const ignored = await git(root, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--", "."], env, signal);
+    const untracked = await git(root, ["ls-files", "-z", "--others", "--directory", "--", "."], env, signal);
+    for (const line of [...ignored.split("\0"), ...untracked.split("\0")]) {
+      if (!line.endsWith("/")) continue;
+      const path = line.slice(0, -1);
+      if (!path || excluded(path) || !DEPENDENCY_DIRS.includes(path.split("/").at(-1)!)) continue;
+      found.add(path);
     }
-    return hash.digest("hex").slice(0, 40);
+    const sorted = [...found].sort();
+    return sorted.filter(path => !sorted.some(other => path.startsWith(`${other}/`)));
+  }
+
+  /**
+   * The contents of the dependency directories under `root` (a workspace or a copy): the top-level `node_modules`/`.venv`/`venv`
+   * (tracked, ignored or a link to a shared store, whose target is walked) and nested directories of those names that git does not
+   * track. ALL of their contents, with no exception by name: a directory called `.cache`, `.vite`, `__pycache__` or anything else can
+   * hold what a check loads, so a tool cache counts like any module (a check that writes one changes the state it ran on; see
+   * docs/orchestrator.md 14.4 for running checks without such writes). Every entry: a directory `d<mode>`, a file
+   * `f<mode>:<sha256 of its bytes>`, a link `l:<target>`; a link is also followed (a file: its bytes; a directory: its whole tree)
+   * unless it leads into one of these dependency directories (walked anyway), so a linked package outside them or outside `root`
+   * counts too. Fail-closed: an entry that cannot be read, or more than DEPENDENCY_WALK_LIMIT entries, throws (the caller then has no
+   * fingerprint, which never counts as unchanged).
+   */
+  async dependencyManifest(root: string, env: Record<string, string>, signal?: AbortSignal): Promise<Manifest> {
+    const manifest: Manifest = {};
+    const files: [string, string][] = [];
+    const dirs = await this.dependencyDirs(root, env, signal);
+    // Where the walk of the dependency directories goes anyway (their real paths): links leading there need not be followed.
+    const walkedRoots = (await Promise.all(dirs.map(dir => realpath(join(root, dir)).catch(() => undefined)))).filter((path): path is string => !!path);
+    const walked = new Set<string>();
+    let seen = 0;
+    const visitTree = async (dir: string, key: string): Promise<void> => {
+      const real = await realpath(dir);
+      if (walked.has(real)) { manifest[`${key}/`] = `walked:${real}`; return; }
+      walked.add(real);
+      for (const name of (await readdir(dir)).sort()) await visit(join(dir, name), `${key}/${name}`);
+    };
+    const visit = async (path: string, key: string): Promise<void> => {
+      if (++seen > DEPENDENCY_WALK_LIMIT) throw new Error(`more than ${DEPENDENCY_WALK_LIMIT} entries in the dependency directories`);
+      signal?.throwIfAborted();
+      const info = await lstat(path);
+      if (info.isDirectory()) { manifest[key] = `d${(info.mode & 0o7777).toString(8)}`; await visitTree(path, key); return; }
+      if (info.isFile()) { files.push([key, path]); return; }
+      if (!info.isSymbolicLink()) { manifest[key] = `o${info.mode.toString(8)}`; return; }
+      manifest[key] = `l:${await readlink(path)}`;
+      const real = await realpath(path).catch(() => undefined);
+      if (!real || walkedRoots.some(dir => inside(real, dir))) return; // dangling (its target text is the state), or walked where it leads
+      const target = await stat(real);
+      if (target.isDirectory()) await visitTree(real, `${key}/->`);
+      else if (target.isFile()) files.push([`${key}/->`, real]);
+    };
+    for (const dir of dirs) {
+      const path = join(root, dir);
+      const info = await lstat(path);
+      if (info.isSymbolicLink()) {
+        // A dependency directory that is a link (a shared store): its target is what the checks load, wherever it is.
+        manifest[dir] = `l:${await readlink(path)}`;
+        const real = await realpath(path).catch(() => undefined);
+        if (real && (await stat(real)).isDirectory()) await visitTree(real, `${dir}/->`);
+      } else await visit(path, dir);
+    }
+    const entries = await pool(files, 32, ([, path]) => this.entry(path));
+    files.forEach(([key, path], index) => {
+      if (entries[index] === undefined) throw new Error(`${path} could not be read`);
+      manifest[key] = entries[index]!;
+    });
+    return manifest;
   }
 
   /**

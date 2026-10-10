@@ -16,8 +16,10 @@
  *    else none of the round's candidates is adoptable), adoption only of a finished candidate whose copy is byte for byte what a
  *    successful check of the orchestrator saw before and after it ran (refused when the workspace moved underneath, rolled back on a
  *    failed write or when the copy changed meanwhile), and the report gate (`gateError`): ≥ 2 candidates with a report, every
- *    candidate accounted for, the chosen one adopted, selection evidence = successful shell checks in the chosen copy that saw the
- *    adopted content, integration evidence = successful shell checks in the workspace whose content fingerprints before and after
+ *    candidate accounted for once, every other finished candidate evaluated (a check of its own copy, passing or failing, that saw
+ *    the copy as it is at the report; "failed" needs a failing one) unless the runtime recorded why it is out (not done, isolation
+ *    breach, protected basis changed, no file changed), the chosen one adopted, selection evidence = successful shell checks in the
+ *    chosen copy that saw the adopted content, integration evidence = successful shell checks in the workspace whose content fingerprints before and after
  *    the check equal the workspace's at the report (so any later change, by a tool, a shell command or another process, requires
  *    new checks), the report alone (no call that can change files in flight), a verification round after the last adoption, every
  *    reproduced counterexample fixed or the task blocked, and a non-empty review when a verifier did not pass;
@@ -25,8 +27,10 @@
  *    and candidates are semantically diverse, that a cited check run actually supports the claim (a passing command proves only
  *    that it ran and exited 0, and that it targets the copy is read from its command text), the tie-break between equally passing
  *    candidates, and the classification of review findings beyond the cited refs.
- * Fingerprints are content-based (candidate-workspace.ts manifests: raw bytes and modes of every in-scope file); a probe that is
- * missing, failed or overlapped another call that can change files never counts as evidence.
+ * Fingerprints are content-based (candidate-workspace.ts: raw bytes and modes of every in-scope file AND of the dependency directories
+ * a check runs with); a probe that is missing, failed or overlapped another call that can change files never counts as evidence.
+ * Sub-worker ids are unique within a task's ultra run (`subWorkerFloor`, carried with the state), and a copy is never made over an
+ * existing candidate's id.
  * Failure path: any stage may end the assignment with status "blocked" and `data.ultra.stage` naming where it stopped (a read-only
  * answer: `data.unresolved`); the gate checks only that shape then.
  */
@@ -40,7 +44,7 @@ import { WRITE_TOOLS } from "../orchestration/ownership.js";
 import { READ_ONLY_TOOL_NAMES } from "../tools/index.js";
 import { BOOKKEEPING_TOOLS, type EvidenceLedger, type ToolRecord } from "../pi/tool-evidence.js";
 import { MAX_SUB_WORKERS, MAX_VERIFICATION_ROUNDS } from "./instructions.js";
-import { CandidateWorkspaces, DEPENDENCY_DIRS, manifestDiff, manifestDigest, UnsafeLinksError, type Manifest, type MaterializeReport } from "./candidate-workspace.js";
+import { CandidateWorkspaces, DEPENDENCY_DIRS, manifestDiff, UnsafeLinksError, type Manifest, type MaterializeReport } from "./candidate-workspace.js";
 import type { PlannedWorker, SpawnReason, SubWorkerOutcome, UltraSpawnHooks } from "./spawn.js";
 
 export const ADOPT_TOOL = "orche_adopt";
@@ -93,8 +97,22 @@ export interface UltraState {
   adoptions: { candidate: string; files: string[]; ref: number; fingerprint?: string }[];
   /** Verification rounds of this assignment: the orche_spawn ref and how its verifiers ended. */
   verifications: { ref: number; finished: number; notPassed: number }[];
+  /**
+   * The highest sub-worker number given out in this task's ultra run (any reason, also refused or failed spawns): a continuation of the
+   * same task numbers its sub-workers after it, so no id (and no candidate copy named by it) is ever reused.
+   */
+  subWorkers?: number;
 }
-export const newUltraState = (): UltraState => ({ explorationRounds: 0, basisDone: 0, analystsDone: 0, protectedPaths: [], candidateRounds: 0, candidates: [], adoptions: [], verifications: [] });
+export const newUltraState = (): UltraState => ({ explorationRounds: 0, basisDone: 0, analystsDone: 0, protectedPaths: [], candidateRounds: 0, candidates: [], adoptions: [], verifications: [], subWorkers: 0 });
+/**
+ * The number after which `orchestrator`'s next sub-worker of this ultra run is numbered: the recorded high-water mark, and never below
+ * a candidate id of the state (a state carried from before the mark existed).
+ */
+export function subWorkerFloor(state: UltraState, orchestrator: string): number {
+  const prefix = `${orchestrator}.`;
+  const used = state.candidates.map(item => item.id.startsWith(prefix) ? Number(item.id.slice(prefix.length)) : 0).filter(Number.isFinite);
+  return Math.max(state.subWorkers ?? 0, 0, ...used);
+}
 
 export interface UltraSummary {
   stage: string; explorationRounds: number; candidateRounds: number; protectedBasis: string[];
@@ -109,7 +127,13 @@ interface Fingerprints { workspace?: string; candidates: Record<string, string> 
  * cited check is tied to the content it evaluated; `overlapped`: another call that is not read-only ran at the same time (the
  * fingerprints then do not prove what the check saw).
  */
-interface Probe { name: string; before?: Fingerprints; after?: Fingerprints; overlapped: boolean; ended: boolean }
+interface Probe {
+  name: string; before?: Fingerprints; after?: Fingerprints; overlapped: boolean; ended: boolean;
+  /** Dependency paths this bash call itself changed, by space ("workspace" or a candidate id): named when its evidence is refused. */
+  dependencyWrites?: Record<string, string[]>;
+}
+/** The dependency manifests behind a probe's fingerprints, by space ("workspace" or a candidate id); kept only while its call runs. */
+type DependencyManifests = Record<string, Manifest>;
 const QUIET_TOOLS: ReadonlySet<string> = new Set([...READ_ONLY_TOOL_NAMES, "task_plan", "send_message"]);
 
 const refNumber = (ref: string) => Number(ref.slice(1));
@@ -140,20 +164,27 @@ export class UltraRun implements UltraSpawnHooks {
   private workspaces?: CandidateWorkspaces | null;
   /** Protected basis paths that differ in the workspace now from the basis snapshot (refreshed before each report). */
   private basisChanged: string[] = [];
-  /** The workspace's fingerprint taken for the report call `call` (when its guard opened it); `error` when it could not be taken. */
-  private current: { call?: string; workspace?: string; error?: string } = {};
+  /**
+   * The workspace's and the finished candidate copies' fingerprints taken for the report call `call` (when its guard opened it);
+   * `error` (or a candidate's `{error}`) when one could not be taken.
+   */
+  private current: { call?: string; workspace?: string; error?: string; candidates: Record<string, string | { error: string }> } = { candidates: {} };
   private gateResult?: string;
+  /** The last complete report's comparison basis: refs of the current checks per evaluated candidate, the reason per excluded one. */
+  private verdicts?: { evaluated: Record<string, string[]>; excluded: Record<string, string> };
   /** The stage the last accepted report named (blocked reports name where they stopped). */
   private reported?: UltraStage;
   readonly carried: boolean;
   /** Probes by tool call id (this assignment only: refs and fingerprints never carry over). */
   private readonly probes = new Map<string, Probe>();
+  /** The dependency manifests at the start of each running bash call (dropped when it ends). */
+  private readonly dependenciesBefore = new Map<string, DependencyManifests>();
   private readonly inFlight = new Set<string>();
   private reportCall?: string;
   /** git work on the copies and the workspace index runs one at a time (probes of parallel calls, adoption, stage hooks). */
   private queue: Promise<unknown> = Promise.resolve();
   /** The open candidates round: the workspace (manifest) and its dependency directories before it ran (escape check), notes for its result. */
-  private round?: { manifest?: Manifest; dependencies?: string; notes: string[] };
+  private round?: { manifest?: Manifest; dependencies: string | { error: string }; notes: string[] };
 
   constructor(private readonly options: UltraRunOptions) {
     this.carried = !!options.carried;
@@ -180,19 +211,24 @@ export class UltraRun implements UltraSpawnHooks {
   }
 
   // ---- integrity probes: every allowed call of the orchestrator, with content fingerprints around each bash call ----
-  /** The workspace's and every finished candidate copy's content now; undefined before there is anything to protect. Inside `serial`. */
-  private async fingerprintsNow(): Promise<Fingerprints | undefined> {
+  /**
+   * The workspace's and every finished candidate copy's verification state now (files and dependencies), with the dependency
+   * manifests behind it; undefined before there is anything to protect. Inside `serial`.
+   */
+  private async fingerprintsNow(): Promise<{ prints: Fingerprints; dependencies: DependencyManifests } | undefined> {
     const state = this.state;
     if (this.options.readOnly || !state.candidates.length && !state.adoptions.length && !state.protectedPaths.length) return undefined;
     const spaces = await this.spaces();
     if (!spaces) return undefined;
     const prints: Fingerprints = { candidates: {} };
-    try { prints.workspace = manifestDigest(await spaces.workspaceManifest()); } catch { /* the probe then proves nothing about the workspace */ }
+    const dependencies: DependencyManifests = {};
+    // Files and dependency contents together: a check is tied to both (an unreadable part leaves no fingerprint, never "unchanged").
+    try { const now = await spaces.workspaceState(); prints.workspace = now.digest; dependencies.workspace = now.dependencies; } catch { /* the probe then proves nothing about the workspace */ }
     for (const candidate of state.candidates) {
       if (!candidate.workspace || candidate.status === "running") continue;
-      try { prints.candidates[candidate.id] = await spaces.fingerprint(candidate.id); } catch { /* nor about this copy */ }
+      try { const now = await spaces.copyState(candidate.id); prints.candidates[candidate.id] = now.digest; dependencies[candidate.id] = now.dependencies; } catch { /* nor about this copy */ }
     }
-    return prints;
+    return { prints, dependencies };
   }
 
   /**
@@ -211,16 +247,44 @@ export class UltraRun implements UltraSpawnHooks {
     this.probes.set(toolCallId, probe);
     this.inFlight.add(toolCallId);
     if (name === "report_result") { this.reportCall = toolCallId; await this.refresh(toolCallId); }
-    if (name === "bash") probe.before = await this.serial(() => this.fingerprintsNow());
+    if (name === "bash") {
+      const now = await this.serial(() => this.fingerprintsNow());
+      probe.before = now?.prints;
+      if (now) this.dependenciesBefore.set(toolCallId, now.dependencies);
+    }
   }
 
-  /** The call ended (`tool_execution_end`, awaited before the worker goes on): a bash call gets the fingerprints after it ran. */
+  /**
+   * The call ended (`tool_execution_end`, awaited before the worker goes on): a bash call gets the fingerprints after it ran, and the
+   * dependency paths it changed itself are kept (few) to name them when its evidence is refused.
+   */
   async endCall(toolCallId: string): Promise<void> {
     const probe = this.probes.get(toolCallId);
     if (!probe || probe.ended) return;
-    if (probe.name === "bash" && probe.before) probe.after = await this.serial(() => this.fingerprintsNow());
+    const before = this.dependenciesBefore.get(toolCallId);
+    this.dependenciesBefore.delete(toolCallId);
+    if (probe.name === "bash" && probe.before) {
+      const now = await this.serial(() => this.fingerprintsNow());
+      probe.after = now?.prints;
+      for (const [space, manifest] of Object.entries(now?.dependencies ?? {})) {
+        const earlier = before?.[space];
+        if (!earlier) continue;
+        const changed = manifestDiff(earlier, manifest).map(change => change.path);
+        if (changed.length) (probe.dependencyWrites ??= {})[space] = changed.length > 8 ? [...changed.slice(0, 8), `… (${changed.length} paths)`] : changed;
+      }
+    }
     probe.ended = true;
     this.inFlight.delete(toolCallId);
+  }
+
+  /**
+   * Why cited checks were refused when they changed the dependency directories of `space` themselves (a tool cache written by a test
+   * run, an install): the paths and the ways out. Empty when none did.
+   */
+  private dependencyWritesNote(calls: readonly ToolRecord[], space: string): string {
+    const writes = calls.flatMap(call => { const paths = this.probes.get(call.toolCallId)?.dependencyWrites?.[space]; return paths?.length ? [`${call.ref} changed ${paths.join(", ")}`] : []; });
+    if (!writes.length) return "";
+    return ` The check itself wrote into the dependency directories (${writes.join("; ")}): every file there counts as an input, caches included, so such a run cannot vouch for what it ran on. Run the checks so they write nothing there (e.g. vitest run --no-cache, a Vite cacheDir outside node_modules, PYTHONDONTWRITEBYTECODE=1 or PYTHONPYCACHEPREFIX=<dir outside>), or run them again when their writes repeat identically.`;
   }
 
   /** The probe of a bash call that proves what it ran on: nothing else ran at the same time, and it had fingerprints on both sides. */
@@ -268,6 +332,9 @@ export class UltraRun implements UltraSpawnHooks {
     if (reason === "candidates") {
       const round = state.candidateRounds + 1;
       const spawnRef = this.nextRef();
+      // A new candidate never takes an existing one's id (its copy and its record stay as they are): refused, nothing runs.
+      const taken = workers.filter(worker => state.candidates.some(item => item.id === worker.id) || worker.from === worker.id).map(worker => worker.id);
+      if (taken.length) throw new Error(`Refused: candidate id(s) ${taken.join(", ")} belong to existing candidates of this task; no candidate ran and the existing ones are unchanged. Report status "blocked" with data.ultra.stage "candidates" if this persists.`);
       if (this.options.readOnly) {
         state.candidateRounds = round;
         for (const worker of workers) state.candidates.push({ id: worker.id, name: worker.name, role: worker.role, round, status: "running", spawnRef, changes: [], tampered: [] });
@@ -282,7 +349,8 @@ export class UltraRun implements UltraSpawnHooks {
         const manifest = await spaces.workspaceManifest(signal);
         const workspaceBase = join(spaces.root, `round-${round}.workspace.json`);
         await writeFile(workspaceBase, JSON.stringify(manifest));
-        const dependencies = await spaces.dependencyFingerprint().catch(() => undefined);
+        // Unreadable dependency directories leave no fingerprint: the round then counts as an escape (never as "unchanged").
+        const dependencies = await spaces.dependencyFingerprint(signal).catch((error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }));
         const added: UltraCandidate[] = [];
         const prepared: PlannedWorker[] = [];
         const reports: MaterializeReport[] = [];
@@ -301,7 +369,7 @@ export class UltraRun implements UltraSpawnHooks {
         }
         state.candidates.push(...added);
         state.candidateRounds = round;
-        this.round = { manifest, ...(dependencies ? { dependencies } : {}), notes: copyNotes(reports) };
+        this.round = { manifest, dependencies, notes: copyNotes(reports) };
         this.event({ stage: "candidates", round, workers: prepared.map(worker => ({ id: worker.id, workspace: worker.workspace, ...(worker.from ? { from: worker.from } : {}) })), copies: reports.map(report => ({ dependencies: report.dependencies, relinked: report.relinked, rewritten: report.rewritten, readOnly: report.readOnly.length, privatized: report.privatized.length, submodules: report.submodules.length })) });
         return prepared;
       });
@@ -358,7 +426,12 @@ export class UltraRun implements UltraSpawnHooks {
           const now = await spaces.workspaceManifest().catch(() => undefined);
           const moved = now && round.manifest ? manifestDiff(round.manifest, now).map(change => change.path) : ["(the workspace could not be fingerprinted)"];
           if (moved.length) escaped.push(`workspace files changed during the round: ${moved.slice(0, 10).join(", ")}${moved.length > 10 ? `, … ${moved.length - 10} more` : ""}`);
-          if (round.dependencies !== undefined && await spaces.dependencyFingerprint().catch(() => undefined) !== round.dependencies) escaped.push(`the workspace's own dependency directories (${DEPENDENCY_DIRS.join(", ")}) changed during the round`);
+          if (typeof round.dependencies !== "string") escaped.push(`the workspace's own dependency directories could not be fingerprinted before the round (${round.dependencies.error}), so an escape into them cannot be ruled out`);
+          else {
+            const after = await spaces.dependencyFingerprint().catch((error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }));
+            if (typeof after !== "string") escaped.push(`the workspace's own dependency directories could not be fingerprinted after the round (${after.error}), so an escape into them cannot be ruled out`);
+            else if (after !== round.dependencies) escaped.push(`the workspace's own dependency directories (${DEPENDENCY_DIRS.join(", ")}) changed during the round`);
+          }
           if (escaped.length) for (const candidate of state.candidates) if (ids.has(candidate.id)) candidate.escaped = escaped;
         }
         return { escaped, notes: round?.notes ?? [] };
@@ -367,8 +440,8 @@ export class UltraRun implements UltraSpawnHooks {
       const checks = this.options.verifyCommands?.length ? this.options.verifyCommands.join(" && ") : "<the project's checks and the basis tests>";
       lines.push(`Ultra candidates round ${state.candidateRounds}/${MAX_CANDIDATE_ROUNDS}: ${outcomes.map(outcome => `${outcome.id} ${outcome.name} ${outcome.status}${outcome.workspace ? `, ${outcome.changes.length} file(s) changed` : ""}`).join("; ")}.`, ...notes);
       if (escaped.length) lines.push(`Isolation breach: ${escaped.join("; ")}. A candidate (or another process) wrote outside its copy, so none of this round's candidates can be adopted. Find and undo the change, then run another candidates round, or report status "blocked" with data.ultra.stage "candidates".`);
-      if (!this.options.readOnly) lines.push(`Evaluate EVERY candidate with the same checks in its own copy, one call at a time, e.g. bash: cd '<workspace>' && ${checks}; judge by those runs, not by the candidates' reports, and cite their [orche ref Tn] in data.ultra.candidates and data.ultra.selection. A check counts for a copy only if the copy was the same before and after it and nothing else ran meanwhile. Adopt the best verified candidate with orche_adopt; a second candidates round (from: <id>) may fix one from its failure evidence while the earlier stays unchanged.`);
-      else lines.push("Check the key claims of every candidate answer against the sources yourself (read, grep, bash) and cite those [orche ref Tn]; a claim without a checked source stays unsupported.");
+      if (!this.options.readOnly) lines.push(`Evaluate EVERY candidate that finished (done) with the same checks in its own copy, one call at a time, e.g. bash: cd '<workspace>' && ${checks}; judge by those runs, not by the candidates' reports, and cite their [orche ref Tn] in each candidate's data.ultra.candidates entry and in data.ultra.selection. A failing run is evidence too (verdict "failed" needs one; "rejected" means it lost the comparison); a completed candidate is never dropped unchecked. Candidates that did not finish, broke isolation, changed the protected basis or changed no file are excluded by the runtime's record (no check needed; give the reason). A check counts for a copy only if the copy (files and dependency directories, every file there including tool caches) was the same before and after it, is still the same at your report, and nothing else ran meanwhile: run checks so they write nothing into node_modules/.venv/venv (e.g. vitest run --no-cache, PYTHONDONTWRITEBYTECODE=1), or run them again when their writes there repeat identically. Adopt the best verified candidate with orche_adopt; a second candidates round (from: <id>) may fix one from its failure evidence while the earlier stays unchanged.`);
+      else lines.push("Check the key claims of every candidate answer against the sources yourself (read, grep, bash) and cite those [orche ref Tn] in each candidate's data.ultra.candidates entry; a claim without a checked source stays unsupported.");
       this.event({ stage: "candidates", round: state.candidateRounds, outcomes: outcomes.map(outcome => ({ id: outcome.id, status: outcome.status, changes: outcome.changes.length, ...(outcome.tampered ? { tampered: outcome.tampered } : {}) })), ...(escaped.length ? { escaped } : {}) });
       return lines;
     }
@@ -403,15 +476,25 @@ export class UltraRun implements UltraSpawnHooks {
       const print = await spaces.fingerprint(id, signal);
       const checks = this.options.ledger().calls.filter(call => call.name === "bash" && !call.isError && refNumber(call.ref) > candidate.spawnRef && !!call.target?.includes(candidate.workspace!));
       if (!checks.length) throw new Error(`Run the checks in ${id}'s workspace first (bash: cd '${candidate.workspace}' && <checks>); a candidate is adopted only after a successful check of your own in its copy.`);
-      if (!checks.some(call => this.sawCandidate(call, id, print))) throw new Error(`${id}'s copy is not what your checks in it (${checks.map(call => call.ref).join(", ")}) evaluated: it changed during or after them, or another call that can change files ran at the same time. Run the checks in its copy again, alone, then adopt.`);
+      if (!checks.some(call => this.sawCandidate(call, id, print))) throw new Error(`${id}'s copy is not what your checks in it (${checks.map(call => call.ref).join(", ")}) evaluated: its files or its dependency directories (${DEPENDENCY_DIRS.join(", ")}) changed during or after them, or another call that can change files ran at the same time. Run the checks in its copy again, alone, then adopt.${this.dependencyWritesNote(checks, id)}`);
       const base = candidate.workspaceBase ? JSON.parse(await readFile(candidate.workspaceBase, "utf8")) as Manifest : undefined;
       if (!base) throw new Error(`${id}'s base (the workspace when its copy was made) is unavailable; it cannot be adopted safely.`);
       const ref = this.nextRef();
       const { applied } = await spaces.adopt(id, changes, base, signal, async () => await spaces.fingerprint(id, signal) === print ? undefined : `${id}'s copy changed while it was copied`);
       candidate.changes = changes;
       this.state.adoptions.push({ candidate: id, files: applied, ref, fingerprint: print });
-      this.event({ stage: "selection", adopted: id, files: applied, fingerprint: print });
-      return `Adopted ${id} into the workspace: ${applied.length} file(s): ${applied.slice(0, 30).join(", ")}${applied.length > 30 ? ", …" : ""}. Next: run the full checks in the workspace (cite them in data.ultra.integration.evidence) and an orche_spawn verification round on the integrated result (counterexamples). Integration edits are allowed from now on; the checks you cite must have run after the last change of the workspace (by any tool or command), alone.`;
+      // Dependency changes stay in the copy (never adopted): the workspace's checks then run with the workspace's own dependencies. A fix
+      // candidate started with the dependency directories its earlier candidate left, so those changes count too.
+      const lineage: string[] = [];
+      for (let item: UltraCandidate | undefined = candidate; item && !lineage.includes(item.id); item = item.from ? this.state.candidates.find(other => other.id === item!.from) : undefined) lineage.push(item.id);
+      let dependencies: string[] | undefined = [];
+      for (const item of lineage) {
+        const changed = await spaces.dependencyChanges(item, signal).catch(() => undefined);
+        dependencies = changed && dependencies ? [...new Set([...dependencies, ...changed.map(change => change.path)])] : undefined;
+      }
+      this.event({ stage: "selection", adopted: id, files: applied, fingerprint: print, ...(dependencies?.length ? { dependencyChanges: dependencies.length } : {}) });
+      const note = dependencies === undefined ? ` Its dependency directories could not be compared with how its copy started; if it installed or changed dependencies there, do the same in the workspace.` : dependencies.length ? ` ${id} also changed its private dependency directories (${dependencies.length} path(s): ${dependencies.slice(0, 5).join(", ")}${dependencies.length > 5 ? ", …" : ""}); those changes are NOT adopted: install or apply them in the workspace before the integration checks.` : "";
+      return `Adopted ${id} into the workspace: ${applied.length} file(s): ${applied.slice(0, 30).join(", ")}${applied.length > 30 ? ", …" : ""}.${note} Next: run the full checks in the workspace (cite them in data.ultra.integration.evidence) and an orche_spawn verification round on the integrated result (counterexamples). Integration edits are allowed from now on; the checks you cite must have run after the last change of the workspace (its files or its dependency directories, by any tool or command), alone.`;
     });
   }
 
@@ -431,22 +514,28 @@ export class UltraRun implements UltraSpawnHooks {
   }
 
   /**
-   * The workspace as the report sees it (taken when the report_result call opens, bound to that call): its content fingerprint and
-   * whether the protected basis is what exploration left. Failures are recorded, never skipped: the gate then refuses.
+   * The workspace and every finished candidate copy as the report sees them (taken when the report_result call opens, bound to that
+   * call): their verification fingerprints (files and dependency contents) and whether the protected basis is what exploration left.
+   * Failures are recorded, never skipped: the gate then refuses.
    */
   private async refresh(toolCallId: string): Promise<void> {
-    this.current = { call: toolCallId, error: "not taken" };
+    this.current = { call: toolCallId, error: "not taken", candidates: {} };
     this.basisChanged = [];
     const state = this.state;
-    if (this.options.readOnly || !state.candidates.length && !state.adoptions.length && !state.protectedPaths.length) { this.current = { call: toolCallId }; return; }
+    if (this.options.readOnly || !state.candidates.length && !state.adoptions.length && !state.protectedPaths.length) { this.current = { call: toolCallId, candidates: {} }; return; }
     await this.serial(async () => {
       const spaces = await this.spaces();
-      if (!spaces) { this.current = { call: toolCallId, error: "no git work tree" }; return; }
+      if (!spaces) { this.current = { call: toolCallId, error: "no git work tree", candidates: {} }; return; }
+      const candidates: Record<string, string | { error: string }> = {};
+      for (const candidate of state.candidates) {
+        if (!candidate.workspace || candidate.status === "running") continue;
+        try { candidates[candidate.id] = await spaces.fingerprint(candidate.id); } catch (error) { candidates[candidate.id] = { error: error instanceof Error ? error.message : String(error) }; }
+      }
       try {
-        const manifest = await spaces.workspaceManifest();
-        this.current = { call: toolCallId, workspace: manifestDigest(manifest) };
+        const { manifest, digest } = await spaces.workspaceState();
+        this.current = { call: toolCallId, workspace: digest, candidates };
         if (state.basis && state.protectedPaths.length) this.basisChanged = manifestDiff(state.basis, manifest, state.protectedPaths).map(change => change.path);
-      } catch (error) { this.current = { call: toolCallId, error: error instanceof Error ? error.message : String(error) }; }
+      } catch (error) { this.current = { call: toolCallId, error: error instanceof Error ? error.message : String(error), candidates }; }
     });
   }
 
@@ -455,14 +544,17 @@ export class UltraRun implements UltraSpawnHooks {
   gateError(kind: string, data: unknown): string | undefined {
     if (kind !== (this.options.readOnly ? "answer" : "implement")) return undefined;
     const record = dataOf(data);
+    this.verdicts = undefined;
     const error = this.check(record);
     // A fingerprint serves exactly one report: the next report_result takes its own (or is refused without one).
-    this.current = { error: "not taken for this report" };
+    this.current = { error: "not taken for this report", candidates: {} };
     const stage = (record.ultra as { stage?: UltraStage } | undefined)?.stage;
     const complete = stage === "complete" && record.status !== "blocked";
     this.gateResult = error ? `rejected: ${error.slice(0, 300)}` : complete ? "passed" : `accepted as incomplete (stopped at ${stage})`;
     if (!error) this.reported = stage;
     if (error) this.event({ stage: "gate", rejected: error.slice(0, 2000) });
+    // What the comparison rested on: the current checks of each evaluated candidate and the runtime fact behind each exclusion.
+    else if (complete) { const verdicts = this.verdicts as { evaluated: Record<string, string[]>; excluded: Record<string, string> } | undefined; if (verdicts) this.event({ stage: "gate", passed: true, ...verdicts }); }
     return error;
   }
 
@@ -496,6 +588,21 @@ export class UltraRun implements UltraSpawnHooks {
     const unknown = [...listed].filter(id => !state.candidates.some(item => item.id === id));
     if (missing.length) problems.push(`data.ultra.candidates must account for every candidate (missing ${missing.join(", ")})`);
     if (unknown.length) problems.push(`data.ultra.candidates names unknown candidates ${unknown.join(", ")}`);
+    const entries = report.candidates ?? [];
+    const duplicates = [...new Set(entries.map(item => item.id).filter((id, index, all) => all.indexOf(id) !== index))];
+    if (duplicates.length) problems.push(`data.ultra.candidates lists ${duplicates.join(", ")} more than once: one entry per candidate`);
+    // Every candidate other than the chosen one is evaluated, or excluded by a fact the runtime recorded (not by a reason string).
+    const evaluated: Record<string, string[]> = {};
+    const excluded: Record<string, string> = {};
+    for (const candidate of state.candidates) {
+      const entry = entries.find(item => item.id === candidate.id);
+      if (!entry || candidate.id === report.selection?.chosen || entry.verdict === "chosen") continue; // missing / chosen: judged above and below
+      const exclusion = this.exclusion(candidate);
+      if (exclusion) { excluded[candidate.id] = exclusion; continue; }
+      const problem = readOnly ? this.answerEvaluation(candidate, entry, cited, evaluated) : this.candidateEvaluation(candidate, entry, cited, evaluated);
+      if (problem) problems.push(problem);
+    }
+    this.verdicts = { evaluated, excluded };
     const selection = report.selection;
     const chosen = selection ? state.candidates.find(item => item.id === selection.chosen) : undefined;
     if (!selection) problems.push("data.ultra.selection is required: {chosen, reason, evidence}");
@@ -507,7 +614,7 @@ export class UltraRun implements UltraSpawnHooks {
       const adopted = state.adoptions.find(item => item.candidate === chosen.id);
       if (!readOnly && !adopted) problems.push(`${chosen.id} is selected but not adopted: orche_adopt {candidate:"${chosen.id}"}`);
       // The cited checks must have evaluated exactly the content that was adopted (fingerprints before and after each check).
-      else if (!readOnly && evidence.length && !evidence.some(call => this.sawCandidate(call, chosen.id, adopted!.fingerprint))) problems.push(`the selection evidence (${evidence.map(call => call.ref).join(", ")}) did not evaluate the content of ${chosen.id} that was adopted: the copy changed during or after those checks, they overlapped another call, or they ran before this assignment; run the checks in its copy again, alone, and cite them`);
+      else if (!readOnly && evidence.length && !evidence.some(call => this.sawCandidate(call, chosen.id, adopted!.fingerprint))) problems.push(`the selection evidence (${evidence.map(call => call.ref).join(", ")}) did not evaluate the content of ${chosen.id} that was adopted: the copy changed during or after those checks, they overlapped another call, or they ran before this assignment; run the checks in its copy again, alone, and cite them.${this.dependencyWritesNote(evidence, chosen.id)}`);
     }
     // Review: a verification round after the last adoption (implement) or the last candidates round (answer).
     const lastAdopt = Math.max(0, ...state.adoptions.map(item => item.ref));
@@ -535,14 +642,49 @@ export class UltraRun implements UltraSpawnHooks {
       // check equal the workspace's fingerprint at this report: nothing changed during or after them, by any tool, command or process.
       const lastWrite = Math.max(lastAdopt, ...[...calls.values()].filter(call => !call.isError && (WRITE_TOOLS.has(call.name) || call.name === ADOPT_TOOL)).map(call => refNumber(call.ref)));
       const integration = cited(report.integration?.evidence, call => call.name === "bash" && !call.isError && refNumber(call.ref) > lastWrite && !workspaces.some(path => call.target?.includes(path)));
-      const current = this.current.call !== undefined && this.current.call === this.reportCall ? this.current : { error: "not taken for this report" };
-      if (!integration.length) problems.push(`data.ultra.integration.evidence cites [orche ref Tn] of successful checks you ran in the workspace after the last adoption or edit (after T${lastWrite})`);
+      const current: { workspace?: string; error?: string } = this.current.call !== undefined && this.current.call === this.reportCall ? this.current : { error: "not taken for this report" };
+      if (!integration.length) problems.push(`data.ultra.integration.evidence cites [orche ref Tn] of successful checks you ran in the workspace after the last adoption or edit (after T${lastWrite}); a command that names a candidate copy's path counts as a check of that copy, not of the workspace, so run the workspace checks without candidate paths`);
       else if (!current.workspace) problems.push(`the workspace's content could not be fingerprinted for this report (${current.error ?? "unknown"}), so the integration checks cannot be tied to it: report status "blocked" with the reason if it persists`);
-      else if (!integration.some(call => { const probe = this.stable(call); return !!probe && probe.before!.workspace === current.workspace && probe.after!.workspace === current.workspace; })) problems.push(`the workspace now differs from what your integration checks (${integration.map(call => call.ref).join(", ")}) evaluated: it changed during or after them (a shell command, an edit or another process), or they overlapped another call; run the full checks again, alone, after the last change and cite the new refs`);
+      else if (!integration.some(call => { const probe = this.stable(call); return !!probe && probe.before!.workspace === current.workspace && probe.after!.workspace === current.workspace; })) problems.push(`the workspace now differs from what your integration checks (${integration.map(call => call.ref).join(", ")}) evaluated: its files or its dependency directories (${DEPENDENCY_DIRS.join(", ")}) changed during or after them (a shell command, an edit, an install or another process), or they overlapped another call; run the full checks again, alone, after the last change and cite the new refs.${this.dependencyWritesNote(integration, "workspace")}`);
       if (this.basisChanged.length) problems.push(`the protected verification basis changed in the workspace: ${this.basisChanged.join(", ")}; restore it (only an exploration round may change it)`);
     }
     if (!problems.length) return undefined;
     return `Ultra report gate: ${problems.slice(0, 6).join("; ")}${problems.length > 6 ? `; … ${problems.length - 6} more` : ""}. If a stage cannot be completed, report status "blocked" (an answer: data.unresolved) with data.ultra.stage where it stopped.`;
+  }
+
+  /** Why a candidate is out of the comparison by a runtime fact (no check needed); undefined: it is a selectable, completed candidate. */
+  private exclusion(candidate: UltraCandidate): string | undefined {
+    if (candidate.status !== "done") return `did not finish with a done report (status ${candidate.status})`;
+    if (candidate.escaped?.length) return `its round broke isolation (${candidate.escaped.join("; ")})`;
+    if (candidate.tampered.length) return `changed the protected verification basis (${candidate.tampered.join(", ")})`;
+    if (!this.options.readOnly && !candidate.changes.length) return "changed no file";
+    return undefined;
+  }
+
+  /**
+   * A selectable implementation candidate that was not chosen: its entry cites checks of yours in its copy (passing or failing) of
+   * which at least one saw the copy exactly as it is at this report (files and dependencies, before and after, alone); "failed" needs
+   * such a check that failed. Undefined: evaluated (recorded in `evaluated`).
+   */
+  private candidateEvaluation(candidate: UltraCandidate, entry: { verdict: string; evidence?: string[] }, cited: (items: readonly string[] | undefined, accept: (call: ToolRecord) => boolean) => ToolRecord[], evaluated: Record<string, string[]>): string | undefined {
+    const checks = cited(entry.evidence, call => call.name === "bash" && refNumber(call.ref) > candidate.spawnRef && !!call.target?.includes(candidate.workspace!));
+    if (!checks.length) return `${candidate.id} completed (done) but was not evaluated: its data.ultra.candidates entry cites no check of yours in its copy (bash: cd '${candidate.workspace}' && <the same checks>; a failing run is evidence too); a completed candidate is compared by execution, never dropped unchecked`;
+    const now = this.current.call !== undefined && this.current.call === this.reportCall ? this.current.candidates[candidate.id] : { error: "not taken for this report" };
+    if (typeof now !== "string") return `${candidate.id}'s copy could not be fingerprinted for this report (${now?.error ?? "not taken"}), so its evaluation cannot be tied to it`;
+    const current = checks.filter(call => this.sawCandidate(call, candidate.id, now));
+    const refs = checks.map(call => call.ref).join(", ");
+    if (!current.length) return `${candidate.id}'s evaluation (${refs}) is stale: its copy (files or dependency directories) changed during or after those checks, or they overlapped another call; run the checks in its copy again, alone, and cite them.${this.dependencyWritesNote(checks, candidate.id)}`;
+    if (entry.verdict === "failed" && !current.some(call => call.isError)) return `${candidate.id} is marked "failed" but none of its current checks (${current.map(call => call.ref).join(", ")}) failed: cite the failing check, or mark it "rejected" with the comparison that ruled it out`;
+    evaluated[candidate.id] = current.map(call => call.ref);
+    return undefined;
+  }
+
+  /** A completed candidate answer that was not chosen: its entry cites a call of yours after its round that checked its claims. */
+  private answerEvaluation(candidate: UltraCandidate, entry: { evidence?: string[] }, cited: (items: readonly string[] | undefined, accept: (call: ToolRecord) => boolean) => ToolRecord[], evaluated: Record<string, string[]>): string | undefined {
+    const checks = cited(entry.evidence, call => refNumber(call.ref) > candidate.spawnRef);
+    if (!checks.length) return `${candidate.id} completed but was not evaluated: its data.ultra.candidates entry cites no [orche ref Tn] of your own check of its claims (read, grep or bash after its round)`;
+    evaluated[candidate.id] = checks.map(call => call.ref);
+    return undefined;
   }
 
   /**
@@ -641,8 +783,8 @@ export function ultraSection(readOnly: boolean): string {
     "1. Requirements: fix the requirements and acceptance criteria in your Task DAG (task_plan) and in data.ultra.criteria; report an ambiguity you cannot resolve instead of guessing.",
     `2. Exploration (orche_spawn reason "exploration", 2-${MAX_SUB_WORKERS} workers, before any candidate): verification-basis builders (role implement) write tests or executable checks for the acceptance criteria in files they own, from the requirements alone, so that a wrong solution fails them; hypothesis/approach analysts (role answer) propose causes or approaches, each with a prediction and a check that would falsify it. Give them only the requirements and references, never a planned solution. The files the basis builders changed become the protected verification basis: nobody changes it afterwards except another exploration round.`,
     `3. Candidates (reason "candidates", 2-${MAX_SUB_WORKERS} implement workers): independent implementations, each with a different approach or hypothesis, each in its own workspace copy (named in the result); they cannot see each other. A second round may fix a candidate from its failure evidence only (from: its id); the earlier candidate stays unchanged as the incumbent.`,
-    "4. Evaluation: run the same checks (the protected basis, the project's tests, typecheck/lint) in every candidate's copy yourself (bash: cd '<workspace>' && <checks>), one tool call per response; judge only by these runs. A check counts only for the exact content it saw: the runtime fingerprints the copies and the workspace before and after every bash call, so a check that changed files, overlapped another call, or was followed by a change (by any tool, shell command or process) has to be run again.",
-    "5. Selection and adoption: choose the candidate with the best execution evidence (on a tie the simpler, smaller, less risky change); orche_adopt {candidate} copies its changes into the workspace (refused unless a successful check of yours saw its copy exactly as it is now, when its round broke isolation, or when the workspace changed underneath).",
+    "4. Evaluation: run the same checks (the protected basis, the project's tests, typecheck/lint) in every finished candidate's copy yourself (bash: cd '<workspace>' && <checks>), one tool call per response; judge only by these runs. Every finished (done) candidate needs such a run of its current copy in its data.ultra.candidates entry, passing or failing (verdict \"failed\" needs a failing one); only candidates that did not finish, broke isolation, changed the protected basis or changed no file are excluded without one. A check counts only for the exact content it saw: the runtime fingerprints the copies and the workspace (their files and their dependency directories node_modules/.venv/venv) before and after every bash call and again at your report, so a check that changed files or dependencies (every file there counts, tool caches included: run checks without writing there, e.g. vitest run --no-cache or PYTHONDONTWRITEBYTECODE=1), overlapped another call, or was followed by a change (by any tool, shell command, install or process) has to be run again.",
+    "5. Selection and adoption: choose the candidate with the best execution evidence (on a tie the simpler, smaller, less risky change); orche_adopt {candidate} copies its changed files into the workspace (refused unless a successful check of yours saw its copy exactly as it is now, when its round broke isolation, or when the workspace changed underneath). Dependency changes a candidate made in its copy are not adopted: install them in the workspace before the integration checks.",
     "6. Counterexample review: orche_spawn reason \"verification\" on the integrated result, asking for concrete counterexamples with reproduction commands. Reproduce each finding yourself: reproduced-fixed (fixed and re-checked), reproduced-open (keeps the task blocked), unverified (could not reproduce), refuted (your run disproves it).",
     "7. Integration: after the last change of the workspace, run the full project checks in the workspace, alone, and report right after them (report_result alone too), citing them in data.ultra.integration.evidence; the report is refused when the workspace differs from what they saw.",
     `Report data.ultra: ${FORMAT}. ${evidence} If a stage cannot be completed (no git work tree, candidates failed, a cap reached), report status "blocked" with data.ultra.stage set to where it stopped, data.reason, and what is preserved (candidates and their workspaces, adopted files). ${caps}`,

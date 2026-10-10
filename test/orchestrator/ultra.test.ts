@@ -8,12 +8,12 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { execFileSync, execSync } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { planSpawn, type PlannedWorker, type SubWorkerOutcome } from "../../src/orchestrator/spawn.js";
-import { CandidateWorkspaces, manifestDigest, UnsafeLinksError } from "../../src/orchestrator/candidate-workspace.js";
-import { MAX_CANDIDATE_ROUNDS, MAX_EXPLORATION_ROUNDS, UltraRun, ultraSection } from "../../src/orchestrator/ultra.js";
+import { CandidateIdConflictError, CandidateWorkspaces, manifestDigest, UnsafeLinksError } from "../../src/orchestrator/candidate-workspace.js";
+import { MAX_CANDIDATE_ROUNDS, MAX_EXPLORATION_ROUNDS, subWorkerFloor, UltraRun, ultraSection, type UltraState } from "../../src/orchestrator/ultra.js";
 import { evidenceLedgerOf, recordToolCall } from "../../src/pi/tool-evidence.js";
 import { subWorkerGuard } from "../../src/orchestrator/sub-worker.js";
 
@@ -190,11 +190,12 @@ describe("ultra: candidate workspaces (real git)", () => {
     expect(await realpath(join(fix, "node_modules", "self"))).toBe(join(fix, "greeting.txt"));
     await writeFile(join(fix, "node_modules", "pkg", "index.js"), "module.exports = 'fix';\n");
     expect(await readFile(join(a, "node_modules", "pkg", "index.js"), "utf8")).toBe("module.exports = 'A';\n");
-    // The escape check sees a write into the workspace's own dependency directories, but not into tool caches.
-    const deps = await spaces.dependencyFingerprint();
+    // The escape check sees any write into the workspace's own dependency directories, tool caches included (no exception by name).
+    let deps = await spaces.dependencyFingerprint();
     await mkdir(join(cwd, "node_modules", ".cache"), { recursive: true });
     await writeFile(join(cwd, "node_modules", ".cache", "x"), "cache\n");
-    expect(await spaces.dependencyFingerprint()).toBe(deps);
+    expect(await spaces.dependencyFingerprint()).not.toBe(deps);
+    deps = await spaces.dependencyFingerprint();
     await writeFile(join(cwd, "node_modules", "pkg", "index.js"), "module.exports = 'escaped';\n");
     expect(await spaces.dependencyFingerprint()).not.toBe(deps);
   });
@@ -274,7 +275,7 @@ describe("ultra: candidate workspaces (real git)", () => {
 });
 
 /** An ultra orchestrator's tool calls through the same hooks the worker pool uses: beginCall (guard), the call, the ledger, endCall. */
-async function orchestrator(options: { readOnly?: boolean; cwd?: string; scratch?: string } = {}) {
+async function orchestrator(options: { readOnly?: boolean; cwd?: string; scratch?: string; carried?: UltraState } = {}) {
   const made = options.cwd ? { cwd: options.cwd, scratch: options.scratch! } : await repo();
   const { cwd, scratch } = made;
   const session = {};
@@ -282,8 +283,10 @@ async function orchestrator(options: { readOnly?: boolean; cwd?: string; scratch
   ledger.tag = true;
   let n = 0;
   const events: Record<string, unknown>[] = [];
-  const ultra = new UltraRun({ orchestrator: "W1", cwd, readOnly: !!options.readOnly, scratch, ledger: () => ledger, verifyCommands: ["sh test/basis.sh"], onEvent: event => events.push(event) });
+  const ultra = new UltraRun({ orchestrator: "W1", cwd, readOnly: !!options.readOnly, scratch, ledger: () => ledger, verifyCommands: ["sh test/basis.sh"], ...(options.carried ? { carried: options.carried } : {}), onEvent: event => events.push(event) });
   const record = (id: string, name: string, input: Record<string, unknown>, isError: boolean) => recordToolCall(session, { toolCallId: id, toolName: name, input, isError }, { request: n, atBaseline: true }).ref;
+  /** Whether a call (by ref) failed: a shell check's exit status, asserted by the tests (shell never throws). */
+  const failures = new Map<string, boolean>();
   /** One call: its effect runs between the guard and the end, as the tool does. */
   const act = async (name: string, input: Record<string, unknown>, effect?: () => unknown) => {
     const id = `c${++n}`;
@@ -291,12 +294,15 @@ async function orchestrator(options: { readOnly?: boolean; cwd?: string; scratch
     let failed = false;
     try { await effect?.(); } catch { failed = true; }
     const ref = record(id, name, input, failed);
+    failures.set(ref, failed);
     await ultra.endCall(id);
     return ref;
   };
   /** A real shell command of the orchestrator (in the workspace unless it cds elsewhere). */
-  const shell = (command: string) => act("bash", { command }, () => execSync(command, { cwd, stdio: "pipe", shell: "/bin/sh" }));
-  const next = ids();
+  const shell = (command: string, env?: NodeJS.ProcessEnv) => act("bash", { command }, () => execSync(command, { cwd, stdio: "pipe", shell: "/bin/sh", ...(env ? { env } : {}) }));
+  // Sub-worker ids as the worker pool gives them out: after the run's high-water mark (carried across assignments of one task).
+  let sub = 0;
+  const next = () => { sub = Math.max(sub, subWorkerFloor(ultra.state, "W1")) + 1; ultra.state.subWorkers = sub; return `W1.${sub}`; };
   /** One orche_spawn call: `during` is what the sub-workers do while it runs. */
   const spawn = async (reason: string, workers: ReturnType<typeof worker>[], status: (planned: PlannedWorker) => string = () => "done", during?: (prepared: PlannedWorker[]) => Promise<void>) => {
     const id = `c${++n}`;
@@ -324,14 +330,14 @@ async function orchestrator(options: { readOnly?: boolean; cwd?: string; scratch
     await ultra.endCall(id);
     return error;
   };
-  return { cwd, scratch, ultra, act, shell, spawn, report, events, begin: (id: string, name: string) => ultra.beginCall(id, name), end: (id: string, name: string, input: Record<string, unknown> = {}) => { record(id, name, input, false); return ultra.endCall(id); } };
+  return { cwd, scratch, ultra, act, shell, spawn, report, events, failed: (ref: string) => failures.get(ref), begin: (id: string, name: string) => ultra.beginCall(id, name), end: (id: string, name: string, input: Record<string, unknown> = {}) => { record(id, name, input, false); return ultra.endCall(id); } };
 }
 
 /** exploration (a basis builder that writes test/basis.sh, an analyst), then two candidates; returns the copies. */
-async function throughCandidates(run: Awaited<ReturnType<typeof orchestrator>>) {
+async function throughCandidates(run: Awaited<ReturnType<typeof orchestrator>>, basis = "grep -q fixed greeting.txt\n") {
   await run.spawn("exploration", [worker("basis", "implement", "acceptance tests", ["test/"]), worker("cause", "answer", "hypotheses")], () => "done", async () => {
     await mkdir(join(run.cwd, "test"), { recursive: true });
-    await writeFile(join(run.cwd, "test", "basis.sh"), "grep -q fixed greeting.txt\n");
+    await writeFile(join(run.cwd, "test", "basis.sh"), basis);
   });
   const round = await run.spawn("candidates", [worker("a", "implement", "approach A", ["greeting.txt"]), worker("b", "implement", "approach B", ["greeting.txt"])], () => "done", async prepared => {
     await writeFile(join(prepared[0]!.workspace!, "greeting.txt"), "fixed\n");
@@ -511,11 +517,337 @@ describe("ultra: UltraRun stages, adoption, guard and report gate", () => {
     const read = await run.act("read", { path: "greeting.txt" });
     const failed = await run.act("read", { path: "missing.ts" }, () => { throw new Error("missing"); });
     await run.spawn("verification", [worker("red", "verify", "refute the claims")], () => "passed");
-    const answer = (claims: unknown[]) => ({ ultra: { stage: "complete", criteria: ["names the cause"], candidates: [{ id: "W1.3", verdict: "chosen", reason: "best supported" }, { id: "W1.4", verdict: "rejected", reason: "unsupported claim" }], selection: { chosen: "W1.3", reason: "checked", evidence: [read] }, review: [], claims } });
+    const answer = (claims: unknown[], rejectedEvidence: string[] = [read]) => ({ ultra: { stage: "complete", criteria: ["names the cause"], candidates: [{ id: "W1.3", verdict: "chosen", reason: "best supported" }, { id: "W1.4", verdict: "rejected", reason: "unsupported claim", evidence: rejectedEvidence }], selection: { chosen: "W1.3", reason: "checked", evidence: [read] }, review: [], claims } });
+    const claims = [{ claim: "the cause is X", sources: [read, "greeting.txt:1"], status: "supported" }];
     expect(await run.report("answer", answer([{ claim: "the cause is X", sources: [failed], status: "supported" }]))).toContain(`cites ${failed}, not a successful call of yours`);
-    expect(await run.report("answer", answer([{ claim: "the cause is X", sources: [read, "greeting.txt:1"], status: "supported" }]))).toBeUndefined();
+    // A completed answer that is not chosen needs a check of its claims of yours (no workspace or bash requirement for answers).
+    expect(await run.report("answer", answer(claims, []))).toContain("W1.4 completed but was not evaluated: its data.ultra.candidates entry cites no [orche ref Tn] of your own check of its claims");
+    expect(await run.report("answer", answer(claims))).toBeUndefined();
     expect(await run.report("answer", { ultra: { stage: "candidates" } })).toContain("data.unresolved");
     expect(await run.report("answer", { ultra: { stage: "candidates" }, unresolved: ["no second source"] })).toBeUndefined();
     expect(ultraSection(true)).toContain("no code tests are required for a question");
   });
+});
+
+/**
+ * Regressions of the independent review of the strong/ultra change (four reproduced defects): dependency contents in the verification
+ * fingerprints, candidate ids and copies that survive a continuation of the task, the evaluation of every completed candidate at the
+ * report gate. (The fourth, the one-shot prompt kept verbatim, is in test/extension/one-shot.test.ts.)
+ */
+describe("ultra: review regressions", () => {
+  const complete = (selection: string, rejected: { id?: string; verdict?: string; evidence: string[] }, integration: string, extra: Record<string, unknown> = {}) => ({
+    status: "done", ultra: {
+      stage: "complete", criteria: ["greeting.txt says fixed"],
+      candidates: [{ id: "W1.3", verdict: "chosen", reason: "passes the basis", evidence: [selection] }, { id: rejected.id ?? "W1.4", verdict: rejected.verdict ?? "rejected", reason: "fails the basis", evidence: rejected.evidence }] as Record<string, unknown>[],
+      selection: { chosen: "W1.3", reason: "the only candidate passing the protected basis", evidence: [selection] }, review: [], integration: { evidence: [integration] }, ...extra,
+    },
+  });
+
+  it("dependency contents are part of a check's evidence: a change in a copy's or the workspace's node_modules after the check refuses adoption and the report until re-checked; dependencies are never adopted", async () => {
+    const run = await orchestrator();
+    const { ultra } = run;
+    const { a, b } = await throughCandidates(run);
+    await run.shell(`cd '${a}' && sh test/basis.sh`);
+    // The verifier's reproduction: the checked candidate's dependency changes afterwards (the in-scope files stay the same).
+    await run.shell(`printf 'module.exports = 2;\\n' > '${a}/node_modules/pkg/index.js'`);
+    await expect(ultra.adopt("W1.3")).rejects.toThrow("its files or its dependency directories (node_modules, .venv, venv) changed during or after them");
+    const checkA = await run.shell(`cd '${a}' && sh test/basis.sh`);
+    const failB = await run.shell(`cd '${b}' && sh test/basis.sh`);
+    let adopted = "";
+    await run.act("orche_adopt", { candidate: "W1.3" }, async () => { adopted = await ultra.adopt("W1.3"); });
+    expect(adopted).toContain("W1.3 also changed its private dependency directories (1 path(s): node_modules/pkg/index.js); those changes are NOT adopted");
+    expect(await readFile(join(run.cwd, "node_modules", "pkg", "index.js"), "utf8")).toBe("module.exports = 1;\n");
+    await run.spawn("verification", [worker("red", "verify", "find counterexamples")], () => "passed");
+    const integration = await run.shell("sh test/basis.sh");
+    expect(await run.report("implement", complete(checkA, { evidence: [failB] }, integration))).toBeUndefined();
+    // The workspace's dependency changes after the integration check (an install, a patch): refused until checked again.
+    await run.shell("printf 'module.exports = 3;\\n' > node_modules/pkg/index.js");
+    expect(await run.report("implement", complete(checkA, { evidence: [failB] }, integration))).toContain("its files or its dependency directories (node_modules, .venv, venv) changed during or after them");
+    const again = await run.shell("sh test/basis.sh");
+    expect(await run.report("implement", complete(checkA, { evidence: [failB] }, again))).toBeUndefined();
+  });
+
+  it("dependency fingerprints: additions, deletions, content (same size, mtime restored), modes, nested and linked stores, links leading outside, tool-cache directories like any other; unreadable fails closed", async () => {
+    const { cwd, scratch } = await repo();
+    const outside = await temp("orche-linked-");
+    await writeFile(join(outside, "lib.js"), "linked 1\n");
+    await symlink(outside, join(cwd, "node_modules", "linked")); // e.g. npm link: a package outside the workspace
+    await mkdir(join(cwd, "packages", "p", "node_modules", "dep"), { recursive: true });
+    await writeFile(join(cwd, "packages", "p", "index.js"), "require('dep')\n");
+    await writeFile(join(cwd, "packages", "p", "node_modules", "dep", "index.js"), "nested 1\n");
+    const spaces = (await CandidateWorkspaces.open(cwd, join(scratch, "ultra")))!;
+    const state = async () => (await spaces.workspaceState()).digest;
+    const files = async () => manifestDigest(await spaces.workspaceManifest());
+    const filesBefore = await files();
+    let print = await state();
+    const changed = async (label: string, mutate: () => Promise<unknown>) => {
+      await mutate();
+      const now = await state();
+      expect(now, label).not.toBe(print);
+      print = now;
+    };
+    const pkg = join(cwd, "node_modules", "pkg", "index.js");
+    const { mtime, atime } = await stat(pkg);
+    await changed("same size, mtime restored", async () => { await writeFile(pkg, "module.exports = 9;\n"); await utimes(pkg, atime, mtime); });
+    await changed("a new file", () => writeFile(join(cwd, "node_modules", "pkg", "extra.js"), "x\n"));
+    await changed("a deletion", () => rm(join(cwd, "node_modules", "pkg", "extra.js")));
+    await changed("a mode", () => chmod(pkg, 0o755));
+    await changed("a new empty directory", () => mkdir(join(cwd, "node_modules", "empty")));
+    await changed("a nested dependency directory", () => writeFile(join(cwd, "packages", "p", "node_modules", "dep", "index.js"), "nested 2\n"));
+    await changed("a linked package outside the workspace", () => writeFile(join(outside, "lib.js"), "linked 2\n"));
+    await changed("a .venv", async () => { await mkdir(join(cwd, ".venv", "lib"), { recursive: true }); await writeFile(join(cwd, ".venv", "lib", "m.py"), "x = 1\n"); });
+    // No directory is exempt by its name (a cache can hold what a check loads); the in-scope manifest (the adoption scope) never
+    // includes dependencies.
+    for (const dir of [["node_modules", ".cache"], ["node_modules", ".vite", "vitest"], ["node_modules", "pkg", ".vitest"], [".venv", "lib", "__pycache__"], [".venv", ".pytest_cache"]]) {
+      await changed(`a new ${dir.join("/")}`, async () => { await mkdir(join(cwd, ...dir), { recursive: true }); await writeFile(join(cwd, ...dir, "entry"), "1\n"); });
+      await changed(`a change in ${dir.join("/")}`, () => writeFile(join(cwd, ...dir, "entry"), "2\n"));
+    }
+    expect(await files()).toBe(filesBefore);
+    // A link from a dependency directory into an ignored place of the workspace (outside the dependency directories) is followed too.
+    await mkdir(join(cwd, "build"), { recursive: true });
+    await writeFile(join(cwd, ".gitignore"), "node_modules/\n.venv/\nignored.log\nbuild/\n");
+    await writeFile(join(cwd, "build", "gen.js"), "gen 1\n");
+    await symlink(join(cwd, "build"), join(cwd, "node_modules", "gen"));
+    print = await state();
+    await changed("an ignored file a dependency link leads to", () => writeFile(join(cwd, "build", "gen.js"), "gen 2\n"));
+    // A dependency directory that is a link to a shared store: its target's contents count.
+    const store = await temp("orche-store-");
+    await mkdir(join(store, "pkg"));
+    await writeFile(join(store, "pkg", "index.js"), "store 1\n");
+    await rm(join(cwd, ".venv"), { recursive: true });
+    await symlink(store, join(cwd, ".venv"));
+    print = await state();
+    await changed("a linked store's contents", () => writeFile(join(store, "pkg", "index.js"), "store 2\n"));
+    if (!root) {
+      // Unreadable: no fingerprint (an error), never "unchanged".
+      await mkdir(join(cwd, "node_modules", "locked"));
+      await chmod(join(cwd, "node_modules", "locked"), 0o000);
+      try {
+        await expect(spaces.workspaceState()).rejects.toThrow();
+        await expect(spaces.dependencyFingerprint()).rejects.toThrow();
+      } finally { await chmod(join(cwd, "node_modules", "locked"), 0o755); }
+    }
+    await spaces.close();
+  });
+
+  it("a copy's fingerprint covers its private dependencies (changes() and adoption do not): a candidate's dependency edit is visible to the check evidence only", async () => {
+    const { cwd, scratch } = await repo();
+    const spaces = (await CandidateWorkspaces.open(cwd, join(scratch, "ultra")))!;
+    await spaces.materialize("W1.3", await spaces.snapshot());
+    const copy = spaces.path("W1.3");
+    const print = await spaces.fingerprint("W1.3");
+    await writeFile(join(copy, "node_modules", "pkg", "index.js"), "module.exports = 'A';\n");
+    expect(await spaces.fingerprint("W1.3")).not.toBe(print);
+    expect(await spaces.changes("W1.3")).toEqual([]);
+    expect(await spaces.dependencyChanges("W1.3")).toEqual([{ path: "node_modules/pkg/index.js", status: "M" }]);
+    await spaces.close();
+  });
+
+  it("an existing candidate is never replaced: a taken id or its leftovers, or from === id, are refused before anything is written", async () => {
+    const { cwd, scratch } = await repo();
+    const spaces = (await CandidateWorkspaces.open(cwd, join(scratch, "ultra")))!;
+    const tree = await spaces.snapshot();
+    await spaces.materialize("W1.3", tree);
+    await writeFile(join(spaces.path("W1.3"), "greeting.txt"), "incumbent\n");
+    const print = await spaces.fingerprint("W1.3");
+    for (const attempt of [() => spaces.materialize("W1.3", tree), () => spaces.materialize("W1.3", tree, "W1.3")]) {
+      const error = await attempt().catch(caught => caught);
+      expect(error).toBeInstanceOf(CandidateIdConflictError);
+      expect(String(error)).toContain("candidate id W1.3 is taken");
+    }
+    expect(await readFile(join(spaces.path("W1.3"), "greeting.txt"), "utf8")).toBe("incumbent\n");
+    expect(await spaces.fingerprint("W1.3")).toBe(print);
+    expect(await spaces.changes("W1.3")).toEqual([{ path: "greeting.txt", status: "M" }]);
+    // A leftover of an id (only its index file) is refused as well, and left in place.
+    await writeFile(join(scratch, "ultra", "W1.9.index"), "left over\n");
+    await expect(spaces.materialize("W1.9", tree)).rejects.toThrow("W1.9.index exists already");
+    expect(await readFile(join(scratch, "ultra", "W1.9.index"), "utf8")).toBe("left over\n");
+    await spaces.close();
+  });
+
+  it("a continuation of the task numbers new sub-workers after every id the run gave out; a fix from the incumbent keeps it, and a taken id is refused without touching it", async () => {
+    // Three assignments of one task, as the worker pool runs them: exploration; candidates; a fix round from the incumbent.
+    const first = await orchestrator();
+    await first.spawn("exploration", [worker("basis", "implement", "acceptance tests", ["test/"]), worker("cause", "answer", "hypotheses")], () => "done", async () => {
+      await mkdir(join(first.cwd, "test"), { recursive: true });
+      await writeFile(join(first.cwd, "test", "basis.sh"), "grep -q fixed greeting.txt\n");
+    });
+    await first.ultra.end(false);
+    const second = await orchestrator({ cwd: first.cwd, scratch: first.scratch, carried: structuredClone(first.ultra.state) });
+    const round = await second.spawn("candidates", [worker("a", "implement", "approach A", ["greeting.txt"]), worker("b", "implement", "approach B", ["greeting.txt"])], () => "done", async prepared => {
+      await writeFile(join(prepared[0]!.workspace!, "greeting.txt"), "fixed incumbent\n");
+      await writeFile(join(prepared[1]!.workspace!, "greeting.txt"), "broken\n");
+    });
+    expect(round.prepared.map(item => item.id)).toEqual(["W1.3", "W1.4"]);
+    await second.ultra.end(false);
+    const third = await orchestrator({ cwd: first.cwd, scratch: first.scratch, carried: structuredClone(second.ultra.state) });
+    const incumbent = round.prepared[0]!.workspace!;
+    const fix = await third.spawn("candidates", [{ ...worker("fix", "implement", "fix W1.3", ["greeting.txt"]), from: "W1.3" }, worker("c", "implement", "approach C", ["greeting.txt"])], () => "done", async prepared => {
+      await writeFile(join(prepared[0]!.workspace!, "greeting.txt"), "fixed by the fix\n");
+    });
+    expect(fix.prepared.map(item => item.id)).toEqual(["W1.5", "W1.6"]);
+    expect(await readFile(join(incumbent, "greeting.txt"), "utf8")).toBe("fixed incumbent\n");
+    expect(third.ultra.state.candidates.map(item => [item.id, item.status, item.changes])).toEqual([["W1.3", "done", ["greeting.txt"]], ["W1.4", "done", ["greeting.txt"]], ["W1.5", "done", ["greeting.txt"]], ["W1.6", "done", []]]);
+    // Checks do not carry over (refs are per assignment): the incumbent is adoptable after a new check of its copy.
+    await expect(third.ultra.adopt("W1.3")).rejects.toThrow("Run the checks in W1.3's workspace first");
+    await third.shell(`cd '${incumbent}' && sh test/basis.sh`);
+    await expect(third.ultra.adopt("W1.3")).resolves.toContain("Adopted W1.3");
+    expect(await readFile(join(third.cwd, "greeting.txt"), "utf8")).toBe("fixed incumbent\n");
+    // A planned id that is taken (as an id reset would give out) is refused before any copy is made; the incumbent stays.
+    const reset = await orchestrator({ cwd: first.cwd, scratch: first.scratch, carried: { ...structuredClone(second.ultra.state), candidateRounds: 1 } });
+    const planned = [{ id: "W1.3", name: "again", role: "implement", request: "x", reason: "candidates", files: ["greeting.txt"] }, { id: "W1.7", name: "other", role: "implement", request: "y", reason: "candidates", files: ["greeting.txt"] }] as PlannedWorker[];
+    await expect(reset.ultra.prepare("candidates", planned, new AbortController().signal)).rejects.toThrow("Refused: candidate id(s) W1.3 belong to existing candidates of this task");
+    await expect(reset.ultra.prepare("candidates", [{ ...planned[1]!, id: "W1.8", from: "W1.8" }, { ...planned[1]!, id: "W1.9", request: "z" }] as PlannedWorker[], new AbortController().signal)).rejects.toThrow("W1.8");
+    expect(await readFile(join(incumbent, "greeting.txt"), "utf8")).toBe("fixed incumbent\n");
+    expect(subWorkerFloor({ ...structuredClone(second.ultra.state), subWorkers: undefined }, "W1")).toBe(4);
+  });
+
+  it("the report gate: every completed candidate is evaluated in its current state; failures count as evidence, unchecked, stale or mislabelled ones do not", async () => {
+    const run = await orchestrator();
+    const { ultra } = run;
+    const { a, b } = await throughCandidates(run);
+    const checkA = await run.shell(`cd '${a}' && sh test/basis.sh`);
+    await run.act("orche_adopt", { candidate: "W1.3" }, () => ultra.adopt("W1.3"));
+    await run.spawn("verification", [worker("red", "verify", "find counterexamples")], () => "passed");
+    // B was never evaluated (the verifier's reproduction): refused, also when its entry cites a check of another copy.
+    let integration = await run.shell("sh test/basis.sh");
+    expect(await run.report("implement", complete(checkA, { evidence: [] }, integration))).toContain("W1.4 completed (done) but was not evaluated");
+    expect(await run.report("implement", complete(checkA, { evidence: [checkA] }, integration))).toContain("W1.4 completed (done) but was not evaluated");
+    // A failing check of B in its copy is evidence for rejecting it (not every candidate has to pass).
+    const failB = await run.shell(`cd '${b}' && sh test/basis.sh`);
+    integration = await run.shell("sh test/basis.sh");
+    expect(await run.report("implement", complete(checkA, { evidence: [failB], verdict: "failed" }, integration))).toBeUndefined();
+    expect(run.events.at(-1)).toMatchObject({ stage: "gate", passed: true, evaluated: { "W1.4": [failB] }, excluded: {} });
+    // B changed after its evaluation: stale until checked again.
+    await writeFile(join(b, "greeting.txt"), "fixed now\n");
+    expect(await run.report("implement", complete(checkA, { evidence: [failB] }, integration))).toContain(`W1.4's evaluation (${failB}) is stale`);
+    const passB = await run.shell(`cd '${b}' && sh test/basis.sh`);
+    integration = await run.shell("sh test/basis.sh");
+    // A passing check cannot back a "failed" verdict; "rejected" (lost the comparison) is fine.
+    expect(await run.report("implement", complete(checkA, { evidence: [passB], verdict: "failed" }, integration))).toContain('W1.4 is marked "failed" but none of its current checks');
+    expect(await run.report("implement", complete(checkA, { evidence: [passB] }, integration))).toBeUndefined();
+    // One entry per candidate.
+    const twice = complete(checkA, { evidence: [passB] }, integration);
+    twice.ultra.candidates.push({ id: "W1.4", verdict: "rejected", reason: "again", evidence: [passB] });
+    expect(await run.report("implement", twice)).toContain("data.ultra.candidates lists W1.4 more than once");
+  });
+
+  it("runtime exclusions: a blocked or failed candidate, or one that changed no file, is excluded with its recorded reason and no check", async () => {
+    const run = await orchestrator();
+    const { ultra } = run;
+    await run.spawn("exploration", [worker("basis", "implement", "acceptance tests", ["test/"]), worker("cause", "answer", "hypotheses")], () => "done", async () => {
+      await mkdir(join(run.cwd, "test"), { recursive: true });
+      await writeFile(join(run.cwd, "test", "basis.sh"), "grep -q fixed greeting.txt\n");
+    });
+    const statuses: Record<string, string> = { a: "done", b: "blocked", c: "done", d: "failed" };
+    const round = await run.spawn("candidates", ["a", "b", "c", "d"].map(name => worker(name, "implement", `approach ${name}`, ["greeting.txt"])), planned => statuses[planned.name]!, async prepared => {
+      await writeFile(join(prepared[0]!.workspace!, "greeting.txt"), "fixed\n");
+      await writeFile(join(prepared[1]!.workspace!, "greeting.txt"), "half done\n");
+      // c changes nothing.
+    });
+    const a = round.prepared[0]!.workspace!;
+    const checkA = await run.shell(`cd '${a}' && sh test/basis.sh`);
+    await run.act("orche_adopt", { candidate: "W1.3" }, () => ultra.adopt("W1.3"));
+    await run.spawn("verification", [worker("red", "verify", "find counterexamples")], () => "passed");
+    const integration = await run.shell("sh test/basis.sh");
+    const data = complete(checkA, { evidence: [], id: "W1.4", verdict: "failed" }, integration);
+    data.ultra.candidates.push({ id: "W1.5", verdict: "rejected", reason: "changed nothing" }, { id: "W1.6", verdict: "failed", reason: "no report" });
+    expect(await run.report("implement", data)).toBeUndefined();
+    expect(run.events.at(-1)).toMatchObject({ stage: "gate", passed: true, excluded: { "W1.4": "did not finish with a done report (status blocked)", "W1.5": "changed no file", "W1.6": "did not finish with a done report (status failed)" } });
+  });
+
+  /**
+   * Files under directories named like tool caches are inputs when a check loads them: the fixture's acceptance check requires a module
+   * there, so changing it changes the check's result. A change after the check refuses the candidate's adoption and the workspace's
+   * report (the old evidence is refused first, without running anything that could refresh it).
+   */
+  it.each([[".cache"], [".vite"], [".vitest"], ["__pycache__"], [".pytest_cache"]])("a module the check loads from node_modules/pkg/%s: changed after the check, adoption and completion are refused", async name => {
+    const run = await orchestrator();
+    const { ultra } = run;
+    const module = (root: string) => join(root, "node_modules", "pkg", name, "answer.js");
+    await mkdir(join(run.cwd, "node_modules", "pkg", name), { recursive: true });
+    await writeFile(module(run.cwd), 'module.exports = "fixed";\n');
+    const basis = `node -e 'process.exit(require("./node_modules/pkg/${name}/answer.js") === require("fs").readFileSync("greeting.txt", "utf8").trim() ? 0 : 1)'\n`;
+    const { a, b } = await throughCandidates(run, basis);
+    expect(await readFile(module(a), "utf8")).toBe('module.exports = "fixed";\n'); // the private dependency copy has it
+    const checkA = await run.shell(`cd '${a}' && sh test/basis.sh`);
+    expect(run.failed(checkA)).toBe(false);
+    const failB = await run.shell(`cd '${b}' && sh test/basis.sh`);
+    expect(run.failed(failB)).toBe(true);
+    // After the check, the module in the candidate's copy changes: the same check now fails, and the old evidence is refused.
+    await writeFile(module(a), 'module.exports = "other";\n');
+    await expect(ultra.adopt("W1.3")).rejects.toThrow("its files or its dependency directories (node_modules, .venv, venv) changed during or after them");
+    const rerun = await run.shell(`cd '${a}' && sh test/basis.sh`);
+    expect(run.failed(rerun)).toBe(true);
+    await expect(ultra.adopt("W1.3")).rejects.toThrow("changed during or after them");
+    // The same bytes as checked: the old evidence applies again (content, not time).
+    await writeFile(module(a), 'module.exports = "fixed";\n');
+    await run.act("orche_adopt", { candidate: "W1.3" }, () => ultra.adopt("W1.3"));
+    expect(await readFile(join(run.cwd, "greeting.txt"), "utf8")).toBe("fixed\n");
+    await run.spawn("verification", [worker("red", "verify", "find counterexamples")], () => "passed");
+    const integration = await run.shell("sh test/basis.sh");
+    expect(run.failed(integration)).toBe(false);
+    const data = { status: "done", ultra: { stage: "complete", criteria: ["greeting.txt matches the module"], candidates: [{ id: "W1.3", verdict: "chosen", reason: "passes", evidence: [checkA] }, { id: "W1.4", verdict: "failed", reason: "fails the basis", evidence: [failB] }], selection: { chosen: "W1.3", reason: "passes", evidence: [checkA] }, review: [], integration: { evidence: [integration] } } };
+    expect(await run.report("implement", data)).toBeUndefined();
+    // After the integration check, the module in the workspace changes: the report citing it is refused; the check now fails.
+    await writeFile(module(run.cwd), 'module.exports = "other";\n');
+    expect(await run.report("implement", data)).toContain("its files or its dependency directories (node_modules, .venv, venv) changed during or after them");
+    const after = await run.shell("sh test/basis.sh");
+    expect(run.failed(after)).toBe(true);
+    expect(await run.report("implement", { ...data, ultra: { ...data.ultra, integration: { evidence: [after] } } })).toContain("data.ultra.integration.evidence cites");
+  });
+
+  it("cache writes by a check: a run that writes into a dependency directory proves nothing (named in the refusal); a run whose writes repeat identically, or one that writes nothing there, counts", async () => {
+    const run = await orchestrator();
+    const { ultra } = run;
+    const { a, b } = await throughCandidates(run);
+    // A check in the candidate's copy that writes a cache there (different each run, like test durations): refused, the path named.
+    const writing = (dir: string) => run.shell(`cd '${dir}' && mkdir -p node_modules/.vite/vitest && date +%s%N > node_modules/.vite/vitest/results.json && sh test/basis.sh`);
+    expect(run.failed(await writing(a))).toBe(false);
+    const refusal = await ultra.adopt("W1.3").then(() => "", (error: Error) => error.message);
+    expect(refusal).toContain("changed node_modules/.vite, node_modules/.vite/vitest, node_modules/.vite/vitest/results.json");
+    expect(refusal).toContain("vitest run --no-cache");
+    // Running it again does not help when the writes differ each time.
+    expect(run.failed(await writing(a))).toBe(false);
+    await expect(ultra.adopt("W1.3")).rejects.toThrow("The check itself wrote into the dependency directories");
+    // Writes that repeat identically: the second run leaves the copy as it found it and counts.
+    const same = `mkdir -p node_modules/.vite/vitest && printf '{}' > node_modules/.vite/vitest/results.json && sh test/basis.sh`;
+    expect(run.failed(await run.shell(`cd '${a}' && ${same}`))).toBe(false);
+    await expect(ultra.adopt("W1.3")).rejects.toThrow("The check itself wrote");
+    const checkA = await run.shell(`cd '${a}' && ${same}`);
+    await run.act("orche_adopt", { candidate: "W1.3" }, () => ultra.adopt("W1.3"));
+    expect(await readFile(join(run.cwd, "greeting.txt"), "utf8")).toBe("fixed\n");
+    const failB = await run.shell(`cd '${b}' && sh test/basis.sh`);
+    await run.spawn("verification", [worker("red", "verify", "find counterexamples")], () => "passed");
+    // In the workspace: a check that writes its cache is refused as integration evidence (named); one that writes nothing counts.
+    const data = (integration: string) => ({ status: "done", ultra: { stage: "complete", criteria: ["greeting.txt says fixed"], candidates: [{ id: "W1.3", verdict: "chosen", reason: "passes", evidence: [checkA] }, { id: "W1.4", verdict: "failed", reason: "fails", evidence: [failB] }], selection: { chosen: "W1.3", reason: "passes", evidence: [checkA] }, review: [], integration: { evidence: [integration] } } });
+    const cached = await run.shell("mkdir -p node_modules/.cache && date +%s%N > node_modules/.cache/run.json && sh test/basis.sh");
+    expect(run.failed(cached)).toBe(false);
+    const error = await run.report("implement", data(cached));
+    expect(error).toContain(`${cached} changed node_modules/.cache, node_modules/.cache/run.json`);
+    expect(error).toContain("PYTHONDONTWRITEBYTECODE=1");
+    const clean = await run.shell("sh test/basis.sh");
+    expect(await run.report("implement", data(clean))).toBeUndefined();
+  });
+
+  it("a real vitest run writes its results cache into node_modules/.vite (refused as evidence, the path named); vitest run --no-cache writes nothing there and counts", async () => {
+    const run = await orchestrator();
+    const vitest = join(process.cwd(), "node_modules", "vitest");
+    await mkdir(join(run.cwd, "spec"), { recursive: true });
+    await writeFile(join(run.cwd, "spec", "greeting.test.mjs"), // globals: the fixture has no vitest package of its own (a link to one outside would be refused for the copies)
+'import { readFileSync } from "node:fs";\nit("is fixed", () => expect(readFileSync("greeting.txt", "utf8")).toBe("fixed\\n"));\n');
+    const { a, b } = await throughCandidates(run);
+    const env = { PATH: process.env.PATH, HOME: process.env.HOME } as NodeJS.ProcessEnv; // not the outer vitest's environment
+    const bin = join(vitest, "vitest.mjs");
+    const withCache = await run.shell(`cd '${a}' && node '${bin}' run --globals --root . --dir spec`, env);
+    expect(run.failed(withCache)).toBe(false);
+    await expect(run.ultra.adopt("W1.3")).rejects.toThrow(/W1\.3's copy is not what your checks[\s\S]*changed node_modules\/\.vite[\s\S]*results\.json[\s\S]*vitest run --no-cache/);
+    const noCache = await run.shell(`cd '${a}' && rm -rf node_modules/.vite && node '${bin}' run --globals --no-cache --root . --dir spec`, env);
+    expect(run.failed(noCache)).toBe(false);
+    await expect(run.ultra.adopt("W1.3")).rejects.toThrow("changed during or after them"); // its own rm changed the copy
+    const clean = await run.shell(`cd '${a}' && node '${bin}' run --globals --no-cache --root . --dir spec`, env);
+    expect(run.failed(clean)).toBe(false);
+    await expect(run.ultra.adopt("W1.3")).resolves.toContain("Adopted W1.3");
+    expect(b).toBeTruthy();
+  }, 60_000);
 });

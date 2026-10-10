@@ -461,6 +461,44 @@ describe("ultra: resume", () => {
     expect(other.details.ultra).toMatchObject({ explorationRounds: 0, protectedBasis: [] });
     expect(other.details.ultra?.carried).toBeUndefined();
   });
+
+  it("a continuation numbers its sub-workers after the earlier assignments': a fix from the incumbent never takes its id or deletes its copy, and the incumbent is adoptable after a new check", async () => {
+    const { h, mainFaux, execute } = await fixture({ single: { ledger: true } });
+    await writeFile(join(h.cwd, "greeting.txt"), "hello\n");
+    const blocked = (stage: string) => tool("report_result", { kind: "implement", summary: `Stopped at ${stage}`, data: { status: "blocked", reason: "time is up for this assignment", checklist: partial, ultra: { stage } } });
+    const seen: Record<string, string> = {};
+    const scripts = {
+      basis: (turn: number) => turn === 0 ? tool("write", { path: "test/basis.sh", content: "grep -q fixed greeting.txt\n" }) : tool("report_result", { kind: "implement", summary: "basis written", data: { status: "done" } }),
+      cause: () => tool("report_result", { kind: "answer", summary: "greeting.txt:1 says hello", data: { evidence: ["greeting.txt:1"] } }),
+      "cand-a": (turn: number) => turn === 0 ? tool("write", { path: "greeting.txt", content: "fixed incumbent\n" }) : tool("report_result", { kind: "implement", summary: "A", data: { status: "done" } }),
+      "cand-b": (turn: number) => turn === 0 ? tool("write", { path: "greeting.txt", content: "broken\n" }) : tool("report_result", { kind: "implement", summary: "B", data: { status: "done" } }),
+      "fix-a": (turn: number) => turn === 0 ? tool("write", { path: "greeting.txt", content: "fixed by the fix\n" }) : tool("report_result", { kind: "implement", summary: "F", data: { status: "done" } }),
+      "cand-c": () => tool("report_result", { kind: "implement", summary: "C", data: { status: "done" } }),
+    };
+    mainFaux.setResponses(scripted(5, { ...scripts, orchestrator: turn => turn === 0 ? tool(SPAWN_TOOL, { reason: "exploration", workers: [{ name: "basis", role: "implement", request: "Write test/basis.sh for R1.", files: ["test/"] }, { name: "cause", role: "answer", request: "Hypotheses for R1." }] }) : blocked("candidates") }));
+    const first = await execute({ mainMode: "ultra" });
+    expect(first.details.spawned?.map(item => item.id)).toEqual(["W1.1", "W1.2"]);
+    mainFaux.setResponses(scripted(6, { ...scripts, orchestrator: turn => turn === 2 ? tool(SPAWN_TOOL, { reason: "candidates", workers: [{ name: "cand-a", role: "implement", request: "Approach A.", files: ["greeting.txt"] }, { name: "cand-b", role: "implement", request: "Approach B.", files: ["greeting.txt"] }] }) : blocked("evaluation") }));
+    const second = await execute({ mainMode: "ultra", worker: "W1", task: "T1" });
+    expect(second.details.spawned?.map(item => item.id)).toEqual(["W1.3", "W1.4"]);
+    const incumbent = second.details.spawned!.find(item => item.id === "W1.3")!.workspace!;
+    mainFaux.setResponses(scripted(7, { ...scripts, orchestrator: (turn, context) => {
+      if (turn === 4) return tool(SPAWN_TOOL, { reason: "candidates", workers: [{ name: "fix-a", role: "implement", request: "Fix W1.3 from its failure evidence.", files: ["greeting.txt"], from: "W1.3" }, { name: "cand-c", role: "implement", request: "Approach C.", files: ["greeting.txt"] }] });
+      if (turn === 5) return tool("bash", { command: `cd '${incumbent}' && sh test/basis.sh` });
+      if (turn === 6) return tool(ADOPT_TOOL, { candidate: "W1.3" });
+      seen.adopt = resultsOf(context).at(-1)!.text;
+      return blocked("review");
+    } }));
+    const third = await execute({ mainMode: "ultra", worker: "W1", task: "T1" });
+    expect(mainFaux.getPendingResponseCount()).toBe(0);
+    expect(third.details.spawned?.map(item => [item.id, item.name, item.status])).toEqual([["W1.5", "fix-a", "done"], ["W1.6", "cand-c", "done"]]);
+    expect(third.details.ultra).toMatchObject({ carried: true, candidateRounds: 2 });
+    expect(third.details.ultra?.candidates.map(item => [item.id, item.status])).toEqual([["W1.3", "done"], ["W1.4", "done"], ["W1.5", "done"], ["W1.6", "done"]]);
+    expect(await readFile(join(incumbent, "greeting.txt"), "utf8")).toBe("fixed incumbent\n");
+    expect(await readFile(join(third.details.spawned![0]!.workspace!, "greeting.txt"), "utf8")).toBe("fixed by the fix\n");
+    expect(seen.adopt).toContain("Adopted W1.3 into the workspace: 1 file(s): greeting.txt");
+    expect(await readFile(join(h.cwd, "greeting.txt"), "utf8")).toBe("fixed incumbent\n");
+  });
 });
 
 describe("strong/ultra through the extension", () => {

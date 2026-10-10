@@ -46,7 +46,7 @@ import { appendSplitLog } from "../orchestrator/split-log.js";
 import { ORCHESTRATOR_TEAM_LINE, orchestratorSection, SPLIT_FORMAT, splitError, splitOf, unresolvedError, MAX_VERIFICATION_ROUNDS, type SplitDecision } from "../orchestrator/instructions.js";
 import { createSpawnTool, outcomeModelUse, scopePaths, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnReason, type SubWorkerOutcome } from "../orchestrator/spawn.js";
 import { createSubWorkerRunner } from "../orchestrator/sub-worker.js";
-import { ADOPT_UNAVAILABLE, createAdoptTool, ultraSection, UltraRun, type UltraState, type UltraSummary } from "../orchestrator/ultra.js";
+import { ADOPT_UNAVAILABLE, createAdoptTool, subWorkerFloor, ultraSection, UltraRun, type UltraState, type UltraSummary } from "../orchestrator/ultra.js";
 import { evidenceLedgerOf } from "../pi/tool-evidence.js";
 import { clampThinkingLevel, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -1788,7 +1788,12 @@ export class WorkerPool {
         }
         meta.spawn = {
           orchestrator: meta.id, ...(files ? { scope: files } : {}), ...(readOnly ? { readOnly: true } : {}), ...(ultraRun ? { ultra: ultraRun } : {}), signal: AbortSignal.any([signal, assignmentEnd.signal]),
-          nextId: () => `${meta.id}.${++sub}`,
+          // Sub-worker ids are unique within the assignment; in ultra within the whole task: a continuation numbers after the carried
+          // high-water mark, so a new candidate never takes (and replaces) an earlier one's id or copy.
+          nextId: () => {
+            if (ultraRun) { sub = Math.max(sub, subWorkerFloor(ultraRun.state, meta.id)) + 1; ultraRun.state.subWorkers = sub; return `${meta.id}.${sub}`; }
+            return `${meta.id}.${++sub}`;
+          },
           runWorker: createSubWorkerRunner({
             orchestrator: meta.id, cwd: args.cwd, runtime, route: standardSubRoute, routeSource: subSource, thinkingSource: standardSubRoute === subRoute ? subThinkingSource : "orchestrator:step", ...(subWindow ? { inheritedContextWindow: subWindow } : {}),
             ...(standardSubRoute !== subRoute ? { verifyRoute: subRoute, verifyThinkingSource: subThinkingSource } : {}),

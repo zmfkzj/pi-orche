@@ -722,45 +722,53 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
 1. 요구사항·합격 기준: Task DAG와 `data.ultra.criteria`.
 2. exploration (`orche_spawn reason "exploration"`, 2~4명, 최대 2라운드, 첫 후보 이전): 검증 기준 작성자(role implement, 소유 파일에 테스트/검사만)와 가설 분석가(role answer). 검증 기준 작성자가 바꾼 파일은 **보호된 검증 기준**이 된다.
 3. candidates (`reason "candidates"`, 2~4명, 최대 2라운드, 요청은 서로 달라야 함): implement 후보는 각자 git 스냅샷으로 만든 **격리된 작업 사본**에서만 쓴다(같은 파일 소유 허용, 서로의 작업을 볼 수 없음). 2라운드는 `from`으로 이전 후보에서 시작하는 수정 후보(이전 후보는 incumbent로 보존). 사본 구성은 14.3.
-4. 평가: orchestrator가 각 사본에서 같은 검사를 직접, 한 응답에 한 호출씩 실행(`cd '<workspace>' && <checks>`). 검사의 유효성은 14.4의 fingerprint로 판정한다.
+4. 평가: orchestrator가 각 사본에서 같은 검사를 직접, 한 응답에 한 호출씩 실행(`cd '<workspace>' && <checks>`). 검사의 유효성은 14.4의 fingerprint로 판정한다. **끝난(done) 후보는 모두 평가한다**: 선택되지 않은 후보도 `data.ultra.candidates` 항목에 그 사본에서 실행한 검사 ref를 인용해야 하며, 그 검사는 보고 시점의 사본(파일과 의존성 디렉터리)을 전후로 본 것이어야 한다. 통과든 실패든 근거가 된다(모든 후보가 통과할 필요는 없다). `failed` 판정에는 실패한 검사가 필요하고 `rejected`는 비교에서 진 것이다. 평가 후 사본이 바뀌면 stale로 거부된다. 검사 없이 빠질 수 있는 것은 런타임이 기록한 사실이 있는 후보뿐이다: done이 아님(blocked/failed/cancelled 등), 격리 위반 라운드, 보호 기준 변경, 바꾼 파일 없음. 이유 문자열만으로 done 후보를 빼지 못한다.
 5. 선택·채택: `orche_adopt {candidate}`. 성공한 검사 중 그 사본의 **현재 내용과 같은 내용**을 검사 전후 모두 본 것이 없거나(검사 뒤 셸·다른 프로세스로 바뀐 경우 포함), 보호 기준을 바꾼 후보이거나, 그 라운드에 격리 위반이 감지됐거나, 후보의 base 이후 작업공간의 같은 경로가 바뀌었으면 거부한다(blind merge 없음). 변경 목록과 보호 기준 침범은 채택 시점에 다시 계산하고, 복사 후 작업공간 내용이 후보와 같은지와 복사 중 후보가 바뀌지 않았는지 확인해 아니면 롤백한다. 채택 전에는 orchestrator가 작업공간을 직접 편집할 수 없다.
 6. 반례 검토: `reason "verification"`(기존 2라운드 상한 유지)을 채택 이후에 실행. 발견 사항은 `reproduced-fixed`/`reproduced-open`/`unverified`/`refuted`로 분류.
 7. 통합 재검증: 작업공간의 마지막 변경 이후 단독으로 실행해 성공한 검사이며, 그 검사 전후의 작업공간 fingerprint가 보고 시점의 fingerprint와 같아야 한다.
 
-보고서 게이트(`data.ultra`)는 런타임 기록과 대조한다: 단계 실행 여부, 후보 2개 이상, 모든 후보의 판정, 선택 후보의 채택, 선택 근거 = 그 사본에서 orchestrator가 실행해 성공하고 **채택된 내용을 본** bash 호출의 `[orche ref Tn]`, 채택 이후 검증 라운드, 통합 근거 = 보고 시점 작업공간과 같은 내용을 검사 전후에 본 검사 ref(마지막 채택·편집 이후), report_result 단독 실행, `reproduced-open`이면 done 불가, 보호 기준 무결성. 다수결·후보 자기 보고는 근거가 아니다. fingerprint를 얻지 못하면 통과시키지 않고 거부한다. 완료하지 못한 단계는 `status:"blocked"` + `data.ultra.stage` + `reason`(answer는 `data.unresolved`)으로 끝낸다. 게이트 거절 횟수는 기존 result 재시도 상한을 따른다.
+보고서 게이트(`data.ultra`)는 런타임 기록과 대조한다: 단계 실행 여부, 후보 2개 이상, 모든 후보의 판정(후보당 한 항목), 선택되지 않은 끝난 후보마다 현재 사본에 묶인 평가 근거 또는 런타임 제외 사유(4번), 선택 후보의 채택, 선택 근거 = 그 사본에서 orchestrator가 실행해 성공하고 **채택된 내용을 본** bash 호출의 `[orche ref Tn]`, 채택 이후 검증 라운드, 통합 근거 = 보고 시점 작업공간과 같은 내용을 검사 전후에 본 검사 ref(마지막 채택·편집 이후), report_result 단독 실행, `reproduced-open`이면 done 불가, 보호 기준 무결성. 다수결·후보 자기 보고는 근거가 아니다. fingerprint를 얻지 못하면 통과시키지 않고 거부한다. 통과한 완료 보고는 평가 근거(후보별 검사 ref)와 제외 사유를 record의 `gate` 이벤트(`evaluated`/`excluded`)에 남긴다. 후보 사본 경로가 들어간 명령은 그 사본의 검사로 보므로 통합 근거가 될 수 없다(거부 메시지에 명시). 완료하지 못한 단계는 `status:"blocked"` + `data.ultra.stage` + `reason`(answer는 `data.unresolved`)으로 끝낸다. 게이트 거절 횟수는 기존 result 재시도 상한을 따른다.
 
 read-only answer 변형: 모든 sub-worker가 answer/verify, `orche_adopt` 거부, 후보 답변의 주장을 orchestrator가 출처로 직접 확인하고 `data.ultra.claims[{claim,sources,status}]`로 보고(코드 테스트 불필요). `single.spawn: false`는 ultra에 적용되지 않으며 결과에 그 사실이 표시된다.
 
-런타임 강제: 단계 순서·상한·역할, 후보 격리(작업 사본, 의존성 디렉터리 사본, 링크 fail-closed 검사, guard, 사본 밖 literal shell 쓰기 차단, 라운드 전후 탈출 감지), 보호 기준(쓰기 거부, 셸 변경 감지), 내용 fingerprint에 묶인 채택 조건과 보고서 게이트. 프롬프트 의존: 검증 기준이 합격 기준을 실제로 담는지, 가설·후보의 의미적 다양성, 성공한 검사가 주장을 실제로 뒷받침하는지(exit 0만 증명하며, 어느 사본을 검사했는지는 명령 문자열의 사본 경로로 판단), 동점 시 선택 기준, 발견 사항 분류의 타당성.
+런타임 강제: 단계 순서·상한·역할, 끝난 후보마다의 평가 근거, 후보 격리(작업 사본, 의존성 디렉터리 사본, 링크 fail-closed 검사, guard, 사본 밖 literal shell 쓰기 차단, 라운드 전후 탈출 감지), 보호 기준(쓰기 거부, 셸 변경 감지), 내용 fingerprint에 묶인 채택 조건과 보고서 게이트. 프롬프트 의존: 검증 기준이 합격 기준을 실제로 담는지, 가설·후보의 의미적 다양성, 성공한 검사가 주장을 실제로 뒷받침하는지(exit 0만 증명하며, 어느 사본을 검사했는지는 명령 문자열의 사본 경로로 판단), 동점 시 선택 기준, 발견 사항 분류의 타당성.
 
 ### 14.3 후보 사본과 의존성 디렉터리
 
 - 사본은 작업공간 subtree의 git tree(추적 + 무시되지 않은 미추적, `.orche` 제외)를 사본 전용 index로 checkout한 것이다. 사용자 index의 assume-unchanged/skip-worktree는 private index에서 해제하고, fsmonitor·untracked cache는 끈다.
-- git이 무시하는 `node_modules`/`.venv`/`venv`는 후보마다 **별도 사본**으로 만든다(`cp -a --reflink=auto`: CoW 지원 파일시스템은 복제, 아니면 전체 복사). 원본으로의 symlink는 만들지 않는다. 사본 안에서 작업공간(또는 `from`의 이전 사본)을 가리키던 링크는 사본 안으로 다시 연결한다. Python 환경은 작업공간 경로를 담은 파일(shebang, activate, `pyvenv.cfg`, `.pth`, editable finder, `direct_url.json`)을 사본 경로로 고친다. 후보가 의존성을 바꿔도 채택되지 않으므로 통합 때 작업공간에서 설치한다.
+- git이 무시하는 `node_modules`/`.venv`/`venv`는 후보마다 **별도 사본**으로 만든다(`cp -a --reflink=auto`: CoW 지원 파일시스템은 복제, 아니면 전체 복사). 원본으로의 symlink는 만들지 않는다. 사본 안에서 작업공간(또는 `from`의 이전 사본)을 가리키던 링크는 사본 안으로 다시 연결한다. Python 환경은 작업공간 경로를 담은 파일(shebang, activate, `pyvenv.cfg`, `.pth`, editable finder, `direct_url.json`)을 사본 경로로 고친다. 후보가 의존성을 바꿔도 채택되지 않으므로 통합 때 작업공간에서 설치한다. 채택 결과는 후보(수정 후보면 그 이전 후보까지)가 자기 사본의 의존성에서 바꾼 경로를 알려 준다(`… also changed its private dependency directories …; those changes are NOT adopted`).
 - 링크 검사(fail-closed, 후보 실행 전): 사본의 모든 링크를 `realpath`로 끝까지 따라간다(링크 체인 포함). 사본 안이면 허용한다. 사본 밖이면 다음과 같이 처리한다.
   - 이 사용자가 쓸 수 없는 파일, 또는 전체 트리를 걸어 쓰기 가능한 항목과 링크가 하나도 없음을 확인한 디렉터리(최대 20,000개 항목): 읽기 전용 공유로 허용하고 보고한다.
   - 의존성 디렉터리 안에서 쓰기 가능한 파일을 가리키는 링크: 그 파일의 사본으로 바꾼다(`venv --copies`와 같은 방식).
   - 그 외(쓰기 가능하거나 확인할 수 없는 디렉터리, 추적 영역의 링크, 사본 밖 쓰기 가능한 곳에 파일을 만들 dangling 링크): 사본을 거부한다. candidates 호출은 아무 후보도 실행하지 않고 거부되며, 경로와 사유가 결과에 남는다.
-- 탈출 감지: candidates 라운드 전후로 작업공간 내용 manifest와 작업공간 자체 의존성 디렉터리(경로·종류·크기·mtime·mode·링크 대상, `.cache`/`.vite`/`.vitest`/`__pycache__`/`.pytest_cache` 제외)를 비교한다. 바뀌었으면 그 라운드의 후보는 모두 채택할 수 없다(`Isolation breach`).
+- 탈출 감지: candidates 라운드 전후로 작업공간 내용 manifest와 작업공간 자체 의존성 디렉터리의 내용 manifest(14.4)를 비교한다. 바뀌었거나 의존성 디렉터리를 읽지 못해 fingerprint를 얻지 못하면 그 라운드의 후보는 모두 채택할 수 없다(`Isolation breach`, fail-closed).
 
 ### 14.4 내용 fingerprint와 검사 유효성
 
-- manifest는 범위 안의 모든 파일(git이 범위를 정함: 추적 또는 무시되지 않은 미추적, `.orche`·의존성 디렉터리 제외)의 **원시 바이트 SHA-256과 권한 비트**, 또는 링크 대상이다. 따라서 index 플래그, clean filter, 줄바꿈 정규화가 바이트 변경을 숨기지 못한다. 해시는 (크기, mtime, ctime, inode, mode)로 캐시하고, 최근 2초 안에 바뀐 파일은 매번 다시 해시한다. 작업공간 fingerprint와 후보 fingerprint 모두 이 manifest의 digest다.
+- manifest는 범위 안의 모든 파일(git이 범위를 정함: 추적 또는 무시되지 않은 미추적, `.orche`·의존성 디렉터리 제외)의 **원시 바이트 SHA-256과 권한 비트**, 또는 링크 대상이다. 따라서 index 플래그, clean filter, 줄바꿈 정규화가 바이트 변경을 숨기지 못한다. 해시는 (크기, mtime, ctime, inode, mode)로 캐시하고, 최근 2초 안에 바뀐 파일은 매번 다시 해시한다. 이 manifest가 채택 범위(`changes`, 충돌 검사, 보호 기준)다.
+- **의존성 manifest**(검증 상태, 채택 범위 아님): 작업공간과 각 사본의 의존성 디렉터리 내용. 범위: 최상위 `node_modules`/`.venv`/`venv`(추적·무시·링크 모두; 링크된 store는 그 대상을 걷는다)와 git이 추적하지 않는 하위 디렉터리 중 같은 이름의 것(예: `packages/a/node_modules`). 항목: 디렉터리 `d<mode>`, 파일의 원시 바이트 SHA-256과 mode, 링크 대상. 링크는 의존성 디렉터리 안을 가리키지 않는 한 따라가 그 파일·트리 내용까지 넣는다(루트 밖의 `npm link`, 작업공간 안의 무시된 빌드 디렉터리 등). 같은 크기로 바꾸고 mtime을 되돌려도 내용 해시로 잡힌다. **이름에 따른 예외는 없다**: `.cache`/`.vite`/`.vitest`/`__pycache__`/`.pytest_cache` 같은 캐시 디렉터리도 모든 파일이 들어간다. 이름은 무해하다는 증거가 아니고(그 안의 모듈을 require하는 검사도 있다), 런타임은 입력과 산출물을 구별할 수 없으므로 fail-closed로 모두 입력으로 본다. fail-closed: 읽을 수 없는 항목이나 2,000,000개 초과면 fingerprint가 없고, 없는 fingerprint는 "변경 없음"으로 인정되지 않는다.
+- **검증 fingerprint** = 범위 manifest digest + 의존성 manifest digest. 작업공간·후보 모두 이것을 쓴다. 따라서 검사 뒤 후보 사본이나 작업공간의 의존성이 바뀌면(설치, 패치, 삭제, 새 파일) 그 검사는 채택·선택·통합·후보 평가 근거가 되지 못하고 다시 검사해야 한다(`its files or its dependency directories (node_modules, .venv, venv) changed during or after them`).
 - orchestrator의 모든 허용된 도구 호출은 probe로 추적한다. guard에서 열고(`tool_call`), 호출이 끝나면(`tool_execution_end`, worker가 다음으로 넘어가기 전에 await) 닫는다. bash 호출은 실행 전후에 작업공간과 끝난 모든 후보 사본의 fingerprint를 기록한다.
 - 다음 검사는 증거로 인정하지 않는다: 같은 시간에 파일을 바꿀 수 있는 다른 호출과 겹친 검사(Pi는 한 응답의 호출을 병렬 실행), probe가 없거나 실패한 검사, 실행 전후 fingerprint가 다른 검사(예: `tests && printf … > file`).
-- report_result의 guard에서 그 호출에 묶인 현재 작업공간 fingerprint를 구한다. 통합 검사의 fingerprint가 이것과 다르면 거부한다(셸·편집·다른 세션의 변경 모두 포함). 기존 dirty 파일이나 다른 세션의 변경을 되돌려 맞추지 않는다. 다시 검사해야 한다.
-- 비용: 후보가 생긴 뒤에는 bash 호출마다 manifest 계산(git ls-files + 파일 stat, 바뀐 파일만 해시)이 전후로 붙는다.
+- report_result의 guard에서 그 호출에 묶인 현재 작업공간과 끝난 모든 후보 사본의 fingerprint를 구한다(후보 평가의 현재 상태). 통합 검사의 fingerprint가 이것과 다르면 거부한다(셸·편집·다른 세션의 변경 모두 포함). 기존 dirty 파일이나 다른 세션의 변경을 되돌려 맞추지 않는다. 다시 검사해야 한다.
+- 비용(정확성 우선): 후보가 생긴 뒤에는 bash 호출마다 작업공간과 끝난 모든 사본의 manifest·의존성 manifest 계산(git ls-files 3회 + 모든 항목 stat, 바뀐 파일만 해시)이 전후로 붙는다. 사본의 의존성은 처음 한 번 전부 해시하므로 큰 `node_modules`/`.venv`에서는 첫 검사가 수 초 늦어질 수 있다.
 
-재개: `single.ledger`가 켜져 있고 같은 worker가 같은 task를 이어 받으면(타임아웃·blocked 이후) 후보·사본·채택(채택한 fingerprint 포함)·보호 기준과 라운드 수가 이어진다. evidence ref와 probe는 assignment마다 새로 시작하므로 검사는 다시 실행한다. 그 외에는 새로 시작한다. 완료(done)된 run은 사본을 삭제해 공간을 돌려준다. blocked·timeout은 이어받기와 확인을 위해 사본을 남긴다. 다음 ultra run이 새로 시작할 때 지운다.
+재개: `single.ledger`가 켜져 있고 같은 worker가 같은 task를 이어 받으면(타임아웃·blocked 이후) 후보·사본·채택(채택한 fingerprint 포함)·보호 기준과 라운드 수, **sub-worker 번호의 최고값**이 이어진다. 이어받은 assignment의 sub-worker는 그 다음 번호부터 받으므로(exploration·verification·거부된 spawn 번호 포함) 새 후보가 기존 후보의 id나 사본을 차지하지 않는다. 그래도 이미 있는 id(사본, index, base manifest 중 하나라도 있으면)나 `from`과 같은 id로 사본을 만들려 하면 아무것도 지우지 않고 candidates 호출을 거부한다. evidence ref와 probe는 assignment마다 새로 시작하므로 검사는 다시 실행한다(보존된 incumbent도 새 검사 뒤에 채택·평가된다). 그 외에는 새로 시작한다. 완료(done)된 run은 사본을 삭제해 공간을 돌려준다. blocked·timeout은 이어받기와 확인을 위해 사본을 남긴다. 다음 ultra run이 새로 시작할 때 지운다.
 
 한계(OS sandbox가 아님):
 - 후보의 셸은 이 사용자가 쓸 수 있는 어디든 절대 경로로 쓸 수 있다. 그중 작업공간 범위 파일과 작업공간 의존성 디렉터리 쓰기는 라운드 뒤에 감지해 채택을 막는다. 홈·전역 캐시 등 그 밖의 쓰기는 감지하지 못한다.
-- 읽기 전용 공유는 OS 권한에 기댄다(root는 모두 쓰기 가능으로 판정되어 fail-closed가 된다). 의존성 탈출 감지는 stat 기반이라, mtime까지 되돌리는 의도적 변경은 놓칠 수 있다.
+- 읽기 전용 공유는 OS 권한에 기댄다(root는 모두 쓰기 가능으로 판정되어 fail-closed가 된다).
+- **검사가 의존성 디렉터리에 쓰는 경우**(캐시·설치): 그 검사 자체가 전후 fingerprint를 바꾸므로 근거가 되지 못한다. 거부 메시지는 그 검사가 바꾼 의존성 경로(최대 8개)를 이름으로 알려 준다(`The check itself wrote into the dependency directories (T12 changed node_modules/.vite/vitest/…/results.json)`). 회복 방법(운영 방법이지 입력 변경이 안전하다는 증명이 아니다):
+  - 캐시 쓰기를 끄거나 의존성 디렉터리 밖으로 옮긴다: Vitest 3는 `vitest run --no-cache`(결과 캐시 `node_modules/.vite/vitest/<hash>/results.json`을 쓰지 않는다; 확인한 버전 3.2.7) 또는 Vite `cacheDir`를 밖으로; Python은 `PYTHONDONTWRITEBYTECODE=1` 또는 `PYTHONPYCACHEPREFIX=<밖의 경로>`; pytest는 `-p no:cacheprovider`; Babel은 `BABEL_DISABLE_CACHE=1`; ESLint는 `--cache-location <밖의 경로>`.
+  - 쓰기가 매번 같은 내용이면 한 번 더 실행한다(두 번째 실행은 사본을 그대로 두므로 유효하다). Vitest 결과 캐시처럼 실행 시간을 담아 **매번 내용이 달라지는 쓰기는 재실행으로 해결되지 않는다**.
+  - 검사 전에 의존성을 미리 만들어 두는 단계(설치, 빌드)는 검사와 별도 호출로 먼저 실행한다.
+- 링크가 의존성 디렉터리 안을 가리키면 대상은 따로 따라가지 않는다(그 디렉터리를 이미 걷는다).
 - 어느 사본을 검사했는지는 명령 문자열의 사본 경로로 판단한다.
 - git work tree가 아니면 implement 후보를 만들 수 없어 blocked로 끝난다.
 - submodule 내용은 사본에 없다. 후보의 파일 도구는 그 경로에서 막히고, 결과에 명시된다.
-- 의존성 디렉터리 외에 git이 무시하는 파일(빌드 산출물, `.env` 같은 로컬 설정)은 사본·채택 대상이 아니며, 결과에 명시된다.
-- 실제 외부 모델 E2E는 수행하지 않았고 faux 모델과 실제 git·bash로 검증했다.
+- 의존성 디렉터리 외에 git이 무시하는 파일(빌드 산출물, `.env` 같은 로컬 설정)은 사본·채택·fingerprint 대상이 아니며, 결과에 명시된다. 검사가 이런 파일을 입력으로 읽는다면 그 변경은 검사 무효화로 이어지지 않는다(검사가 매번 다시 만드는 산출물을 넣으면 모든 검사가 스스로 무효가 되기 때문).
+- 하위 의존성 디렉터리(예: `packages/a/node_modules`)는 fingerprint에는 들어가지만 사본에는 복사되지 않는다(기존과 같음).
+- 자동 테스트는 faux 모델과 실제 git·bash로 검증한다. 실제 모델(cliproxyapi/gpt-6.1-sol) E2E와 독립 검토 결과는 `CHANGELOG.md` [Unreleased]에 요약한다.
 
 ### 14.5 one-shot 명령 `/orche strong <PROMPT>` · `/orche ultra <PROMPT>`
 
@@ -799,5 +807,5 @@ read-only answer 변형: 모든 sub-worker가 answer/verify, `orche_adopt` 거�
   - `direct` 세션에서는 run이 끝난 뒤 위임 도구가 꺼진다. 같은 worker로 이어가려면 `/orche strong|ultra <PROMPT>`를 다시 쓴다.
   - main이 답하기 전에 run의 첫 steering 확인에 들어온 메시지는 그 요청의 문맥으로 취급한다(프롬프트와 같은 시점).
   - 출처를 가릴 수 없는 메시지로 요청 모드가 끝난 그 run의 첫 다음 모델 요청에서는, Pi가 이미 선언한 도구 목록이 한 번 늦게 바뀔 수 있다. guard는 호출 시점의 모드로 막고, 프롬프트는 그 요청부터 세션 모드다.
-  - 실제 외부 모델 E2E는 하지 않았다. faux 모델로 실제 Pi 세션·확장·job 경로를 검증했다.
+  - 자동 테스트는 faux 모델로 실제 Pi 세션·확장·job 경로를 검증한다. 실제 모델(cliproxyapi/gpt-6.1-sol) E2E 결과는 `CHANGELOG.md` [Unreleased]에 요약했다.
 
