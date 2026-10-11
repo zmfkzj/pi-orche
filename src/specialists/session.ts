@@ -9,7 +9,7 @@ import type { Static, TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { formatSchemaErrors } from "../orchestration/schema-errors.js";
 import type { ModelRuntime, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { createSession, type ToolGuard } from "../pi/session-factory.js";
+import { createSession, type SessionOptions, type ToolGuard } from "../pi/session-factory.js";
 import type { AstRewriteFileGuard } from "../tools/ast.js";
 import { abortable } from "../orchestration/run/deadline.js";
 import type { ModelRoute } from "../orchestration/routing.js";
@@ -60,6 +60,8 @@ export interface SpecialistRun<S extends TSchema> {
   inheritedContextWindow?: number;
   /** Output-limit recovery options of the session (src/pi/length-recovery.ts); its defaults without. */
   lengthRecovery?: LengthRecoveryOptions;
+  /** Skills (metadata) the session lists in its prompt; see SessionOptions.skills. */
+  skills?: SessionOptions["skills"];
   /** Every tool the specialist starts (progress lines). */
   onTool?: (name: string) => void;
   /** Once the session exists: the `provider/id` and thinking level it really runs on (after Pi resolved the route and clamped the level). */
@@ -164,6 +166,7 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
       ...(run.sessionFile ? { sessionFile: run.sessionFile } : {}),
       ...(run.inheritedContextWindow ? { inheritedContextWindow: run.inheritedContextWindow } : {}),
       ...(run.lengthRecovery ? { lengthRecovery: run.lengthRecovery } : {}),
+      ...(run.skills?.length ? { skills: run.skills } : {}),
     }).then(created => {
       if (controller.signal.aborted) { created.dispose(); throw controller.signal.reason; }
       return created;

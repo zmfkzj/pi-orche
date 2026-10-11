@@ -11,9 +11,23 @@
  * the model (`--model`, `--models`, `--provider`, `--thinking`). A resumed, forked or reloaded session keeps its model, and
  * nothing re-applies it later: a model or thinking level the user picks during the session (`/model`, the cycle keys) stays.
  */
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { INHERIT_MAIN, inheritsMain, inheritsMainThinking, tierThinking, usesStrongTiers, type MainMode, type ModelTiers, type RouteSettings, type TierSettings } from "../orchestration/routing.js";
 import { withExtendedContext } from "../pi/extended-context.js";
+import { THINKING_LEVELS } from "../pi/thinking-levels.js";
+
+/**
+ * The thinking a tier that sets none of its own inherits from main (docs/orchestrator.md 12): main's current level, but not below
+ * `floor` (models.main's thinking, else main's level at the last session start). Lowering main's thinking during the session (for
+ * example to make main hand off faster) then does not lower the workers that only inherit it; raising it still raises them. A tier
+ * that names main's thinking (`thinking: "main"`, `{ "model": "main" }` without a level) is not floored: it follows main exactly.
+ * The worker's model clamps the result like any level.
+ */
+export function inheritedThinking(current: ThinkingLevel | undefined, floor: ThinkingLevel | undefined): ThinkingLevel | undefined {
+  const rank = (level: ThinkingLevel | undefined) => level === undefined ? -1 : (THINKING_LEVELS as readonly string[]).indexOf(level);
+  return rank(floor) > rank(current) ? floor : current;
+}
 
 export const MAIN_MODEL_START_REASONS: readonly string[] = ["startup", "new"];
 /** Pi's command-line flags that choose the session's model or thinking (Pi's `cli/args.js`). */
@@ -82,6 +96,8 @@ export interface ModelTiersView {
   /** The main session's model now (`provider/id`) and thinking. */
   main?: string;
   thinking?: string;
+  /** The floor of implicit thinking inheritance ({@link inheritedThinking}) and where it comes from. */
+  thinkingFloor?: { level: string; source: "models.main" | "session start" };
   mode: string;
   path?: string;
   error?: string;
@@ -124,6 +140,7 @@ export function formatModelTiers(view: ModelTiersView): string {
     `- strong-orchestrator (strong and ultra modes, in place of the orchestrator): ${strongOrchestrator ? `${describe(strongOrchestrator, "main's", main)} — ${tierSource("strong-orchestrator", strongOrchestrator)}` : orchestrator ? `unset: falls back to models.orchestrator (${describe(orchestrator, "main's", main)})` : `unset: inherited from main (${current})`}`,
     `- strong-worker (strong and ultra modes, in place of the worker): ${strongWorker ? `${describe(strongWorker, "the strong orchestrator's", main)} — ${tierSource("strong-worker", strongWorker)}` : `inherited from the strong orchestrator (${strongOrchestratorModel}); models.worker does not apply`}`,
     ...(view.mode === "direct" ? [] : [`- main's thinking (${view.thinking ?? "off"}) reaches at each hand-off: ${reach.length ? reach.join(", ") : "no tier (each sets its own level)"}${reach.length ? "; a model that lacks the level runs the nearest one it supports (Pi's clamp; the task result and run.json record the level used)" : ""}`]),
+    ...(view.mode === "direct" || !view.thinkingFloor ? [] : [`- thinking floor ${view.thinkingFloor.level} (${view.thinkingFloor.source === "models.main" ? "models.main's thinking" : "main's level at session start"}): a tier that sets no thinking of its own takes main's current thinking but not below it, so lowering main's thinking does not lower it; thinking "main" (or { "model": "main" } without a level) follows main exactly; give a tier its own level (e.g. "thinking": "high") to keep it independent of main`]),
     "- game-asset, video: their own routes (models does not apply)",
     ...(orchestrator || worker || advisor || strongOrchestrator || strongWorker ? ["A configured model that orche's runtime cannot resolve is replaced by the inherited one, with a warning in the task result."] : []),
     ...(strong ? [`Mode ${view.mode}: orche_task workers run on the strong tiers above (models.orchestrator only as the fallback of an unset or unresolvable strong-orchestrator; models.worker not at all).`] : []),

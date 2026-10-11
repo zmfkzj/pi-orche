@@ -10,7 +10,7 @@ import { fauxAssistantMessage as reply, fauxProvider, type FauxResponseStep } fr
 import { WorkerPool } from "../../src/extension/workers.js";
 import { OrcheController } from "../../src/extension/controller.js";
 import { delegationRules } from "../../src/extension/mode.js";
-import { applyMainModel, formatModelTiers } from "../../src/extension/main-model.js";
+import { applyMainModel, formatModelTiers, inheritedThinking } from "../../src/extension/main-model.js";
 import { parseRouteConfig, RouteConfigError } from "../../src/orchestration/routing.js";
 import { SPAWN_TOOL } from "../../src/orchestrator/spawn.js";
 import { readSplitLog } from "../../src/orchestrator/split-log.js";
@@ -59,15 +59,18 @@ describe("model tiers: config", () => {
     expect(() => parseRouteConfig({ routes: {}, models: { main: { model: "no-slash" } } })).toThrow("config.models.main.model: expected provider/modelId");
     expect(() => parseRouteConfig({ routes: {}, models: [] })).toThrow("config.models: expected object");
   });
-  it("without models nothing changes: no models key, main's hand-off rule word for word", () => {
+  it("without models: no models key; main's hand-off rule names the thinking floor of an implicit inheritance", () => {
     expect(parseRouteConfig({ routes: {}, default: { model: "p/m" } })).not.toHaveProperty("models");
     for (const spawn of [true, false]) {
       expect(delegationRules("single", { spawn, orchestratorModel: false })).toBe(delegationRules("single", { spawn }));
-      expect(delegationRules("single", { spawn })).toContain("Standard roles inherit main's CURRENT model and thinking at hand-off and compact above 50% context");
+      expect(delegationRules("single", { spawn })).toContain("Standard roles inherit main's CURRENT model at hand-off, with main's thinking at hand-off, but not below the level main started this session with (models.main's thinking when set), and compact above 50% context");
     }
     const configured = delegationRules("single", { orchestratorModel: true });
-    expect(configured).toContain("Standard roles run on the orchestrator model configured in the orche config (models.orchestrator), not on main's model, with main's CURRENT thinking at hand-off, and compact above 50% context");
+    expect(configured).toContain("Standard roles run on the orchestrator model configured in the orche config (models.orchestrator), not on main's model, with main's thinking at hand-off, but not below the level main started this session with (models.main's thinking when set), and compact above 50% context");
     expect(configured).not.toContain("inherit main's CURRENT model");
+    // A tier that names main's thinking keeps the earlier sentences word for word (no floor).
+    expect(delegationRules("single", { orchestratorThinkingMain: true })).toContain("Standard roles inherit main's CURRENT model and thinking at hand-off and compact above 50% context");
+    expect(delegationRules("single", { orchestratorModel: true, orchestratorThinkingMain: true })).toContain("not on main's model, with main's CURRENT thinking at hand-off, and compact above 50% context");
     expect(delegationRules("direct", { orchestratorModel: true })).toBe(delegationRules("direct"));
   });
 });
@@ -548,7 +551,8 @@ describe('model tiers: { "thinking": "main" } (another model, main\'s current th
     const fixedThinking = delegationRules("single", { orchestratorThinking: true });
     expect(fixedThinking).toContain("Standard roles inherit main's CURRENT model at hand-off, with the thinking level configured in the orche config (models.orchestrator), and compact above 50% context");
     expect(fixedThinking).not.toContain("CURRENT model and thinking");
-    expect(delegationRules("single", { orchestratorModel: true })).toContain("not on main's model, with main's CURRENT thinking at hand-off, and compact");
+    expect(delegationRules("single", { orchestratorModel: true })).toContain("not on main's model, with main's thinking at hand-off, but not below the level main started this session with (models.main's thinking when set), and compact");
+    expect(delegationRules("single", { orchestratorModel: true, orchestratorThinkingMain: true })).toContain("not on main's model, with main's CURRENT thinking at hand-off, and compact");
     expect(delegationRules("single", { orchestratorModel: true, orchestratorThinking: true })).toContain("Standard roles run on the orchestrator model and thinking level configured in the orche config (models.orchestrator), not on main's, and compact");
   });
 });
@@ -579,5 +583,75 @@ describe('model tiers: { "thinking": "main" } through the extension', () => {
     await h.session.prompt("once more, independently checked");
     for (const tier of Object.values(tiers)) expect(tier.getPendingResponseCount()).toBe(0);
     expect(results()[1]).toMatchObject({ details: { worker: "W1", model: "tier-orch/o1", thinking: "high", thinkingSource: "config:main", spawned: [expect.objectContaining({ model: "tier-worker/w1", thinking: "high", thinkingSource: "config:main" })] } });
+  });
+});
+
+describe("model tiers: implicit thinking inheritance has a floor; named inheritance follows main exactly", () => {
+  it("inheritedThinking: main's current level, raised to the floor, never lowered", () => {
+    expect(inheritedThinking("low", "high")).toBe("high");
+    expect(inheritedThinking("xhigh", "medium")).toBe("xhigh");
+    expect(inheritedThinking("off", "minimal")).toBe("minimal");
+    expect(inheritedThinking(undefined, "high")).toBe("high");
+    expect(inheritedThinking("high", undefined)).toBe("high");
+    expect(inheritedThinking(undefined, undefined)).toBeUndefined();
+  });
+  it("an unset orchestrator tier and a model without thinking take the floored level; thinking \"main\", { model: \"main\" } and explicit levels do not", async () => {
+    // main lowered its thinking to low; it started the session on high.
+    const floored = { thinking: "low" as const, inheritedThinking: "high" as const };
+    const unset = await fixture();
+    unset.mainFaux.setResponses([implemented(false)]);
+    const first = await unset.execute({ thinking: "low", inheritedThinking: "medium" });
+    expect(first.details).toMatchObject({ model: unset.main, thinking: "medium", modelSource: "main", thinkingSource: "main" });
+    // A reused worker is switched to the floored level again at the next hand-off.
+    unset.mainFaux.setResponses([implemented(false)]);
+    expect((await unset.execute({ thinking: "minimal", inheritedThinking: "medium", worker: "W1" })).details).toMatchObject({ worker: "W1", thinking: "medium", thinkingSource: "main" });
+    // Raising main's thinking above the floor still raises the inheriting worker.
+    unset.mainFaux.setResponses([implemented(false)]);
+    expect((await unset.execute({ thinking: "high", inheritedThinking: "high", worker: "W1" })).details).toMatchObject({ worker: "W1", thinking: "high" });
+
+    const cases: [Record<string, unknown>, string, string][] = [
+      [{ orchestrator: { model: "tier-orch/o1" } }, "high", "main"],
+      [{ orchestrator: { model: "tier-orch/o1", thinking: "main" } }, "low", "config:main"],
+      [{ orchestrator: { model: "tier-orch/o1", thinking: "minimal" } }, "minimal", "config"],
+      [{ orchestrator: { model: "main" } }, "low", "config:main"],
+      [{ orchestrator: { model: "main", thinking: "medium" } }, "medium", "config"],
+    ];
+    for (const [models, thinking, thinkingSource] of cases) {
+      const orchestrator = tierProvider("tier-orch", "o1");
+      const { h, execute, mainFaux } = await fixture({ models });
+      h.runtime.registerNativeProvider(orchestrator.provider);
+      orchestrator.setResponses([implemented(false)]);
+      mainFaux.setResponses([implemented(false)]);
+      expect((await execute(floored)).details, JSON.stringify(models)).toMatchObject({ thinking, thinkingSource });
+    }
+  });
+  it("strong mode: models.orchestrator as the fallback of an unset strong-orchestrator is floored too; an explicit strong level is kept", async () => {
+    const floored = { thinking: "low" as const, inheritedThinking: "high" as const, mainMode: "strong" as const };
+    for (const [models, thinking] of [[{ orchestrator: { model: "tier-orch/o1" } }, "high"], [{ "strong-orchestrator": { model: "tier-orch/o1", thinking: "medium" } }, "medium"]] as const) {
+      const orchestrator = tierProvider("tier-orch", "o1");
+      const { h, execute } = await fixture({ models });
+      h.runtime.registerNativeProvider(orchestrator.provider);
+      orchestrator.setResponses([implemented(false)]);
+      expect((await execute(floored)).details, JSON.stringify(models)).toMatchObject({ model: "tier-orch/o1", thinking });
+    }
+  });
+  it("through the extension: lowering main's thinking keeps the inheriting worker on models.main's level; /orche models shows the floor", async () => {
+    const tiers = { main: tierProvider("tier-main", "m1"), orchestrator: tierProvider("tier-orch", "o1") };
+    const h = await createHarness({ mainSteps: [], orcheSteps: [], inheritMainModel: true, models: { main: { model: "tier-main/m1", thinking: "high" }, orchestrator: { model: "tier-orch/o1" } }, providers: Object.values(tiers).map(item => ({ provider: item.provider })) });
+    opened.push(h);
+    execFileSync("git", ["init", "-q"], { cwd: h.cwd });
+    expect(h.session.thinkingLevel).toBe("high");
+    h.session.setThinkingLevel("low"); // the user lowers main's thinking during the session
+    let system = "";
+    tiers.main.setResponses([context => { system = systemOf(context); return tool("orche_task", { role: "implement", request }); }, reply("reviewed")]);
+    tiers.orchestrator.setResponses([implemented(false)]);
+    await h.session.prompt("fix the greeting");
+    const result = h.session.messages.find(message => message.role === "toolResult" && message.toolName === "orche_task");
+    expect(result).toMatchObject({ details: { model: "tier-orch/o1", thinking: "high", thinkingSource: "main" } });
+    expect(system).toContain("but not below the level main started this session with");
+    const before = h.notifications.length;
+    await h.session.prompt("/orche models");
+    const text = h.notifications.slice(before).map(item => item.message).join("\n");
+    expect(text).toContain("- thinking floor high (models.main's thinking): a tier that sets no thinking of its own takes main's current thinking but not below it");
   });
 });

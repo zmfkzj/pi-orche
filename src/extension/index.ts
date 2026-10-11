@@ -1,11 +1,12 @@
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 
-import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type InputEvent, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type InputEvent, type Skill, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createOrcheTools } from "../tools/index.js";
 import { spillToolResult } from "../tools/spill.js";
 import { OrcheController, type OrcheControllerOptions } from "./controller.js";
-import { inheritsMain, isDelegatingMode, MAIN_MODES, modeTiers, tierThinking, type MainMode, type ModelTiers } from "../orchestration/routing.js";
+import { inheritsMain, inheritsMainThinking, isDelegatingMode, MAIN_MODES, modeTiers, tierThinking, type MainMode, type ModelTiers } from "../orchestration/routing.js";
 import { delegationRules, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
 import { contextWarning, DEFAULT_CONTEXT_WARNING, type ContextWarningSettings, type ContextWarningState } from "./context-warning.js";
 import { CONFIG_FILE, DEFAULT_SINGLE, loadOrcheConfigFile } from "./config.js";
@@ -19,11 +20,13 @@ import { formatRecordList, listRecords } from "./records.js";
 import { createOrcheRenderers, orcheTaskRenderers, renderJobResultMessage } from "./render.js";
 import { partialUpdate } from "./progress.js";
 import { formatSplitSummary, readSplitLog, summarizeSplits } from "../orchestrator/split-log.js";
-import { applyMainModel, formatModelTiers, type ModelTiersView } from "./main-model.js";
+import { applyMainModel, formatModelTiers, inheritedThinking, type ModelTiersView } from "./main-model.js";
+import { LONG_RESPONSE_GUIDANCE_TYPE, LongResponseWatch, type LongResponseOptions } from "./long-response.js";
 import { defaultRunLimits, extensionBudgetMs, extensionLengthMs } from "../orchestration/limits.js";
 import { formatDuration } from "../agent/liveness.js";
 import { LEDGER_ENTRY_TYPE, LEDGER_SUMMARY_TYPE, latestLedgers, type TaskLedger } from "../single/ledger.js";
 import { completeOrcheArguments } from "./completions.js";
+import { workerSkills } from "../pi/worker-skills.js";
 
 export const RESULT_MESSAGE_TYPE = "orche-result";
 /** Pi built-ins that stay Pi's own but are switched on next to our tools. */
@@ -155,6 +158,8 @@ export interface OrcheExtensionOptions extends OrcheControllerOptions {
   workerIdleTtlMs?: number;
   /** Disable only when an embedding intentionally owns an isolated worker provider setup. Default true. */
   inheritProviders?: boolean;
+  /** Thresholds of the main session's long-response watch (long-response.ts), injectable for tests. */
+  longResponse?: LongResponseOptions;
 }
 /** Build the extension; options provide config/runtime/run and idle-timeout test seams. */
 export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
@@ -168,10 +173,16 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     /** The UI and mode of the latest tool call / session start, for the background job's widget and notices. */
     let lastUi: ExtensionContext["ui"] | undefined;
     let lastMode: ExtensionContext["mode"] | undefined;
+    /**
+     * Metadata of the skills main's Pi discovered, as of main's latest run (before_agent_start): new workers list them in their own
+     * prompt (src/pi/worker-skills.ts). Nothing else of main reaches a worker this way: no extension, hook, conversation or state.
+     */
+    let mainSkills: Skill[] = [];
     const pool = () => {
       if (!workers) {
         workers = new WorkerPool({
           controller, ...(options.agentDir ? { agentDir: options.agentDir } : {}), ...(options.workerIdleTtlMs !== undefined ? { idleTtlMs: options.workerIdleTtlMs } : {}),
+          skills: () => mainSkills,
           // One small entry per ledger event, not part of the model context: it follows the session branch and survives reloads.
           onLedgerEvent: event => pi.appendEntry(LEDGER_ENTRY_TYPE, event),
           // Workers that go away are remembered in the session, so naming one later continues with a new worker briefed from it.
@@ -320,6 +331,16 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     /** The config's model tiers at the last session start: the mode's orchestrator tier decides main's hand-off rule (its own model or
      * thinking level, or "inherit main's"); strong and ultra read models.strong-orchestrator, with models.orchestrator as its fallback. */
     let configuredTiers: ModelTiers | undefined;
+    /** The floor of an implicit thinking inheritance (main-model.ts inheritedThinking): models.main's thinking, else main's level
+     * at the last session start. Lowering main's thinking later does not lower the workers that only inherit it. */
+    let thinkingFloor: { level: ThinkingLevel; source: "models.main" | "session start" } | undefined;
+    /** Main's thinking now, and the level a tier that sets no thinking of its own inherits from it. */
+    const handOffThinking = () => {
+      const thinking = pi.getThinkingLevel();
+      return { thinking, inheritedThinking: inheritedThinking(thinking, thinkingFloor?.level) };
+    };
+    /** The main session's long-response watch (long-response.ts): notifies the user, adds a request-local note after a long failure. */
+    const longResponse = new LongResponseWatch(() => state.effective, (message, type) => { try { lastUi?.notify(message, type); } catch { /* the UI may be gone */ } }, options.longResponse);
     const showMode = (ctx: Pick<ExtensionContext, "ui">) =>
       ctx.ui.setStatus("orche-mode", `orche: ${state.session}${state.overriding ? ` (one-turn ${state.effective})` : ""}`);
     const endOneShot = (ui: ExtensionContext["ui"]) => {
@@ -351,7 +372,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     /** The `orche-delegation` prompt section of a mode (the rules main follows in it). */
     const delegationSection = (mode: MainMode) => {
       const head = modeTiers(configuredTiers, mode).orchestrators[0];
-      return delegationRules(mode, { spawn, orchestratorModel: !!head && !inheritsMain(head.tier), orchestratorThinking: !!tierThinking(head?.tier), ...(head ? { orchestratorKey: head.key } : {}) });
+      return delegationRules(mode, { spawn, orchestratorModel: !!head && !inheritsMain(head.tier), orchestratorThinking: !!tierThinking(head?.tier), orchestratorThinkingMain: inheritsMainThinking(head?.tier), ...(head ? { orchestratorKey: head.key } : {}) });
     };
 
     // (1) Our tools replace Pi's read/edit by name; they are bound to the cwd of the call, not of the process.
@@ -397,6 +418,10 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       const main = await applyMainModel(pi, ctx, event.reason, found.models?.main);
       mainModel = { ...(found.models?.main ? { configured: found.models.main } : {}), ...(main.applied ? { applied: main.applied } : {}), ...(main.skipped ? { skipped: main.skipped } : {}) };
       for (const warning of main.warnings) ctx.ui.notify(warning, "warning");
+      // The floor of implicit thinking inheritance: models.main's level when the config sets one, else main's level now (after
+      // models.main was applied at a fresh start; a resumed or reloaded session takes the level it has at this start).
+      thinkingFloor = found.models?.main?.thinking ? { level: found.models.main.thinking, source: "models.main" } : { level: pi.getThinkingLevel(), source: "session start" };
+      longResponse.reset();
       state.restore(ctx.sessionManager.getBranch());
       restoredLedgers = latestLedgers(ctx.sessionManager.getBranch());
       workers?.restoreLedgers(restoredLedgers);
@@ -435,6 +460,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       if (found.legacyMode && !found.error) ctx.ui.notify(`orche: mainMode "${found.legacyMode}" in ${found.path} was removed (multi-agent orche_run delegation); using "single". Set mainMode to one of ${MAIN_MODES.join(", ")}.`, "warning");
     });
     pi.on("before_agent_start", event => {
+      mainSkills = workerSkills(event.systemPromptOptions.skills);
       event.systemPromptOptions.sections[DELEGATION_SECTION] = delegationSection(state.effective);
       if (!interruptedNotice || oneShot) return undefined;
       const message = interruptedNotice;
@@ -462,7 +488,17 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       messages.splice(at, 0, { role: "system", content: "", sections: { [DELEGATION_SECTION]: wanted }, timestamp: Date.now() } as (typeof messages)[number]);
       return { messages };
     });
-    // Direct mode keeps the whole task in the main window: advise the user (not the model) when it fills up.
+    // After a long main response failed without a tool call (long-response.ts), every model request of this session gets a short
+    // request-local note at the end of its context (Pi's auto-retry included: `context` runs before each request) until a response
+    // completes or the user aborts. Appended last, so the cached prefix of the request stays the same; never stored in the session.
+    pi.on("context", event => {
+      const note = longResponse.guidance();
+      if (!note) return undefined;
+      return { messages: [...event.messages, { role: "custom", customType: LONG_RESPONSE_GUIDANCE_TYPE, content: note, display: false, timestamp: Date.now() } as (typeof event.messages)[number]] };
+    });
+    pi.on("message_update", event => { longResponse.messageUpdate(event.message as Parameters<LongResponseWatch["messageUpdate"]>[0]); });
+    // Every mode: advise the user (not the model) when main's context fills up (context-warning.ts); direct mode names single mode,
+    // the delegating modes /compact or a new session, since delegating does not shrink the history main already holds.
     pi.on("turn_end", (_event, ctx) => {
       const checked = contextWarning(state.effective, ctx.getContextUsage(), warningSettings, warningState);
       warningState = checked.state;
@@ -510,6 +546,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.on("message_start", (event, ctx) => {
       const message = event.message as { role?: string; customType?: string; details?: { job?: unknown } };
       if (message.role === "assistant" && oneShot) oneShot.answering = true;
+      longResponse.messageStart(event.message as Parameters<LongResponseWatch["messageStart"]>[0]);
       // A message main did not ask for that arrives in a one-shot run once main answers (the prompt's own context came before) and is
       // not part of the request: a peer note, another extension's message. Not attributable, so the request's mode ends here.
       if (message.role === "custom" && oneShot?.answering) {
@@ -529,6 +566,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.on("message_end", event => {
       const message = event.message as { role?: string; customType?: string; details?: { note?: { id?: unknown } } };
       if (message.role === "custom" && message.customType === SESSION_BUS_MESSAGE_TYPE && typeof message.details?.note?.id === "string") pendingNotes.delete(message.details.note.id);
+      longResponse.messageEnd(event.message as Parameters<LongResponseWatch["messageEnd"]>[0]);
       return undefined;
     });
     // A run that ended has taken every steered message (or Esc dropped them): nothing it queued is still waiting.
@@ -537,6 +575,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     // A one-shot request ends with its run; what it held back runs next, each as its own run (Pi starts them after this event).
     pi.on("agent_settled", (event, ctx) => {
       resetQueued();
+      // Not at agent_end: Pi's auto-retry starts after it, and the note must reach that retry.
+      longResponse.settled(event.aborted);
       if (!oneShot && !heldBack.length) return;
       endOneShot(ctx.ui);
       releaseHeldBack(ctx.ui, event.aborted);
@@ -545,6 +585,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.on("session_shutdown", async () => {
       // Running background jobs end as interrupted (entry + run record), never silently left "running"; an attached call returns.
       jobs?.dispose();
+      longResponse.reset();
       stopWidgetTimer();
       if (widgetText !== undefined) { widgetText = undefined; try { lastUi?.setWidget(JOB_WIDGET_KEY, undefined); } catch { /* the UI may be gone */ } }
       endedShown = undefined;
@@ -612,7 +653,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         if (parsed.mode === "models") {
           // The model tiers now and where each comes from (docs/orchestrator.md 12), with the advisor's on/off state (13).
           const found = await discoverConfiguredMainMode({ cwd: ctx.cwd, agentDir: options.agentDir ?? getAgentDir(), projectTrusted: ctx.isProjectTrusted() });
-          ctx.ui.notify(formatModelTiers({ main: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(), mode: state.effective, ...(found.path ? { path: found.path } : {}), ...(found.error ? { error: found.error } : {}), ...(found.models ? { tiers: found.models } : {}), advisor: found.advisor ?? DEFAULT_SINGLE.advisor, atStart: mainModel }), "info");
+          ctx.ui.notify(formatModelTiers({ main: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(), ...(thinkingFloor ? { thinkingFloor } : {}), mode: state.effective, ...(found.path ? { path: found.path } : {}), ...(found.error ? { error: found.error } : {}), ...(found.models ? { tiers: found.models } : {}), advisor: found.advisor ?? DEFAULT_SINGLE.advisor, atStart: mainModel }), "info");
           return;
         }
         if (parsed.mode === "splits") {
@@ -706,7 +747,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           cwd: ctx.cwd,
           model: ctx.model,
           ...(options.inheritProviders !== false ? { modelRegistry: ctx.modelRegistry } : {}),
-          thinking: pi.getThinkingLevel(),
+          ...handOffThinking(),
           projectTrusted: ctx.isProjectTrusted(),
           currentSession: currentSession(ctx),
         };
@@ -742,7 +783,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           cwd: ctx.cwd,
           model: ctx.model,
           ...(options.inheritProviders !== false ? { modelRegistry: ctx.modelRegistry } : {}),
-          thinking: pi.getThinkingLevel(),
+          ...handOffThinking(),
           projectTrusted: ctx.isProjectTrusted(),
           signal,
           currentSession: currentSession(ctx),

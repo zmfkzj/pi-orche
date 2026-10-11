@@ -33,6 +33,12 @@ export function blockedTools(mode: MainMode): readonly string[] {
 export const ASYNC_RULE = "Background tasks: in an interactive or RPC session orche_task runs as a job (J1, J2, …) and the call stays attached to it: it waits like a blocking call and returns the worker's result. A user message steered into the running turn or a message from another Pi session DETACHES it: the call returns at once, the worker keeps running. Then answer that input first. A queued follow-up message never detaches: like any follow-up it reaches you after the result, once this turn has nothing else to do, and it does not count as waiting. After answering, if the job is still running and nothing else is waiting for you, call orche_task_attach to wait for the result again; do not attach again after the user detached it themselves (/orche detach) unless they ask, and when the user interrupted with Esc only after answering their next message. A job that ends while detached delivers its result once as an orche-task-result message that starts your next turn. Never wait with sleep and never poll orche_task_status (call it only when the user asks about progress). To add or correct instructions for the running worker, use orche_task_message: it reaches the worker before its next model request and grants no new permissions; a message the worker could not read before it reported is listed as not delivered in the result, so send it as a follow-up orche_task then. One task runs at a time; orche_task_status with cancel:true (or the user's /orche cancel) stops it, detaching never does. Pass wait:true only when the result must not be interrupted. When the result arrives (attached result or message), review it as below and report to the user.";
 const REFERENCE_RULE = "Pass references, not copies: repository paths with line ranges or symbol names, reproduction commands, artifact and run-record paths. Paste only short decisive snippets a worker cannot reproduce (an exact error line or user-provided text); never whole files, diffs or long logs.";
 /**
+ * Main's role boundary before a hand-off. A main session that designed the implementation itself before calling orche_task ran
+ * single responses of 13-15 minutes and was cut off by the provider path at about 15 minutes, repeatedly (docs/orchestrator.md 15).
+ * Advice, not a limit: nothing enforces a time here (the long-response watch in long-response.ts only notifies and adds a note).
+ */
+export const ROLE_BOUNDARY_RULE = "Role boundary: main states WHAT and WHY (goals, constraints, observable success criteria, the user's requirements and original request); the worker decides HOW. Do not design the implementation before the hand-off: formulas and tuning values, data structures, network or protocol details, algorithms and detailed test design belong to the worker, who reads the code. Where something is still undecided, name it in the request as an open decision for the worker to make (with any limits the user set), never as a requirement you invented, and never drop, weaken or change a requirement the user stated. Keep this analysis short and call orche_task as soon as the requirements are stated: a long analysis before the hand-off delays the work, and a provider may cut off a single very long response.";
+/**
  * Main reviews a result from the report alone, without re-reading the changed code or re-running checks itself (G-M + G-M2,
  * 48 tasks per arm: 48/48 vs 46/48 passed, main context 0.41x, cost 0.97x; docs/specialist-orchestration.md 10.6–10.7).
  */
@@ -57,22 +63,29 @@ export interface DelegationOptions {
   orchestratorModel?: boolean;
   /** That tier sets a thinking level of its own (not `"main"`, not omitted): standard roles do not take main's thinking. */
   orchestratorThinking?: boolean;
+  /** That tier names main's thinking explicitly (`thinking: "main"`, or `{ "model": "main" }` without a level): main's CURRENT
+   * thinking exactly, without the floor of an implicit inheritance (main-model.ts inheritedThinking). */
+  orchestratorThinkingMain?: boolean;
   /** The `models` key of that tier (default `orchestrator`; strong/ultra: `strong-orchestrator`, or `orchestrator` as its fallback). */
   orchestratorKey?: string;
 }
 /**
- * How standard roles get their model and thinking. Without a model or level of `models.orchestrator`'s own (unset, `"main"`, or
- * no thinking) the earlier sentence word for word; each part names main's CURRENT value only where it is really inherited.
+ * How standard roles get their model and thinking. A tier that names main's thinking (`"main"`) keeps the earlier sentence word
+ * for word; an implicit inheritance (unset tier, or a model without a level) says that main's thinking does not go below the
+ * level main started the session with (main-model.ts inheritedThinking).
  */
+const FLOORED = "main's thinking at hand-off, but not below the level main started this session with (models.main's thinking when set),";
 const MODEL_SENTENCE = {
   inherited: "Standard roles inherit main's CURRENT model and thinking at hand-off",
+  inheritedFloor: `Standard roles inherit main's CURRENT model at hand-off, with ${FLOORED}`,
   inheritedModel: "Standard roles inherit main's CURRENT model at hand-off, with the thinking level configured in the orche config (models.orchestrator),",
   configured: "Standard roles run on the orchestrator model configured in the orche config (models.orchestrator), not on main's model, with main's CURRENT thinking at hand-off,",
+  configuredFloor: `Standard roles run on the orchestrator model configured in the orche config (models.orchestrator), not on main's model, with ${FLOORED}`,
   configuredBoth: "Standard roles run on the orchestrator model and thinking level configured in the orche config (models.orchestrator), not on main's,",
 };
 const modelSentence = (options: DelegationOptions) => (options.orchestratorModel
-  ? options.orchestratorThinking ? MODEL_SENTENCE.configuredBoth : MODEL_SENTENCE.configured
-  : options.orchestratorThinking ? MODEL_SENTENCE.inheritedModel : MODEL_SENTENCE.inherited).replace("(models.orchestrator)", `(models.${options.orchestratorKey ?? "orchestrator"})`);
+  ? options.orchestratorThinking ? MODEL_SENTENCE.configuredBoth : options.orchestratorThinkingMain ? MODEL_SENTENCE.configured : MODEL_SENTENCE.configuredFloor
+  : options.orchestratorThinking ? MODEL_SENTENCE.inheritedModel : options.orchestratorThinkingMain ? MODEL_SENTENCE.inherited : MODEL_SENTENCE.inheritedFloor).replace("(models.orchestrator)", `(models.${options.orchestratorKey ?? "orchestrator"})`);
 /** The first sentence per delegating mode: strong and ultra are the single workflow on the strong tiers. */
 const MODE_HEAD: Record<Exclude<MainMode, "direct">, string> = {
   single: "orche mode: single.",
@@ -91,6 +104,7 @@ export function delegationRules(mode: MainMode, options: DelegationOptions = {})
     WORK_TYPE_RULE,
     "Git: workers never commit or push on their own, and this session cannot run commits itself. Only when the user explicitly asked in this conversation to commit or push, pass `git` ({commit:true} or {push:true, remote?, branch?}) to an implement, game-asset or video orche_task; explore, answer and verify reject it. The grant covers that assignment only, so scope the commit to the task's files where possible (pass `files` and name the paths in `request`) and check the commits listed in the result before reporting.",
     "Single workflow: refine the requirements with the user: goal, constraints and acceptance criteria. Inspect only what is needed to state the task precisely. Ask the user only about decisions you cannot reasonably make; without a UI, make a reasonable assumption and state it in the request and final report. Hand the whole task to ONE orche_task in ONE end-to-end assignment, even when it is large or risky: role implement for changes, answer for read-only questions. Do not split the task into explore/implement/verify phases, and never send an explore before an implement for the same request. Never stop to ask the user to switch modes in order to proceed, and never end a turn without attempting the requested change because of its size or risk. This workflow is the same with and without a UI.",
+    ROLE_BOUNDARY_RULE,
     ...(spawn ? [mode === "ultra" ? ULTRA_RULE : ORCHESTRATOR_RULE] : []),
     `Single hand-off: main analyses the user's intent, purpose and requirements. Write \`request\` as: Intent/Purpose; numbered requirements checklist R1..Rn as lines \`R1: …\`, each testable with acceptance criteria; Constraints and non-goals; Assumptions (explicit when there is no UI); and a final Original request section containing the user's ORIGINAL request text verbatim. Put relevant background and file/evidence references in \`context\`. One end-to-end assignment per round: implement for changes, answer for read-only questions. The worker analyses requirements, creates a Task DAG with task_plan and executes nodes sequentially without main intervention while it runs. ${modelSentence(options)} and compact above 50% context, preserving requirements, original request and the assignment's plan. Specialists keep their routes and do not receive task_plan or 50% compaction.`,
     ASYNC_RULE,

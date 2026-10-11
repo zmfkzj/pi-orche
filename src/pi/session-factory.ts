@@ -16,6 +16,7 @@ import {
   type LoadExtensionsResult,
   type ResourceLoader,
   type ToolDefinition,
+  type Skill,
 } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { createOrcheTools } from "../tools/index.js";
@@ -33,6 +34,7 @@ import { thinkingPolicyOf } from "./thinking-policy.js";
 import { atEffectiveBaseline, thinkingStateOf } from "./thinking-state.js";
 import { BOOKKEEPING_TOOLS, evidenceLedgerOf, recordToolCall, refText } from "./tool-evidence.js";
 import { unknownToolHandler } from "./unknown-tool.js";
+import { WORKER_SKILLS_NOTE, workerSkills } from "./worker-skills.js";
 export interface SessionOptions {
   route: { role: string; model: string; thinking?: ThinkingLevel; extendedContext?: boolean };
   cwd: string;
@@ -94,6 +96,11 @@ export interface SessionOptions {
    * `{ mode: "off" }` keeps Pi's own behaviour (the state is still tracked).
    */
   lengthRecovery?: LengthRecoveryOptions;
+  /**
+   * Skills the session lists in its prompt (`available_skills`): main's discovered skills, as metadata only (name, description,
+   * absolute SKILL.md path; see worker-skills.ts). Copied at creation: a living session keeps this list. Without it, none.
+   */
+  skills?: readonly Skill[];
 }
 /** `toolCallId`: the call's id, for owners that pair the guard with the call's end (the ultra integrity probes in src/orchestrator/ultra.ts). */
 export type ToolGuard = (toolName: string, input: Record<string, unknown>, toolCallId?: string) => string | undefined | Promise<string | undefined>;
@@ -274,19 +281,20 @@ export async function createSession(
   // Capability extensions (e.g. pi-gui's MCP server for a GUI worker) load once, with their own extension runtime, which
   // the session then uses: their `pi.*` calls (tools, MCP registrations) must reach the runner of this session.
   const factoryExtensions = options.extensionFactories?.length ? await loadFactoryExtensions(options.cwd, options.extensionFactories) : undefined;
+  const skills = workerSkills(options.skills);
   const loader: ResourceLoader = {
     getExtensions: () => ({
       extensions: [createSpillExtension(options.cwd), ...(options.toolGuard ? [createGuardExtension(options.toolGuard)] : []), createContextProjectionExtension(() => options.contextProjection), compactionExtension, hygieneExtension, ...(factoryExtensions?.extensions ?? [])],
       errors: [],
       runtime: factoryExtensions?.runtime ?? createExtensionRuntime(),
     }),
-    getSkills: () => ({ skills: [], diagnostics: [] }),
+    getSkills: () => ({ skills: skills.map(skill => ({ ...skill, sourceInfo: { ...skill.sourceInfo } })), diagnostics: [] }),
     getPrompts: () => ({ prompts: [], diagnostics: [] }),
     getThemes: () => ({ themes: [], diagnostics: [] }),
     getAgentsFiles: () => ({ agentsFiles: [] }),
     getSystemPrompt: () => options.baseSystemPrompt,
     getSystemPromptSource: () => undefined,
-    getAppendSystemPrompt: () => [options.instructions],
+    getAppendSystemPrompt: () => skills.length ? [options.instructions, WORKER_SKILLS_NOTE] : [options.instructions],
     getAppendSystemPromptSources: () => [],
     extendResources: () => {},
     reload: async () => {},

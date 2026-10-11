@@ -63,6 +63,8 @@ export async function createHarness(options: {
   mode?: "tui" | "rpc" | "print" | "json";
   /** Further extensions loaded after pi-orche (e.g. a stand-in for another extension that talks to it over `pi.events`). */
   extraExtensions?: ExtensionFactory[];
+  /** Pi settings of the session next to the harness default (compaction off), e.g. `{ retry: { baseDelayMs: 1 } }`. */
+  settings?: Record<string, unknown>;
 }): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "orche-ext-"));
   const cwd = join(root, "project");
@@ -78,7 +80,7 @@ export async function createHarness(options: {
     const records = options.records === true ? {} : options.records === undefined || options.records === false ? { enabled: false } : options.records;
     await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: orche.route.model }, records, ...(options.taskContext ? { taskContext: options.taskContext } : {}), ...(options.single ? { single: options.single } : {}), ...(options.models ? { models: options.models } : {}), ...(options.mainMode === "unset" ? {} : { mainMode: options.mainMode ?? "single" }) }));
   }
-  const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
+  const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, ...options.settings });
   const resourceLoader = new DefaultResourceLoader({
     cwd, agentDir, settingsManager, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
     // Most fixtures deliberately keep main/worker scripts isolated; inheritance regressions opt in.

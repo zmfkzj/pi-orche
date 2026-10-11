@@ -611,7 +611,8 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
   - 모델이 그 단계를 지원하지 않으면 Pi의 clamp를 따른다(`clampThinkingLevel`: 가장 가까운 지원 단계, 추론 미지원 모델은 `off`). 기록되는 `thinking`은 실제로 쓴 단계다. orchestrator는 세션의 `thinkingLevel`, sub-worker는 이번에 세션 생성 뒤 `thinkingLevel`을 읽도록 고쳤다(`src/specialists/session.ts`). 전에는 sub-worker가 요청한 단계를 기록했다.
   - `{ "model": "main", "thinking": "main" }`은 `{ "model": "main" }`과 같다. 파싱할 때 `{ "model": "main" }`으로 읽는다.
   - 문법 근거: `model: "main"`과 같은 방식으로, 상속할 값의 자리에 같은 예약값 `"main"`을 둔다. 필드마다 같은 규칙("그 필드에 main이라고 쓰면 main의 현재 값")이라 새 키(`inheritThinking` 같은 것)나 두 번째 값 모양이 필요 없다. thinking 단계 이름에 `main`이 없고 예전에는 설정 오류였으므로, 예전에 유효하던 설정의 뜻이 바뀌지 않는다. 다른 필드(`extendedContext`)에는 상속 예약값을 두지 않는다.
-  - thinking을 생략한 기존 의미는 그대로다. orchestrator는 자기 모델이어도 생략하면 main의 현재 thinking을 쓴다(b42684a부터). 그래서 orchestrator에서 `"thinking": "main"`은 동작이 생략과 같고, 출처만 `config:main`(명시)과 `main`(생략)으로 다르게 기록된다. worker는 생략하면 orchestrator의 thinking을 따른다.
+  - thinking을 생략하면 orchestrator는 자기 모델이어도 main의 thinking을 쓴다(b42684a부터). 다만 15.4절의 변경 이후 생략(암묵 상속)에는 하한(floor)이 있다: main의 현재 thinking과 floor(`models.main`의 thinking, 없으면 마지막 세션 시작 때 main의 단계) 가운데 높은 쪽이다. 그래서 orchestrator에서 `"thinking": "main"`(명시: main의 현재 단계 그대로)과 생략(암묵: floor 아래로 내려가지 않음)은 main이 세션 중에 단계를 낮췄을 때만 달라진다. 출처는 `config:main`(명시)과 `main`(생략)으로 기록된다. worker는 생략하면 orchestrator의 thinking을 따른다.
+- **암묵 상속의 thinking floor**(`inheritedThinking`, `src/extension/main-model.ts`, 15.4절): 단계를 정하지 않은 orchestrator 계층(계층 없음, 모델만 지정, 해석할 수 없어 main을 상속, strong에서 fallback된 `models.orchestrator` 포함)과 orche 설정이 없을 때의 세션 route는 `max(main의 현재 단계, floor)`를 쓴다. 명시적 `"thinking": "main"`·단계 없는 `{ "model": "main" }`·자기 단계는 floor를 쓰지 않는다. sub-worker와 advisor는 상속하는 orchestrator의 실제 단계를 따르므로 함께 올라간다.
   - 설정 오류: `routes`, `default`, `models.main`의 `"thinking": "main"`(상속할 main이 없거나 main 자신이다).
 
 - **해석 규칙**:
@@ -619,7 +620,7 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
   | 계층 | 모델을 지정했을 때 | `{ "model": "main" }` | `"thinking": "main"` | 지정하지 않았을 때 | 해석할 수 없을 때 |
   |---|---|---|---|---|---|
   | main (Pi 세션) | 새 세션 시작 때 적용(아래) | 설정 오류 | 설정 오류 | Pi 모델(settings.json 기본값, `/model`) | 경고(`ctx.ui.notify`) 후 세션 모델 유지 |
-  | orchestrator (표준 역할 explore/answer/implement/verify) | 그 모델. thinking이 없으면 main의 현재 thinking, extendedContext가 없으면 최상위 값 | main의 현재 모델. thinking은 지정값, 없으면 main의 현재 thinking. context window는 main 것 | main의 현재 thinking(모델에 맞게 clamp) | main의 현재 모델·thinking 상속(예전과 같음) | 결과 첫 줄 바로 아래와 run.json에 경고 후 main 상속(`"main"`이면 지정하지 않았을 때와 같은 경고와 route) |
+  | orchestrator (표준 역할 explore/answer/implement/verify) | 그 모델. thinking이 없으면 main의 thinking(floor 아래로는 내려가지 않음, 15.4절), extendedContext가 없으면 최상위 값 | main의 현재 모델. thinking은 지정값, 없으면 main의 현재 thinking(floor 없음). context window는 main 것 | main의 현재 thinking(모델에 맞게 clamp, floor 없음) | main의 현재 모델, thinking은 main의 단계와 floor 중 높은 쪽 | 결과 첫 줄 바로 아래와 run.json에 경고 후 main 상속(`"main"`이면 지정하지 않았을 때와 같은 경고와 route) |
   | worker (orche_spawn sub-worker, 독립 verifier 포함) | 그 모델. thinking이 없으면 orchestrator의 thinking | orchestrator가 아니라 main의 현재 모델. thinking은 지정값, 없으면 main의 현재 thinking. context window는 main 것 | orchestrator가 아니라 main의 현재 thinking(모델에 맞게 clamp) | orchestrator의 실제 모델·thinking 상속(예전과 같음) | 경고 후 orchestrator의 모델·thinking 상속(`"main"`이면 main 모델을 해석할 수 없을 때) |
   | advisor (`single.advisor`가 켜졌을 때만, 13절) | worker 행과 같다 | worker 행과 같다 | worker 행과 같다 | orchestrator(조언받는 worker)의 실제 모델·thinking(그 assignment의 baseline) | 결과와 run.json에 `models.advisor … inherits the orchestrator's model instead` 경고 후 orchestrator 상속 |
   | game-asset, video | 영향 없음 | 영향 없음 | 영향 없음 | 자기 route | (예전과 같음) |
@@ -632,7 +633,7 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
   - direct 모드에서는 main 설정만 의미가 있다.
 - **가시성**:
   - `/orche models`가 세 계층의 모델과 출처를 보여 준다. 출처는 config, inherited, Pi 가운데 하나다. `"main"`은 `main's model and thinking (지금 main 모델) — config models.orchestrator "main"`처럼 보인다. `"thinking": "main"`은 `provider/model-b with main's thinking (high) — config models.orchestrator (thinking "main")`처럼 지금 main의 단계와 함께 보인다. 그 아래 `main's thinking (high) reaches at each hand-off: orchestrator, worker` 줄이 main의 지금 thinking이 닿는 계층을 보여 준다(worker가 orchestrator를 거쳐 받으면 `worker (through the orchestrator)`, 아무 계층에도 닿지 않으면 `no tier`).
-  - main의 인계 규칙 문장은 orchestrator가 실제로 상속하는 것에만 "main's CURRENT"를 쓴다(`src/extension/mode.ts`의 `modelSentence`). 지정하지 않았거나 `"main"`(단계 없음)이면 예전 문장 그대로 "inherit main's CURRENT model and thinking"이다. `"main"`에 단계를 주면 "main's CURRENT model ... with the thinking level configured"이다. 0407075에서는 이 경우에도 "model and thinking" 문장이 나와 부정확했는데 이번에 바로잡았다. 자기 모델이면 단계가 없거나 `"main"`일 때 "... not on main's model, with main's CURRENT thinking at hand-off", 단계를 주면 "orchestrator model and thinking level configured ..., not on main's"이다.
+  - main의 인계 규칙 문장은 orchestrator가 실제로 상속하는 것에만 "main's CURRENT"를 쓴다(`src/extension/mode.ts`의 `modelSentence`). 단계 없는 `"main"`이나 `"thinking": "main"`이면 예전 문장 그대로다("inherit main's CURRENT model and thinking", 자기 모델이면 "... not on main's model, with main's CURRENT thinking at hand-off"). 지정하지 않았거나 모델만 지정했으면 floor를 말하는 문장이다("... with main's thinking at hand-off, but not below the level main started this session with (models.main's thinking when set)"). `"main"`에 단계를 주면 "main's CURRENT model ... with the thinking level configured"이고, 자기 모델에 단계를 주면 "orchestrator model and thinking level configured ..., not on main's"이다. `/orche models`는 위임 모드에서 `- thinking floor <단계> (models.main's thinking | main's level at session start)` 줄을 더 보여 준다.
   - orchestrator와 sub-worker에게 주는 지시문에는 모델 상속을 말하는 문장이 없다. specialist가 자기 모델을 쓴다는 문장만 있어서 고칠 것이 없었다. 분할 판단 지시문의 비용 문장("약 두 배 비용")은 같은 모델 sub-worker로 잰 값이다. 평가로 고른 문장이라 그대로 두었다. `models.worker`로 더 싼 모델을 쓰면 실제 비용 비율은 달라진다(측정하지 않음).
 - **기록**:
   - assignment의 모델과 `modelSource`는 `details`, run.json의 `assignment`·`outcome`, split log에 남는다. 값은 `config`(지정한 모델), `config:main`(`{ "model": "main" }`으로 명시한 main 모델), `main`(지정하지 않아 상속), `route` 가운데 하나다.
@@ -809,3 +810,34 @@ read-only answer 변형: 모든 sub-worker가 answer/verify, `orche_adopt` 거�
   - 출처를 가릴 수 없는 메시지로 요청 모드가 끝난 그 run의 첫 다음 모델 요청에서는, Pi가 이미 선언한 도구 목록이 한 번 늦게 바뀔 수 있다. guard는 호출 시점의 모드로 막고, 프롬프트는 그 요청부터 세션 모드다.
   - 자동 테스트는 faux 모델로 실제 Pi 세션·확장·job 경로를 검증한다. 실제 모델(cliproxyapi/gpt-6.1-sol) E2E 결과는 `CHANGELOG.md` [Unreleased]에 요약했다.
 
+
+## 15. main 세션의 지연 방지 (역할 경계 · 긴 응답 감시 · 컨텍스트 경고 · thinking floor)
+
+### 15.1 계기 (관찰된 사실)
+
+- 세션 `~/.pi/agent/sessions/--home-arthur-Code-tower_together--/2026-10-07T13-07-39-272Z_01a1167a-….jsonl` L582 이후, single 모드의 main(gpt-6-astra, 컨텍스트 약 59만 토큰)은 큰 게임 기능 요청을 받고 `orche_task`를 부르기 전에 구현 설계(공식, 충돌, 네트워크 인코딩, 테스트 봇)를 추론만으로 진행했다. 도구 호출도 텍스트도 없는 응답이 약 902초에 `stream closed before response.completed`로 6번 끊겼다(L583·586·588·591·596·607). Pi의 자동 재시도(`retry.maxRetries` 3)는 같은 요청을 같은 문맥으로 다시 보냈다. 사용자가 thinking을 medium/high로 낮춰도 같은 시간에 끊겼다.
+- 프록시 로그에서 이 경로(`/backend-api/codex/responses`)의 14분 넘는 요청은 모두 901–902초에 끝났다. 15분 상한을 둔 주체(프록시인지 상류인지)는 확인하지 못했고, 이 절의 변경은 상한 자체를 바꾸지 않는다.
+
+### 15.2 역할 경계 (`ROLE_BOUNDARY_RULE`, `src/extension/mode.ts`)
+
+- single·strong·ultra의 main 지시문에 `Role boundary:` 문단을 더했다. main은 WHAT/WHY(목표, 제약, 관찰 가능한 성공 조건, 사용자 요구와 원문)를 쓰고, HOW(공식과 수치, 자료구조, 네트워크·프로토콜, 알고리즘, 상세 테스트 설계)는 코드를 읽는 worker가 정한다. 미정 사항은 worker가 정할 open decision으로 넘기되, 지어낸 요구사항으로 쓰지 않고 사용자 요구를 빼거나 약화·변경하지 않는다.
+- 시간 수치는 넣지 않았다. "분석은 짧게, 요구사항이 정리되면 바로 위임"이라는 권고이며 아무것도 강제하지 않는다. 기존 hand-off 형식(R1..Rn, Original request 원문), Reuse·Supervision 규칙은 그대로다.
+
+### 15.3 긴 응답 감시 (`LongResponseWatch`, `src/extension/long-response.ts`)
+
+- **확인한 Pi 1.1.0 동작**: 자동 재시도는 `_handlePostAgentRun` → `_prepareRetry`(실패 응답을 projection에서 빼고 backoff) → `agent.continue()`이다. `auto_retry_start/end`는 AgentSession 이벤트일 뿐 `pi.on` 확장 이벤트가 아니다. 확장은 `message_start/update/end`(assistant 메시지의 `stopReason`, `errorMessage`, `timestamp`, `durationMs`), 모든 모델 요청 직전의 `context`, 재시도·후속 실행이 모두 끝난 뒤의 `agent_settled {aborted}`로 볼 수 있다. `agent_end` 뒤에도 재시도가 있으므로 거기서 상태를 지우지 않는다.
+- **알림(사용자에게만)**: assistant 응답 하나가 요청 시작(`message.timestamp`)부터 10분(`LONG_RESPONSE_WARN_MS`) 동안 도구 호출도 텍스트도 없으면 응답마다 한 번 `orche: main has been generating one response for …` 경고를 띄운다. 이미 스트리밍 중인 응답은 바꿀 수 없으므로 Esc 후 바로 위임하라고 안내만 한다. 타이머는 `message_start`..`message_end` 동안만 돈다. 도구 실행, `orche_task` job, attach 대기는 세지 않는다.
+- **재시도 지침(요청 한정)**: 응답이 `stopReason: "error"`로 끝났고, 10분(`LONG_RESPONSE_FAILURE_MS`) 이상이었고, 도구 호출과 텍스트가 없으면 상태가 켜진다. 그 뒤 main의 모든 모델 요청(Pi 자동 재시도 포함)의 `context` 끝에 `orche-long-response` custom 메시지(LLM에는 user 메시지)를 붙인다. 내용: 직전 응답이 N분 만에 오류로 끝났으니 그 분석을 반복하지 말 것, 작업이 필요하면 바로 `orche_task`로 목표·제약·성공 조건·원문을 넘기고 미정 사항은 worker 결정으로 넘길 것, 사용자 요구를 빼거나 바꾸지 말 것, 짧은 질문이면 짧게 답할 것. direct 모드에서는 "짧은 단계로, 바로 도구 호출부터"라고 쓴다. 맨 끝에 붙이므로 캐시되는 앞부분은 그대로이고, 세션 파일에는 저장하지 않는다.
+- **해제와 초기화**: 응답이 완료(`stop`·`toolUse`·`length`)되거나, 사용자가 abort하거나(`stopReason: "aborted"`, `agent_settled {aborted: true}`), session_start·session_shutdown이 오면 꺼진다. 짧은 오류(429 등)는 켜지도 끄지도 않는다. 재시도가 다 실패하고 abort 없이 끝나면 사용자의 다음 프롬프트까지 유지한다. 사용자 알림은 한 에피소드에 한 번이고, 연속 실패 횟수는 지침에 적는다. 상태는 확장 인스턴스(Pi 세션)마다 따로다.
+- **차단이 아니다**: Pi의 재시도를 취소·지연·차단하지 않는다. 재시도가 무엇을 요청하는지만 바꾼다. 모델이 지침을 따를지는 보장하지 않는다. 멈추려면 사용자가 Esc를 누른다.
+
+### 15.4 컨텍스트 경고와 thinking floor
+
+- **컨텍스트 경고**(`src/extension/context-warning.ts`): 예전에는 direct에서만 경고했다. 이제 모든 모드에서 같은 임계치(`contextWarning.thresholds`, 기본 50·75%)로 경고한다. direct는 예전 문장 그대로다. 위임 모드의 문장은 main 요청마다 대화 전체가 다시 전송되어 느려지고, 긴 응답이 provider 시간 제한에 가까워지며, 위임해도 이미 쌓인 이력은 줄지 않으니 `/compact`나 새 세션(`/new`)을 쓰라고 권한다. 경고 상태는 모드와 상관없이 하나다. 한 모드에서 경고한 단계는 모드를 바꿔도 되풀이하지 않고, 사용량이 가장 낮은 임계치보다 10%p 아래(기본 40% 미만)로 내려가면 다시 켜진다. 압축이나 삭제는 하지 않는다.
+- **thinking floor**(`inheritedThinking`, 12절): main이 세션 중에 thinking을 낮추면, 단계를 정하지 않은 orchestrator(그리고 그것을 따르는 sub-worker와 advisor)는 floor 아래로 내려가지 않는다. floor는 `models.main.thinking`, 없으면 마지막 `session_start` 때 main의 단계다(reload·resume에서는 그때의 단계). main을 높이면 함께 올라간다. `"thinking": "main"`과 단계 없는 `{ "model": "main" }`은 명시적 상속이라 예전처럼 main의 현재 단계를 그대로 쓴다. main과 worker를 완전히 떼려면 계층에 자기 단계를 준다(예: `"orchestrator": { "model": "…", "thinking": "high" }`).
+- **로컬 설정 영향**: 이 저장소 작업 시점의 사용자 설정(`~/.pi/agent/orche.config.json`)은 `models.orchestrator`·`models.advisor`가 `"thinking": "main"`이다. 명시적 상속이므로 floor가 적용되지 않는다. main을 낮춰도 single worker를 높게 유지하려면 두 계층의 `thinking`을 독립 단계로 바꿔야 한다. strong·ultra의 `models.strong-orchestrator`는 `"max"`라 이미 독립이다. `orche_task`는 hand-off마다 설정 파일을 읽으므로 계층 단계는 다음 hand-off부터 적용된다. main 지시문의 인계 문장과 floor는 세션 시작 때 읽으므로 `/reload`나 새 세션에서 갱신된다. `models.main`은 새 세션(startup·`/new`)에만 적용된다.
+
+### 15.5 검증과 한계
+
+- 테스트: `test/extension/long-response.test.ts`(fake timer 단위: 임계 전후, 텍스트·도구 호출, 도구 실행 중 타이머 없음, 오류 길이·종류·abort·settled·reset, 중복 알림, 모드별 문구, 인스턴스 분리 / 실제 Pi 세션과 faux provider: Pi 자동 재시도 요청 끝에 지침이 붙고, 재시도는 그대로 실행되며, 완료 뒤 사라지고 세션에 저장되지 않음; 반복 실패와 재시도 소진 뒤 다음 프롬프트; 짧은 오류), `context-warning.test.ts`(모든 모드, 50/75 경계, 40% 재무장, 모드 왕복, 실제 세션에서 압축 없음), `delegation-rules.test.ts`(역할 경계와 기존 규칙 보존), `model-tiers.test.ts`(floor, 명시적 `"main"`·자기 단계·strong fallback·worker 재사용·확장 경유 `/orche models`).
+- 실제 15분 원격 끊김은 재현하지 않았다. 임계치를 줄이고 faux provider의 지연된 `network error` 응답으로 같은 Pi 재시도 경로를 돌렸다. 모델이 지침을 받고 실제로 일찍 위임하는지는 실측하지 않았다.

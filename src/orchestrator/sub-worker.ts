@@ -8,7 +8,7 @@
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { formatSchemaErrors } from "../orchestration/schema-errors.js";
-import type { ModelRuntime, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ModelRuntime, Skill, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ModelRoute, SubWorkerModelSource, SubWorkerThinkingSource } from "../orchestration/routing.js";
 import type { TaskItem } from "../orchestration/backlog.js";
 import { relative, resolve, sep } from "node:path";
@@ -59,6 +59,8 @@ export interface SubWorkerEnvironment {
   /** Every event of a sub-worker's session (its orchestrator's liveness tracks it), and the end of that session. Throws are ignored. */
   onSessionEvent?(id: string, event: { type: string; [key: string]: unknown }): void;
   onSessionEnd?(id: string): void;
+  /** Main's discovered skills (metadata) every sub-worker lists, as an orche_task worker does (src/pi/worker-skills.ts). */
+  skills?: readonly Skill[];
 }
 
 const reportSchema = Type.Object({ kind: Type.String(), summary: Type.String({ minLength: 1 }), data: Type.Optional(Type.Unknown()) });
@@ -136,6 +138,7 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
         onSession: use => { started = true; onModel?.(use); },
         ...(env.onSessionEvent ? { onEvent: (event: { type: string; [key: string]: unknown }) => env.onSessionEvent!(worker.id, event) } : {}),
         ...(sessionFile ? { sessionFile } : {}), ...(!specialist && env.inheritedContextWindow ? { inheritedContextWindow: env.inheritedContextWindow } : {}),
+        ...(env.skills?.length ? { skills: env.skills } : {}),
         ...(!specialist && env.lengthLadder ? { lengthRecovery: { ladder: env.lengthLadder } } : {}),
       });
       const report = value as Report;

@@ -5,7 +5,7 @@
  * executeTool() is execute() as a tool result, with such a failure returned as an isError result that keeps the details.
  * formatWorkers(), stop(id|"all") and roster() implement the pool slash commands. */
 import { Type, type Static } from "typebox";
-import { getAgentDir, type AgentToolResult, type ExtensionFactory, type ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type AgentToolResult, type ExtensionFactory, type ModelRegistry, type Skill } from "@earendil-works/pi-coding-agent";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -82,6 +82,12 @@ export type TaskRole = TaskParameters["role"];
 // Extension-supplied effective mode; omitted SDK callers retain legacy routing/instructions.
 type TaskArgs = Omit<OrcheRunArgs, "model"> & TaskParameters & {
   mainMode?: MainMode; model?: { provider: string; id: string; contextWindow?: number }; modelRegistry?: ModelRegistry;
+  /**
+   * The thinking level a tier that sets none of its own inherits (an unset orchestrator tier, or a model without `thinking`):
+   * main's current `thinking`, raised to the floor main started the session with (main-model.ts inheritedThinking). A tier that
+   * names main's thinking (`thinking: "main"`, `{ "model": "main" }` without a level) takes `thinking` as it is. Omitted: `thinking`.
+   */
+  inheritedThinking?: ThinkingLevel;
   /**
    * Set while main runs a one-shot `/orche <mode> <prompt>` turn: `mainMode` is that request's mode and `session` the session's own.
    * The assignment runs in the request's mode, and with task ledgers pins it to its task (see {@link RequestMode}).
@@ -433,6 +439,11 @@ export interface WorkerPoolOptions {
   onWorkerGone?: (worker: GoneWorker) => void;
   /** Base directory of the workers' scratch directories (test seam; default `<tmpdir>/pi-orche`). */
   scratchBase?: string;
+  /**
+   * The skills main's Pi discovered (metadata; the extension captures them per main run). Every new worker and sub-worker lists them
+   * in its prompt (src/pi/worker-skills.ts) and reads a SKILL.md only when relevant; a living worker keeps the list it started with.
+   */
+  skills?: () => readonly Skill[];
 }
 
 // ---- git grant: validation, the line every assignment prompt carries, and the read-only commit/push report ----
@@ -1116,7 +1127,7 @@ export class WorkerPool {
     try {
     const sessionModel = args.model ? `${args.model.provider}/${args.model.id}` : undefined;
     const agentDir = this.options.agentDir ?? getAgentDir();
-    const config = await discoverOrcheConfig({ cwd: args.cwd, agentDir, projectTrusted: args.projectTrusted, session: { model: sessionModel, thinking: args.thinking } });
+    const config = await discoverOrcheConfig({ cwd: args.cwd, agentDir, projectTrusted: args.projectTrusted, session: { model: sessionModel, thinking: args.inheritedThinking ?? args.thinking } });
     signal.throwIfAborted();
     // Task ledgers (single.ledger): `task` continues a task, also with another or a new worker; without it every assignment starts a new task.
     const ledgerOn = singleWorkflow && config.single.ledger;
@@ -1246,10 +1257,12 @@ export class WorkerPool {
     const mainModel = inheritMain && !configured && args.model ? runtime.getModel(args.model.provider, args.model.id) : undefined;
     const mainWindow = args.model?.contextWindow ?? mainModel?.contextWindow ?? 0;
     const tierExtended = configured?.extendedContext ?? config.routes.extendedContext;
+    // A tier that names main's thinking takes it exactly; an implicit inheritance does not go below main's session-start floor.
+    const implicitThinking = args.inheritedThinking ?? args.thinking;
     const route = configured
-      ? { role: routeRole, model: configured.model, thinking: tierLevel ?? args.thinking ?? "off", ...(tierExtended !== undefined ? { extendedContext: tierExtended } : {}) }
+      ? { role: routeRole, model: configured.model, thinking: tierLevel ?? (inheritsMainThinking(tier) ? args.thinking : implicitThinking) ?? "off", ...(tierExtended !== undefined ? { extendedContext: tierExtended } : {}) }
       : mainModel
-      ? { role: routeRole, model: sessionModel!, thinking: (tierMain ? tierLevel : undefined) ?? args.thinking ?? "off", extendedContext: false }
+      ? { role: routeRole, model: sessionModel!, thinking: (tierMain ? tierLevel ?? args.thinking : implicitThinking) ?? "off", extendedContext: false }
       : worker && (!inheritMain || !args.model && this.manager.session(worker.id).model) ? this.manager.get(worker.id).route
       : args.role === "game-asset" || args.role === "video"
         ? resolveSpecialistRoute(config.routes, routeRole, (provider, id) => !!runtime.getModel(provider, id))
@@ -1313,6 +1326,7 @@ export class WorkerPool {
       // GUI tools likewise (the first call of a desktop starts it).
       const toolTimeoutsMs = { ...(images ? { generate_image: images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } : {}), ...gui?.toolTimeoutsMs };
       await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, signal: startupSignal, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name), ...(gui?.tools ?? [])], customTools, peerMessaging: false, ...(sessionFile ? { sessionFile } : {}),
+        skills: this.options.skills?.() ?? [],
         ...(Object.keys(toolTimeoutsMs).length ? { toolTimeoutsMs } : {}),
         // The GUI capability's own extensions (Pi's MCP + the desktop server) live in this worker's session only.
         ...(gui ? { extensionFactories: gui.extensionFactories } : {}),
@@ -1796,6 +1810,7 @@ export class WorkerPool {
           },
           runWorker: createSubWorkerRunner({
             orchestrator: meta.id, cwd: args.cwd, runtime, route: standardSubRoute, routeSource: subSource, thinkingSource: standardSubRoute === subRoute ? subThinkingSource : "orchestrator:step", ...(subWindow ? { inheritedContextWindow: subWindow } : {}),
+            skills: this.options.skills?.() ?? [],
             ...(standardSubRoute !== subRoute ? { verifyRoute: subRoute, verifyThinkingSource: subThinkingSource } : {}),
             ...(thinkingPolicy.mode === "phase" ? { lengthLadder: thinkingPolicy.lengthRecovery } : {}),
             specialistRoute: role => resolveSpecialistRoute(config.routes, role, (provider, id) => !!runtime.getModel(provider, id)),
