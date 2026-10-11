@@ -1,4 +1,6 @@
-import type { Skill } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import { dirname, isAbsolute } from "node:path";
+import { parseFrontmatter, type Skill, type SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 
 /**
  * Skill metadata a worker session lists in its `available_skills` prompt section: copies of the skills the main session's Pi
@@ -18,6 +20,39 @@ export function workerSkills(skills: readonly Skill[] | undefined): Skill[] {
       sourceInfo: { ...skill.sourceInfo },
       disableModelInvocation: false,
     }));
+}
+
+/**
+ * The same metadata when main has not run yet in this extension runtime (after a session start or `/reload`) and a run that a
+ * `triggerTurn` message started (a session-bus wake, an orche result, another extension's notice) creates a worker: Pi emits no
+ * `before_agent_start` for such a run. Pi lists every skill its loader has, the list main's own prompt is built from, as a
+ * `skill:<name>` slash command with the `SKILL.md` path in `sourceInfo.path` (`pi.getCommands()`). The command does not carry
+ * `disable-model-invocation`, so that frontmatter flag is read from the listed file; a file that cannot be read or parsed is left out.
+ * Nothing beyond that list is searched, so `--no-skills`, settings and package filters keep applying.
+ */
+export function discoveredSkills(commands: readonly SlashCommandInfo[] | undefined): Skill[] {
+  const skills: Skill[] = [];
+  for (const command of commands ?? []) {
+    if (command?.source !== "skill" || !command.name.startsWith("skill:")) continue;
+    const filePath = command.sourceInfo?.path;
+    if (typeof filePath !== "string" || !isAbsolute(filePath)) continue;
+    let frontmatter: Record<string, unknown>;
+    try {
+      frontmatter = parseFrontmatter(readFileSync(filePath, "utf8")).frontmatter;
+    } catch {
+      continue;
+    }
+    if (frontmatter["disable-model-invocation"] === true) continue;
+    skills.push({
+      name: command.name.slice("skill:".length),
+      description: command.description ?? "",
+      filePath,
+      baseDir: dirname(filePath),
+      sourceInfo: { ...command.sourceInfo },
+      disableModelInvocation: false,
+    });
+  }
+  return skills;
 }
 
 /** Appended to a worker's instructions when it lists skills: a skill is reference material, never a grant. */

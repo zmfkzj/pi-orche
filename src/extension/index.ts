@@ -26,7 +26,7 @@ import { defaultRunLimits, extensionBudgetMs, extensionLengthMs } from "../orche
 import { formatDuration } from "../agent/liveness.js";
 import { LEDGER_ENTRY_TYPE, LEDGER_SUMMARY_TYPE, latestLedgers, type TaskLedger } from "../single/ledger.js";
 import { completeOrcheArguments } from "./completions.js";
-import { workerSkills } from "../pi/worker-skills.js";
+import { discoveredSkills, workerSkills } from "../pi/worker-skills.js";
 
 export const RESULT_MESSAGE_TYPE = "orche-result";
 /** Pi built-ins that stay Pi's own but are switched on next to our tools. */
@@ -174,15 +174,25 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     let lastUi: ExtensionContext["ui"] | undefined;
     let lastMode: ExtensionContext["mode"] | undefined;
     /**
-     * Metadata of the skills main's Pi discovered, as of main's latest run (before_agent_start): new workers list them in their own
-     * prompt (src/pi/worker-skills.ts). Nothing else of main reaches a worker this way: no extension, hook, conversation or state.
+     * Metadata of the skills main's Pi discovered, for new workers' own prompts (src/pi/worker-skills.ts): the list of main's latest
+     * run (before_agent_start). Undefined until main's first run of this runtime: a run that a triggerTurn message starts after a
+     * session start or /reload has no before_agent_start, so its workers take the same loader list from Pi's slash commands when they
+     * start. Nothing else of main reaches a worker this way: no extension, hook, conversation or state.
      */
-    let mainSkills: Skill[] = [];
+    let mainSkills: Skill[] | undefined;
+    const knownSkills = (): Skill[] => {
+      if (mainSkills) return mainSkills;
+      try {
+        return discoveredSkills(pi.getCommands());
+      } catch {
+        return [];
+      }
+    };
     const pool = () => {
       if (!workers) {
         workers = new WorkerPool({
           controller, ...(options.agentDir ? { agentDir: options.agentDir } : {}), ...(options.workerIdleTtlMs !== undefined ? { idleTtlMs: options.workerIdleTtlMs } : {}),
-          skills: () => mainSkills,
+          skills: knownSkills,
           // One small entry per ledger event, not part of the model context: it follows the session branch and survives reloads.
           onLedgerEvent: event => pi.appendEntry(LEDGER_ENTRY_TYPE, event),
           // Workers that go away are remembered in the session, so naming one later continues with a new worker briefed from it.
@@ -422,6 +432,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       // models.main was applied at a fresh start; a resumed or reloaded session takes the level it has at this start).
       thinkingFloor = found.models?.main?.thinking ? { level: found.models.main.thinking, source: "models.main" } : { level: pi.getThinkingLevel(), source: "session start" };
       longResponse.reset();
+      // Not known until main's own run (before_agent_start); workers started before it read Pi's command list (knownSkills).
+      mainSkills = undefined;
       state.restore(ctx.sessionManager.getBranch());
       restoredLedgers = latestLedgers(ctx.sessionManager.getBranch());
       workers?.restoreLedgers(restoredLedgers);

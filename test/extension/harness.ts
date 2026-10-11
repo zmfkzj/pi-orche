@@ -63,6 +63,8 @@ export async function createHarness(options: {
   mode?: "tui" | "rpc" | "print" | "json";
   /** Further extensions loaded after pi-orche (e.g. a stand-in for another extension that talks to it over `pi.events`). */
   extraExtensions?: ExtensionFactory[];
+  /** Discover skills as `pi` does (global `<agentDir>/skills`, project `.pi/skills`, packages from `settings.packages`); default off (`noSkills`). */
+  discoverSkills?: boolean;
   /** Pi settings of the session next to the harness default (compaction off), e.g. `{ retry: { baseDelayMs: 1 } }`. */
   settings?: Record<string, unknown>;
 }): Promise<Harness> {
@@ -82,7 +84,7 @@ export async function createHarness(options: {
   }
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, ...options.settings });
   const resourceLoader = new DefaultResourceLoader({
-    cwd, agentDir, settingsManager, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+    cwd, agentDir, settingsManager, noSkills: !options.discoverSkills, noPromptTemplates: true, noThemes: true, noContextFiles: true,
     // Most fixtures deliberately keep main/worker scripts isolated; inheritance regressions opt in.
     extensionFactories: [createOrcheExtension({ agentDir, inheritProviders: false, createRuntime: async () => options.inheritMainModel || options.writeUserConfig === false ? main.runtime : orche.runtime, ...options.extension }), ...(options.extraExtensions ?? [])],
   });

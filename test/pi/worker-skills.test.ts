@@ -7,7 +7,7 @@ import { Type } from "typebox";
 import { createSyntheticSourceInfo, type Skill } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage as reply, fauxToolCall as call, type AssistantMessage, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { createSession } from "../../src/pi/session-factory.js";
-import { WORKER_SKILLS_NOTE, workerSkills } from "../../src/pi/worker-skills.js";
+import { WORKER_SKILLS_NOTE, discoveredSkills, workerSkills } from "../../src/pi/worker-skills.js";
 import { runSpecialistSession } from "../../src/specialists/session.js";
 import { fauxRuntime } from "../helpers/faux.js";
 
@@ -118,5 +118,36 @@ describe("specialist (orche_spawn sub-worker) sessions", () => {
     expect(seen.text).toContain("SUB-WORKER-INSTRUCTIONS");
     expect(seen.text).toContain(WORKER_SKILLS_NOTE);
     expect(seen.text).not.toContain("BODY-SENTINEL");
+  });
+});
+
+describe("discoveredSkills (main's skill commands, before main's first run)", () => {
+  it("takes skill commands only, reads disable-model-invocation from the listed file and leaves out what cannot be read", async () => {
+    const root = await mkdtemp(join(tmpdir(), "orche-discovered-skills-"));
+    roots.push(root);
+    const file = async (name: string, content: string) => {
+      await mkdir(join(root, name), { recursive: true });
+      await writeFile(join(root, name, "SKILL.md"), content);
+      return join(root, name, "SKILL.md");
+    };
+    const visible = await file("visible", "---\nname: visible\ndescription: Shown.\n---\nBODY\n");
+    const hidden = await file("hidden", "---\nname: hidden\ndescription: Explicit only.\ndisable-model-invocation: true\n---\nBODY\n");
+    const quoted = await file("quoted", "---\nname: quoted\ndescription: A string flag is not the boolean.\ndisable-model-invocation: \"true\"\n---\nBODY\n");
+    const broken = await file("broken", "---\nname: broken\ndescription: [unclosed\n---\nBODY\n");
+    const source = (path: string) => ({ ...createSyntheticSourceInfo(path, { source: "local", baseDir: root }) });
+    const skills = discoveredSkills([
+      { name: "workbench", description: "an extension command", source: "extension", sourceInfo: source(visible) },
+      { name: "review", description: "a prompt template", source: "prompt", sourceInfo: source(visible) },
+      { name: "skill:visible", description: "Shown.", source: "skill", sourceInfo: source(visible) },
+      { name: "skill:hidden", description: "Explicit only.", source: "skill", sourceInfo: source(hidden) },
+      { name: "skill:quoted", description: "A string flag is not the boolean.", source: "skill", sourceInfo: source(quoted) },
+      { name: "skill:broken", description: "Unparsable.", source: "skill", sourceInfo: source(broken) },
+      { name: "skill:gone", description: "Deleted since.", source: "skill", sourceInfo: source(join(root, "gone", "SKILL.md")) },
+      { name: "skill:relative", description: "Not absolute.", source: "skill", sourceInfo: source("relative/SKILL.md") },
+    ]);
+    expect(skills.map(skill => skill.name)).toEqual(["visible", "quoted"]);
+    expect(skills[0]).toMatchObject({ name: "visible", description: "Shown.", filePath: visible, baseDir: join(root, "visible"), disableModelInvocation: false });
+    expect(skills[0]!.sourceInfo.path).toBe(visible);
+    expect(discoveredSkills(undefined)).toEqual([]);
   });
 });
