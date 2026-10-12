@@ -4,13 +4,18 @@ import { createReadToolDefinition, type ToolDefinition } from "@earendil-works/p
 import { formatTaggedLine, parseFileText, resolveWorkspacePath } from "./anchors.js";
 import { AnchorRegistry } from "./anchor-registry.js";
 import {
-  buildOutline, findSymbols, formatOutline, isOutlineSupported, outlineTargetError, similarNames,
+  buildOutline, findSymbols, formatOutline, isCodeOutlineSupported, isOutlineSupported, outlineTargetError, similarNames,
   type OutlineEntry,
 } from "./outline.js";
 import { coerceIntegerArguments } from "./prepare-arguments.js";
 
 export const READ_MAX_LINES = 2000;
 export const READ_MAX_BYTES = 50 * 1024;
+/**
+ * A read without offset/limit of a JS/TS file larger than this (roughly 4k tokens at 4 bytes per token) returns its
+ * declaration outline first. `offset: 1` (or any offset/limit) reads the text as before; Markdown and other files are not affected.
+ */
+export const READ_OUTLINE_FIRST_BYTES = 16 * 1024;
 const IMAGE_PATH = /\.(png|jpe?g|gif|webp|bmp)$/i;
 
 const readSchema = Type.Object({
@@ -34,10 +39,10 @@ export function createReadTool(cwd: string, registry = new AnchorRegistry()): To
     name: "read",
     label: "read",
     description:
-      "Read a file: non-blank lines print LINE#TAG|text (4 hex), blanks LINE|text; edit uses these anchors. Capped at 2000 lines / 50KB; continue with offset. Use offset/limit for ranges, or outline:true then symbol for JS/TS/Markdown ≤2 MB. Outline/symbol exclude each other and offset/limit. Images are attachments.",
+      "Read a file: non-blank lines print LINE#TAG|text (4 hex), blanks LINE|text; edit uses these anchors. Capped at 2000 lines / 50KB; continue with offset. Without offset/limit, a JS/TS file over 16KB returns its declaration outline first; offset: 1 reads its text. Use offset/limit for ranges, or outline:true then symbol for JS/TS/Markdown ≤2 MB. Outline/symbol exclude each other and offset/limit. Images are attachments.",
     promptSnippet: "Read anchored file ranges, declaration outlines or named symbols",
     promptGuidelines: [
-      "Use read, not cat/sed, to examine files; use offset/limit or outline then symbol instead of reading huge files whole.",
+      "Use read, not cat/sed, to examine files. Read what the task needs: after grep, read offset/limit around the matches; in a large JS/TS/Markdown file, outline then symbol. Read small files, images and documents you must read completely in full (Markdown is never outlined automatically).",
     ],
     parameters: readSchema,
     // Pi's read contract (string | { type: "image", data, mimeType, note }); codemode uses structuredContent only with it.
@@ -77,6 +82,10 @@ export function createReadTool(cwd: string, registry = new AnchorRegistry()): To
         registry.recordShown(absolute, raw, lines, result.shown);
         return textResult(result.text);
       }
+      if (params.offset === undefined && params.limit === undefined) {
+        const first = await outlineFirst(params.path, buffer.length, raw, lines.length);
+        if (first) return textResult(first);
+      }
       registry.recordShown(absolute, raw, lines, []);
       if (lines.length === 0) return textResult("(empty file)");
       const start = Math.max(1, Math.floor(params.offset ?? 1));
@@ -105,6 +114,20 @@ export function createReadTool(cwd: string, registry = new AnchorRegistry()): To
       return textResult(out.join("\n") + notice + hint);
     },
   };
+}
+
+/**
+ * The first view of a bare read of a large JS/TS file: its declaration outline and how to read on, or undefined to read
+ * the text as before (small, unsupported or over the outline limit, or fewer than two declarations to choose from).
+ * Nothing enters anchor history; the model reads a symbol or a range next, which returns anchors for edit.
+ */
+async function outlineFirst(path: string, sizeBytes: number, raw: string, totalLines: number): Promise<string | undefined> {
+  if (sizeBytes <= READ_OUTLINE_FIRST_BYTES || !isCodeOutlineSupported(path) || outlineTargetError(path, sizeBytes)) return undefined;
+  const entries = await buildOutline(path, raw);
+  if (entries.length < 2) return undefined;
+  return `${formatOutline(path, totalLines, entries)}\n\n[${path} is ${Math.round(sizeBytes / 1024)}KB, so this read without offset/limit shows `
+    + "its declaration outline instead of the text. Next: symbol for a declaration, offset/limit for a range (for example "
+    + "around a grep match), or offset: 1 for the text from the start.]";
 }
 
 /** Headers count toward the normal output caps; only anchored lines enter history. */

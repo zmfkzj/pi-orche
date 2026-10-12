@@ -3,7 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { AnchorRegistry } from "../../src/tools/anchor-registry.js";
 import { lineTag } from "../../src/tools/anchors.js";
-import { createReadTool, READ_MAX_BYTES, READ_MAX_LINES } from "../../src/tools/read.js";
+import { createReadTool, READ_MAX_BYTES, READ_MAX_LINES, READ_OUTLINE_FIRST_BYTES } from "../../src/tools/read.js";
 import { cleanupWorkspaces, runToolScript, tempWorkspace } from "./harness.js";
 
 afterEach(cleanupWorkspaces);
@@ -189,5 +189,60 @@ describe("read declaration validation and caps", () => {
     expect(await s.read({})).not.toContain("Hint:");
     const plain = await setup(Array.from({ length: 2100 }, (_, n) => `line${n}`).join("\n"), "plain.txt");
     expect(await plain.read({})).not.toContain("Hint:");
+  });
+});
+
+describe("read: outline first for large JS/TS files", () => {
+  const large = (count = 120) => Array.from({ length: count }, (_, n) =>
+    `/** Step ${n}. */\nexport function step${n}(value: number): number {\n  // ${"x".repeat(100)}\n  return value + ${n};\n}\n`).join("\n");
+  const toolOf = async (text: string, path: string) => {
+    const s = await setup(text, path);
+    const tool = createReadTool(s.cwd, s.registry);
+    return { ...s, raw: (args: Record<string, unknown>) => tool.execute("r", { path, ...args }, undefined, undefined, undefined as never) };
+  };
+
+  it("returns the outline and the next steps instead of the text, records no anchors", async () => {
+    const text = large();
+    expect(Buffer.byteLength(text)).toBeGreaterThan(READ_OUTLINE_FIRST_BYTES);
+    const s = await setup(text, "big.ts");
+    const record = vi.spyOn(s.registry, "recordShown");
+    const output = await s.read({});
+    expect(output).toMatch(/^big\.ts: \d+ lines, 120 declarations\n\d+-\d+ function step0\n/);
+    expect(output).toContain("KB, so this read without offset/limit shows its declaration outline instead of the text.");
+    expect(output).toContain("offset: 1 for the text from the start");
+    expect(output).not.toMatch(/^\d+(?:#[0-9a-f]+)?\|/m);
+    expect(Buffer.byteLength(output)).toBeLessThan(Buffer.byteLength(text) / 4);
+    expect(record).not.toHaveBeenCalled();
+  });
+  it("keeps explicit reads: offset: 1 and limit read the anchored text as before, symbol reads a declaration", async () => {
+    const s = await setup(large(), "big.ts");
+    const full = await s.read({ offset: 1 });
+    expect(full).toMatch(/^1#[0-9a-f]{4}\|\/\*\* Step 0\. \*\/\n2#[0-9a-f]{4}\|export function step0/);
+    expect(await s.read({ limit: 3 })).toMatch(/^1#[0-9a-f]{4}\|.*\n2#.*\n3#[0-9a-f]{4}\|  \/\/ x+\n\n\[Showing lines 1-3 of /);
+    const symbol = await s.read({ symbol: "step7" });
+    expect(symbol).toMatch(/^-- function step7 \(lines \d+-\d+\)\n\d+#[0-9a-f]{4}\|\/\*\* Step 7\. \*\//);
+  });
+  it("returns the same text as structuredContent for programmatic callers", async () => {
+    const s = await toolOf(large(), "big.mjs");
+    const result = await s.raw({});
+    const text = result.content.map(c => c.type === "text" ? c.text : "").join("");
+    expect(text).toMatch(/^big\.mjs: .* declarations/);
+    expect((result as { structuredContent?: unknown }).structuredContent).toBe(text);
+  });
+  it("reads small code files, Markdown documents, other types and declaration-poor files whole", async () => {
+    expect(await (await setup(large(10), "small.ts")).read({})).toMatch(/^1#[0-9a-f]{4}\|/);
+    const doc = Array.from({ length: 200 }, (_, n) => `## Section ${n}\n\n${"text ".repeat(30)}\n`).join("\n");
+    expect(Buffer.byteLength(doc)).toBeGreaterThan(READ_OUTLINE_FIRST_BYTES);
+    const md = await (await setup(doc, "guide.md")).read({});
+    expect(md).toMatch(/^1#[0-9a-f]{4}\|## Section 0/);
+    expect(md).not.toContain("declaration outline instead");
+    expect(await (await setup(large().replace(/\.|:/g, " "), "data.json")).read({})).toMatch(/^1#[0-9a-f]{4}\|/);
+    const one = `export function only() {\n${Array.from({ length: 300 }, (_, n) => `  // ${n} ${"x".repeat(80)}`).join("\n")}\n}\n`;
+    expect(await (await setup(one, "one.ts")).read({})).toMatch(/^1#[0-9a-f]{4}\|export function only/);
+  });
+  it("tells the model when to narrow and which files to read whole", () => {
+    const tool = createReadTool(process.cwd());
+    expect(tool.description).toContain("Without offset/limit, a JS/TS file over 16KB returns its declaration outline first; offset: 1 reads its text.");
+    expect(tool.promptGuidelines).toEqual([expect.stringMatching(/after grep, read offset\/limit around the matches; in a large JS\/TS\/Markdown file, outline then symbol\. Read small files, images and documents you must read completely in full/)]);
   });
 });

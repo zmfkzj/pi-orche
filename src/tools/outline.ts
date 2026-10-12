@@ -26,6 +26,11 @@ export function isOutlineSupported(path: string): boolean {
   return markdown(path) || Object.hasOwn(LANGUAGES, extname(path).toLowerCase());
 }
 
+/** JS/TS (not Markdown, whose documents are often read in full on purpose). */
+export function isCodeOutlineSupported(path: string): boolean {
+  return Object.hasOwn(LANGUAGES, extname(path).toLowerCase());
+}
+
 /** Validate before parsing; returned messages point callers at non-outline alternatives. */
 export function outlineTargetError(path: string, sizeBytes: number): string | undefined {
   if (!isOutlineSupported(path)) return `Outline/symbol reads do not support ${extname(path) || "this file type"}; use offset/limit or grep instead.`;
