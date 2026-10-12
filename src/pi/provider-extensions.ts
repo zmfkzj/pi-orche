@@ -10,6 +10,7 @@ export class ProviderExtensionError extends Error {
 }
 export interface ProviderExtensionHost {
   readonly sources: readonly string[];
+  readonly warnings?: readonly string[];
   /** Stops the extensions. Providers stay registered in the runtime, but their dispatch is gone: call only when the runtime is no longer used for requests. */
   dispose(): void;
 }
@@ -29,23 +30,28 @@ const SELF_PACKAGE = "pi-orche";
 export async function loadProviderExtensions(
   runtime: ModelRuntime,
   sources: readonly string[],
-  options: { cwd: string; agentDir?: string; signal?: AbortSignal },
+  options: { cwd: string; agentDir?: string; signal?: AbortSignal; allowMissing?: boolean },
 ): Promise<ProviderExtensionHost> {
   options.signal?.throwIfAborted();
   const agentDir = options.agentDir ?? getAgentDir();
   const settingsManager = SettingsManager.inMemory({});
   const packages = new DefaultPackageManager({ cwd: options.cwd, agentDir, settingsManager });
   const paths: string[] = [];
+  const warnings: string[] = [];
   for (const source of sources) {
     const installed = packages.getInstalledPath(source, "user");
     if (!installed) {
-      throw new ProviderExtensionError(`Provider extension ${source} is not installed at user scope. Install it with: pi install ${source}`);
+      const message = `Provider extension ${source} is not installed at user scope. Install it with: pi install ${source}`;
+      if (!options.allowMissing) throw new ProviderExtensionError(message);
+      warnings.push(`Warning: ${message}. Using Pi's inherited providers; remove the obsolete providerExtensions entry if it is no longer needed.`);
+      continue;
     }
     if (await packageName(installed) === SELF_PACKAGE) {
       throw new ProviderExtensionError(`Provider extension ${source} is pi-orche itself; loading it into an orche run would recurse.`);
     }
     paths.push(installed);
   }
+  if (!paths.length) return { sources, warnings, dispose() {} };
   const loader = new DefaultResourceLoader({
     cwd: options.cwd, agentDir, settingsManager, noExtensions: true, additionalExtensionPaths: paths,
     noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
@@ -65,7 +71,7 @@ export async function loadProviderExtensions(
     sessionManager: SessionManager.inMemory(options.cwd), tools: [],
   });
   if (options.signal?.aborted) { session.dispose(); options.signal.throwIfAborted(); }
-  return { sources, dispose: () => session.dispose() };
+  return { sources, warnings, dispose: () => session.dispose() };
 }
 
 async function packageName(directory: string): Promise<string | undefined> {

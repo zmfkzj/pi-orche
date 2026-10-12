@@ -68,6 +68,25 @@ describe("provider extensions in orche's own runtime", () => {
   });
 
 
+  it("warns about removed optional sources when Pi provides the registry, without hiding broken installed extensions", async () => {
+    const installed = await installProviderPackage();
+    shared.__orcheTestProvider = fauxProvider({ provider: "ext-provider" });
+    const f = await fauxRuntime();
+    const missing = "npm:@scope/no-longer-installed";
+    const options = { cwd: installed.root, agentDir: installed.agentDir, allowMissing: true };
+    const empty = await loadProviderExtensions(f.runtime, [missing], options);
+    expect(empty.warnings).toEqual([expect.stringContaining("Using Pi's inherited providers")]);
+    empty.dispose();
+    const host = await loadProviderExtensions(f.runtime, [missing, installed.source], options);
+    expect(host.warnings).toHaveLength(1);
+    expect(f.runtime.getModel("ext-provider", shared.__orcheTestProvider.getModel().id)).toBeDefined();
+    host.dispose();
+    const broken = await installProviderPackage("broken-provider");
+    await writeFile(join(broken.source, "index.ts"), "throw new Error('broken-installed-provider'); export default function () {}\n");
+    await expect(loadProviderExtensions(f.runtime, [broken.source], options)).rejects.toThrow("broken-installed-provider");
+  });
+
+
   it("validates the providerExtensions config field", () => {
     const base = { routes: {} };
     expect(parseRouteConfig({ ...base, providerExtensions: ["npm:@scope/pkg"] }).providerExtensions).toEqual(["npm:@scope/pkg"]);

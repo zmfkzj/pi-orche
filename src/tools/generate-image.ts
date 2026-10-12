@@ -62,7 +62,7 @@ export function createGenerateImageTool(options: { cwd: string; runtime: ImageRu
         if (blocked) throw new Error(blocked.reason);
         const slash = options.images.model.indexOf("/");
         const model = options.runtime.getModelOfType("image", options.images.model.slice(0, slash), options.images.model.slice(slash + 1));
-        if (!model) throw new Error(`Image model ${options.images.model} is not registered in orche's runtime. cliproxyapi-images is bundled with pi-orche and registered automatically when images.model names it (check the model id, e.g. cliproxyapi-images/gpt-image-2.5, and the gateway credentials). Any other image provider needs a providerExtensions entry, installed with \`pi install\`, so orche can load it.`);
+        if (!model) throw new Error(`Image model ${options.images.model} is not registered in orche's runtime. Image providers available in Pi are inherited automatically; check the provider/model id and credentials. cliproxyapi-images is also bundled with pi-orche (e.g. cliproxyapi-images/gpt-image-2.5). An additional worker-only provider needs a providerExtensions entry installed with \`pi install\`.`);
         const input: ImagesContext["input"] = [{ type: "text", text: params.prompt }];
         const root = await realpath(cwd);
         for (const reference of params.references ?? []) {

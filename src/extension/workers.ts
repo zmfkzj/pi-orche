@@ -1170,20 +1170,21 @@ export class WorkerPool {
     const startup = new AbortController();
     startupTimer = setTimeout(() => startup.abort(new Error(`Worker startup timed out after ${limits.assignmentMs}ms`)), Math.max(0, limits.assignmentMs - (Date.now() - started)));
     const startupSignal = AbortSignal.any([signal, startup.signal]);
-    const runtime = await this.options.controller.modelRuntime(startupSignal);
+    const isolatedRuntime = await this.options.controller.modelRuntime(startupSignal);
     if (this.disposed) throw new Error("Worker pool is disposed");
     signal.throwIfAborted();
-    // All workers, spawned sub-workers and compaction share this provider-aware runtime.
-    // Inherit before explicit providerExtensions, which remain the worker-specific override.
-    if (args.modelRegistry) this.inheritedProviders.sync(runtime, args.modelRegistry);
+    // All workers, advisors, sub-workers and compaction use Pi's providers and request-time auth.
+    // Explicit worker-only extensions still register in the isolated runtime and take precedence.
+    const runtime = args.modelRegistry ? this.inheritedProviders.sync(isolatedRuntime, args.modelRegistry) : isolatedRuntime;
 
     if (config.routes.providerExtensions?.length) {
       const key = JSON.stringify(config.routes.providerExtensions);
       if (!this.providers.has(key)) {
-        const host = await loadProviderExtensions(runtime, config.routes.providerExtensions, { cwd: args.cwd, agentDir: this.options.agentDir, signal: startupSignal });
+        const host = await loadProviderExtensions(runtime, config.routes.providerExtensions, { cwd: args.cwd, agentDir: this.options.agentDir, signal: startupSignal, allowMissing: !!args.modelRegistry });
         if (this.disposed) { host.dispose(); throw new Error("Worker pool is disposed"); }
         this.providers.set(key, host);
       }
+      modelWarnings.push(...(this.providers.get(key)?.warnings ?? []));
     }
     const images = args.role === "game-asset" || args.role === "video" ? config.routes.images : undefined;
     const imageConfig = images ? JSON.stringify(images) : undefined;

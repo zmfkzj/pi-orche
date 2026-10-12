@@ -70,6 +70,12 @@ Reused `orche_task` workers clear large earlier tool outputs at assignment start
 
 In `single`, PowerShell is unsupported until it has a dedicated parser. Bash rejects bare globs, variables and substitutions; quote literal patterns (for example `find . -name '*.ts'`). `npx`/`bunx` runners require `--no-install` (for example `npx --no-install vitest run`); this is not a containment or executable-provenance guarantee. Permitted tests/linters can execute project configuration and create generated files, caches or reports. Policy acceptance does not guarantee a successful CLI invocation.
 
+### Pi providers in workers
+
+Workers automatically use **all providers in the running Pi session**: built-ins (OpenAI, Anthropic, Google, Bedrock, Vertex, Azure, OpenRouter, etc.), `models.json` endpoints and extension providers, including bundled ones. Chat, image and classifier catalogs are mirrored; requests and request-time authentication go through Pi's public model registry, so OAuth refresh, ambient cloud credentials and runtime-only API keys stay with Pi. No provider-specific package list or duplicate install is required. Worker tools, hooks and conversations remain separate.
+
+`providerExtensions` is optional, for additional worker-only providers (or standalone SDK callers). An obsolete, missing package now warns instead of blocking tasks when the host registry is available; an installed but broken package still fails, and SDK tasks without a host registry keep the strict missing-package error. Explicit worker-only provider registrations retain precedence. See [provider details and limits](docs/pi-package.md#models-auth-and-providers-that-extensions-register).
+
 ### Raster image generation
 
 The `cliproxyapi-images/gpt-image-2.5` image model (CLIProxyAPI gateway, from [pi-images](https://github.com/zmfkzj/pi-images)) is **bundled with pi-orche**: `pi install git:github.com/zmfkzj/pi-orche` brings its provider along, so there is no separate install and no `providerExtensions` entry. Set the model in `orche.config.json` (merge into your existing file, retaining `routes` and `default`):
@@ -84,7 +90,7 @@ When `images.model` names `cliproxyapi-images`, orche registers the bundled prov
 
 Credentials come from the `CLIPROXYAPI_API_KEY` and `CLIPROXYAPI_BASE_URL` environment variables, or from `cliproxyapi.json` (`apiKey`/`baseUrl`) or the `cliproxyapi` entry of `auth.json` in the Pi agent directory (the same one orche uses for its own config). They are resolved when an image is requested and never go in this routing file.
 
-`providerExtensions` is needed only for **other** image providers. Install the provider's Pi package first (`pi install <source>`, since `providerExtensions` loads only packages installed at user scope), list it, and point `images.model` at its model:
+Other image providers already available in Pi are inherited too: only set `images.model`. `providerExtensions` is needed only for an **additional worker-only** image provider. Install its Pi package first (`pi install <source>`, since this option resolves user-scope packages), then configure it:
 
 ```json
 {

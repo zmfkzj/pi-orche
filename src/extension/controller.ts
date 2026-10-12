@@ -134,7 +134,9 @@ export class OrcheController {
 
   async modelRuntime(signal?: AbortSignal): Promise<ModelRuntime> {
     signal?.throwIfAborted();
-    const created = (this.runtime ??= (this.options.createRuntime ?? (() => ModelRuntime.create()))());
+    const created = (this.runtime ??= (this.options.createRuntime ?? (() => ModelRuntime.create(this.options.agentDir ? {
+      authPath: join(this.options.agentDir, "auth.json"), modelsPath: join(this.options.agentDir, "models.json"),
+    } : {})))());
     created.catch(() => {
       if (this.runtime === created) this.runtime = undefined;
     });

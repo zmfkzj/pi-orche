@@ -67,15 +67,17 @@ describe("generate_image", () => {
     expect(runtime.generateImages.mock.calls[0]?.[1].input[1]).toEqual({ type: "image", data: png.toString("base64"), mimeType: "image/png" });
   });
 
-  it("reports a missing model: cliproxyapi-images is bundled and automatic, other providers need providerExtensions via pi install", async () => {
+  it("reports inherited image providers, the bundled fallback, and worker-only package setup for a missing model", async () => {
     const { run, runtime } = await fixture();
     runtime.getModelOfType.mockReturnValue(undefined);
     const result = await run();
     expect(result.isError).toBe(true);
     const message = text(result);
     expect(message).toContain("Image model test/image is not registered");
-    expect(message).toContain("cliproxyapi-images is bundled with pi-orche and registered automatically");
-    expect(message).toContain("gateway credentials");
+    expect(message).toContain("Image providers available in Pi are inherited automatically");
+    expect(message).toContain("cliproxyapi-images is also bundled with pi-orche");
+    expect(message).toContain("worker-only provider");
+    expect(message).toContain("credentials");
     expect(message).toContain("providerExtensions");
     expect(message).toContain("pi install");
     expect(message).not.toContain("Configure providerExtensions"); // the old wording told everyone to configure providerExtensions
