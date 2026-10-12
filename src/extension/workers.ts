@@ -5,7 +5,7 @@
  * executeTool() is execute() as a tool result, with such a failure returned as an isError result that keeps the details.
  * formatWorkers(), stop(id|"all") and roster() implement the pool slash commands. */
 import { Type, type Static } from "typebox";
-import { getAgentDir, type AgentToolResult, type ExtensionFactory, type ModelRegistry, type Skill } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type AgentToolResult, type ModelRegistry, type Skill } from "@earendil-works/pi-coding-agent";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -66,7 +66,7 @@ export const orcheTaskParameters = Type.Object({
   wait: Type.Optional(Type.Boolean({ description: "Omit (default): the task starts in the background, this call returns its job id at once, and the result arrives later as an orche-task-result message; keep talking with the user meanwhile and do not poll. true: block until the worker finishes and return its result (only when you cannot continue without it)." })),
   verificationRounds: Type.Optional(Type.Integer({ minimum: 1, maximum: 5, description: "Fresh-verifier rounds (orche_spawn verification) the orchestrator may start in this assignment; default 2. Raise it only when the user explicitly asked for more independent review rounds. Rounds past the cap are refused and the result lists what stays unresolved." })),
   task: Type.Optional(Type.String({ pattern: "^T[1-9][0-9]*$", description: "Task ledger id (T1, T2, …) named in an earlier result. Pass it for a follow-up of that same task, also when another or a new worker takes it over; omit it for a different user task, even when reusing a worker. Used only when single.ledger is on." })),
-  gui: Type.Optional(Type.Boolean({ description: "true: the worker gets its own private GUI desktop (computer use: launch apps, screenshots, click, type), which the user does not see; needs the pi-gui package. Set it only when the task needs GUI applications. false: no desktop. Omitted: a new worker gets none, a reused worker keeps its setting. Changing it on a reused worker starts a fresh worker." })),
+  gui: Type.Optional(Type.Boolean({ description: "true: the worker gets its own private GUI desktop (computer use: launch apps, screenshots, click, type), which the user does not see; needs the pi-gui package. Set it only when the task needs GUI applications, including a rendered or interactive web page (the worker browses there with a fresh profile; workers have browser_fetch only otherwise). Read-only roles (explore, answer, verify) get an observe-only desktop (no clicks, typing or form input); interaction needs role implement. false: no desktop. Omitted: a new worker gets none, a reused worker keeps its setting. Changing it on a reused worker starts a fresh worker." })),
   git: Type.Optional(Type.Object({
     commit: Type.Optional(Type.Boolean({ description: "Authorize git commit for this assignment." })),
     push: Type.Optional(Type.Boolean({ description: "Authorize git push (implies commit). Never force-push." })),
@@ -211,6 +211,10 @@ export interface TaskDetails {
   spawned?: SpawnedWorker[];
   /** Present (true) when the worker has its own private GUI desktop (`gui`, provided by pi-gui). */
   gui?: boolean;
+  /** Present (true) when the worker has its own stateless `browser_fetch` (capability `web-fetch`, provided by pi-browser). */
+  webFetch?: boolean;
+  /** Why the worker has no `browser_fetch` although a provider answered (e.g. obscura is not installed). */
+  webFetchUnavailable?: string;
   /** Messages main injected while the assignment ran (`orche_task_message`), with their delivery status. */
   injected?: InjectedMessage[];
   /** Output-limit stops of this assignment (src/pi/length-recovery.ts). */
@@ -227,27 +231,8 @@ export type SpawnedWorker = Omit<SubWorkerOutcome, "data" | "summary"> & { summa
 /** The workspace/git part of a task's details. */
 type ChangeReport = Pick<TaskDetails, "changes" | "otherChanges" | "submodules" | "headMoved">;
 
-/**
- * An opt-in worker capability that another Pi extension provides (pi-gui answers `gui`). Orche asks on `pi.events`
- * channel {@link WORKER_CAPABILITY_CHANNEL} with a {@link WorkerCapabilityRequest} plus `provide(answer)`; the provider
- * answers synchronously. The answer's extension factories are loaded into that worker's own session only, so whatever
- * they start (e.g. an MCP server process) belongs to that worker and stops with its session. Orche knows no specifics.
- */
-export interface WorkerCapabilityProvider {
-  /** Stable description of the configuration: a reused worker whose key differs is replaced by a fresh one. */
-  key: string;
-  /** Exact tool names the factories register, added to the worker's tool allowlist. */
-  tools: string[];
-  extensionFactories: ExtensionFactory[];
-  /** Appended to the worker's instructions. */
-  instructions?: string;
-  /** Own timeouts of those tools, for liveness (see KNOWN_TOOL_TIMEOUTS_MS). */
-  toolTimeoutsMs?: Record<string, number>;
-}
-export interface WorkerCapabilityRequest { capability: string; cwd: string; workerId?: string }
-/** Undefined: nobody provides the capability. */
-export type WorkerCapabilityAnswer = WorkerCapabilityProvider | { error: string } | undefined;
-export const WORKER_CAPABILITY_CHANNEL = "orche:worker-capability";
+import { mergeCapabilities, webFetchCapability, type WorkerCapabilityAnswer, type WorkerCapabilityProvider, type WorkerCapabilityRequest } from "./capabilities.js";
+export { mergeCapabilities, WEB_FETCH_CAPABILITY, webFetchCapability, WORKER_CAPABILITY_CHANNEL, type WorkerCapabilityAnswer, type WorkerCapabilityProvider, type WorkerCapabilityRequest } from "./capabilities.js";
 
 /**
  * A task whose worker ran but did not complete its assignment: the worker failed or ended without a result, the
@@ -308,6 +293,8 @@ interface Worker {
   imageConfig?: string;
   /** {@link WorkerCapabilityProvider.key} of the worker's GUI capability; absent without one. */
   gui?: string;
+  /** {@link WorkerCapabilityProvider.key} of the worker's web-fetch capability; absent without one. */
+  webFetch?: string;
   latestInput: number;
   timer?: ReturnType<typeof setTimeout>;
   /** The task ledger of this worker's task (single workflow with `single.ledger`), read when the worker compacts. */
@@ -1200,13 +1187,18 @@ export class WorkerPool {
     // GUI desktop (pi-gui): omitted keeps a reused worker's setting. Asked before any worker is touched, so an unavailable
     // GUI fails the task without retiring anything; the provider's factories load only into a newly spawned session.
     const wantGui = args.gui ?? !!worker?.gui;
+    // Every capability request names the worker's role, so a provider can scope what it gives (pi-gui: read-only roles).
+    const capabilityRequest = { cwd: args.cwd, workerId: worker?.id ?? `W${this.nextId}`, role: args.role, readOnly: !WRITING_KINDS.has(args.role) };
     let gui: WorkerCapabilityProvider | undefined;
     if (wantGui) {
-      const answer = this.options.capability?.({ capability: "gui", cwd: args.cwd, workerId: worker?.id ?? `W${this.nextId}` });
+      const answer = this.options.capability?.({ capability: "gui", ...capabilityRequest });
       if (!answer) throw new Error("gui: true needs the pi-gui package (no extension provides the GUI capability in this session).");
       if ("error" in answer) throw new Error(`gui: ${answer.error}`);
       gui = answer;
     }
+    // Public-web reading for every worker (pi-browser): its own stateless browser_fetch. Unavailable is not an error: the
+    // worker runs without it and is told why, so it never believes it has a browser it lacks.
+    const webFetch = webFetchCapability(this.options.capability, capabilityRequest);
     // Tools cannot be unregistered from a session. Recreate only when this optional
     // capability changes, so neither tool registration nor old instructions leak roles.
     if (worker && worker.imageConfig !== imageConfig) {
@@ -1219,6 +1211,12 @@ export class WorkerPool {
       await this.retire(worker.id, "replaced: GUI desktop setting changed");
       retired.push(worker.id);
       retirementLines.push(`${worker.id} retired: GUI desktop ${gui ? (worker.gui ? "configuration changed" : "requested") : "no longer requested"}; starting a fresh worker.`);
+      worker = undefined;
+    }
+    if (worker && worker.webFetch !== webFetch.provider?.key) {
+      await this.retire(worker.id, "replaced: web fetch capability changed");
+      retired.push(worker.id);
+      retirementLines.push(`${worker.id} retired: browser_fetch ${webFetch.provider ? (worker.webFetch ? "configuration changed" : "became available") : "is no longer available"}; starting a fresh worker.`);
       worker = undefined;
     }
     // The ultra tool set (orche_spawn with the ultra reasons, orche_adopt) is installed when a session is created and cannot be
@@ -1312,7 +1310,7 @@ export class WorkerPool {
       // orche_spawn only with `single.spawn` on: `single.spawn: false` keeps the earlier single worker's tool set exactly.
       // Ultra workers get the ultra tool set (orche_spawn with the ultra reasons, orche_adopt) whatever single.spawn says.
       const spawnTool = singleWorkflow && (config.single.spawn || ultraMode);
-      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool, ...(singleWorkflow && ultraMode ? { ultraTools: true } : {}), ...(gui ? { gui: gui.key } : {}) };
+      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool, ...(singleWorkflow && ultraMode ? { ultraTools: true } : {}), ...(gui ? { gui: gui.key } : {}), ...(webFetch.provider ? { webFetch: webFetch.provider.key } : {}) };
       const meta = worker;
       meta.model = route.model;
       meta.thinking = route.thinking ?? "off";
@@ -1323,17 +1321,18 @@ export class WorkerPool {
       // orche_adopt (ultra): usable only while an ultra implement assignment runs (`meta.ultra`); the tool refuses otherwise.
       ...(meta.ultraTools ? [createAdoptTool(() => meta.ultra ?? ADOPT_UNAVAILABLE)] : [])];
       // generate_image has its own timeout (images.timeoutMs, 180 s by default): liveness bounds a silent call by it, not by the generic tool bound.
-      // GUI tools likewise (the first call of a desktop starts it).
-      const toolTimeoutsMs = { ...(images ? { generate_image: images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } : {}), ...gui?.toolTimeoutsMs };
-      await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, signal: startupSignal, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name), ...(gui?.tools ?? [])], customTools, peerMessaging: false, ...(sessionFile ? { sessionFile } : {}),
+      // Capability tools likewise (the first GUI call of a desktop starts it).
+      const capabilities = mergeCapabilities([gui, webFetch.provider]);
+      const toolTimeoutsMs = { ...(images ? { generate_image: images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } : {}), ...capabilities.toolTimeoutsMs };
+      await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, signal: startupSignal, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name), ...capabilities.tools], customTools, peerMessaging: false, ...(sessionFile ? { sessionFile } : {}),
         skills: this.options.skills?.() ?? [],
         ...(Object.keys(toolTimeoutsMs).length ? { toolTimeoutsMs } : {}),
-        // The GUI capability's own extensions (Pi's MCP + the desktop server) live in this worker's session only.
-        ...(gui ? { extensionFactories: gui.extensionFactories } : {}),
+        // The capabilities' own extensions (pi-gui's MCP + desktop server, pi-browser's browser_fetch) live in this worker's session only.
+        ...(capabilities.extensionFactories.length ? { extensionFactories: capabilities.extensionFactories } : {}),
         contextProjection: createAssignmentProjector(),
         ...(mainModel ? { inheritedContextWindow: mainWindow } : {}),
         ...(singleWorkflow ? { taskCompaction: taskCompactionFor(meta) } : {}),
-        instructions: `${workerSystemInstructions(!!spawnTool)}${gui?.instructions ? `\n${gui.instructions}` : ""}`,
+        instructions: [workerSystemInstructions(!!spawnTool), ...capabilities.instructions, ...(webFetch.unavailable ? [webFetch.unavailable] : [])].join("\n"),
         ...this.callbacks(meta),
       });
       if (this.disposed) { await this.manager.dispose(id); throw new Error("Worker pool is disposed"); }
@@ -1571,7 +1570,7 @@ export class WorkerPool {
     const modeLines = (): string[] => [...requestLine(), ...(usesStrongTiers(args.mainMode)
       ? [`Mode: ${args.mainMode} (orchestrator: ${tierKey && modelSource !== "route" ? `models.${tierKey}` : modelSource === "route" ? "a configured route" : "main's model"}${orchestrating ? `; sub-workers: ${subSource === "orchestrator" ? "the orchestrator's model" : `models.${workerKey}`}` : ""})`] : [])];
     const workflowDetails = () => ({ ...modeDetails(), thinking: meta.thinking, ...(Object.keys(answered).length ? { models: { ...answered } } : {}), ...(meta.plan ? { plan: structuredClone(meta.plan) } : {}), ...policyDetails(),
-      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(meta.gui ? { gui: true as const } : {}), ...spawnedDetails() });
+      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(meta.gui ? { gui: true as const } : {}), ...(meta.webFetch ? { webFetch: true as const } : webFetch.unavailable ? { webFetchUnavailable: webFetch.unavailable } : {}), ...spawnedDetails() });
     let requests = 0;
     /** Provider-reported cost of this assignment's own requests (the split log); undefined while none was reported. */
     let ownCostUSD: number | undefined;
@@ -1811,6 +1810,8 @@ export class WorkerPool {
           runWorker: createSubWorkerRunner({
             orchestrator: meta.id, cwd: args.cwd, runtime, route: standardSubRoute, routeSource: subSource, thinkingSource: standardSubRoute === subRoute ? subThinkingSource : "orchestrator:step", ...(subWindow ? { inheritedContextWindow: subWindow } : {}),
             skills: this.options.skills?.() ?? [],
+            // Each sub-worker gets its own browser_fetch instance (asked with its own id and role), like an orche_task worker.
+            webFetch: planned => webFetchCapability(this.options.capability, { cwd: planned.workspace ?? args.cwd, workerId: planned.id, role: planned.role, readOnly: !WRITING_KINDS.has(planned.role) }),
             ...(standardSubRoute !== subRoute ? { verifyRoute: subRoute, verifyThinkingSource: subThinkingSource } : {}),
             ...(thinkingPolicy.mode === "phase" ? { lengthLadder: thinkingPolicy.lengthRecovery } : {}),
             specialistRoute: role => resolveSpecialistRoute(config.routes, role, (provider, id) => !!runtime.getModel(provider, id)),

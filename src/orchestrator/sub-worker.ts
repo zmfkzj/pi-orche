@@ -16,6 +16,7 @@ import { checkWriteRealPath, WRITE_TOOLS } from "../orchestration/ownership.js";
 import { checkBashWrites } from "../orchestration/bash-writes.js";
 import { orchestrationResultSchemas } from "../orchestration/result-schemas.js";
 import { WORKER_TOOL_NAMES } from "../tools/index.js";
+import { mergeCapabilities, type WorkerCapabilityProvider } from "../extension/capabilities.js";
 import { runSpecialistSession, SpecialistError, type SpecialistDeadline, type SpecialistReport, type SpecialistStats } from "../specialists/session.js";
 import { DEPTH_LIMIT_MESSAGE, SPAWN_TOOL, subWorkerDeadline, type PlannedWorker, type RunSubWorker, type SubWorkerOutcome, type SubWorkerRole } from "./spawn.js";
 
@@ -61,6 +62,11 @@ export interface SubWorkerEnvironment {
   onSessionEnd?(id: string): void;
   /** Main's discovered skills (metadata) every sub-worker lists, as an orche_task worker does (src/pi/worker-skills.ts). */
   skills?: readonly Skill[];
+  /**
+   * The web-fetch capability of one sub-worker (pi-browser's own browser_fetch in its session), asked with its own id and role,
+   * as an orche_task worker gets it; `unavailable` is told to the sub-worker. Absent: none.
+   */
+  webFetch?(worker: PlannedWorker): { provider?: WorkerCapabilityProvider; unavailable?: string };
 }
 
 const reportSchema = Type.Object({ kind: Type.String(), summary: Type.String({ minLength: 1 }), data: Type.Optional(Type.Unknown()) });
@@ -123,6 +129,8 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
     const route = specialist ? env.specialistRoute(worker.role as "game-asset" | "video") : verifyRoute ?? env.route;
     const image = specialist ? env.imageTool?.() : undefined;
     const guard = subWorkerGuard(worker, siblings, env.cwd);
+    const webFetch = env.webFetch?.(worker) ?? {};
+    const capabilities = mergeCapabilities([webFetch.provider]);
     const cwd = worker.workspace ?? env.cwd;
     const sessionFile = env.sessionFile?.(worker.id);
     const base = { id: worker.id, name: worker.name, role: worker.role, reason: worker.reason, ...(worker.files ? { files: [...worker.files] } : {}), ...(worker.workspace ? { workspace: worker.workspace } : {}), changes: [] as string[], modelSource: specialist ? "route" as const : env.routeSource, thinkingSource: specialist ? "route" as const : verifyRoute ? env.verifyThinkingSource ?? env.thinkingSource : env.thinkingSource };
@@ -130,11 +138,13 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
     const fromStats = (stats: SpecialistStats) => ({ model: stats.model, ...(stats.thinking ? { thinking: stats.thinking } : {}), ...(started ? {} : { notStarted: true as const }), requests: stats.requests, models: { ...stats.models }, startedAt: stats.startedAt, durationMs: stats.durationMs, costUSD: stats.usage.cost, ...(stats.sessionFile ? { sessionFile: stats.sessionFile } : {}), ...(stats.deadline ? { deadline: subWorkerDeadline(stats.deadline) } : {}) });
     try {
       const { value, stats } = await runSpecialistSession({
-        actor: worker.id, route, runtime: env.runtime, cwd, instructions: SUB_WORKER_INSTRUCTIONS, prompt: env.prompt(worker, !!image),
-        tools: [...WORKER_TOOL_NAMES, ...(image ? [image.name] : [])], ...(image ? { customTools: [image] } : {}), report: reportFor(worker.role),
+        actor: worker.id, route, runtime: env.runtime, cwd, prompt: env.prompt(worker, !!image),
+        instructions: [SUB_WORKER_INSTRUCTIONS, ...capabilities.instructions, ...(webFetch.unavailable ? [webFetch.unavailable] : [])].join("\n"),
+        tools: [...WORKER_TOOL_NAMES, ...(image ? [image.name] : []), ...capabilities.tools], ...(image ? { customTools: [image] } : {}), report: reportFor(worker.role),
+        ...(capabilities.extensionFactories.length ? { extensionFactories: capabilities.extensionFactories } : {}),
         toolGuard: guard, writeFileGuard: (file, abort) => abort?.aborted ? "cancelled" : guard("ast_rewrite", { path: file }),
         maxTurns: env.maxTurns, timeoutMs: env.timeoutMs, signal, nudges: 1, onTool,
-        ...(env.deadline ? { deadline: { ...env.deadline, onExtended: extension => onDeadline?.({ type: "extended", extension }), onObservation: observation => onDeadline?.({ type: "observation", observation }) } } : {}),
+        ...(env.deadline ? { deadline: { ...env.deadline, toolTimeoutsMs: { ...env.deadline.toolTimeoutsMs, ...capabilities.toolTimeoutsMs }, onExtended: extension => onDeadline?.({ type: "extended", extension }), onObservation: observation => onDeadline?.({ type: "observation", observation }) } } : {}),
         onSession: use => { started = true; onModel?.(use); },
         ...(env.onSessionEvent ? { onEvent: (event: { type: string; [key: string]: unknown }) => env.onSessionEvent!(worker.id, event) } : {}),
         ...(sessionFile ? { sessionFile } : {}), ...(!specialist && env.inheritedContextWindow ? { inheritedContextWindow: env.inheritedContextWindow } : {}),

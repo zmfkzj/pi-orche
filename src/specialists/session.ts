@@ -37,6 +37,8 @@ export interface SpecialistRun<S extends TSchema> {
   /** Built-in tool names; the report tool is added. */
   tools: readonly string[];
   customTools?: readonly ToolDefinition[];
+  /** Worker capability extensions loaded into this session only (see SessionOptions.extensionFactories); their tools must be in `tools`. */
+  extensionFactories?: SessionOptions["extensionFactories"];
   report: SpecialistReport<S>;
   toolGuard?: ToolGuard;
   /** Per-file ownership check of directory ast_rewrite writes (see SessionOptions.writeFileGuard); guarded sessions refuse them without it. */
@@ -167,6 +169,7 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
       ...(run.inheritedContextWindow ? { inheritedContextWindow: run.inheritedContextWindow } : {}),
       ...(run.lengthRecovery ? { lengthRecovery: run.lengthRecovery } : {}),
       ...(run.skills?.length ? { skills: run.skills } : {}),
+      ...(run.extensionFactories?.length ? { extensionFactories: run.extensionFactories } : {}),
     }).then(created => {
       if (controller.signal.aborted) { created.dispose(); throw controller.signal.reason; }
       return created;
