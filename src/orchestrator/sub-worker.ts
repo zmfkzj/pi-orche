@@ -67,6 +67,8 @@ export interface SubWorkerEnvironment {
    * as an orche_task worker gets it; `unavailable` is told to the sub-worker. Absent: none.
    */
   webFetch?(worker: PlannedWorker): { provider?: WorkerCapabilityProvider; unavailable?: string };
+  /** The codegraph capability of one sub-worker (pi-codegraph's MCP tools in its session), asked like `webFetch`. Absent: none. */
+  codeGraph?(worker: PlannedWorker): { provider?: WorkerCapabilityProvider; unavailable?: string };
 }
 
 const reportSchema = Type.Object({ kind: Type.String(), summary: Type.String({ minLength: 1 }), data: Type.Optional(Type.Unknown()) });
@@ -130,7 +132,8 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
     const image = specialist ? env.imageTool?.() : undefined;
     const guard = subWorkerGuard(worker, siblings, env.cwd);
     const webFetch = env.webFetch?.(worker) ?? {};
-    const capabilities = mergeCapabilities([webFetch.provider]);
+    const codeGraph = env.codeGraph?.(worker) ?? {};
+    const capabilities = mergeCapabilities([webFetch.provider, codeGraph.provider]);
     const cwd = worker.workspace ?? env.cwd;
     const sessionFile = env.sessionFile?.(worker.id);
     const base = { id: worker.id, name: worker.name, role: worker.role, reason: worker.reason, ...(worker.files ? { files: [...worker.files] } : {}), ...(worker.workspace ? { workspace: worker.workspace } : {}), changes: [] as string[], modelSource: specialist ? "route" as const : env.routeSource, thinkingSource: specialist ? "route" as const : verifyRoute ? env.verifyThinkingSource ?? env.thinkingSource : env.thinkingSource };
@@ -139,7 +142,7 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
     try {
       const { value, stats } = await runSpecialistSession({
         actor: worker.id, route, runtime: env.runtime, cwd, prompt: env.prompt(worker, !!image),
-        instructions: [SUB_WORKER_INSTRUCTIONS, ...capabilities.instructions, ...(webFetch.unavailable ? [webFetch.unavailable] : [])].join("\n"),
+        instructions: [SUB_WORKER_INSTRUCTIONS, ...capabilities.instructions, ...(webFetch.unavailable ? [webFetch.unavailable] : []), ...(codeGraph.unavailable ? [codeGraph.unavailable] : [])].join("\n"),
         tools: [...WORKER_TOOL_NAMES, ...(image ? [image.name] : []), ...capabilities.tools], ...(image ? { customTools: [image] } : {}), report: reportFor(worker.role),
         ...(capabilities.extensionFactories.length ? { extensionFactories: capabilities.extensionFactories } : {}),
         toolGuard: guard, writeFileGuard: (file, abort) => abort?.aborted ? "cancelled" : guard("ast_rewrite", { path: file }),

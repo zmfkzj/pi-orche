@@ -215,6 +215,10 @@ export interface TaskDetails {
   webFetch?: boolean;
   /** Why the worker has no `browser_fetch` although a provider answered (e.g. obscura is not installed). */
   webFetchUnavailable?: string;
+  /** Present (true) when the worker has its own CodeGraph MCP tools (capability `codegraph`, provided by pi-codegraph). */
+  codeGraph?: boolean;
+  /** Why the worker has no CodeGraph tools although a provider answered (e.g. the project has no index). */
+  codeGraphUnavailable?: string;
   /** Messages main injected while the assignment ran (`orche_task_message`), with their delivery status. */
   injected?: InjectedMessage[];
   /** Output-limit stops of this assignment (src/pi/length-recovery.ts). */
@@ -231,8 +235,8 @@ export type SpawnedWorker = Omit<SubWorkerOutcome, "data" | "summary"> & { summa
 /** The workspace/git part of a task's details. */
 type ChangeReport = Pick<TaskDetails, "changes" | "otherChanges" | "submodules" | "headMoved">;
 
-import { mergeCapabilities, webFetchCapability, type WorkerCapabilityAnswer, type WorkerCapabilityProvider, type WorkerCapabilityRequest } from "./capabilities.js";
-export { mergeCapabilities, WEB_FETCH_CAPABILITY, webFetchCapability, WORKER_CAPABILITY_CHANNEL, type WorkerCapabilityAnswer, type WorkerCapabilityProvider, type WorkerCapabilityRequest } from "./capabilities.js";
+import { codeGraphCapability, mergeCapabilities, webFetchCapability, type WorkerCapabilityAnswer, type WorkerCapabilityProvider, type WorkerCapabilityRequest } from "./capabilities.js";
+export { CODEGRAPH_CAPABILITY, codeGraphCapability, mergeCapabilities, WEB_FETCH_CAPABILITY, webFetchCapability, WORKER_CAPABILITY_CHANNEL, type WorkerCapabilityAnswer, type WorkerCapabilityProvider, type WorkerCapabilityRequest } from "./capabilities.js";
 
 /**
  * A task whose worker ran but did not complete its assignment: the worker failed or ended without a result, the
@@ -295,6 +299,8 @@ interface Worker {
   gui?: string;
   /** {@link WorkerCapabilityProvider.key} of the worker's web-fetch capability; absent without one. */
   webFetch?: string;
+  /** {@link WorkerCapabilityProvider.key} of the worker's codegraph capability; absent without one. */
+  codeGraph?: string;
   latestInput: number;
   timer?: ReturnType<typeof setTimeout>;
   /** The task ledger of this worker's task (single workflow with `single.ledger`), read when the worker compacts. */
@@ -1199,6 +1205,9 @@ export class WorkerPool {
     // Public-web reading for every worker (pi-browser): its own stateless browser_fetch. Unavailable is not an error: the
     // worker runs without it and is told why, so it never believes it has a browser it lacks.
     const webFetch = webFetchCapability(this.options.capability, capabilityRequest);
+    // The project's code graph for every worker (pi-codegraph): its own MCP connection in its own session; unavailable (e.g. no
+    // index) is told to the worker, like browser_fetch.
+    const codeGraph = codeGraphCapability(this.options.capability, capabilityRequest);
     // Tools cannot be unregistered from a session. Recreate only when this optional
     // capability changes, so neither tool registration nor old instructions leak roles.
     if (worker && worker.imageConfig !== imageConfig) {
@@ -1217,6 +1226,12 @@ export class WorkerPool {
       await this.retire(worker.id, "replaced: web fetch capability changed");
       retired.push(worker.id);
       retirementLines.push(`${worker.id} retired: browser_fetch ${webFetch.provider ? (worker.webFetch ? "configuration changed" : "became available") : "is no longer available"}; starting a fresh worker.`);
+      worker = undefined;
+    }
+    if (worker && worker.codeGraph !== codeGraph.provider?.key) {
+      await this.retire(worker.id, "replaced: code graph capability changed");
+      retired.push(worker.id);
+      retirementLines.push(`${worker.id} retired: CodeGraph tools ${codeGraph.provider ? (worker.codeGraph ? "configuration changed" : "became available") : "are no longer available"}; starting a fresh worker.`);
       worker = undefined;
     }
     // The ultra tool set (orche_spawn with the ultra reasons, orche_adopt) is installed when a session is created and cannot be
@@ -1310,7 +1325,7 @@ export class WorkerPool {
       // orche_spawn only with `single.spawn` on: `single.spawn: false` keeps the earlier single worker's tool set exactly.
       // Ultra workers get the ultra tool set (orche_spawn with the ultra reasons, orche_adopt) whatever single.spawn says.
       const spawnTool = singleWorkflow && (config.single.spawn || ultraMode);
-      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool, ...(singleWorkflow && ultraMode ? { ultraTools: true } : {}), ...(gui ? { gui: gui.key } : {}), ...(webFetch.provider ? { webFetch: webFetch.provider.key } : {}) };
+      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool, ...(singleWorkflow && ultraMode ? { ultraTools: true } : {}), ...(gui ? { gui: gui.key } : {}), ...(webFetch.provider ? { webFetch: webFetch.provider.key } : {}), ...(codeGraph.provider ? { codeGraph: codeGraph.provider.key } : {}) };
       const meta = worker;
       meta.model = route.model;
       meta.thinking = route.thinking ?? "off";
@@ -1322,7 +1337,7 @@ export class WorkerPool {
       ...(meta.ultraTools ? [createAdoptTool(() => meta.ultra ?? ADOPT_UNAVAILABLE)] : [])];
       // generate_image has its own timeout (images.timeoutMs, 180 s by default): liveness bounds a silent call by it, not by the generic tool bound.
       // Capability tools likewise (the first GUI call of a desktop starts it).
-      const capabilities = mergeCapabilities([gui, webFetch.provider]);
+      const capabilities = mergeCapabilities([gui, webFetch.provider, codeGraph.provider]);
       const toolTimeoutsMs = { ...(images ? { generate_image: images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } : {}), ...capabilities.toolTimeoutsMs };
       await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, signal: startupSignal, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name), ...capabilities.tools], customTools, peerMessaging: false, ...(sessionFile ? { sessionFile } : {}),
         skills: this.options.skills?.() ?? [],
@@ -1332,7 +1347,7 @@ export class WorkerPool {
         contextProjection: createAssignmentProjector(),
         ...(mainModel ? { inheritedContextWindow: mainWindow } : {}),
         ...(singleWorkflow ? { taskCompaction: taskCompactionFor(meta) } : {}),
-        instructions: [workerSystemInstructions(!!spawnTool), ...capabilities.instructions, ...(webFetch.unavailable ? [webFetch.unavailable] : [])].join("\n"),
+        instructions: [workerSystemInstructions(!!spawnTool), ...capabilities.instructions, ...(webFetch.unavailable ? [webFetch.unavailable] : []), ...(codeGraph.unavailable ? [codeGraph.unavailable] : [])].join("\n"),
         ...this.callbacks(meta),
       });
       if (this.disposed) { await this.manager.dispose(id); throw new Error("Worker pool is disposed"); }
@@ -1570,7 +1585,7 @@ export class WorkerPool {
     const modeLines = (): string[] => [...requestLine(), ...(usesStrongTiers(args.mainMode)
       ? [`Mode: ${args.mainMode} (orchestrator: ${tierKey && modelSource !== "route" ? `models.${tierKey}` : modelSource === "route" ? "a configured route" : "main's model"}${orchestrating ? `; sub-workers: ${subSource === "orchestrator" ? "the orchestrator's model" : `models.${workerKey}`}` : ""})`] : [])];
     const workflowDetails = () => ({ ...modeDetails(), thinking: meta.thinking, ...(Object.keys(answered).length ? { models: { ...answered } } : {}), ...(meta.plan ? { plan: structuredClone(meta.plan) } : {}), ...policyDetails(),
-      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(meta.gui ? { gui: true as const } : {}), ...(meta.webFetch ? { webFetch: true as const } : webFetch.unavailable ? { webFetchUnavailable: webFetch.unavailable } : {}), ...spawnedDetails() });
+      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(meta.gui ? { gui: true as const } : {}), ...(meta.webFetch ? { webFetch: true as const } : webFetch.unavailable ? { webFetchUnavailable: webFetch.unavailable } : {}), ...(meta.codeGraph ? { codeGraph: true as const } : codeGraph.unavailable ? { codeGraphUnavailable: codeGraph.unavailable } : {}), ...spawnedDetails() });
     let requests = 0;
     /** Provider-reported cost of this assignment's own requests (the split log); undefined while none was reported. */
     let ownCostUSD: number | undefined;
@@ -1812,6 +1827,8 @@ export class WorkerPool {
             skills: this.options.skills?.() ?? [],
             // Each sub-worker gets its own browser_fetch instance (asked with its own id and role), like an orche_task worker.
             webFetch: planned => webFetchCapability(this.options.capability, { cwd: planned.workspace ?? args.cwd, workerId: planned.id, role: planned.role, readOnly: !WRITING_KINDS.has(planned.role) }),
+            // And its own CodeGraph MCP connection (pi-codegraph), for the code graph of its workspace.
+            codeGraph: planned => codeGraphCapability(this.options.capability, { cwd: planned.workspace ?? args.cwd, workerId: planned.id, role: planned.role, readOnly: !WRITING_KINDS.has(planned.role) }),
             ...(standardSubRoute !== subRoute ? { verifyRoute: subRoute, verifyThinkingSource: subThinkingSource } : {}),
             ...(thinkingPolicy.mode === "phase" ? { lengthLadder: thinkingPolicy.lengthRecovery } : {}),
             specialistRoute: role => resolveSpecialistRoute(config.routes, role, (provider, id) => !!runtime.getModel(provider, id)),

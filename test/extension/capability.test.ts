@@ -8,7 +8,7 @@ import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import type { FauxResponseStep } from "@earendil-works/pi-ai";
 import { AgentManager } from "../../src/agent/agent-manager.js";
 import { OrcheController } from "../../src/extension/controller.js";
-import { WorkerPool, webFetchCapability, type WorkerCapabilityAnswer, type WorkerCapabilityRequest } from "../../src/extension/workers.js";
+import { codeGraphCapability, mergeCapabilities, WorkerPool, webFetchCapability, type WorkerCapabilityAnswer, type WorkerCapabilityRequest } from "../../src/extension/workers.js";
 import { createSubWorkerRunner } from "../../src/orchestrator/sub-worker.js";
 import { planSpawn } from "../../src/orchestrator/spawn.js";
 import { createHarness, tool, type Harness } from "./harness.js";
@@ -62,6 +62,7 @@ describe("orche_task gui capability", () => {
     expect(provider.requests).toEqual([
       { capability: "gui", cwd: expect.any(String), workerId: "W1", role: "explore", readOnly: true },
       { capability: "web-fetch", cwd: expect.any(String), workerId: "W1", role: "explore", readOnly: true },
+      { capability: "codegraph", cwd: expect.any(String), workerId: "W1", role: "explore", readOnly: true },
     ]);
     const options = spawned.mock.calls[0]![0];
     expect(options.tools).toContain("gui_probe");
@@ -82,8 +83,8 @@ describe("orche_task gui capability", () => {
     const { pool, execute } = await fixture([report], provider.capability);
     const result = await execute();
     expect(result.details.gui).toBeUndefined();
-    // Only the always-asked web-fetch capability (nobody provides it here), never the GUI.
-    expect(provider.requests.map(request => request.capability)).toEqual(["web-fetch"]);
+    // Only the always-asked web-fetch and codegraph capabilities (nobody provides them here), never the GUI.
+    expect(provider.requests.map(request => request.capability)).toEqual(["web-fetch", "codegraph"]);
     expect(spawned.mock.calls[0]![0].extensionFactories).toBeUndefined();
     expect(pool.session("W1").getActiveToolNames()).not.toContain("gui_probe");
   });
@@ -144,7 +145,10 @@ describe("web-fetch capability (every worker)", () => {
     const { pool, execute } = await fixture([tool("web_probe", {}), answerReport], provider.capability);
     const result = await execute({ role: "answer" });
     expect(result.details.webFetch).toBe(true);
-    expect(provider.requests).toEqual([{ capability: "web-fetch", cwd: expect.any(String), workerId: "W1", role: "answer", readOnly: true }]);
+    expect(provider.requests).toEqual([
+      { capability: "web-fetch", cwd: expect.any(String), workerId: "W1", role: "answer", readOnly: true },
+      { capability: "codegraph", cwd: expect.any(String), workerId: "W1", role: "answer", readOnly: true },
+    ]);
     const options = spawned.mock.calls[0]![0];
     expect(options.tools).toContain("web_probe");
     // Main-only delegation tools are never inherited through a capability.
@@ -179,7 +183,7 @@ describe("web-fetch capability (every worker)", () => {
     const implementReport = tool("report_result", { kind: "implement", summary: "Done", data: { status: "done", reason: "ok", evidence: [] } });
     const { pool, execute } = await fixture([implementReport, implementReport], provider.capability);
     await execute({ role: "implement", gui: true }).catch(() => undefined);
-    expect(provider.requests.map(request => [request.capability, request.role, request.readOnly])).toEqual([["gui", "implement", false], ["web-fetch", "implement", false]]);
+    expect(provider.requests.map(request => [request.capability, request.role, request.readOnly])).toEqual([["gui", "implement", false], ["web-fetch", "implement", false], ["codegraph", "implement", false]]);
     const options = spawned.mock.calls[0]![0];
     expect(options.tools).toEqual(expect.arrayContaining(["gui_probe", "web_probe"]));
     expect(options.extensionFactories).toHaveLength(2);
@@ -223,5 +227,108 @@ describe("web-fetch capability (orche_spawn sub-workers)", () => {
     expect(outcome.status).toBe("done");
     expect(provider.requests).toEqual([{ capability: "web-fetch", cwd: h.cwd, workerId: "W1.1", role: "answer", readOnly: true }]);
     expect(provider.events).toEqual(["start", "shutdown"]);
+  });
+});
+
+/** A stand-in for pi-codegraph: a shared factory object (like Pi's MCP extension for workers) plus its own registration. */
+function codeGraphProvider(options: { gui?: boolean } = {}) {
+  const events: string[] = [];
+  const requests: WorkerCapabilityRequest[] = [];
+  const state: { key: string; error?: string } = { key: "cg-1" };
+  const shared: ExtensionFactory = pi => {
+    pi.on("session_start", () => { events.push("shared:start"); });
+    pi.on("session_shutdown", () => { events.push("shared:shutdown"); });
+  };
+  const own: ExtensionFactory = pi => {
+    pi.registerTool({
+      name: "mcp__codegraph__codegraph_explore", label: "CodeGraph explore", description: "Explore the code graph", parameters: Type.Object({}),
+      execute: async () => ({ content: [{ type: "text", text: "graph ok" }], details: undefined }),
+    });
+  };
+  const guiFactory: ExtensionFactory = pi => { pi.registerTool({ name: "gui_probe", label: "GUI", description: "GUI", parameters: Type.Object({}), execute: async () => ({ content: [{ type: "text", text: "desktop ok" }], details: undefined }) }); };
+  const capability = (request: WorkerCapabilityRequest): WorkerCapabilityAnswer => {
+    requests.push(request);
+    if (request.capability === "gui" && options.gui) return { key: "gui", tools: ["gui_probe"], extensionFactories: [shared, guiFactory] };
+    if (request.capability !== "codegraph") return undefined;
+    return state.error ? { error: state.error } : { key: state.key, tools: ["mcp__codegraph__codegraph_explore", "mcp__codegraph__codegraph_search"], extensionFactories: [shared, own], instructions: "CODEGRAPH-INSTRUCTIONS", toolTimeoutsMs: { mcp__codegraph__codegraph_explore: 120_000 } };
+  };
+  return { events, requests, state, capability };
+}
+
+describe("codegraph capability (every worker)", () => {
+  it("gives every worker, read-only roles included, its own code graph tool with instructions and timeouts", async () => {
+    const spawned = vi.spyOn(AgentManager.prototype, "spawn");
+    const provider = codeGraphProvider();
+    const { pool, execute } = await fixture([tool("mcp__codegraph__codegraph_explore", {}), answerReport], provider.capability);
+    const result = await execute({ role: "answer" });
+    expect(result.details.codeGraph).toBe(true);
+    expect(provider.requests.filter(request => request.capability === "codegraph")).toEqual([{ capability: "codegraph", cwd: expect.any(String), workerId: "W1", role: "answer", readOnly: true }]);
+    const options = spawned.mock.calls[0]![0];
+    expect(options.tools).toEqual(expect.arrayContaining(["mcp__codegraph__codegraph_explore", "mcp__codegraph__codegraph_search"]));
+    expect(options.toolTimeoutsMs).toEqual({ mcp__codegraph__codegraph_explore: 120_000 });
+    const session = pool.session("W1");
+    // A listed name the server does not offer (search) is simply absent; the offered one is active and was called.
+    expect(session.getActiveToolNames()).toContain("mcp__codegraph__codegraph_explore");
+    expect(session.getActiveToolNames()).not.toContain("mcp__codegraph__codegraph_search");
+    expect(JSON.stringify(session.messages)).toContain("graph ok");
+    expect(session.systemPrompt).toContain("CODEGRAPH-INSTRUCTIONS");
+    await pool.dispose();
+    expect(provider.events).toEqual(["shared:start", "shared:shutdown"]);
+  });
+
+  it("tells the worker and main why it is unavailable, and replaces a reused worker when it becomes available", async () => {
+    const provider = codeGraphProvider();
+    provider.state.error = "CodeGraph unavailable: no index";
+    const { pool, execute } = await fixture([report, report], provider.capability);
+    const first = await execute();
+    expect(first.details.codeGraph).toBeUndefined();
+    expect(first.details.codeGraphUnavailable).toBe("CodeGraph unavailable: no index");
+    expect(pool.session("W1").systemPrompt).toContain("CodeGraph unavailable: no index");
+    delete provider.state.error;
+    const second = await execute({ worker: "W1" });
+    expect(second.details.worker).toBe("W2");
+    expect(second.details.retired).toEqual(["W1"]);
+    expect(second.details.codeGraph).toBe(true);
+    expect(pool.session("W2").getActiveToolNames()).toContain("mcp__codegraph__codegraph_explore");
+  });
+
+  it("loads a factory that the GUI and code graph providers share once per worker session", async () => {
+    const spawned = vi.spyOn(AgentManager.prototype, "spawn");
+    const provider = codeGraphProvider({ gui: true });
+    const implementReport = tool("report_result", { kind: "implement", summary: "Done", data: { status: "done", reason: "ok", evidence: [] } });
+    const { pool, execute } = await fixture([implementReport, implementReport], provider.capability);
+    await execute({ role: "implement", gui: true }).catch(() => undefined);
+    expect(spawned.mock.calls[0]![0].extensionFactories).toHaveLength(3);
+    expect(pool.session("W1").getActiveToolNames()).toEqual(expect.arrayContaining(["gui_probe", "mcp__codegraph__codegraph_explore"]));
+    expect(provider.events).toEqual(["shared:start"]);
+    await pool.dispose();
+    expect(provider.events).toEqual(["shared:start", "shared:shutdown"]);
+  });
+
+  it("merges capabilities with factories and tools deduplicated by identity", () => {
+    const shared: ExtensionFactory = () => undefined;
+    const a: ExtensionFactory = () => undefined;
+    const merged = mergeCapabilities([
+      { key: "1", tools: ["x", "y"], extensionFactories: [shared, a] }, undefined,
+      { key: "2", tools: ["y", "z"], extensionFactories: [shared] },
+    ]);
+    expect(merged.extensionFactories).toEqual([shared, a]);
+    expect(merged.tools).toEqual(["x", "y", "z"]);
+  });
+
+  it("gives an orche_spawn sub-worker its own instance with its own id and role", async () => {
+    const provider = codeGraphProvider();
+    const h = await createHarness({ mainSteps: [], orcheSteps: [tool("mcp__codegraph__codegraph_explore", {}), tool("report_result", { kind: "answer", summary: "Explored", data: {} })] });
+    open.push({ h, pool: new WorkerPool({ controller: new OrcheController({ agentDir: h.agentDir, createRuntime: async () => h.runtime }), agentDir: h.agentDir }) });
+    const run = createSubWorkerRunner({
+      orchestrator: "W1", cwd: h.cwd, runtime: h.runtime, route: h.orche.route, routeSource: "orchestrator", thinkingSource: "orchestrator",
+      specialistRoute: () => h.orche.route, prompt: worker => worker.request, timeoutMs: 30_000, maxTurns: 5,
+      codeGraph: planned => codeGraphCapability(provider.capability, { cwd: h.cwd, workerId: planned.id, role: planned.role, readOnly: true }),
+    });
+    const { workers } = planSpawn({ reason: "isolation", workers: [{ name: "graph", role: "answer", request: "Explore the graph" }] }, { nextId: () => "W1.1" });
+    const outcome = await run(workers[0]!, workers, new AbortController().signal, () => undefined);
+    expect(outcome.status).toBe("done");
+    expect(provider.requests).toEqual([{ capability: "codegraph", cwd: h.cwd, workerId: "W1.1", role: "answer", readOnly: true }]);
+    expect(provider.events).toEqual(["shared:start", "shared:shutdown"]);
   });
 });
