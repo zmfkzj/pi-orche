@@ -69,6 +69,10 @@ export async function createHarness(options: {
   settings?: Record<string, unknown>;
   /** The `pi` API pi-orche gets (default: Pi's own), e.g. to stand in for an older Pi host's events. */
   wrapOrche?: (pi: ExtensionAPI) => ExtensionAPI;
+  /** Further `ctx.ui` methods (e.g. `select` for orche_task's approval dialog); notify, setStatus and setWidget stay recorded. */
+  ui?: Partial<ExtensionUIContext>;
+  /** Bind no UI context (Pi's no-op UI, `ctx.hasUI` false) while keeping `mode`; nothing is recorded then. */
+  noUi?: boolean;
 }): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "orche-ext-"));
   const cwd = join(root, "project");
@@ -101,11 +105,12 @@ export async function createHarness(options: {
   const widgets: Harness["widgets"] = [];
   // Only the UI methods the extension uses; notify, setStatus and setWidget are recorded.
   const uiContext = {
+    ...options.ui,
     notify: (message: string, type?: string) => { notifications.push({ message, type }); },
     setStatus: (key: string, text?: string) => { statuses.push({ key, ...(text === undefined ? {} : { text }) }); },
     setWidget: (key: string, lines?: readonly string[]) => { widgets.push({ key, ...(lines === undefined ? {} : { lines }) }); },
   } as unknown as ExtensionUIContext;
-  await session.bindExtensions({ uiContext, ...(options.mode ? { mode: options.mode } : {}) });
+  await session.bindExtensions({ ...(options.noUi ? {} : { uiContext }), ...(options.mode ? { mode: options.mode } : {}) });
   return {
     session, runtime: main.runtime, cwd, agentDir, main, orche, notifications, statuses, widgets,
     async dispose() {

@@ -23,10 +23,37 @@ The Pi package (`src/extension/index.ts`) gives the main session four delegation
 
 | Tool | Parameters | What it does |
 | --- | --- | --- |
-| `orche_task` | `role`, `request` (required); `context?`, `worker?`, `files?`, `task?`, `git?`, `gui?`, and: `wait?` (boolean), `writeRoots?` (≤10 paths), `verificationRounds?` (integer 1–5, default 2) | Delegates one assignment to one persistent worker. In interactive (`tui`) and RPC sessions it starts a **background job** (J1, …) and stays **attached**: it waits and returns the result like a blocking call, unless it is detached first (see below); a detached call returns `Started job J1: worker W1 implement (model · thinking level). Detached from J1 (…): <why and what to do>`. `wait: false` detaches at once. `wait: true`, and every other mode (`pi -p` print, `--mode json`, SDK sessions without a UI mode), **block** without a job and return the result (aborting cancels), because those processes end with the turn. Errors before the worker has its assignment (unknown worker, bad arguments, a job already running) fail the call itself in all paths. |
+| `orche_task` | `role`, `request` (required); `context?`, `worker?`, `files?`, `task?`, `git?`, `gui?`, and: `wait?` (boolean), `writeRoots?` (≤10 paths), `verificationRounds?` (integer 1–5, default 2) | Delegates one assignment to one persistent worker. In interactive (`tui`) and RPC sessions it starts a **background job** (J1, …) and stays **attached**: it waits and returns the result like a blocking call, unless it is detached first (see below); a detached call returns `Started job J1: worker W1 implement (model · thinking level). Detached from J1 (…): <why and what to do>`. `wait: false` detaches at once. `wait: true`, and every other mode (`pi -p` print, `--mode json`, SDK sessions without a UI mode), **block** without a job and return the result (aborting cancels), because those processes end with the turn. Errors before the worker has its assignment (unknown worker, bad arguments, a job already running) fail the call itself in all paths. While a background job runs, every path first asks the user (see *Approval while a job runs* below). |
 | `orche_task_attach` | `job?` (`J<n>`; default the running job) | Attaches to the running job and waits for its result like `orche_task`; detaches the same way. Refused (`Not attached …`, `details.attach: "pending"`) while a steered user message or an undelivered woken peer note waits (queued follow-ups do not count); for a job that already ended it says so (`already-ended`) and repeats nothing. Never restarts or cancels the worker. |
-| `orche_task_status` | `job?` (`J<n>`; default the running job, else the latest), `cancel?` (boolean) | Job state, elapsed time, attached/detached, latest progress and the worker's liveness, or the result summary when it ended; `cancel: true` cancels the running job (also `/orche cancel`). Never waits; only when the user asks. |
-| `orche_task_message` | `message` (1–20,000 chars, self-contained), `job?` (default the running job) | Queues an extra or corrected instruction for the running job's worker (`Queued M1 for W1 (J1): …`). |
+| `orche_task_status` | `job?` (`J<n>` or a queued `Q<n>`; default the running job, else the latest), `cancel?` (boolean) | Job state, elapsed time, attached/detached, latest progress and the worker's liveness, or the result summary when it ended, plus the queued task if any; `cancel: true` cancels the running job (also `/orche cancel`; a task queued after it is dropped). With `Q<n>` it shows the queued task, and `cancel: true` drops it before it starts. Never waits; only when the user asks. |
+| `orche_task_message` | `message` (1–20,000 chars by schema, at most 2,000 sent; self-contained), `job?` (default the running job) | After the user confirmed it in a dialog (see *Worker control asks the user too*), queues an extra or corrected instruction for the running job's own task (`Queued M1 for W1 (J1): …`). |
+
+**Approval while a job runs.** `orche_task` called while a background job runs (or while an approved task waits for it), on the
+background path and with `wait: true` alike, calls Pi's dialog API itself (`ctx.ui.select(title, [APPROVE_QUEUED, DECLINE_QUEUED],
+{ signal, timeout: 5 min })`; TUI dialog, RPC `extension_ui_request`) before anything is delegated. Only the exact approve option
+chosen by the user approves; decline, Esc (the call's signal), timeout, a throwing dialog, no UI (`ctx.hasUI` false), a session change
+or a switch to `direct` while asking return `Not delegated: …` (`details: {approval: "not-approved", reason: declined | no-answer |
+aborted | dialog-error | no-ui | session-changed | mode-changed | slot-taken | job-ended, job}`; `isError` only for `dialog-error`).
+Approved while the job still runs, the call's arguments are queued (`Queued Q1 …`, `details: {approval: "approved", queued: "Q1",
+after: "J1"}`) in `TaskJobs` (`src/extension/jobs.ts`): one slot, taken from the moment the dialog opens. The queued task starts as a
+background job only after the job it waits for ended `done`; the result of that job says once whether it starts now or was dropped
+(failed, cancelled, interrupted). A start that is refused later (direct mode, start error) is told to main once as an
+`orche-task-queue` message. Approved after the job ended `done` while the dialog was open, the call proceeds as an ordinary
+`orche_task`. Queue events are `orche-job` entries (`queue`, `queue-end` with `outcome: started | dropped`); a queue without its
+end at the next session start is dropped then and announced once.
+
+**Worker control asks the user too.** `orche_task_message` and `orche_task_status {cancel: true}` on a running job open a
+confirmation dialog first (`CONFIRM_MESSAGE` / `DECLINE_MESSAGE`, `CONFIRM_CANCEL` / `DECLINE_CANCEL` in `src/extension/index.ts`,
+`confirmWorkerControl`): the message is shown in full and refused without a dialog above `MESSAGE_CONFIRM_MAX` (2,000) characters.
+Refusals return `Not sent: …` / `Not cancelled: …` with `details: {approval: "not-approved", reason: declined | no-answer | aborted |
+dialog-error | no-ui | session-changed | mode-changed | too-long | job-ended, job, control: "message" | "cancel"}`. The confirmation is
+bound to the job shown: when it is no longer the running job after the dialog (`job-ended`), nothing is sent or cancelled, also not
+to the queued task that started meanwhile. Dropping a queued `Q<n>`, status reads, attach, and the user's `/orche cancel` ask nothing.
+
+**Read-only window.** In the delegating modes, while a job runs or an approved task waits, the `tool_call` guard
+(`guardBusyToolCall`, `src/extension/mode.ts`) allows only `read`, `grep`, `find`, `ls`, `ast_search`, the four orche task tools and
+tools with `annotations.readOnlyHint` (not `destructiveHint`, no `reachesTools`); it blocks every other call, shell included. Direct
+mode is not restricted.
 
 **Attach and detach.** Attaching and detaching only change whether a tool call waits; the job's worker is untouched. An attached
 call detaches when: a steer arrives (`input` event with `streamingBehavior: "steer"`: an interactive prompt sent while main works,

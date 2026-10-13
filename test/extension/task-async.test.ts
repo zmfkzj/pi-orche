@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionFactory, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage as reply, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { createHarness, tool, type Harness } from "./harness.js";
 import { deferred } from "../helpers/faux.js";
@@ -61,7 +61,7 @@ async function stillAttached(h: Harness, followUps: string[]) {
   expect(h.session.isStreaming).toBe(true);
 }
 
-async function harness(mainSteps: FauxResponseStep[], orcheSteps: FauxResponseStep[], extra: { records?: boolean; extraExtensions?: ExtensionFactory[] } = {}) {
+async function harness(mainSteps: FauxResponseStep[], orcheSteps: FauxResponseStep[], extra: { records?: boolean; extraExtensions?: ExtensionFactory[]; ui?: Partial<ExtensionUIContext> } = {}) {
   const h = await createHarness({ mainSteps, orcheSteps, mode: "tui", mainMode: "single", single: { spawn: false }, ...extra });
   open.push(h);
   execFileSync("git", ["init", "-q"], { cwd: h.cwd });
@@ -553,7 +553,7 @@ describe("background orche_task jobs (wait:false)", () => {
     ], [
       gated(entered, gate, tool("read", { path: "greeting.txt" })),
       context => { workerSaw = textOf(context.messages); return report(); },
-    ]);
+    ], { ui: { select: async (_title: string, options: string[]) => options[0] } });
     await h.session.prompt("check the greeting");
     await entered.promise;
     await h.session.prompt("tell the worker to keep the newline");
@@ -578,7 +578,7 @@ describe("background orche_task jobs (wait:false)", () => {
       tool("orche_task_message", { message: "Late detail." }),
       reply("Sent."),
       reply("Reviewed; M1 must be resent."),
-    ], [gated(entered, gate, report())]);
+    ], [gated(entered, gate, report())], { ui: { select: async (_title: string, options: string[]) => options[0] } });
     await h.session.prompt("go");
     await entered.promise;
     await h.session.prompt("add a detail");
@@ -591,8 +591,9 @@ describe("background orche_task jobs (wait:false)", () => {
     await vi.waitFor(() => expect(h.session.getLastAssistantText()).toContain("resent"));
   });
 
-  it("rejects a second task and messages without a running job; cancel delivers one cancelled result", async () => {
+  it("a second task while one runs is not delegated when the user declines; messages without a running job are rejected; cancel delivers one cancelled result", async () => {
     const entered = deferred();
+    const asked: string[] = [];
     const h = await harness([
       tool("orche_task", { role: "implement", request, wait: false }),
       reply("Started."),
@@ -604,14 +605,15 @@ describe("background orche_task jobs (wait:false)", () => {
       tool("orche_task_message", { message: "anything" }),
       tool("orche_task_message", { job: "J1", message: "anything" }),
       reply("Nothing is running."),
-    ], [untilAborted(entered)]);
+    ], [untilAborted(entered)], { ui: { select: async (title: string, options: string[]) => { asked.push(title); return title.startsWith("orche: cancel J1?") ? options[0] : options[1]; } } });
     await h.session.prompt("go");
     await entered.promise;
     await h.session.prompt("start another and then cancel");
     const second = toolResults(h, "orche_task")[1]!;
-    expect(second).toMatchObject({ isError: true });
-    expect(textOf(second)).toContain("Job J1 (W1, implement) is still running; one task runs at a time");
-    expect(textOf(second)).toContain("orche_task_attach");
+    // One approval dialog for the second task (declined), one confirmation for the cancel (confirmed).
+    expect(asked).toHaveLength(2);
+    expect(second).toMatchObject({ details: { approval: "not-approved", reason: "declined", job: "J1" } });
+    expect(textOf(second)).toContain("Not delegated: the user declined. J1 keeps running; nothing was cancelled or replaced.");
     expect(textOf(toolResults(h, "orche_task_status")[0])).toContain("J1 running");
     expect(textOf(toolResults(h, "orche_task_status")[0])).toContain("Detached: its result arrives as an orche-task-result message");
     expect(textOf(toolResults(h, "orche_task_status")[1])).toContain("J1 cancelled");

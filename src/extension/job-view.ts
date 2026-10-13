@@ -85,7 +85,9 @@ export function attachResult(outcome: AttachOutcome, tool: "orche_task" | "orche
       // Exactly what a blocking orche_task returns; orche_task_attach names the job first.
       const result = job.toolResult ?? { content: [{ type: "text", text: job.result?.text ?? "" }], details: {}, ...(job.result?.isError ? { isError: true } : {}) };
       const content = tool === "orche_task" ? result.content : [{ type: "text" as const, text: `[orche task result · ${job.id} · ${who(job)} · ${job.status} after ${formatElapsed((job.finishedAt ?? Date.now()) - job.startedAt)}]` }, ...result.content];
-      return { content, details: { ...result.details, job: job.id, attach: "ended" }, ...(result.isError ? { isError: true } : {}) };
+      // The approved task that waited for this job (jobs.ts queue): what becomes of it is said once, with this result.
+      const withQueue = job.queueNote ? [...content, { type: "text" as const, text: `\n\n${job.queueNote}` }] : content;
+      return { content: withQueue, details: { ...result.details, job: job.id, attach: "ended" }, ...(result.isError ? { isError: true } : {}) };
     }
     case "detached":
       return {

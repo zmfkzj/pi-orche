@@ -7,12 +7,12 @@ import { createOrcheTools } from "../tools/index.js";
 import { spillToolResult } from "../tools/spill.js";
 import { OrcheController, type OrcheControllerOptions } from "./controller.js";
 import { inheritsMain, inheritsMainThinking, isDelegatingMode, MAIN_MODES, modeTiers, tierThinking, type MainMode, type ModelTiers } from "../orchestration/routing.js";
-import { delegationRules, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
+import { delegationRules, guardBusyToolCall, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
 import { contextWarning, DEFAULT_CONTEXT_WARNING, type ContextWarningSettings, type ContextWarningState } from "./context-warning.js";
 import { CONFIG_FILE, DEFAULT_SINGLE, loadOrcheConfigFile } from "./config.js";
 import { orcheTaskParameters, WORKER_CAPABILITY_CHANNEL, WorkerPool, type GoneWorker, type WorkerCapabilityAnswer } from "./workers.js";
 import { Type } from "typebox";
-import { JOB_ENTRY_TYPE, jobResultContent, TASK_RESULT_TYPE, TaskJobs, WORKER_ENTRY_TYPE, type AttachOptions, type DetachReason, type Job, type JobEntry } from "./jobs.js";
+import { JOB_ENTRY_TYPE, jobResultContent, TASK_RESULT_TYPE, TaskJobs, WORKER_ENTRY_TYPE, type AttachOptions, type DetachReason, type Job, type JobEntry, type JobToolResult, type QueueArgs, type QueuedTask, type QueueEvent } from "./jobs.js";
 import { attachResult, JOB_WIDGET_KEY, jobEndNotice, jobUpdate, jobWidgetLines } from "./job-view.js";
 import { recoverOrphanRecords } from "./records.js";
 
@@ -87,6 +87,20 @@ const NOTE_PENDING_MS = 60_000;
 /** The event pi-session-bus emits once Pi accepted an incoming note (`{ id, wake }`; see its README). */
 export const SESSION_BUS_MESSAGE_EVENT = "session-bus:message";
 const SESSION_BUS_MESSAGE_TYPE = "session-bus.message";
+/** How long orche_task's approval dialog waits for the user while a job runs; no answer in time approves nothing. */
+const APPROVAL_TIMEOUT_MS = 5 * 60_000;
+/** The two answers of that dialog: only the first, chosen by the user, approves (jobs.ts queue). */
+export const APPROVE_QUEUED = "Approve: queue it to start after the running job has finished";
+export const DECLINE_QUEUED = "Decline: do not delegate it";
+/** The answers of the dialog that confirms main's control of the running worker (orche_task_message, orche_task_status cancel). */
+export const CONFIRM_MESSAGE = "Send: it adds to or corrects the running worker's own task";
+export const DECLINE_MESSAGE = "Do not send";
+export const CONFIRM_CANCEL = "Cancel the running job";
+export const DECLINE_CANCEL = "Keep it running";
+/** The longest orche_task_message the user is asked to confirm, shown in full; a longer one is not sent while a job runs. */
+export const MESSAGE_CONFIRM_MAX = 2000;
+/** A message to main about an approved queued task that could not start after its job's result said it would. */
+export const QUEUE_MESSAGE_TYPE = "orche-task-queue";
 
 export const ORCHE_USAGE = "Usage: /orche single|strong|ultra|direct <PROMPT> | /orche mode [single|strong|ultra|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche splits [DAYS] | /orche models | /orche cancel | /orche detach";
 export type OrcheCommand =
@@ -160,6 +174,8 @@ export interface OrcheExtensionOptions extends OrcheControllerOptions {
   inheritProviders?: boolean;
   /** Thresholds of the main session's long-response watch (long-response.ts), injectable for tests. */
   longResponse?: LongResponseOptions;
+  /** How long orche_task's approval dialog (a delegation while a job runs) waits for the user; default 5 minutes. */
+  approvalTimeoutMs?: number;
 }
 /** Build the extension; options provide config/runtime/run and idle-timeout test seams. */
 export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
@@ -227,7 +243,24 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         if (job.status !== "running") endedShown = job.id;
         paintJob();
       },
+      onQueue: event => announceQueue(event),
+      // A queued task delegates: not once the session's main switched delegation off (direct mode) since the user approved it.
+      canStartQueued: () => isDelegatingMode(state.effective) ? undefined : `delegation is off now (orche mode ${state.effective})`,
     }));
+    /** What became of an approved queued task (jobs.ts): the user hears it once; main gets a message only when nothing told it yet. */
+    const announceQueue = (event: QueueEvent) => {
+      if (event.kind === "started") {
+        try { lastUi?.notify(`orche: ${event.task.id}, the task you approved, started as ${event.job.id} (${event.job.worker ?? "?"} ${event.job.role}); its result arrives as a message.`, "info"); } catch { /* the UI may be gone */ }
+        return;
+      }
+      try { lastUi?.notify(`orche: ${event.task.id}, the task you approved (${event.task.role}: ${event.task.request}), was dropped and did not start: ${event.reason}.`, "warning"); } catch { /* the UI may be gone */ }
+      // `result`: the result of the job it waited for says so; `cancel`: the caller hears it. `start`: that result said it would start.
+      if (event.source !== "start") return;
+      pi.sendMessage(
+        { customType: QUEUE_MESSAGE_TYPE, content: `[orche queued task ${event.task.id} dropped] The task the user approved to run after ${event.task.after} (${event.task.role}: ${event.task.request}) did not start: ${event.reason}. Nothing was delegated. Tell the user; delegate it again only when they ask.`, display: true, details: { queued: event.task.id, after: event.task.after, reason: event.reason } },
+        { triggerTurn: true, deliverAs: "followUp" },
+      );
+    };
 
     const deliverResult = (job: Job, triggerTurn = true) => pi.sendMessage(
       { customType: TASK_RESULT_TYPE, content: jobResultContent(job), display: true, details: { job: job.id, worker: job.worker, role: job.role, status: job.status, startedAt: job.startedAt, ...(job.finishedAt ? { finishedAt: job.finishedAt } : {}), ...(job.record ? { record: job.record } : {}), ...(job.result?.details ? { task: job.result.details } : {}) } },
@@ -255,7 +288,12 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     const stopWidgetTimer = () => { if (widgetTimer) clearInterval(widgetTimer); widgetTimer = undefined; };
     const paintJob = () => {
       const job = jobs?.running ?? (endedShown ? jobs?.get(endedShown) : undefined);
-      const lines = job ? jobWidgetLines(job, { attached: jobs?.attached === job, coarse: lastMode !== "tui" }) : undefined;
+      const queued = jobs?.queued;
+      const lines = job ? [
+        ...jobWidgetLines(job, { attached: jobs?.attached === job, coarse: lastMode !== "tui" }),
+        // The approved task waiting for it (not while the user is still being asked).
+        ...(queued && queued.state !== "asking" ? [`⧗ orche ${queued.id} · ${queued.role} · approved: ${queued.state === "starting" ? "starting" : `starts after ${queued.after} has finished (done)`}`] : []),
+      ] : undefined;
       const text = lines?.join("\n");
       if (text !== widgetText) {
         widgetText = text;
@@ -456,14 +494,18 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       const restored = taskJobs().restore(customData<JobEntry>(JOB_ENTRY_TYPE), customData<GoneWorker>(WORKER_ENTRY_TYPE));
       restoredHistory = { gone: restored.gone, usedWorkerIds: restored.usedWorkerIds };
       workers?.restoreHistory(restored.gone, restored.usedWorkerIds);
-      if (restored.interrupted.length) {
+      // An approved queued task never starts in a later session: said once, with the interrupted jobs.
+      const dropped = restored.droppedQueue.map((task: QueuedTask) => `${task.id} (${task.role}: ${task.request}; it was to start after ${task.after})`);
+      const droppedText = dropped.length ? `the task${dropped.length === 1 ? "" : "s"} the user approved to run after a background job did not start before the previous pi session ended and ${dropped.length === 1 ? "is" : "are"} dropped: ${dropped.join("; ")}; delegate again only when the user asks.` : "";
+      if (restored.interrupted.length || dropped.length) {
         const lines = restored.interrupted.map(job => `${job.id} (${job.worker ?? "?"} ${job.role}: ${job.request})${job.record ? ` record ${job.record}` : ""}`);
-        const text = `orche: ${restored.interrupted.length === 1 ? "a background task was" : "background tasks were"} still running when the previous pi process ended, and ${restored.interrupted.length === 1 ? "is" : "are"} now marked interrupted: ${lines.join("; ")}. Naming its worker in orche_task continues the work with a new worker briefed from its transcript.`;
+        const interruptedText = restored.interrupted.length ? `orche: ${restored.interrupted.length === 1 ? "a background task was" : "background tasks were"} still running when the previous pi process ended, and ${restored.interrupted.length === 1 ? "is" : "are"} now marked interrupted: ${lines.join("; ")}. Naming its worker in orche_task continues the work with a new worker briefed from its transcript.` : "";
+        const text = [interruptedText, droppedText ? (interruptedText ? `Also, ${droppedText}` : `orche: ${droppedText}`) : ""].filter(Boolean).join(" ");
         ctx.ui.notify(text, "warning");
         // With the next run's start (before_agent_start), but not with a one-shot request's: those jobs are not part of it. On Pi
         // 1.2.0 and later that may be a run a triggerTurn message starts (an orche result, a session-bus wake), not only a user
         // prompt: the notice goes with whichever run comes first, once, as it reports the session's state, not a reply to a prompt.
-        interruptedNotice = { customType: "orche-job-interrupted", content: text, display: true, details: { jobs: restored.interrupted.map(job => job.id) } };
+        interruptedNotice = { customType: "orche-job-interrupted", content: text, display: true, details: { jobs: restored.interrupted.map(job => job.id), ...(dropped.length ? { queued: restored.droppedQueue.map((task: QueuedTask) => task.id) } : {}) } };
       }
       // run.json records of this session left at "running" by a process that is gone: close them as interrupted (best effort, async).
       void controller.recordsFor({ cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted(), ...(ctx.model ? { model: ctx.model } : {}) })
@@ -534,9 +576,163 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     });
     // Second line of defence next to the tool set: `--tools`, another extension or the model can still reach a disabled tool.
     pi.on("tool_call", event => {
-      const reason = guardToolCall(state.effective, event.toolName, event.input as Record<string, unknown>);
+      const reason = guardToolCall(state.effective, event.toolName, event.input as Record<string, unknown>) ?? busyGuard(event.toolName);
       return reason ? { block: true, reason } : undefined;
     });
+    /**
+     * The read-only window (mode.ts guardBusyToolCall): while a background job runs, or the task the user approved waits for it, main
+     * of a delegating mode only reads. Checked per call, so it ends with the job (and the queued task's start). Direct mode keeps its own
+     * meaning: the user chose to edit directly there.
+     */
+    const busyGuard = (toolName: string): string | undefined => {
+      if (!isDelegatingMode(state.effective)) return undefined;
+      const busy = jobs?.running?.id ?? jobs?.queued?.id;
+      if (!busy) return undefined;
+      let info: Parameters<typeof guardBusyToolCall>[2];
+      try { info = pi.getAllTools().find(tool => tool.name === toolName); } catch { /* unknown: blocked unless allowlisted */ }
+      return guardBusyToolCall(toolName, busy, info);
+    };
+    /** A refusal of orche_task's approval gate: nothing was delegated and the running job is untouched. */
+    const notDelegated = (text: string, details: Record<string, unknown>, isError = false): JobToolResult => ({
+      content: [{ type: "text", text }], details: { approval: "not-approved", ...details }, ...(isError ? { isError: true } : {}),
+    });
+    /** The dialog text: what runs now (and keeps running), what exactly is requested, and what approving does and does not mean. */
+    const approvalTitle = (running: Job, task: QueuedTask, args: QueueArgs, timeoutMs: number): string => {
+      const p = args as unknown as Record<string, unknown>;
+      const list = (value: unknown) => Array.isArray(value) && value.length ? value.map(String).join(", ") : undefined;
+      const git = p.git && typeof p.git === "object" ? Object.entries(p.git as Record<string, unknown>).filter(([, value]) => value !== undefined && value !== false).map(([key, value]) => value === true ? key : `${key} ${String(value)}`).join(", ") : undefined;
+      const scope = [
+        `role ${task.role}`,
+        typeof p.worker === "string" ? `reuses worker ${p.worker}` : "new worker",
+        ...(typeof p.task === "string" ? [`task ${p.task}`] : []),
+        ...(list(p.files) ? [`files: ${list(p.files)}`] : []),
+        ...(list(p.writeRoots) ? [`also writes outside the workspace: ${list(p.writeRoots)}`] : []),
+        ...(git ? [`git: ${git}`] : []),
+        ...(p.gui === true ? ["GUI desktop"] : []),
+      ].join(" · ");
+      const request = String(p.request ?? "").trim();
+      return [
+        `orche: approve one more delegation while ${running.id} runs?`,
+        "",
+        `Running now: ${running.id} · ${running.worker ?? "?"} ${running.role} · ${running.request}`,
+        `It keeps running: approving does not cancel, pause or replace it.`,
+        "",
+        `Requested (${task.id}): ${scope}`,
+        request.length > 700 ? `${request.slice(0, 700)}…` : request,
+        "",
+        `Approve: this one request is queued and starts as its own background job only after ${running.id} has finished successfully (done). It never runs at the same time as ${running.id}. It is dropped, not started, if ${running.id} fails, is cancelled or interrupted, if delegation is switched off (direct mode) or the session ends first.`,
+        `Decline, Esc or no answer within ${formatDuration(timeoutMs)}: nothing is delegated.`,
+      ].join("\n");
+    };
+    /**
+     * orche_task while a background job runs (or an approved task already waits for it): the user approves in Pi's own dialog
+     * (`ctx.ui.select`, TUI and RPC) or nothing is delegated. Only the user's choice of {@link APPROVE_QUEUED} approves; a decline,
+     * Esc, a timeout, a failed dialog, no UI, a session or mode change while asking all refuse. Approved while the job still runs:
+     * the call's arguments, as shown, wait for it (jobs.ts queue) and this returns at once. Approved after the job ended done in the
+     * meantime: undefined, the call proceeds as an ordinary orche_task. Returns the tool result of the call otherwise.
+     */
+    const approveWhileBusy = async (tasks: TaskJobs, args: QueueArgs, ctx: ExtensionContext, signal: AbortSignal | undefined): Promise<JobToolResult | undefined> => {
+      const running = tasks.running;
+      const waiting = tasks.queued;
+      const keeps = running ? `${running.id} keeps running; nothing was cancelled or replaced.` : "";
+      if (waiting) return notDelegated(`Not delegated: ${waiting.id} (${waiting.role}: ${waiting.request}) ${waiting.state === "asking" ? "is waiting for the user's approval" : waiting.state === "queued" ? `already waits for ${waiting.after}` : "is starting"}, and at most one approved task waits for the running job. ${keeps} Tell the user; they can ask again once it has started.`, { reason: "slot-taken", queued: waiting.id });
+      if (!running) return undefined;
+      if (!ctx.hasUI) return notDelegated(`Not delegated: ${running.id} is still running, and delegating another task meanwhile needs the user's approval in a dialog, which this session cannot show (no UI). ${keeps} Tell the user; they can ask again once ${running.id} has ended.`, { reason: "no-ui", job: running.id });
+      const reserved = tasks.reserve(running, args);
+      if (typeof reserved === "string") return notDelegated(`Not delegated: ${reserved}. ${keeps}`, { reason: "unavailable", job: running.id });
+      const timeoutMs = options.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS;
+      let answer: string | undefined;
+      let failure: string | undefined;
+      try {
+        answer = await ctx.ui.select(approvalTitle(running, reserved, args, timeoutMs), [APPROVE_QUEUED, DECLINE_QUEUED], { ...(signal ? { signal } : {}), timeout: timeoutMs });
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      }
+      // Checked after the dialog: a late answer to a dialog whose turn, session or mode is gone approves nothing.
+      const refusal: [reason: string, text: string] | undefined = failure !== undefined ? ["dialog-error", `the approval dialog failed (${failure})`]
+        : signal?.aborted ? ["aborted", "the turn was interrupted (Esc) while the user was asked"]
+        : jobs !== tasks ? ["session-changed", "the session changed while the user was asked"]
+        : !isDelegatingMode(state.effective) ? ["mode-changed", `delegation was switched off (orche mode ${state.effective}) while the user was asked`]
+        : answer === APPROVE_QUEUED ? undefined
+        : answer === DECLINE_QUEUED ? ["declined", "the user declined"]
+        : ["no-answer", "the user did not answer (dismissed or timed out)"];
+      if (refusal) {
+        tasks.withdraw(reserved.id);
+        return notDelegated(`Not delegated: ${refusal[1]}. ${keeps} Do not call orche_task for this request again unless the user asks; answer what you can by reading, or tell them they can ask again once ${running.id} has ended.`, { reason: refusal[0], job: running.id }, refusal[0] === "dialog-error");
+      }
+      const approved = tasks.approve(reserved.id);
+      if ("queued" in approved) {
+        const id = approved.queued.id;
+        try { ctx.ui.notify(`orche: ${id} approved: it starts after ${running.id} has finished (done); ${running.id} keeps running.`, "info"); } catch { /* no UI */ }
+        return {
+          content: [{ type: "text", text: `Queued ${id} with the user's approval in the dialog: it starts as its own background job only after ${running.id} has ended done, never next to it; if ${running.id} fails or is cancelled it is dropped (the result of ${running.id} says which), and its own result arrives later as an orche-task-result message. ${keeps} Tell the user it is queued; then, if ${running.id} is still running and nothing else is waiting for you, call orche_task_attach {"job":"${running.id}"} to wait for it.` }],
+          details: { approval: "approved", queued: id, after: running.id },
+        };
+      }
+      if ("ended" in approved) {
+        // The job ended while the user was asked: done, the approved request starts now as an ordinary orche_task (this call).
+        if (approved.ended.status === "done") return undefined;
+        return notDelegated(`Not delegated: ${running.id} ended ${approved.ended.status} while the user was asked, and the approval covered running it only after ${running.id} completed. Tell the user; delegate it again only when they ask.`, { reason: "job-ended", job: running.id, status: approved.ended.status });
+      }
+      return notDelegated("Not delegated: the session changed while the user was asked.", { reason: "session-changed" });
+    };
+    /**
+     * Main's control of the running worker asks the user first, in Pi's own dialog: a message into its session (orche_task_message)
+     * could carry a new task past orche_task's approval and the run-after-the-job order, and cancelling (orche_task_status cancel)
+     * could replace it. Whether a message only refines the running task cannot be told reliably from its text, so every message is
+     * confirmed. Only the exact confirm option chosen by the user proceeds; decline, Esc, timeout, a failing dialog, no UI, or the job,
+     * session or mode changing meanwhile return the refusal (nothing sent, nothing cancelled). Undefined: confirmed, go ahead.
+     * The user's own /orche cancel and Esc/detach need no dialog.
+     */
+    const confirmWorkerControl = async (tasks: TaskJobs, job: Job, kind: "message" | "cancel", ctx: ExtensionContext, signal: AbortSignal | undefined, message = ""): Promise<JobToolResult | undefined> => {
+      const what = kind === "message" ? "Not sent" : "Not cancelled";
+      const after = () => job.status !== "running"
+        ? `${job.id} ended ${job.status} meanwhile; nothing else was ${kind === "message" ? "sent to" : "cancelled"}, and this confirmation is not reused for another job. Do not try again unless the user asks.`
+        : kind === "message"
+          ? `${job.id} keeps running with its task unchanged. If this is a new task, delegate it with orche_task (it asks the user to queue it after ${job.id}); do not send it again unless the user asks.`
+          : `${job.id} keeps running. Do not try again unless the user asks; they can stop it with /orche cancel.`;
+      const refuse = (reason: string, text: string, isError = false): JobToolResult => ({
+        content: [{ type: "text", text: `${what}: ${text}. ${after()}` }], details: { approval: "not-approved", reason, job: job.id, control: kind }, ...(isError ? { isError: true } : {}),
+      });
+      if (!ctx.hasUI) return refuse("no-ui", `${kind === "message" ? "a message to the running worker" : "cancelling the running job"} needs the user's confirmation in a dialog, which this session cannot show (no UI)`);
+      // The user confirms the whole message they would send: one too long to read in a dialog is not sent this way.
+      if (kind === "message" && message.length > MESSAGE_CONFIRM_MAX) return refuse("too-long", `the message has ${message.length} characters, more than the ${MESSAGE_CONFIRM_MAX} the user can confirm in full in a dialog; send a shorter correction, or deliver longer work as a follow-up orche_task after ${job.id}`);
+      const timeoutMs = options.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS;
+      const running = `Running: ${job.id} · ${job.worker ?? "?"} ${job.role} · ${job.request}`;
+      const title = kind === "message" ? [
+        `orche: send this to the worker of ${job.id}?`,
+        "",
+        running,
+        "",
+        "Message, in full (it is added to that worker's CURRENT task, mid-run):",
+        message,
+        "",
+        `Send only if it adds to or corrects ${job.id}'s own task. Sending does not approve a new task: a new task does not belong here; it is delegated with orche_task, which asks you to queue it after ${job.id} has finished. The message grants no permissions.`,
+        `Do not send, Esc or no answer within ${formatDuration(timeoutMs)}: nothing is sent.`,
+      ].join("\n") : [
+        `orche: cancel ${job.id}?`,
+        "",
+        running,
+        "",
+        `Cancelling stops the worker now; its partial work stays in the workspace and its cancelled result is delivered once.${tasks.queued ? ` The task approved to run after it (${tasks.queued.id}) is dropped.` : ""}`,
+        `Keep it running, Esc or no answer within ${formatDuration(timeoutMs)}: nothing is cancelled.`,
+      ].join("\n");
+      const [yes, no] = kind === "message" ? [CONFIRM_MESSAGE, DECLINE_MESSAGE] : [CONFIRM_CANCEL, DECLINE_CANCEL];
+      let answer: string | undefined;
+      try {
+        answer = await ctx.ui.select(title, [yes, no], { ...(signal ? { signal } : {}), timeout: timeoutMs });
+      } catch (error) {
+        return refuse("dialog-error", `the confirmation dialog failed (${error instanceof Error ? error.message : String(error)})`, true);
+      }
+      if (signal?.aborted) return refuse("aborted", "the turn was interrupted (Esc) while the user was asked");
+      if (jobs !== tasks) return refuse("session-changed", "the session changed while the user was asked");
+      if (!isDelegatingMode(state.effective)) return refuse("mode-changed", `delegation was switched off (orche mode ${state.effective}) while the user was asked`);
+      if (answer === no) return refuse("declined", "the user declined");
+      if (answer !== yes) return refuse("no-answer", "the user did not answer (dismissed or timed out)");
+      // Confirmed for this job only: when it ended meanwhile (another job may run now), nothing is sent or cancelled.
+      if (job.status !== "running" || tasks.running !== job) return refuse("job-ended", `${job.id} is no longer running`);
+      return undefined;
+    };
     // A steer for main detaches an attached call (the job keeps running); a follow-up stays queued in Pi until the run has nothing
     // else to do, i.e. after the attached call returned the result. The widget's last end line goes with the next user input.
     pi.on("input", (event, ctx) => {
@@ -744,7 +940,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.registerTool({
       name: "orche_task",
       label: "orche task",
-      description: `Delegate one self-contained request to one persistent worker. In an interactive or RPC session the task runs as a background job (J1, …) and this call stays ATTACHED to it: it waits like a blocking call, shows the worker's progress and returns the result, unless a user message steered into the turn, a message from another Pi session, Esc or /orche detach DETACHES it first; a queued follow-up message does not detach it and reaches you after the result. Then it returns at once with the job id, the worker keeps running, and the result arrives later as one orche-task-result message unless you attach again with orche_task_attach. wait:false returns as soon as the worker has its assignment (detached); wait:true, and print/JSON modes, block until the result and cannot detach (aborting cancels). Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs. Choose explore, answer, implement, verify, game-asset (create/modify game art, audio and model assets) or video (produce/edit video); pass worker to reuse a live worker with its retained context and original model. Implement, game-asset and video may write within files (or the workspace when omitted); other roles are read-only. Workers never git commit or push unless this assignment carries \`git\` ({commit, push, remote, branch}; implement, game-asset and video only): set it only when the user explicitly asked in this conversation to commit or push, and scope the commit to the task's files where possible. Only one task can be active. Time budget: ${timeBudget()} an idle worker times out at the base deadline, and the result says why a timeout was not extended.`,
+      description: `Delegate one self-contained request to one persistent worker. In an interactive or RPC session the task runs as a background job (J1, …) and this call stays ATTACHED to it: it waits like a blocking call, shows the worker's progress and returns the result, unless a user message steered into the turn, a message from another Pi session, Esc or /orche detach DETACHES it first; a queued follow-up message does not detach it and reaches you after the result. Then it returns at once with the job id, the worker keeps running, and the result arrives later as one orche-task-result message unless you attach again with orche_task_attach. wait:false returns as soon as the worker has its assignment (detached); wait:true, and print/JSON modes, block until the result and cannot detach (aborting cancels). Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs. Choose explore, answer, implement, verify, game-asset (create/modify game art, audio and model assets) or video (produce/edit video); pass worker to reuse a live worker with its retained context and original model. Implement, game-asset and video may write within files (or the workspace when omitted); other roles are read-only. Workers never git commit or push unless this assignment carries \`git\` ({commit, push, remote, branch}; implement, game-asset and video only): set it only when the user explicitly asked in this conversation to commit or push, and scope the commit to the task's files where possible. Only one task can be active: while a job runs, this call first asks the user in a Pi dialog to approve queueing this request after that job (it then starts only once that job has ended done, never next to it or in its place; declined, dismissed or unanswered, nothing is delegated), and you cannot approve it yourself. Time budget: ${timeBudget()} an idle worker times out at the base deadline, and the result says why a timeout was not extended.`,
       promptSnippet: "orche_task: one reusable worker for explore, answer, implement, verify, game-asset (game art/audio/model assets) or video (production/editing)",
       promptGuidelines: [
         "orche_task workers never git commit or push on their own. Pass `git` ({commit:true} or {push:true, remote?, branch?}) only when the user explicitly asked in this conversation to commit or push; never on your own initiative. Only implement, game-asset and video accept it; explore, answer and verify reject it.",
@@ -752,6 +948,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         "Pass `gui: true` only when the task needs GUI applications (needs pi-gui): the worker then gets its own private desktop that the user does not see, separate from yours and from other workers'. Omit it otherwise.",
         "Workers do not share your tools or their state: none of your browser_* session tools, tabs, profiles or logins reach them. With pi-browser installed every worker gets its own stateless browser_fetch for public web pages (the result says when it is unavailable, e.g. obscura not installed). A task that needs a rendered, interactive web page (tabs, clicks, forms, sign-in) needs `gui: true` with a writing role (implement): the worker browses in its private desktop with a fresh browser profile, not the user's. With `gui: true`, read-only roles (explore, answer, verify) get an observe-only desktop: no clicks, typing or form input.",
         "In interactive/RPC sessions orche_task stays attached to its job (J1, …) and returns the result like a blocking call. When it returns DETACHED (a steered user message or a peer-session message arrived), answer that input first; then, if the job is still running and nothing else is waiting for you, call orche_task_attach to wait for it again. Queued follow-up messages never detach and do not count as waiting: Pi delivers them after the result, when the turn has nothing else to do. Never wait with sleep, never poll orche_task_status (only when the user asks for progress or wants to cancel). Use orche_task_message to add instructions to the running worker.",
+        "While a background job runs, answer questions that need only reading yourself (read, grep, find, ls, ast_search; other tools are blocked until it ends) and never cancel, replace or re-delegate the running worker for a question. Delegate only what needs a worker: orche_task then asks the user to approve queueing it after the running job; only the user's answer in that dialog approves it.",
         "Every worker has a private scratch directory for temporary files. Pass `writeRoots` (implement/game-asset/video) only when the user explicitly asked to change a location outside the workspace, such as a sibling repository; it applies to that assignment only.",
         "An implement/answer orchestrator may run at most 2 fresh-verifier rounds; further rounds are refused and the result lists the remaining findings (data.unresolved, a `Verification cap:` line). Pass `verificationRounds` (up to 5) only when the user explicitly asked for more independent review rounds.",
       ],
@@ -773,6 +970,12 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           projectTrusted: ctx.isProjectTrusted(),
           currentSession: currentSession(ctx),
         };
+        // While a background job runs (or an approved task waits for it), a new delegation needs the user's explicit approval in Pi's
+        // own dialog, for the blocking path (wait:true) too: approved, it waits for the running job (jobs.ts queue), never runs next to it.
+        if (jobs?.running || jobs?.queued) {
+          const gated = await approveWhileBusy(jobs, { ...base, ...structuredClone(params) }, ctx, signal);
+          if (gated) return gated as never;
+        }
         // Background job (jobs.ts) in sessions that keep running after the turn: interactive and RPC. The call stays attached to
         // it (like a blocking call) until the job ends or something detaches it; wait:false detaches at once. Print/JSON modes exit
         // when the turn ends, so they (and an explicit wait:true) keep the blocking call.
@@ -821,15 +1024,32 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.registerTool({
       name: "orche_task_status",
       label: "orche task status",
-      description: "Status of a background orche_task job (the running one, or the one named): worker, elapsed time, attached or detached, latest progress and liveness, or the result summary when it ended. Never waits; do not poll it: to wait for the result use orche_task_attach. Use it when the user asks about progress, or with cancel:true to stop the job (its cancelled result is delivered once).",
+      description: "Status of a background orche_task job (the running one, or the one named): worker, elapsed time, attached or detached, latest progress and liveness, or the result summary when it ended, and the task the user approved to run after it (Q1, …), if any. Never waits; do not poll it: to wait for the result use orche_task_attach. Use it when the user asks about progress, or with cancel:true to stop the job (only when the user asks; the user confirms it in a dialog first, nothing is cancelled otherwise; its cancelled result is delivered once; a task queued after it is then dropped), or with a queued task's id (Q1, …) and cancel:true to drop that task before it starts (only when the user asks).",
       promptSnippet: "orche_task_status: progress of the background orche_task job, or cancel it",
       parameters: Type.Object({
-        job: Type.Optional(Type.String({ pattern: "^J[1-9][0-9]*$", description: "Job id from orche_task (J1, …); default: the running or latest job." })),
-        cancel: Type.Optional(Type.Boolean({ description: "true: cancel the job." })),
+        job: Type.Optional(Type.String({ pattern: "^[JQ][1-9][0-9]*$", description: "Job id from orche_task (J1, …) or an approved queued task (Q1, …); default: the running or latest job." })),
+        cancel: Type.Optional(Type.Boolean({ description: "true: cancel the job (or drop the queued task)." })),
       }),
-      execute: async (_id, params) => {
+      execute: async (_id, params, signal, _onUpdate, ctx) => {
         const tasks = taskJobs();
-        if (params.cancel === true) return { content: [{ type: "text", text: await tasks.cancel(params.job) }], details: { job: params.job, cancel: true } };
+        if (params.job?.startsWith("Q")) {
+          const queued = tasks.queued;
+          if (params.cancel === true) return { content: [{ type: "text", text: tasks.cancelQueued(params.job) }], details: { job: params.job, cancel: true } };
+          const text = queued?.id === params.job
+            ? `${queued.id} ${queued.state} · ${queued.role}${queued.worker ? ` · worker ${queued.worker}` : ""} · ${queued.state === "asking" ? "the user is being asked to approve it" : queued.state === "queued" ? `approved by the user; starts after ${queued.after} has ended done, dropped if it fails or is cancelled` : "starting now"}\nRequest: ${queued.request}`
+            : `No queued task ${params.job} (a queued task that started is a job now: see the latest job).`;
+          return { content: [{ type: "text", text }], details: { job: params.job, cancel: false } };
+        }
+        if (params.cancel === true) {
+          // Cancelling the running job asks the user first (one dialog), so that main cannot replace the running task by itself.
+          const target = params.job ? tasks.get(params.job) : tasks.running;
+          if (target?.status === "running") {
+            const refused = await confirmWorkerControl(tasks, target, "cancel", ctx, signal);
+            if (refused) return refused as never;
+          }
+          // The confirmed job by id: never another job that started meanwhile.
+          return { content: [{ type: "text", text: await tasks.cancel(target?.id ?? params.job) }], details: { job: target?.id ?? params.job, cancel: true } };
+        }
         const text = tasks.status(params.job, worker => workers?.workerLiveness(worker)?.detail);
         return { content: [{ type: "text", text }], details: { job: params.job, cancel: false } };
       },
@@ -859,14 +1079,22 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.registerTool({
       name: "orche_task_message",
       label: "orche task message",
-      description: "Send an additional or corrected instruction to the worker of the running background orche_task job. It is steered into the worker's session after its current tool calls, before its next model request; it refines the assignment and grants no permissions (no git grant, no new write scope). If the worker reports before reading it, the result lists it as undelivered: then send it as a follow-up orche_task to the same worker.",
-      promptSnippet: "orche_task_message: add instructions to the running orche_task worker",
+      description: "Send an additional or corrected instruction for the running worker's OWN task (the background orche_task job). The user confirms each message in a dialog first: a new task must not be slipped into the running worker; it goes to orche_task, which asks to queue it after the running job. Declined, dismissed, unanswered or without a UI, nothing is sent. Once sent, it is steered into the worker's session after its current tool calls, before its next model request; it refines the assignment and grants no permissions (no git grant, no new write scope). If the worker reports before reading it, the result lists it as undelivered: then send it as a follow-up orche_task to the same worker.",
+      promptSnippet: "orche_task_message: add instructions for the running orche_task worker's own task (the user confirms)",
       parameters: Type.Object({
         job: Type.Optional(Type.String({ pattern: "^J[1-9][0-9]*$", description: "Job id (default: the running job)." })),
-        message: Type.String({ minLength: 1, maxLength: 20_000, description: "The instruction, self-contained (the worker does not see this conversation)." }),
+        message: Type.String({ minLength: 1, maxLength: 20_000, description: `The instruction, self-contained (the worker does not see this conversation); the user confirms it in full, so at most ${MESSAGE_CONFIRM_MAX} characters are sent.` }),
       }),
-      execute: async (_id, params) => {
-        const sent = taskJobs().message(params.job, params.message);
+      execute: async (_id, params, signal, _onUpdate, ctx) => {
+        const tasks = taskJobs();
+        const target = params.job ? tasks.get(params.job) : tasks.running;
+        // Not running: tasks.message refuses with its own error, nothing to confirm.
+        if (target?.status === "running") {
+          const refused = await confirmWorkerControl(tasks, target, "message", ctx, signal, params.message);
+          if (refused) return refused as never;
+        }
+        // The confirmed job by id: never another job that started meanwhile.
+        const sent = tasks.message(target?.id ?? params.job, params.message);
         return { content: [{ type: "text", text: sent.text }], details: sent.details, ...(sent.ok ? {} : { isError: true }) };
       },
     });

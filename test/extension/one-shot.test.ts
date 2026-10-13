@@ -185,8 +185,8 @@ describe("one-shot request mode: the request's assignments run in it; only a pro
 });
 
 /** The extension in a real session; the workers' strong tier is a faux provider registered in the worker runtime. */
-async function session(options: { mainSteps: FauxResponseStep[]; strongSteps?: FauxResponseStep[]; generalSteps?: FauxResponseStep[]; mainMode?: "single" | "ultra" | "direct"; mode?: "tui" }) {
-  const h = await createHarness({ mainSteps: options.mainSteps, orcheSteps: options.generalSteps ?? [], models: { "strong-orchestrator": { model: "strong-orch/s1" } }, mainMode: options.mainMode ?? "single", ...(options.mode ? { mode: options.mode } : {}) });
+async function session(options: { mainSteps: FauxResponseStep[]; strongSteps?: FauxResponseStep[]; generalSteps?: FauxResponseStep[]; mainMode?: "single" | "ultra" | "direct"; mode?: "tui"; ui?: Parameters<typeof createHarness>[0]["ui"] }) {
+  const h = await createHarness({ mainSteps: options.mainSteps, orcheSteps: options.generalSteps ?? [], models: { "strong-orchestrator": { model: "strong-orch/s1" } }, mainMode: options.mainMode ?? "single", ...(options.mode ? { mode: options.mode } : {}), ...(options.ui ? { ui: options.ui } : {}) });
   opened.push(h);
   execFileSync("git", ["init", "-q"], { cwd: h.cwd });
   const strong = tierProvider("strong-orch", "s1", options.strongSteps ?? []);
@@ -485,10 +485,11 @@ describe("one-shot commands through the extension", () => {
     expect(modeEntries(h)).toEqual([]);
   });
 
-  it("a background job of a one-shot request keeps its mode after the turn; a second task meanwhile is refused (one task at a time)", async () => {
+  it("a background job of a one-shot request keeps its mode after the turn; a second task meanwhile is not delegated without the user's approval (one task at a time)", async () => {
     const gate = deferred();
     const { h } = await session({
       mode: "tui",
+      ui: { select: async (_title: string, options: string[]) => options[1] },
       mainSteps: [
         tool("orche_task", { role: "answer", request: "Inspect greeting.txt in the background", wait: false }),
         tool("orche_task", { role: "answer", request: "Another task" }),
@@ -498,7 +499,7 @@ describe("one-shot commands through the extension", () => {
       strongSteps: [async () => { await gate.promise; return answered("background result on the strong tier"); }],
     });
     await h.session.prompt("/orche strong Inspect greeting.txt in the background");
-    expect(JSON.stringify(toolResults(h).at(-1))).toContain("still running; one task runs at a time");
+    expect(JSON.stringify(toolResults(h).at(-1))).toContain("Not delegated: the user declined. J1 keeps running");
     expect(h.statuses.filter(status => status.key === "orche-mode").at(-1)?.text).toBe("orche: single");
     gate.resolve();
     for (let i = 0; i < 100 && !h.session.messages.some(message => (message as { customType?: string }).customType === "orche-task-result"); i++) await new Promise(resolve => setTimeout(resolve, 20));
