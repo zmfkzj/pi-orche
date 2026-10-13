@@ -23,12 +23,14 @@ export function workerSkills(skills: readonly Skill[] | undefined): Skill[] {
 }
 
 /**
- * The same metadata when main has not run yet in this extension runtime (after a session start or `/reload`) and a run that a
- * `triggerTurn` message started (a session-bus wake, an orche result, another extension's notice) creates a worker: Pi emits no
- * `before_agent_start` for such a run. Pi lists every skill its loader has, the list main's own prompt is built from, as a
- * `skill:<name>` slash command with the `SKILL.md` path in `sourceInfo.path` (`pi.getCommands()`). The command does not carry
- * `disable-model-invocation`, so that frontmatter flag is read from the listed file; a file that cannot be read or parsed is left out.
- * Nothing beyond that list is searched, so `--no-skills`, settings and package filters keep applying.
+ * The same metadata when main has not run yet in this extension runtime (after a session start or `/reload`) and a worker starts
+ * anyway. On Pi 1.2.0 and later every run that starts while idle emits `before_agent_start` (`messageType` `"user"` or
+ * `"custom"`), so a run's workers have the event's list; an older Pi host (orche's peer range is `*`) emits none for a run that
+ * a `triggerTurn` message started (a session-bus wake, an orche result, another extension's notice). Pi lists every skill its
+ * loader has, the list main's own prompt is built from, as a `skill:<name>` slash command with the `SKILL.md` path in
+ * `sourceInfo.path` (`pi.getCommands()`). The command does not carry `disable-model-invocation`, so that frontmatter flag is read
+ * from the listed file; a file that cannot be read or parsed is left out. Nothing beyond that list is searched, so `--no-skills`,
+ * settings and package filters keep applying.
  */
 export function discoveredSkills(commands: readonly SlashCommandInfo[] | undefined): Skill[] {
   const skills: Skill[] = [];

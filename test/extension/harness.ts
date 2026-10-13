@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager,
-  type AgentSession, type ExtensionFactory, type ExtensionUIContext, type ModelRuntime,
+  type AgentSession, type ExtensionAPI, type ExtensionFactory, type ExtensionUIContext, type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage as reply, fauxToolCall as call, type FauxResponseStep, type ToolCall } from "@earendil-works/pi-ai";
 import { createOrcheExtension, type OrcheExtensionOptions } from "../../src/extension/index.js";
@@ -67,6 +67,8 @@ export async function createHarness(options: {
   discoverSkills?: boolean;
   /** Pi settings of the session next to the harness default (compaction off), e.g. `{ retry: { baseDelayMs: 1 } }`. */
   settings?: Record<string, unknown>;
+  /** The `pi` API pi-orche gets (default: Pi's own), e.g. to stand in for an older Pi host's events. */
+  wrapOrche?: (pi: ExtensionAPI) => ExtensionAPI;
 }): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "orche-ext-"));
   const cwd = join(root, "project");
@@ -86,7 +88,7 @@ export async function createHarness(options: {
   const resourceLoader = new DefaultResourceLoader({
     cwd, agentDir, settingsManager, noSkills: !options.discoverSkills, noPromptTemplates: true, noThemes: true, noContextFiles: true,
     // Most fixtures deliberately keep main/worker scripts isolated; inheritance regressions opt in.
-    extensionFactories: [createOrcheExtension({ agentDir, inheritProviders: false, createRuntime: async () => options.inheritMainModel || options.writeUserConfig === false ? main.runtime : orche.runtime, ...options.extension }), ...(options.extraExtensions ?? [])],
+    extensionFactories: [orcheFactory(options, agentDir, main.runtime, orche.runtime), ...(options.extraExtensions ?? [])],
   });
   await resourceLoader.reload();
   const model = main.runtime.getModel(main.faux.provider.id, main.faux.getModel().id)!;
@@ -112,4 +114,10 @@ export async function createHarness(options: {
       await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     },
   };
+}
+
+function orcheFactory(options: Parameters<typeof createHarness>[0], agentDir: string, mainRuntime: ModelRuntime, orcheRuntime: ModelRuntime): ExtensionFactory {
+  const factory = createOrcheExtension({ agentDir, inheritProviders: false, createRuntime: async () => options.inheritMainModel || options.writeUserConfig === false ? mainRuntime : orcheRuntime, ...options.extension });
+  const wrap = options.wrapOrche;
+  return wrap ? pi => factory(wrap(pi)) : factory;
 }

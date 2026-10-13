@@ -1,5 +1,6 @@
 // End to end: the skills main's Pi discovered reach orche_task workers' and orche_spawn sub-workers' prompts as metadata, also in a
-// run that a triggerTurn message starts before main's own first run (Pi emits no before_agent_start for it); main's extensions,
+// run that a triggerTurn message starts before main's own first run: on Pi 1.2.0+ through that run's before_agent_start
+// (`messageType: "custom"`), on an older host (no before_agent_start for it) through Pi's skill commands; main's extensions,
 // hooks, tools and conversation do not.
 import { afterEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -7,7 +8,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
-import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage as reply, type FauxResponseFactory } from "@earendil-works/pi-ai";
 import { SPAWN_TOOL } from "../../src/orchestrator/spawn.js";
 import { WORKER_SKILLS_NOTE } from "../../src/pi/worker-skills.js";
@@ -43,10 +44,33 @@ function mainOnlyExtension(path: string): ExtensionFactory {
   };
 }
 
-/** Counts main's before_agent_start events: Pi emits none for a run that a triggerTurn message starts. */
-function runStarts(counter: { starts: number }): ExtensionFactory {
-  return pi => { pi.on("before_agent_start", () => { counter.starts++; return undefined; }); };
+type RunStart = { messageType: string; customType?: string };
+/** What started each of main's runs, as Pi's before_agent_start tells every extension (Pi 1.2.0+: custom-started runs too). */
+function runStarts(starts: RunStart[]): ExtensionFactory {
+  return pi => {
+    pi.on("before_agent_start", event => {
+      starts.push(event.messageType === "custom" ? { messageType: "custom", customType: event.message.customType } : { messageType: event.messageType });
+      return undefined;
+    });
+  };
 }
+
+/**
+ * pi-orche on a Pi host before 1.2.0 (its peer range is `*`): such a host emits no before_agent_start for a run that a triggerTurn
+ * message starts, so orche's handlers do not see it; every other event and API is Pi's own.
+ */
+const olderHost = (pi: ExtensionAPI): ExtensionAPI => {
+  const on = (event: string, handler: (event: { messageType?: string }, ctx: unknown) => unknown) =>
+    pi.on(event as never, (event === "before_agent_start" ? (data: { messageType?: string }, ctx: unknown) => data.messageType === "custom" ? undefined : handler(data, ctx) : handler) as never);
+  return new Proxy(pi, { get: (target, key) => key === "on" ? on : Reflect.get(target, key) });
+};
+/** The hosts a woken first run is checked on: Pi itself (1.2.0+) and an older host (the commands fallback, `discoveredSkills`). */
+const HOSTS = [
+  { host: "Pi 1.2.0+ (before_agent_start for the custom run)", wrapOrche: undefined },
+  { host: "an older Pi host (no before_agent_start for it: Pi's skill commands)", wrapOrche: olderHost },
+] as const;
+/** The woken run was a custom-started one, as Pi reported it to every extension. */
+const expectWokenRun = (starts: RunStart[]) => expect(starts).toEqual([{ messageType: "custom", customType: "peer-note" }]);
 
 type Context = Parameters<FauxResponseFactory>[0];
 const firstUser = (context: Context) => JSON.stringify(context.messages.find(message => message.role === "user"));
@@ -99,9 +123,9 @@ describe("orche_task worker skills", () => {
     expect(workerText).not.toContain("MAIN-CONVERSATION-SENTINEL");
   });
 
-  it("a run a triggerTurn message starts first (no user prompt, no before_agent_start) gives its worker and sub-worker main's skills", async () => {
+  it.each(HOSTS)("a run a triggerTurn message starts first (no user prompt) gives its worker and sub-worker main's skills: $host", async ({ wrapOrche }) => {
     const skills = await skillsDir();
-    const counter = { starts: 0 };
+    const starts: RunStart[] = [];
     const seen: { worker?: string; subWorker?: string } = {};
     // The implement worker orchestrates: it starts a verify sub-worker with orche_spawn, then reports.
     const respond: FauxResponseFactory = context => {
@@ -118,12 +142,12 @@ describe("orche_task worker skills", () => {
     const h = await createHarness({
       mainSteps: [tool("orche_task", { role: "implement", request: "Check that greeting.txt says hello. The user asks for an independent review.", wait: true }), reply("relayed")],
       orcheSteps: Array.from({ length: 6 }, () => respond),
-      mainMode: "single", extraExtensions: [mainOnlyExtension(skills.root), runStarts(counter)],
+      mainMode: "single", extraExtensions: [mainOnlyExtension(skills.root), runStarts(starts)], ...(wrapOrche ? { wrapOrche } : {}),
     });
     open.push(h);
     execFileSync("git", ["init", "-q"], { cwd: h.cwd });
     await wake(h);
-    expect(counter.starts).toBe(0);
+    expectWokenRun(starts);
     expect(seen.worker).toBeDefined();
     expect(seen.subWorker).toBeDefined();
     for (const text of [seen.worker!, seen.subWorker!]) {
@@ -134,19 +158,19 @@ describe("orche_task worker skills", () => {
     }
   });
 
-  it("after /reload, the first run a triggerTurn message starts lists what main's loader found: global, project, package and extension skills", async () => {
+  it.each(HOSTS)("after /reload, the first run a triggerTurn message starts lists what main's loader found: global, project, package and extension skills: $host", async ({ wrapOrche }) => {
     const skills = await skillsDir();
     const pkg = await mkdtemp(join(tmpdir(), "orche-skill-package-"));
     dirs.push(pkg);
     await writeFile(join(pkg, "package.json"), JSON.stringify({ name: "orche-skill-package", version: "1.0.0", pi: { skills: ["./skills"] } }));
     await writeSkill(join(pkg, "skills"), "package-skill", "description: From a package.\n", "BODY-SENTINEL-PACKAGE");
-    const counter = { starts: 0 };
+    const starts: RunStart[] = [];
     const seen: { text?: string } = {};
     const h = await createHarness({
       mainSteps: [tool("orche_task", { role: "explore", request: "Inspect greeting.txt", wait: true }), reply("relayed")],
       orcheSteps: [explore(seen)],
       mainMode: "single", single: { spawn: false }, discoverSkills: true, settings: { packages: [pkg] },
-      extraExtensions: [mainOnlyExtension(skills.root), runStarts(counter)],
+      extraExtensions: [mainOnlyExtension(skills.root), runStarts(starts)], ...(wrapOrche ? { wrapOrche } : {}),
     });
     open.push(h);
     await writeSkill(join(h.agentDir, "skills"), "global-skill", "description: From the user's skills.\n", "BODY-SENTINEL-GLOBAL");
@@ -154,7 +178,7 @@ describe("orche_task worker skills", () => {
     await writeSkill(join(h.cwd, ".pi", "skills"), "project-skill", "description: From the project.\n", "BODY-SENTINEL-PROJECT");
     await h.session.reload();
     await wake(h);
-    expect(counter.starts).toBe(0);
+    expectWokenRun(starts);
     const names = h.session.resourceLoader.getSkills().skills.map(skill => skill.name);
     expect(names).toEqual(expect.arrayContaining(["global-skill", "global-hidden", "project-skill", "package-skill", "main-visible", "main-hidden"]));
     for (const name of ["global-skill", "project-skill", "package-skill", "main-visible"]) expect(seen.text).toContain(`<name>${name}</name>`);
@@ -162,20 +186,20 @@ describe("orche_task worker skills", () => {
     expectLoaderSkills(h, seen.text!);
   });
 
-  it("nothing outside main's loader list is searched: with --no-skills a woken run's worker lists no skill", async () => {
-    const counter = { starts: 0 };
+  it.each(HOSTS)("nothing outside main's loader list is searched: with --no-skills a woken run's worker lists no skill: $host", async ({ wrapOrche }) => {
+    const starts: RunStart[] = [];
     const seen: { text?: string } = {};
     const h = await createHarness({
       mainSteps: [tool("orche_task", { role: "explore", request: "Inspect greeting.txt", wait: true }), reply("relayed")],
       orcheSteps: [explore(seen)],
-      mainMode: "single", single: { spawn: false }, extraExtensions: [runStarts(counter)],
+      mainMode: "single", single: { spawn: false }, extraExtensions: [runStarts(starts)], ...(wrapOrche ? { wrapOrche } : {}),
     });
     open.push(h);
     await writeSkill(join(h.agentDir, "skills"), "global-skill", "description: From the user's skills.\n", "BODY-SENTINEL-GLOBAL");
     await writeSkill(join(h.cwd, ".pi", "skills"), "project-skill", "description: From the project.\n", "BODY-SENTINEL-PROJECT");
     await h.session.reload();
     await wake(h);
-    expect(counter.starts).toBe(0);
+    expectWokenRun(starts);
     expect(h.session.resourceLoader.getSkills().skills).toEqual([]);
     expect(seen.text).toContain("report_result");
     expect(seen.text).not.toContain("<available_skills>");

@@ -175,8 +175,10 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     let lastMode: ExtensionContext["mode"] | undefined;
     /**
      * Metadata of the skills main's Pi discovered, for new workers' own prompts (src/pi/worker-skills.ts): the list of main's latest
-     * run (before_agent_start). Undefined until main's first run of this runtime: a run that a triggerTurn message starts after a
-     * session start or /reload has no before_agent_start, so its workers take the same loader list from Pi's slash commands when they
+     * run (before_agent_start). Pi 1.2.0 and later emit before_agent_start for every run that starts while idle: a user prompt
+     * (`messageType: "user"`) and a run a triggerTurn message starts (`"custom"`: a session-bus wake, an orche result). Undefined
+     * until main's first run of this runtime; an older Pi host (peer `*`) emits nothing for a custom run, so when such a run is
+     * main's first after a session start or /reload, its workers take the same loader list from Pi's slash commands when they
      * start. Nothing else of main reaches a worker this way: no extension, hook, conversation or state.
      */
     let mainSkills: Skill[] | undefined;
@@ -458,7 +460,9 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         const lines = restored.interrupted.map(job => `${job.id} (${job.worker ?? "?"} ${job.role}: ${job.request})${job.record ? ` record ${job.record}` : ""}`);
         const text = `orche: ${restored.interrupted.length === 1 ? "a background task was" : "background tasks were"} still running when the previous pi process ended, and ${restored.interrupted.length === 1 ? "is" : "are"} now marked interrupted: ${lines.join("; ")}. Naming its worker in orche_task continues the work with a new worker briefed from its transcript.`;
         ctx.ui.notify(text, "warning");
-        // With the next prompt (before_agent_start), but not with a one-shot request's: those jobs are not part of it.
+        // With the next run's start (before_agent_start), but not with a one-shot request's: those jobs are not part of it. On Pi
+        // 1.2.0 and later that may be a run a triggerTurn message starts (an orche result, a session-bus wake), not only a user
+        // prompt: the notice goes with whichever run comes first, once, as it reports the session's state, not a reply to a prompt.
         interruptedNotice = { customType: "orche-job-interrupted", content: text, display: true, details: { jobs: restored.interrupted.map(job => job.id) } };
       }
       // run.json records of this session left at "running" by a process that is gone: close them as interrupted (best effort, async).
@@ -471,6 +475,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       if (found.error) ctx.ui.notify(`orche: ${found.error}; using the default mode ${state.session}`, "warning");
       if (found.legacyMode && !found.error) ctx.ui.notify(`orche: mainMode "${found.legacyMode}" in ${found.path} was removed (multi-agent orche_run delegation); using "single". Set mainMode to one of ${MAIN_MODES.join(", ")}.`, "warning");
     });
+    // Every run main starts while idle (Pi 1.2.0+: user prompts and runs a triggerTurn message starts alike; older hosts: user
+    // prompts only). Both kinds get the skill list and the delegation section of the mode in force, and the first takes the notice.
     pi.on("before_agent_start", event => {
       mainSkills = workerSkills(event.systemPromptOptions.skills);
       event.systemPromptOptions.sections[DELEGATION_SECTION] = delegationSection(state.effective);
@@ -479,9 +485,12 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       interruptedNotice = undefined;
       return { message };
     });
-    // Pi writes the prompt sections once per run (before_agent_start) and keeps them for runs it starts itself (a triggered job
-    // result): every model request carries the section of the mode in force NOW, so a one-shot mode never outlives its request in
-    // the prompt (a run after it, an override that ended mid-run). Request-local: the transcript keeps what Pi recorded.
+    // Pi writes the prompt sections when a run starts (before_agent_start: since Pi 1.2.0 also for a run a triggerTurn message
+    // starts while idle, before it only for user prompts) and keeps them for the rest of that run (its tool turns, steers and
+    // follow-ups, a job result that arrives while main is busy): every model request carries the section of the mode in force NOW,
+    // so a one-shot mode never outlives its request in the prompt (an override that ended mid-run, a run an older Pi started
+    // without before_agent_start). When the recorded section is already current nothing is added. Request-local: the transcript
+    // keeps what Pi recorded.
     pi.on("context_with_system", event => {
       // As Pi records a custom section in the transcript (buildSystemPromptSections wraps it in its name's tags).
       const wanted = `<${DELEGATION_SECTION}>\n${delegationSection(state.effective)}\n</${DELEGATION_SECTION}>`;
