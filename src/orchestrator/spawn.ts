@@ -1,5 +1,5 @@
 /**
- * `orche_spawn`: the orchestrator's one way to split work (docs/orchestrator.md 2–3). It starts up to MAX_SUB_WORKERS sub-workers in
+ * `orche_spawn`: the orchestrator's one way to split work (docs/orchestrator.md 2–3). It starts up to the session's cap (`single.maxSubWorkers`, default MAX_SUB_WORKERS) sub-workers in
  * fresh sessions at the same time and returns when all of them have reported.
  *
  * File conflicts are prevented in layers: writers must own files and their ownership may not overlap (planSpawn, with the backlog
@@ -39,27 +39,34 @@ export const DEPTH_LIMIT_MESSAGE = "Blocked: sub-workers cannot spawn workers (o
 /** One `Type.Literal` per value, typed as a tuple so TypeBox 1.x `Static` yields the literal union (a plain array maps to `never`). */
 const literals = <const T extends readonly string[]>(values: T) => values.map(value => Type.Literal(value)) as unknown as { -readonly [K in keyof T]: TLiteral<T[K]> };
 
-export const spawnParameters = Type.Object({
-  reason: Type.Union(literals(SPAWN_REASONS), { description: "Why you split: parallelism (independent parts at the same time), isolation (a game-asset/video specialist or a part that must run apart), verification (fresh independent verifiers, role verify only)." }),
-  workers: Type.Array(Type.Object({
-    name: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$", description: "Short unit name, unique in this call (e.g. csv, cache, verify)." }),
-    role: Type.Union(literals(SUB_WORKER_ROLES), { description: "implement (writes its own files), answer (read-only investigation), verify (read-only independent verification), game-asset or video (specialists)." }),
-    request: Type.String({ minLength: 1, description: "Self-contained request: the sub-worker sees nothing else. Goal, acceptance criteria, constraints, file references and the user's wording where it matters; not your reasoning." }),
-    files: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Owned files or directories (dir/ or dir/**) of a writing role; required for implement, game-asset and video; ignored for read-only roles." })),
-  }, { additionalProperties: false }), { minItems: 1, maxItems: MAX_SUB_WORKERS }),
-}, { additionalProperties: false });
+/** orche_spawn's parameters with the session's per-call cap (`single.maxSubWorkers`). */
+export function spawnParametersFor(maxSubWorkers: number) {
+  return Type.Object({
+    reason: Type.Union(literals(SPAWN_REASONS), { description: "Why you split: parallelism (independent parts at the same time), isolation (a game-asset/video specialist or a part that must run apart), verification (fresh independent verifiers, role verify only)." }),
+    workers: Type.Array(Type.Object({
+      name: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$", description: "Short unit name, unique in this call (e.g. csv, cache, verify)." }),
+      role: Type.Union(literals(SUB_WORKER_ROLES), { description: "implement (writes its own files), answer (read-only investigation), verify (read-only independent verification), game-asset or video (specialists)." }),
+      request: Type.String({ minLength: 1, description: "Self-contained request: the sub-worker sees nothing else. Goal, acceptance criteria, constraints, file references and the user's wording where it matters; not your reasoning." }),
+      files: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Owned files or directories (dir/ or dir/**) of a writing role; required for implement, game-asset and video; ignored for read-only roles." })),
+    }, { additionalProperties: false }), { minItems: 1, maxItems: maxSubWorkers }),
+  }, { additionalProperties: false });
+}
+export const spawnParameters = spawnParametersFor(MAX_SUB_WORKERS);
 export type SpawnParameters = Static<typeof spawnParameters>;
 /** orche_spawn of an ultra orchestrator: the ultra reasons and, for a fix candidate, `from` (an earlier candidate to start from). */
-export const ultraSpawnParameters = Type.Object({
-  reason: Type.Union(literals(ULTRA_SPAWN_REASONS), { description: "exploration (before any candidate: independent verification-basis builders, role implement owning the test/check files they write, and hypothesis analysts, role answer), candidates (2-4 independent implementations, each in its own workspace copy, or independent answers for a read-only task), verification (fresh verifiers, role verify only), isolation (a game-asset/video specialist)." }),
-  workers: Type.Array(Type.Object({
-    name: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$", description: "Short unit name, unique in this call (e.g. basis, cause, cand-a, verify)." }),
-    role: Type.Union(literals(SUB_WORKER_ROLES), { description: "implement (writes its own files; a candidate writes only in its workspace copy), answer (read-only), verify (read-only independent verification), game-asset or video (specialists)." }),
-    request: Type.String({ minLength: 1, description: "Self-contained request: the sub-worker sees nothing else. Goal, acceptance criteria, constraints, file references and the user's wording where it matters; not your reasoning and, for exploration and first-round candidates, never another worker's conclusions." }),
-    files: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Owned files or directories of a writing role (for a candidate: inside its own workspace copy; candidates may own the same paths)." })),
-    from: Type.Optional(Type.String({ minLength: 1, description: "candidates only: id of an earlier candidate (e.g. W1.3) whose workspace this fix candidate starts from; the earlier one stays unchanged." })),
-  }, { additionalProperties: false }), { minItems: 1, maxItems: MAX_SUB_WORKERS }),
-}, { additionalProperties: false });
+export function ultraSpawnParametersFor(maxSubWorkers: number) {
+  return Type.Object({
+    reason: Type.Union(literals(ULTRA_SPAWN_REASONS), { description: `exploration (before any candidate: independent verification-basis builders, role implement owning the test/check files they write, and hypothesis analysts, role answer), candidates (2-${maxSubWorkers} independent implementations, each in its own workspace copy, or independent answers for a read-only task), verification (fresh verifiers, role verify only), isolation (a game-asset/video specialist).` }),
+    workers: Type.Array(Type.Object({
+      name: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$", description: "Short unit name, unique in this call (e.g. basis, cause, cand-a, verify)." }),
+      role: Type.Union(literals(SUB_WORKER_ROLES), { description: "implement (writes its own files; a candidate writes only in its workspace copy), answer (read-only), verify (read-only independent verification), game-asset or video (specialists)." }),
+      request: Type.String({ minLength: 1, description: "Self-contained request: the sub-worker sees nothing else. Goal, acceptance criteria, constraints, file references and the user's wording where it matters; not your reasoning and, for exploration and first-round candidates, never another worker's conclusions." }),
+      files: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Owned files or directories of a writing role (for a candidate: inside its own workspace copy; candidates may own the same paths)." })),
+      from: Type.Optional(Type.String({ minLength: 1, description: "candidates only: id of an earlier candidate (e.g. W1.3) whose workspace this fix candidate starts from; the earlier one stays unchanged." })),
+    }, { additionalProperties: false }), { minItems: 1, maxItems: maxSubWorkers }),
+  }, { additionalProperties: false });
+}
+export const ultraSpawnParameters = ultraSpawnParametersFor(MAX_SUB_WORKERS);
 /** One orche_spawn call of either tool variant. */
 export interface SpawnCall { reason: SpawnReason; workers: { name: string; role: SubWorkerRole; request: string; files?: string[]; from?: string }[] }
 
@@ -85,12 +92,13 @@ export interface PlannedWorker {
 
 /**
  * Validate one call and give the workers their ids (only after it is valid, so a refused call uses none). Throws an Error whose
- * message tells the orchestrator what to change.
+ * message tells the orchestrator what to change. `maxSubWorkers`: the session's per-call cap (default MAX_SUB_WORKERS).
  */
-export function planSpawn(params: SpawnCall, options: { scope?: readonly string[]; readOnly?: boolean; ultra?: boolean; nextId: () => string }): { workers: PlannedWorker[]; notes: string[] } {
+export function planSpawn(params: SpawnCall, options: { scope?: readonly string[]; readOnly?: boolean; ultra?: boolean; maxSubWorkers?: number; nextId: () => string }): { workers: PlannedWorker[]; notes: string[] } {
   const { reason, workers } = params;
   const notes: string[] = [];
-  if (!workers.length || workers.length > MAX_SUB_WORKERS) throw new Error(`orche_spawn takes 1 to ${MAX_SUB_WORKERS} workers per call.`);
+  const max = options.maxSubWorkers ?? MAX_SUB_WORKERS;
+  if (!workers.length || workers.length > max) throw new Error(`orche_spawn takes 1 to ${max} workers per call (this session's cap, set by single.maxSubWorkers).`);
   const names = new Set<string>();
   for (const worker of workers) {
     if (names.has(worker.name)) throw new Error(`Duplicate worker name ${worker.name}; names must be unique in one call.`);
@@ -106,7 +114,7 @@ export function planSpawn(params: SpawnCall, options: { scope?: readonly string[
     if (reason === "isolation" && workers.some(worker => worker.role !== "game-asset" && worker.role !== "video")) throw new Error('in ultra mode reason "isolation" is for game-asset and video specialists only; other work goes through exploration and candidates.');
     if (reason === "exploration" && (workers.length < 2 || workers.some(worker => worker.role !== "implement" && worker.role !== "answer"))) throw new Error('reason "exploration" takes two or more independent workers: verification-basis builders (role implement, owning the test or check files they write) and hypothesis/approach analysts (role answer).');
     if (candidates) {
-      if (workers.length < 2) throw new Error('reason "candidates" takes 2 to 4 independent candidates; one attempt is no comparison.');
+      if (workers.length < 2) throw new Error(`reason "candidates" takes 2 to ${max} independent candidates; one attempt is no comparison.`);
       const role = workers[0]!.role;
       if ((role !== "implement" && role !== "answer") || workers.some(worker => worker.role !== role)) throw new Error('candidates are all role implement (implementations, each in its own workspace copy) or all role answer (independent answers of a read-only task).');
       const requests = new Set(workers.map(worker => worker.request.trim().replace(/\s+/g, " ")));
@@ -232,6 +240,8 @@ export interface SpawnContext {
   readOnly?: boolean;
   /** The orchestrator assignment's own cancellation, next to the tool call's. */
   signal?: AbortSignal;
+  /** Sub-workers per call (`single.maxSubWorkers` of the orchestrator's session; default {@link MAX_SUB_WORKERS}). */
+  maxSubWorkers?: number;
   nextId(): string;
   runWorker: RunSubWorker;
   /** Workspace snapshot and diff for the after-the-fact conflict check; absent outside a git work tree. */
@@ -297,7 +307,7 @@ export function formatSpawn(details: SpawnDetails): string {
 /** Run one validated call: all workers at once, then the conflict check. Never rejects for a sub-worker's failure (that is its outcome). */
 export async function executeSpawn(context: SpawnContext, params: SpawnCall, signal: AbortSignal | undefined, onUpdate?: (text: string) => void): Promise<{ text: string; details: SpawnDetails }> {
   context.ultra?.validate(params.reason, params.workers);
-  const planned = planSpawn(params, { ...(context.scope ? { scope: context.scope } : {}), ...(context.readOnly ? { readOnly: true } : {}), ...(context.ultra ? { ultra: true } : {}), nextId: () => context.nextId() });
+  const planned = planSpawn(params, { ...(context.scope ? { scope: context.scope } : {}), ...(context.readOnly ? { readOnly: true } : {}), ...(context.ultra ? { ultra: true } : {}), ...(context.maxSubWorkers !== undefined ? { maxSubWorkers: context.maxSubWorkers } : {}), nextId: () => context.nextId() });
   const notes = planned.notes;
   const started = Date.now();
   const signals = [signal, context.signal].filter((item): item is AbortSignal => !!item);
@@ -379,14 +389,16 @@ export async function executeSpawn(context: SpawnContext, params: SpawnCall, sig
  */
 const verificationRounds = new WeakMap<SpawnContext, number>();
 
-export function createSpawnTool(context: () => SpawnContext | string, options: { ultra?: boolean } = {}): ToolDefinition {
+/** `maxSubWorkers`: the session's per-call cap (`single.maxSubWorkers`, read when the session starts), in the schema and the description. */
+export function createSpawnTool(context: () => SpawnContext | string, options: { ultra?: boolean; maxSubWorkers?: number } = {}): ToolDefinition {
+  const max = options.maxSubWorkers ?? MAX_SUB_WORKERS;
   return {
     name: SPAWN_TOOL,
     label: "orche spawn",
     description: options.ultra
-      ? `Start up to ${MAX_SUB_WORKERS} sub-workers in fresh sessions at the same time and wait for all of them, by the ultra stage contract of your assignment: exploration (independent verification basis and hypotheses), candidates (independent implementations, each in its own workspace copy, or independent answers), verification (fresh read-only verifiers) or isolation (a game-asset/video specialist). Sub-workers see only their request and cannot spawn.`
-      : `Start up to ${MAX_SUB_WORKERS} sub-workers in fresh sessions at the same time and wait for all of them: independent parallel parts (each writer owns disjoint files), an isolated game-asset/video specialist, or fresh read-only verifiers. Sub-workers see only their request and cannot spawn. Use it only when the orchestration rules of your assignment say the task should be split.`,
-    parameters: options.ultra ? ultraSpawnParameters : spawnParameters,
+      ? `Start up to ${max} sub-workers in fresh sessions at the same time and wait for all of them, by the ultra stage contract of your assignment: exploration (independent verification basis and hypotheses), candidates (independent implementations, each in its own workspace copy, or independent answers), verification (fresh read-only verifiers) or isolation (a game-asset/video specialist). Sub-workers see only their request and cannot spawn.`
+      : `Start up to ${max} sub-workers in fresh sessions at the same time and wait for all of them: independent parallel parts (each writer owns disjoint files), an isolated game-asset/video specialist, or fresh read-only verifiers. Sub-workers see only their request and cannot spawn. Use it only when the orchestration rules of your assignment say the task should be split.`,
+    parameters: options.ultra ? ultraSpawnParametersFor(max) : spawnParametersFor(max),
     executionMode: "sequential",
     execute: async (_id, params, signal, onUpdate): Promise<AgentToolResult<SpawnDetails | undefined>> => {
       const current = context();

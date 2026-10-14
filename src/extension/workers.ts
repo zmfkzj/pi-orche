@@ -43,7 +43,7 @@ import { ExtendableDeadline, extensionEvent, formatExtensionProgress, formatExte
 import { createAssignmentProjector, type ContextClearedStats } from "../pi/context-projection.js";
 import { planProgress, recordFailure, recordHandoff, recordPlan, recordResult, renderLedgerForWorker, renderLedgerSummary, renderResumeBriefing, renderTimeoutResume, startLedger, type LedgerEvent, type TaskLedger } from "../single/ledger.js";
 import { appendSplitLog } from "../orchestrator/split-log.js";
-import { ORCHESTRATOR_TEAM_LINE, orchestratorSection, SPLIT_FORMAT, splitError, splitOf, unresolvedError, MAX_VERIFICATION_ROUNDS, type SplitDecision } from "../orchestrator/instructions.js";
+import { ORCHESTRATOR_TEAM_LINE, orchestratorSection, SPLIT_FORMAT, splitError, splitOf, unresolvedError, MAX_SUB_WORKERS, MAX_VERIFICATION_ROUNDS, type SplitDecision } from "../orchestrator/instructions.js";
 import { createSpawnTool, outcomeModelUse, scopePaths, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnReason, type SubWorkerOutcome } from "../orchestrator/spawn.js";
 import { createSubWorkerRunner } from "../orchestrator/sub-worker.js";
 import { ADOPT_UNAVAILABLE, createAdoptTool, subWorkerFloor, ultraSection, UltraRun, type UltraState, type UltraSummary } from "../orchestrator/ultra.js";
@@ -310,6 +310,8 @@ interface Worker {
   roundCheck?: (kind: string, data: unknown) => string | undefined;
   /** The session has orche_spawn (single-workflow workers spawned by this pool). */
   spawnTool?: boolean;
+  /** orche_spawn's per-call cap (`single.maxSubWorkers` when the session started): its tool schema, prompts and runtime check; a reused worker keeps it. */
+  maxSubWorkers?: number;
   /** The orche_spawn context of the orchestrator assignment in flight; absent otherwise (the tool then refuses). */
   spawn?: SpawnContext;
   /** The mode of the worker's last assignment (a reused worker switching modes says so in its result). */
@@ -1326,14 +1328,15 @@ export class WorkerPool {
       // orche_spawn only with `single.spawn` on: `single.spawn: false` keeps the earlier single worker's tool set exactly.
       // Ultra workers get the ultra tool set (orche_spawn with the ultra reasons, orche_adopt) whatever single.spawn says.
       const spawnTool = singleWorkflow && (config.single.spawn || ultraMode);
-      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool, ...(singleWorkflow && ultraMode ? { ultraTools: true } : {}), ...(gui ? { gui: gui.key } : {}), ...(webFetch.provider ? { webFetch: webFetch.provider.key } : {}), ...(codeGraph.provider ? { codeGraph: codeGraph.provider.key } : {}) };
+      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool, ...(spawnTool ? { maxSubWorkers: config.single.maxSubWorkers } : {}), ...(singleWorkflow && ultraMode ? { ultraTools: true } : {}), ...(gui ? { gui: gui.key } : {}), ...(webFetch.provider ? { webFetch: webFetch.provider.key } : {}), ...(codeGraph.provider ? { codeGraph: codeGraph.provider.key } : {}) };
       const meta = worker;
       meta.model = route.model;
       meta.thinking = route.thinking ?? "off";
       baselineLevel = route.thinking ?? "off";
       const customTools = [...(images ? [createGenerateImageTool({ cwd: args.cwd, runtime, images })] : []), ...(singleWorkflow ? [taskPlanToolFor(meta, () => this.manager!.session(meta.id))] : []),
       // orche_spawn: registered once per session; usable only while an orchestrator assignment set `meta.spawn` (the guard refuses it otherwise).
-      ...(spawnTool ? [createSpawnTool(() => meta.spawn ?? SPAWN_UNAVAILABLE, { ultra: !!meta.ultraTools })] : []),
+      // Its per-call cap (single.maxSubWorkers) is fixed with the schema here; prompts and the runtime check use the same meta value.
+      ...(spawnTool ? [createSpawnTool(() => meta.spawn ?? SPAWN_UNAVAILABLE, { ultra: !!meta.ultraTools, ...(meta.maxSubWorkers !== undefined ? { maxSubWorkers: meta.maxSubWorkers } : {}) })] : []),
       // orche_adopt (ultra): usable only while an ultra implement assignment runs (`meta.ultra`); the tool refuses otherwise.
       ...(meta.ultraTools ? [createAdoptTool(() => meta.ultra ?? ADOPT_UNAVAILABLE)] : [])];
       // generate_image has its own timeout (images.timeoutMs, 180 s by default): liveness bounds a silent call by it, not by the generic tool bound.
@@ -1400,6 +1403,9 @@ export class WorkerPool {
     const handoffRequest = args.request;
     // Orchestrator assignment: the sub-workers its orche_spawn calls ran, and the reasons it used (its split decision must name them).
     const orchestrating = orchestrate && !!meta.spawnTool;
+    /** orche_spawn's per-call cap of this session (single.maxSubWorkers when it started); a reused worker keeps it, a new one reads the config. */
+    const maxSubWorkers = meta.maxSubWorkers ?? MAX_SUB_WORKERS;
+    if (orchestrating && maxSubWorkers !== config.single.maxSubWorkers) ledgerNotes.push(`Note: ${meta.id} keeps orche_spawn's cap of ${maxSubWorkers} sub-workers per call from when its session started; single.maxSubWorkers ${config.single.maxSubWorkers} applies to new workers (omit worker to start one).`);
     /** Ultra: the stage contract of this orchestrator assignment (created with its spawn context; src/orchestrator/ultra.ts). */
     let ultraRun: UltraRun | undefined;
     /** The ultra outcome: a report accepted with stage complete (the next ultra assignment of the task then starts afresh). */
@@ -1809,14 +1815,14 @@ export class WorkerPool {
           // The same worker continuing the same task (after a timeout or a blocked report) keeps its candidates and their copies.
           const carried = reusedContext && ledger && meta.ultraCarry?.task === ledger.taskId ? meta.ultraCarry.state : undefined;
           const session = this.manager.session(meta.id);
-          ultraRun = new UltraRun({ orchestrator: meta.id, cwd: args.cwd, readOnly, ...(meta.scratch ? { scratch: meta.scratch } : {}), ledger: () => evidenceLedgerOf(session), verifyCommands: config.routes.verifyCommands ?? [], ...(carried ? { carried } : {}), onEvent: event => record?.appendEvent(event) });
+          ultraRun = new UltraRun({ orchestrator: meta.id, cwd: args.cwd, readOnly, ...(meta.scratch ? { scratch: meta.scratch } : {}), ledger: () => evidenceLedgerOf(session), verifyCommands: config.routes.verifyCommands ?? [], ...(carried ? { carried } : {}), maxSubWorkers, onEvent: event => record?.appendEvent(event) });
           meta.ultra = ultraRun;
           meta.ultraCarry = undefined;
           // Refs on every tool result: the ultra gate checks the cited [orche ref Tn] against this session's calls.
           evidenceLedgerOf(session).tag = true;
         }
         meta.spawn = {
-          orchestrator: meta.id, ...(files ? { scope: files } : {}), ...(readOnly ? { readOnly: true } : {}), ...(ultraRun ? { ultra: ultraRun } : {}), signal: AbortSignal.any([signal, assignmentEnd.signal]),
+          orchestrator: meta.id, maxSubWorkers, ...(files ? { scope: files } : {}), ...(readOnly ? { readOnly: true } : {}), ...(ultraRun ? { ultra: ultraRun } : {}), signal: AbortSignal.any([signal, assignmentEnd.signal]),
           // Sub-worker ids are unique within the assignment; in ultra within the whole task: a continuation numbers after the carried
           // high-water mark, so a new candidate never takes (and replaces) an earlier one's id or copy.
           nextId: () => {
@@ -1872,7 +1878,7 @@ export class WorkerPool {
         // The DAG is required for implement; an answer worker that plans gets the same rules from task_plan's own errors and notes.
         singleWorkflow && args.role === "implement" ? thinkingPolicyInstructions(thinkingPolicy) : "",
       ].filter(Boolean).join("\n");
-      const prompt = `${assignmentPrompt({ ...args, request: handoffRequest, orchestrate: orchestrating, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant, orchestrating ? (ultraRun ? ultraSection(readOnly) : orchestratorSection()) : "")}${rootsLine ? `\n${rootsLine}` : ""}`;
+      const prompt = `${assignmentPrompt({ ...args, request: handoffRequest, orchestrate: orchestrating, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant, orchestrating ? (ultraRun ? ultraSection(readOnly, maxSubWorkers) : orchestratorSection(undefined, maxSubWorkers)) : "")}${rootsLine ? `\n${rootsLine}` : ""}`;
       const handoff = reusedContext && workflowMode ? prompt.replace(/^(Assignment[^\n]*\n)/, "$1This Assignment message supersedes earlier requirement ids and plans, including any assignment preserved at compaction time. Use only this round's requirements and Task DAG.\n") : prompt;
       // The plan advisor (single.advisor): armed before the hand-off, started by the worker's first accepted task_plan (or first edit).
       if (advisorRoute) {

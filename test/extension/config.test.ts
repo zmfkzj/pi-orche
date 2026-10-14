@@ -251,8 +251,8 @@ describe("orche config discovery", () => {
     await expect(discoverOrcheConfig({ ...files, projectTrusted: false, session })).rejects.toThrow("config.taskContext");
   });
 
-  it("defaults single to {ledger:false, spawn:true, advisor:false} and reads it from the selected file", async () => {
-    const defaults = { ledger: false, spawn: true, advisor: false };
+  it("defaults single to {ledger:false, spawn:true, advisor:false, maxSubWorkers:4} and reads it from the selected file", async () => {
+    const defaults = { ledger: false, spawn: true, advisor: false, maxSubWorkers: 4 };
     expect(DEFAULT_SINGLE).toEqual(defaults);
     expect(parseSingleConfig({})).toEqual(defaults);
     expect(parseSingleConfig({ ledger: true })).toEqual({ ...defaults, ledger: true });
@@ -288,19 +288,50 @@ describe("orche config discovery", () => {
   });
   it.each([{ pipeline: "v2" }, { pipeline: "v3" }, { frame: "spec" }, { checker: { gate: "always" } }, { nav: false }, { mainReview: "evidence" }, { investigation: { critic: "auto" } }, { creation: { divergence: "always", candidates: 2 } }])("ignores the removed single setting %j with a warning", async value => {
     const warnings: string[] = [];
-    expect(parseSingleConfig({ ...value, ledger: true }, warnings)).toEqual({ ledger: true, spawn: true, advisor: false });
+    expect(parseSingleConfig({ ...value, ledger: true }, warnings)).toEqual({ ledger: true, spawn: true, advisor: false, maxSubWorkers: 4 });
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain(Object.keys(value)[0]);
     const files = await layout({ user: { ...cfg("u/user"), single: value } });
     const path = join(files.agentDir, "orche.config.json");
     const loaded = await loadOrcheConfigFile(path);
-    expect(loaded.single).toEqual({ ledger: false, spawn: true, advisor: false });
+    expect(loaded.single).toEqual({ ledger: false, spawn: true, advisor: false, maxSubWorkers: 4 });
     expect(loaded.warnings.join("\n")).toContain(Object.keys(value)[0]);
     const found = await discoverOrcheConfig({ ...files, projectTrusted: false, session });
-    expect(found.single).toEqual({ ledger: false, spawn: true, advisor: false });
+    expect(found.single).toEqual({ ledger: false, spawn: true, advisor: false, maxSubWorkers: 4 });
     expect(found.warnings?.join("\n")).toContain(Object.keys(value)[0]);
   });
 
+  // single.maxSubWorkers: orche_spawn's per-call cap (default 4, integers 2-8); invalid values fail the config load with an actionable error.
+  it("reads single.maxSubWorkers within 2-8 next to the other single settings", async () => {
+    expect(parseSingleConfig({ maxSubWorkers: 2 })).toEqual({ ledger: false, spawn: true, advisor: false, maxSubWorkers: 2 });
+    expect(parseSingleConfig({ maxSubWorkers: 8, spawn: false }).maxSubWorkers).toBe(8);
+    const files = await layout({ user: { ...cfg("u/user"), single: { maxSubWorkers: 3 } } });
+    const found = await discoverOrcheConfig({ ...files, projectTrusted: false, session });
+    expect(found.single).toEqual({ ledger: false, spawn: true, advisor: false, maxSubWorkers: 3 });
+    expect(found.warnings ?? []).toEqual([]);
+  });
+  it.each([1, 9, 0, -4, 2.5, "4", null, true, Number.NaN, Infinity])("rejects single.maxSubWorkers %j with the supported range", async value => {
+    expect(() => parseSingleConfig({ maxSubWorkers: value })).toThrow("config.single.maxSubWorkers: expected an integer from 2 to 8 (sub-workers per orche_spawn call; default 4)");
+    if (typeof value === "number" && !Number.isFinite(value)) return; // NaN and Infinity have no JSON form
+    const files = await layout({ user: { ...cfg("u/user"), single: { maxSubWorkers: value } } });
+    await expect(discoverOrcheConfig({ ...files, projectTrusted: false, session })).rejects.toThrow("config.single.maxSubWorkers");
+  });
+  it("keeps the legacy workers.maxWorkers ignored, also next to single.maxSubWorkers, and points to the new key", async () => {
+    const warnings: string[] = [];
+    const parsed = parseRouteConfig({ ...cfg("u/user"), workers: { maxWorkers: 2, answerAngles: ["a"] } }, warnings);
+    expect(parsed.workers).toBeUndefined();
+    expect(warnings.join("\n")).toContain('"single": { "maxSubWorkers": 2-8 }');
+    expect(warnings.join("\n")).not.toContain("answerAngles is now");
+    const files = await layout({ user: { ...cfg("u/user"), workers: { maxWorkers: 2 }, single: { maxSubWorkers: 6 } } });
+    const found = await discoverOrcheConfig({ ...files, projectTrusted: false, session });
+    expect(found.single.maxSubWorkers).toBe(6);
+    expect(found.warnings?.join("\n")).toContain("workers.maxWorkers was removed with the multi-worker coordinator");
+    const legacyOnly = await layout({ user: { ...cfg("u/user"), workers: { maxWorkers: 2 } } });
+    expect((await discoverOrcheConfig({ ...legacyOnly, projectTrusted: false, session })).single.maxSubWorkers).toBe(4);
+    const advisors: string[] = [];
+    parseRouteConfig({ ...cfg("u/user"), advisors: [{ name: "x", model: "p/m" }] }, advisors);
+    expect(advisors.join("\n")).not.toContain("maxSubWorkers");
+  });
   it.each([{ spawn: "yes" }, { spawn: null }])("rejects invalid single.spawn %j", value => {
     expect(() => parseSingleConfig(value)).toThrow("config.single");
   });

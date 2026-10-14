@@ -7,6 +7,7 @@ import { DEFAULT_WINDOW_MS } from "./concurrent-sessions.js";
 import { DEFAULT_CONTEXT_WARNING, type ContextWarningSettings } from "./context-warning.js";
 import { DEFAULT_THINKING_POLICY, resolveThinkingPolicy, type ThinkingPolicySettings } from "../pi/thinking-policy.js";
 import { DEFAULT_OUTPUT_CAP, type OutputCapSettings } from "../pi/output-cap.js";
+import { MAX_SUB_WORKERS, SUB_WORKER_CAP_MAX, SUB_WORKER_CAP_MIN } from "../orchestrator/instructions.js";
 
 export const CONFIG_FILE = "orche.config.json";
 
@@ -184,6 +185,12 @@ export function parseContextWarningConfig(value: unknown): ContextWarningSetting
  * its advice is steered into the running worker as advisory text. Its model and thinking come from `models.advisor` (unset: the
  * worker's own). Off: no advisor session, no extra request, nothing changes.
  *
+ * `maxSubWorkers` (default 4 = MAX_SUB_WORKERS, an integer from SUB_WORKER_CAP_MIN 2 to SUB_WORKER_CAP_MAX 8): how many
+ * sub-workers one `orche_spawn` call may start; they run at the same time, so this is the orchestrator's parallel sub-worker cap (the
+ * single, strong and ultra modes; ultra's exploration and candidates need 2, hence the minimum). It is fixed when an orchestrator
+ * worker session starts (its tool schema carries it); a reused worker keeps its value. Not the session's job queue or the idle
+ * worker pool (pool cap 3).
+ *
  * The keys of the removed v2 pipeline and workflow policies (`pipeline`, `frame`, `checker`, `nav`, `mainReview`, `investigation`,
  * `creation`) are ignored with a warning, whatever their value, so an old config still loads.
  */
@@ -191,9 +198,10 @@ export interface SingleSettings {
   ledger: boolean;
   spawn: boolean;
   advisor: boolean;
+  maxSubWorkers: number;
 }
-export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false, spawn: true, advisor: false };
-const SINGLE_KEYS = new Set(["ledger", "spawn", "advisor"]);
+export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false, spawn: true, advisor: false, maxSubWorkers: MAX_SUB_WORKERS };
+const SINGLE_KEYS = new Set(["ledger", "spawn", "advisor", "maxSubWorkers"]);
 /** Keys of the removed single pipeline v2, `mainReview` and workflow policies (docs/orchestrator.md 4): ignored with a warning. */
 export const LEGACY_SINGLE_KEYS: ReadonlySet<string> = new Set(["pipeline", "frame", "checker", "nav", "mainReview", "investigation", "creation"]);
 export function legacySingleWarning(keys: readonly string[]): string {
@@ -208,11 +216,15 @@ export function parseSingleConfig(value: unknown, warnings?: string[]): SingleSe
   if (settings.ledger !== undefined && typeof settings.ledger !== "boolean") throw new RouteConfigError("config.single.ledger: expected boolean");
   if (settings.spawn !== undefined && typeof settings.spawn !== "boolean") throw new RouteConfigError("config.single.spawn: expected boolean");
   if (settings.advisor !== undefined && typeof settings.advisor !== "boolean") throw new RouteConfigError("config.single.advisor: expected boolean");
+  const max = settings.maxSubWorkers;
+  if (max !== undefined && (typeof max !== "number" || !Number.isInteger(max) || max < SUB_WORKER_CAP_MIN || max > SUB_WORKER_CAP_MAX))
+    throw new RouteConfigError(`config.single.maxSubWorkers: expected an integer from ${SUB_WORKER_CAP_MIN} to ${SUB_WORKER_CAP_MAX} (sub-workers per orche_spawn call; default ${MAX_SUB_WORKERS}); got ${JSON.stringify(max)}`);
   if (legacy.length) warnings?.push(legacySingleWarning(legacy));
   return {
     ledger: (settings.ledger as boolean | undefined) ?? DEFAULT_SINGLE.ledger,
     spawn: (settings.spawn as boolean | undefined) ?? DEFAULT_SINGLE.spawn,
     advisor: (settings.advisor as boolean | undefined) ?? DEFAULT_SINGLE.advisor,
+    maxSubWorkers: (max as number | undefined) ?? DEFAULT_SINGLE.maxSubWorkers,
   };
 }
 

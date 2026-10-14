@@ -275,7 +275,7 @@ describe("ultra: candidate workspaces (real git)", () => {
 });
 
 /** An ultra orchestrator's tool calls through the same hooks the worker pool uses: beginCall (guard), the call, the ledger, endCall. */
-async function orchestrator(options: { readOnly?: boolean; cwd?: string; scratch?: string; carried?: UltraState } = {}) {
+async function orchestrator(options: { readOnly?: boolean; cwd?: string; scratch?: string; carried?: UltraState; maxSubWorkers?: number } = {}) {
   const made = options.cwd ? { cwd: options.cwd, scratch: options.scratch! } : await repo();
   const { cwd, scratch } = made;
   const session = {};
@@ -283,7 +283,7 @@ async function orchestrator(options: { readOnly?: boolean; cwd?: string; scratch
   ledger.tag = true;
   let n = 0;
   const events: Record<string, unknown>[] = [];
-  const ultra = new UltraRun({ orchestrator: "W1", cwd, readOnly: !!options.readOnly, scratch, ledger: () => ledger, verifyCommands: ["sh test/basis.sh"], ...(options.carried ? { carried: options.carried } : {}), onEvent: event => events.push(event) });
+  const ultra = new UltraRun({ orchestrator: "W1", cwd, readOnly: !!options.readOnly, scratch, ledger: () => ledger, verifyCommands: ["sh test/basis.sh"], ...(options.carried ? { carried: options.carried } : {}), ...(options.maxSubWorkers ? { maxSubWorkers: options.maxSubWorkers } : {}), onEvent: event => events.push(event) });
   const record = (id: string, name: string, input: Record<string, unknown>, isError: boolean) => recordToolCall(session, { toolCallId: id, toolName: name, input, isError }, { request: n, atBaseline: true }).ref;
   /** Whether a call (by ref) failed: a shell check's exit status, asserted by the tests (shell never throws). */
   const failures = new Map<string, boolean>();
@@ -309,7 +309,7 @@ async function orchestrator(options: { readOnly?: boolean; cwd?: string; scratch
     await ultra.beginCall(id, "orche_spawn");
     try {
       ultra.validate(reason as never, workers);
-      const planned = planSpawn({ reason: reason as never, workers }, { ultra: true, readOnly: !!options.readOnly, nextId: next }).workers;
+      const planned = planSpawn({ reason: reason as never, workers }, { ultra: true, readOnly: !!options.readOnly, ...(options.maxSubWorkers ? { maxSubWorkers: options.maxSubWorkers } : {}), nextId: next }).workers;
       const prepared = await ultra.prepare(reason as never, planned, new AbortController().signal);
       await during?.(prepared);
       const outcomes = prepared.map(item => outcome(item, status(item), item.role === "implement" && !item.workspace ? [...(item.files ?? [])] : []));
@@ -526,6 +526,22 @@ describe("ultra: UltraRun stages, adoption, guard and report gate", () => {
     expect(await run.report("answer", { ultra: { stage: "candidates" } })).toContain("data.unresolved");
     expect(await run.report("answer", { ultra: { stage: "candidates" }, unresolved: ["no second source"] })).toBeUndefined();
     expect(ultraSection(true)).toContain("no code tests are required for a question");
+  });
+
+  // single.maxSubWorkers: the ultra stages, their next-step hint and the prompt follow the session's per-call cap.
+  it("follows the configured sub-worker cap in its stages, hints and prompt", async () => {
+    const run = await orchestrator({ readOnly: true, maxSubWorkers: 3 });
+    const { lines } = await run.spawn("exploration", [worker("sources", "answer", "find sources"), worker("cause", "answer", "hypotheses"), worker("other", "answer", "other angle")]);
+    expect(lines.join("\n")).toContain('Next: orche_spawn reason "candidates" with 2-3 independent answers');
+    await expect(run.spawn("candidates", ["a", "b", "c", "d"].map(name => worker(name, "answer", `angle ${name}`)))).rejects.toThrow("orche_spawn takes 1 to 3 workers per call");
+    const { prepared } = await run.spawn("candidates", ["a", "b", "c"].map(name => worker(name, "answer", `angle ${name}`)));
+    expect(prepared).toHaveLength(3);
+    for (const readOnly of [true, false]) {
+      expect(ultraSection(readOnly, 3)).toContain("3 workers per orche_spawn call");
+      expect(ultraSection(readOnly, 3)).toContain('(reason "candidates", 2-3 ');
+      expect(ultraSection(readOnly)).toContain('(reason "candidates", 2-4 ');
+    }
+    expect(ultraSection(false, 8)).toContain('orche_spawn reason "exploration", 2-8 workers');
   });
 });
 

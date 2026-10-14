@@ -24,20 +24,31 @@ Units: one unit per independent part with the files or directories it owns; two 
  */
 export const ORCHESTRATOR_TEAM_LINE = "There are no peers or backlog; the only other workers are the sub-workers you start with orche_spawn.";
 
-/** Sub-workers one orche_spawn call may start (they run at the same time). */
+/**
+ * Sub-workers one orche_spawn call may start by default (they run at the same time). `single.maxSubWorkers` in orche.config.json
+ * sets it per orchestrator worker session within SUB_WORKER_CAP_MIN..SUB_WORKER_CAP_MAX: 2 because parallelism and ultra's
+ * exploration and candidates need two workers, 8 because every sub-worker is a full model session (cost, provider rate limits,
+ * memory and the checks it runs) and every ultra implement candidate a workspace copy.
+ */
 export const MAX_SUB_WORKERS = 4;
+export const SUB_WORKER_CAP_MIN = 2;
+export const SUB_WORKER_CAP_MAX = 8;
 /** Verification rounds (orche_spawn with reason "verification") per orchestrator assignment; see createSpawnTool in spawn.ts. */
 export const MAX_VERIFICATION_ROUNDS = 2;
 
-/** How the orchestrator uses orche_spawn and what it owes afterwards. */
-export const SPAWN_USAGE = `orche_spawn {reason, workers:[{name, role, request, files}]} starts up to ${MAX_SUB_WORKERS} sub-workers in fresh sessions at the same time and returns when all of them have reported. They see only their own request: make each one self-contained (goal, acceptance criteria, constraints, file references, and the user's original wording where it matters) and never paste your reasoning. Sub-workers cannot spawn workers. reason "parallelism": two or more workers; every writing worker (implement, game-asset, video) names the files or directories it owns, no two own the same file, and writes outside a worker's own files are blocked. reason "isolation": a game-asset or video specialist (its own model route and image tools), or a worker that must run apart from this context. reason "verification": role verify only; give the fresh verifier the original request, the acceptance criteria and the changed paths, not how you built it, and let it run its own checks; at most ${MAX_VERIFICATION_ROUNDS} verification rounds per assignment, after which you report the remaining findings in data.unresolved instead of starting another round. Call orche_spawn again for another reason (one call at a time). Each sub-worker has your assignment's time limits from its own start, extended while it is itself active, but it ends when your assignment ends. After sub-workers report you own the result: read their reports, check what they changed, run the project checks yourself, fix or finish what is missing, and report one result for the whole task.`;
+/** How the orchestrator uses orche_spawn and what it owes afterwards; `maxSubWorkers`: the session's per-call cap. */
+export function spawnUsage(maxSubWorkers: number = MAX_SUB_WORKERS): string {
+  return `orche_spawn {reason, workers:[{name, role, request, files}]} starts up to ${maxSubWorkers} sub-workers in fresh sessions at the same time and returns when all of them have reported. They see only their own request: make each one self-contained (goal, acceptance criteria, constraints, file references, and the user's original wording where it matters) and never paste your reasoning. Sub-workers cannot spawn workers. reason "parallelism": two or more workers; every writing worker (implement, game-asset, video) names the files or directories it owns, no two own the same file, and writes outside a worker's own files are blocked. reason "isolation": a game-asset or video specialist (its own model route and image tools), or a worker that must run apart from this context. reason "verification": role verify only; give the fresh verifier the original request, the acceptance criteria and the changed paths, not how you built it, and let it run its own checks; at most ${MAX_VERIFICATION_ROUNDS} verification rounds per assignment, after which you report the remaining findings in data.unresolved instead of starting another round. Call orche_spawn again for another reason (one call at a time). Each sub-worker has your assignment's time limits from its own start, extended while it is itself active, but it ends when your assignment ends. After sub-workers report you own the result: read their reports, check what they changed, run the project checks yourself, fix or finish what is missing, and report one result for the whole task.`;
+}
+export const SPAWN_USAGE = spawnUsage();
 
 /**
  * The orchestrator part of an implement/answer assignment prompt in the single workflow. `judgment` exists for the split-judgment
- * evaluation (experiments/judgment/run-v2.ts), which renders this exact section with each instruction variant.
+ * evaluation (experiments/judgment/run-v2.ts), which renders this exact section with each instruction variant; `maxSubWorkers` is
+ * the orchestrator session's per-call cap (`single.maxSubWorkers`).
  */
-export function orchestratorSection(judgment: string = SPLIT_JUDGMENT): string {
-  return `Orchestration: you are the orchestrator of this task. Before you start working, decide whether to split it.\n${judgment}\n${SPAWN_USAGE}\nReport the decision in data.split: {decision:"none" or "split",criteria:[the criteria that applied: "parallelism", "isolation", "verification"],reason:"one or two sentences"}.`;
+export function orchestratorSection(judgment: string = SPLIT_JUDGMENT, maxSubWorkers: number = MAX_SUB_WORKERS): string {
+  return `Orchestration: you are the orchestrator of this task. Before you start working, decide whether to split it.\n${judgment}\n${spawnUsage(maxSubWorkers)}\nReport the decision in data.split: {decision:"none" or "split",criteria:[the criteria that applied: "parallelism", "isolation", "verification"],reason:"one or two sentences"}.`;
 }
 
 /** The `split` field the orchestrator's report_result data carries. */

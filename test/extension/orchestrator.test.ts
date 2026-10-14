@@ -206,6 +206,39 @@ describe("orchestrator: parallel split", () => {
   });
 });
 
+// single.maxSubWorkers: fixed when the orchestrator's session starts (schema, prompt, runtime check); new workers read the config.
+describe("orchestrator: single.maxSubWorkers", () => {
+  const maxItems = (pool: WorkerPool, id: string) => (pool.session(id).getToolDefinition(SPAWN_TOOL)?.parameters as { properties: { workers: { maxItems: number } } }).properties.workers.maxItems;
+  const report = tool("report_result", { kind: "implement", summary: "Did it myself", data: { status: "done", checklist, split: { decision: "none", reason: "coupled" } } });
+
+  it("a cap of 2 refuses three sub-workers; a reused worker keeps its cap, a new worker takes the changed one", async () => {
+    let refused = "";
+    const { h, pool, execute } = await fixture([
+      tool(SPAWN_TOOL, { reason: "parallelism", workers: [{ name: "a", role: "answer", request: "x" }, { name: "b", role: "answer", request: "y" }, { name: "c", role: "answer", request: "z" }] }),
+      context => { refused = JSON.stringify(toolErrorOf(context, SPAWN_TOOL)); return report; },
+      report,
+      report,
+    ], { single: { maxSubWorkers: 2 } });
+    const first = await execute();
+    expect(refused).toContain("must not have more than 2 items"); // the session schema refuses it; planSpawn is the second line
+    expect(first.details.spawned).toBeUndefined();
+    expect(maxItems(pool, "W1")).toBe(2);
+    expect(assignmentOf(h, pool)).toContain("starts up to 2 sub-workers");
+    // The user raises the cap: the reused W1 keeps 2 (its schema cannot change) and says so; a new worker gets 8.
+    const path = join(h.agentDir, "orche.config.json");
+    const config = JSON.parse(await readFile(path, "utf8"));
+    await writeFile(path, JSON.stringify({ ...config, single: { maxSubWorkers: 8 } }));
+    const reused = await execute({ worker: "W1" });
+    expect(reused.text).toContain("W1 keeps orche_spawn's cap of 2 sub-workers per call");
+    expect(JSON.stringify(pool.session("W1").messages.filter(message => message.role === "user").at(-1))).toContain("starts up to 2 sub-workers");
+    const fresh = await execute();
+    expect(fresh.details.worker).toBe("W2");
+    expect(fresh.text).not.toContain("keeps orche_spawn's cap");
+    expect(maxItems(pool, "W2")).toBe(8);
+    expect(JSON.stringify(pool.session("W2").messages.find(message => message.role === "user"))).toContain("starts up to 8 sub-workers");
+  });
+});
+
 describe("orchestrator: independent verification", () => {
   it("starts a fresh read-only verifier without the orchestrator's context and requires the split decision to name it", async () => {
     const seen: Record<string, string> = {};

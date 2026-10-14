@@ -40,9 +40,9 @@ User ⇄ main (single 모드: 대화·요구사항 정리·보고서 검토, 편
 |---|---|---|
 | main 규칙 | `src/extension/mode.ts` `delegationRules` | single 인계 형식 + 보고서 기반 검토(`mainReview` 분기 제거, G-M2의 `report`만 남김) + "분할은 orchestrator가 판단한다" |
 | orchestrator 지시 | `src/orchestrator/instructions.ts` | 5장에서 고른 분할 판단 지시문, spawn 사용법, `data.split` 보고 |
-| spawn 도구 | `src/orchestrator/spawn.ts`, `src/orchestrator/sub-worker.ts` | 병렬 실행(호출당 최대 4), 깊이 1, 소유 파일 검증·쓰기 guard·사후 audit, verifier는 새 세션·읽기 전용, specialist route, 모델 상속 |
+| spawn 도구 | `src/orchestrator/spawn.ts`, `src/orchestrator/sub-worker.ts` | 병렬 실행(호출당 최대 4, `single.maxSubWorkers`로 2–8), 깊이 1, 소유 파일 검증·쓰기 guard·사후 audit, verifier는 새 세션·읽기 전용, specialist route, 모델 상속 |
 | 연결 | `src/extension/workers.ts` | orchestrator 세션에만 `orche_spawn` 등록, sub-worker 기록을 run record와 결과에 남김 |
-| 설정 | `src/extension/config.ts` | `single.ledger`(유지), `single.spawn`(새, 기본 true; false면 예전 single). 예전 키(`pipeline`, `frame`, `checker`, `nav`, `mainReview`, `investigation`, `creation`)는 무시하고 경고 |
+| 설정 | `src/extension/config.ts` | `single.ledger`(유지), `single.spawn`(새, 기본 true; false면 예전 single), `single.maxSubWorkers`(orche_spawn 한 번에 동시에 띄우는 sub-worker 수, 정수 2–8, 기본 4; orchestrator worker 세션 시작 때 고정). 예전 키(`pipeline`, `frame`, `checker`, `nav`, `mainReview`, `investigation`, `creation`)는 무시하고 경고 |
 
 파일 충돌을 막는 장치는 네 겹이다. (1) 한 spawn 호출 안의 쓰기 worker는 소유 파일을 반드시 적고, 서로 겹치면 호출 자체를 거부한다(`validateBacklog`의 `file_overlap` 재사용). (2) sub-worker의 edit/write/ast_rewrite는 `checkWriteRealPath`로 자기 소유 파일 안에서만 허용되고 형제 worker의 파일은 막힌다(symlink 포함). (3) spawn 도구는 `executionMode: "sequential"`이라 다른 도구 호출과 겹쳐 실행되지 않고, orchestrator는 sub-worker가 도는 동안 기다린다. (4) bash처럼 guard가 못 막는 쓰기는 spawn 전후 workspace snapshot(`WorkspaceAudit`/`WorkspaceActivity.checkpoint`)으로 비교해 소유 범위 밖 변경을 결과에 경고로 남긴다.
 

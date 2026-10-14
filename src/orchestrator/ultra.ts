@@ -43,7 +43,7 @@ import { formatSchemaErrors } from "../orchestration/schema-errors.js";
 import { WRITE_TOOLS } from "../orchestration/ownership.js";
 import { READ_ONLY_TOOL_NAMES } from "../tools/index.js";
 import { BOOKKEEPING_TOOLS, type EvidenceLedger, type ToolRecord } from "../pi/tool-evidence.js";
-import { MAX_SUB_WORKERS, MAX_VERIFICATION_ROUNDS } from "./instructions.js";
+import { MAX_SUB_WORKERS, MAX_VERIFICATION_ROUNDS, SUB_WORKER_CAP_MAX } from "./instructions.js";
 import { CandidateWorkspaces, DEPENDENCY_DIRS, manifestDiff, UnsafeLinksError, type Manifest, type MaterializeReport } from "./candidate-workspace.js";
 import type { PlannedWorker, SpawnReason, SubWorkerOutcome, UltraSpawnHooks } from "./spawn.js";
 
@@ -62,7 +62,7 @@ export const ultraReportSchema = Type.Object({
   stage: lit(ULTRA_STAGES),
   criteria: Type.Optional(Type.Array(text(600), { minItems: 1, maxItems: 30 })),
   hypotheses: Type.Optional(Type.Array(Type.Object({ claim: text(600), verdict: lit(["supported", "refuted", "open"] as const), evidence: Type.Optional(refs) }), { maxItems: 20 })),
-  candidates: Type.Optional(Type.Array(Type.Object({ id: text(40), verdict: lit(["chosen", "rejected", "failed"] as const), reason: text(1000), evidence: Type.Optional(refs) }), { maxItems: MAX_SUB_WORKERS * MAX_CANDIDATE_ROUNDS })),
+  candidates: Type.Optional(Type.Array(Type.Object({ id: text(40), verdict: lit(["chosen", "rejected", "failed"] as const), reason: text(1000), evidence: Type.Optional(refs) }), { maxItems: SUB_WORKER_CAP_MAX * MAX_CANDIDATE_ROUNDS })),
   selection: Type.Optional(Type.Object({ chosen: text(40), reason: text(1000), evidence: refs })),
   review: Type.Optional(Type.Array(Type.Object({ finding: text(1000), source: Type.Optional(text(40)), status: lit(["reproduced-fixed", "reproduced-open", "unverified", "refuted"] as const), evidence: Type.Optional(refs) }), { maxItems: 30 })),
   integration: Type.Optional(Type.Object({ evidence: refs })),
@@ -155,6 +155,8 @@ export interface UltraRunOptions {
   verifyCommands?: readonly string[];
   /** Carried state of the same worker and task (after a timeout or a blocked report). */
   carried?: UltraState;
+  /** Sub-workers per orche_spawn call (`single.maxSubWorkers` of the orchestrator's session; default MAX_SUB_WORKERS). */
+  maxSubWorkers?: number;
   onEvent?(event: Record<string, unknown>): void;
 }
 
@@ -399,7 +401,7 @@ export class UltraRun implements UltraSpawnHooks {
       });
       lines.push(`Ultra exploration round ${state.explorationRounds}/${MAX_EXPLORATION_ROUNDS}: ${basis.length} basis builder(s) and ${done.length - basis.length} analyst(s) finished (${outcomes.length - done.length} did not).`,
         state.protectedPaths.length ? `Protected verification basis (candidates and you cannot change it; only another exploration round can): ${state.protectedPaths.join(", ")}.` : this.options.readOnly ? "" : "No basis file was written: the candidates are judged by the existing project checks only; say so in data.ultra.criteria.",
-        state.basisDone && state.analystsDone || this.options.readOnly && state.analystsDone ? `Next: orche_spawn reason "candidates" with 2-${MAX_SUB_WORKERS} independent ${this.options.readOnly ? "answers" : "implementations, each with a different approach or hypothesis"}.` : `Candidates still need a finished ${state.basisDone ? "analyst" : "verification-basis builder"}: run another exploration round (cap ${MAX_EXPLORATION_ROUNDS}) or report status "blocked".`);
+        state.basisDone && state.analystsDone || this.options.readOnly && state.analystsDone ? `Next: orche_spawn reason "candidates" with 2-${this.options.maxSubWorkers ?? MAX_SUB_WORKERS} independent ${this.options.readOnly ? "answers" : "implementations, each with a different approach or hypothesis"}.` : `Candidates still need a finished ${state.basisDone ? "analyst" : "verification-basis builder"}: run another exploration round (cap ${MAX_EXPLORATION_ROUNDS}) or report status "blocked".`);
       this.event({ stage: "exploration", round: state.explorationRounds, basisDone: state.basisDone, analystsDone: state.analystsDone, protected: [...state.protectedPaths] });
       return lines.filter(Boolean);
     }
@@ -765,15 +767,15 @@ export function createAdoptTool(context: () => UltraRun | string): ToolDefinitio
   } as ToolDefinition;
 }
 
-/** The ultra part of an implement/answer assignment prompt (prompt-based guidance next to the enforced contract above). */
-export function ultraSection(readOnly: boolean): string {
-  const caps = `Caps: exploration ${MAX_EXPLORATION_ROUNDS} rounds, candidates ${MAX_CANDIDATE_ROUNDS} rounds, verification ${MAX_VERIFICATION_ROUNDS} rounds per assignment, ${MAX_SUB_WORKERS} workers per orche_spawn call; sub-workers cannot spawn.`;
+/** The ultra part of an implement/answer assignment prompt (prompt-based guidance next to the enforced contract above); `maxSubWorkers`: the session's per-call cap. */
+export function ultraSection(readOnly: boolean, maxSubWorkers: number = MAX_SUB_WORKERS): string {
+  const caps = `Caps: exploration ${MAX_EXPLORATION_ROUNDS} rounds, candidates ${MAX_CANDIDATE_ROUNDS} rounds, verification ${MAX_VERIFICATION_ROUNDS} rounds per assignment, ${maxSubWorkers} workers per orche_spawn call; sub-workers cannot spawn.`;
   const evidence = "Evidence items cite the [orche ref Tn] that ends each of your tool results; only your own successful runs count, never a sub-worker's report, a vote or the number of agreeing reports.";
   if (readOnly) return [
     "Ultra mode (quality first; the runtime enforces the stage order, the caps and the report gate). You are the orchestrator of this read-only question; sub-workers are read-only.",
     "1. Criteria: fix the question's explicit evaluation criteria (what a correct, complete answer must show) in data.ultra.criteria.",
-    `2. Exploration (orche_spawn reason "exploration", 2-${MAX_SUB_WORKERS} answer workers): independent source finders/criteria builders and hypothesis analysts; give them only the question and references, never a draft answer.`,
-    `3. Candidates (reason "candidates", 2-${MAX_SUB_WORKERS} answer workers): independent answers, each from a different angle, each claim with its sources.`,
+    `2. Exploration (orche_spawn reason "exploration", 2-${maxSubWorkers} answer workers): independent source finders/criteria builders and hypothesis analysts; give them only the question and references, never a draft answer.`,
+    `3. Candidates (reason "candidates", 2-${maxSubWorkers} answer workers): independent answers, each from a different angle, each claim with its sources.`,
     "4. Evaluation: check every candidate's key claims against the sources yourself (read, grep, bash); no code tests are required for a question.",
     "5. Selection: choose the best-supported candidate answer by the criteria; merge only claims you checked. 6. Review: orche_spawn reason \"verification\" with fresh verifiers that try to refute the selected answer's claims; reproduce or refute each finding yourself.",
     `Report data.ultra: ${FORMAT}. ${evidence} If a stage cannot be completed, set data.ultra.stage to where it stopped and list what is missing in data.unresolved. ${caps}`,
@@ -781,8 +783,8 @@ export function ultraSection(readOnly: boolean): string {
   return [
     "Ultra mode (quality first; the runtime enforces the stage order, the caps, candidate isolation, the protected basis, adoption and the report gate). You are the orchestrator: you do not implement the solution in the workspace yourself; candidates do, and you edit the workspace only to integrate after an adoption.",
     "1. Requirements: fix the requirements and acceptance criteria in your Task DAG (task_plan) and in data.ultra.criteria; report an ambiguity you cannot resolve instead of guessing.",
-    `2. Exploration (orche_spawn reason "exploration", 2-${MAX_SUB_WORKERS} workers, before any candidate): verification-basis builders (role implement) write tests or executable checks for the acceptance criteria in files they own, from the requirements alone, so that a wrong solution fails them; hypothesis/approach analysts (role answer) propose causes or approaches, each with a prediction and a check that would falsify it. Give them only the requirements and references, never a planned solution. The files the basis builders changed become the protected verification basis: nobody changes it afterwards except another exploration round.`,
-    `3. Candidates (reason "candidates", 2-${MAX_SUB_WORKERS} implement workers): independent implementations, each with a different approach or hypothesis, each in its own workspace copy (named in the result); they cannot see each other. A second round may fix a candidate from its failure evidence only (from: its id); the earlier candidate stays unchanged as the incumbent.`,
+    `2. Exploration (orche_spawn reason "exploration", 2-${maxSubWorkers} workers, before any candidate): verification-basis builders (role implement) write tests or executable checks for the acceptance criteria in files they own, from the requirements alone, so that a wrong solution fails them; hypothesis/approach analysts (role answer) propose causes or approaches, each with a prediction and a check that would falsify it. Give them only the requirements and references, never a planned solution. The files the basis builders changed become the protected verification basis: nobody changes it afterwards except another exploration round.`,
+    `3. Candidates (reason "candidates", 2-${maxSubWorkers} implement workers): independent implementations, each with a different approach or hypothesis, each in its own workspace copy (named in the result); they cannot see each other. A second round may fix a candidate from its failure evidence only (from: its id); the earlier candidate stays unchanged as the incumbent.`,
     "4. Evaluation: run the same checks (the protected basis, the project's tests, typecheck/lint) in every finished candidate's copy yourself (bash: cd '<workspace>' && <checks>), one tool call per response; judge only by these runs. Every finished (done) candidate needs such a run of its current copy in its data.ultra.candidates entry, passing or failing (verdict \"failed\" needs a failing one); only candidates that did not finish, broke isolation, changed the protected basis or changed no file are excluded without one. A check counts only for the exact content it saw: the runtime fingerprints the copies and the workspace (their files and their dependency directories node_modules/.venv/venv) before and after every bash call and again at your report, so a check that changed files or dependencies (every file there counts, tool caches included: run checks without writing there, e.g. vitest run --no-cache or PYTHONDONTWRITEBYTECODE=1), overlapped another call, or was followed by a change (by any tool, shell command, install or process) has to be run again.",
     "5. Selection and adoption: choose the candidate with the best execution evidence (on a tie the simpler, smaller, less risky change); orche_adopt {candidate} copies its changed files into the workspace (refused unless a successful check of yours saw its copy exactly as it is now, when its round broke isolation, or when the workspace changed underneath). Dependency changes a candidate made in its copy are not adopted: install them in the workspace before the integration checks.",
     "6. Counterexample review: orche_spawn reason \"verification\" on the integrated result, asking for concrete counterexamples with reproduction commands. Reproduce each finding yourself: reproduced-fixed (fixed and re-checked), reproduced-open (keeps the task blocked), unverified (could not reproduce), refuted (your run disproves it).",

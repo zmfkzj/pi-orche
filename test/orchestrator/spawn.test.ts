@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { VARIANTS } from "../../experiments/judgment/variants.js";
 import { VARIANTS_V2 } from "../../experiments/judgment/variants-v2.js";
-import { MAX_SUB_WORKERS, orchestratorSection, SPLIT_JUDGMENT, splitError, unresolvedError } from "../../src/orchestrator/instructions.js";
+import { MAX_SUB_WORKERS, orchestratorSection, SPAWN_USAGE, SPLIT_JUDGMENT, splitError, SUB_WORKER_CAP_MAX, SUB_WORKER_CAP_MIN, unresolvedError } from "../../src/orchestrator/instructions.js";
 import { createSpawnTool, DEPTH_LIMIT_MESSAGE, executeSpawn, outcomeModelUse, planSpawn, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnParameters, type SubWorkerOutcome } from "../../src/orchestrator/spawn.js";
 import { createSubWorkerRunner, subWorkerGuard } from "../../src/orchestrator/sub-worker.js";
 
@@ -113,6 +113,66 @@ describe("parallel split", () => {
   it("a read-only orchestrator (answer) spawns only read-only workers", () => {
     expect(() => planSpawn({ reason: "parallelism", workers: [{ name: "a", role: "answer", request: "x" }, { name: "b", role: "implement", request: "y", files: ["b.ts"] }] }, { readOnly: true, nextId })).toThrow(/read-only/);
     expect(planSpawn({ reason: "parallelism", workers: [{ name: "a", role: "answer", request: "x" }, { name: "b", role: "answer", request: "y" }] }, { readOnly: true, nextId }).workers).toHaveLength(2);
+  });
+});
+
+// single.maxSubWorkers (src/extension/config.ts): one per-call cap for the schema, the description, the prompt and the runtime check.
+describe("configurable sub-worker cap", () => {
+  const answers = (count: number) => Array.from({ length: count }, (_, index) => ({ name: `w${index}`, role: "answer" as const, request: `part ${index}` }));
+  const schemaMax = (tool: ReturnType<typeof createSpawnTool>) => (tool.parameters as { properties: { workers: { maxItems: number } } }).properties.workers.maxItems;
+
+  it("defaults to 4 in the schema, the description, the prompt and the runtime check", async () => {
+    expect(MAX_SUB_WORKERS).toBe(4);
+    expect([SUB_WORKER_CAP_MIN, SUB_WORKER_CAP_MAX]).toEqual([2, 8]);
+    const tool = createSpawnTool(() => context());
+    expect(schemaMax(tool)).toBe(4);
+    expect(tool.description).toContain("up to 4 sub-workers");
+    expect(orchestratorSection()).toContain("starts up to 4 sub-workers");
+    expect(orchestratorSection()).toContain(SPAWN_USAGE);
+    expect(() => planSpawn({ reason: "parallelism", workers: answers(5) }, { nextId })).toThrow("orche_spawn takes 1 to 4 workers per call");
+    expect(planSpawn({ reason: "parallelism", workers: answers(4) }, { nextId }).workers).toHaveLength(4);
+  });
+
+  it("a cap of 2 refuses a third worker before any id, start or workspace preparation", async () => {
+    let started = 0;
+    let prepared = 0;
+    const issued: string[] = [];
+    const assignment = context({ maxSubWorkers: 2, nextId: () => { const id = nextId(); issued.push(id); return id; }, runWorker: async worker => { started++; return outcome(worker); } });
+    const tool = createSpawnTool(() => assignment, { maxSubWorkers: 2 });
+    expect(schemaMax(tool)).toBe(2);
+    expect(tool.description).toContain("up to 2 sub-workers");
+    const refused = await tool.execute("c1", { reason: "parallelism", workers: answers(3) } as never, undefined, undefined, undefined as never).catch((error: Error) => error);
+    expect(String(refused instanceof Error ? refused.message : JSON.stringify(refused))).toContain("orche_spawn takes 1 to 2 workers per call");
+    expect([started, prepared, issued.length]).toEqual([0, 0, 0]);
+    // Ultra: the same cap, refused before the stage contract prepares candidate copies.
+    const ultra = { validate: () => undefined, prepare: async (_reason: string, workers: PlannedWorker[]) => { prepared++; return workers; }, finish: async () => [] };
+    await expect(executeSpawn(context({ maxSubWorkers: 2, ultra, runWorker: async worker => { started++; return outcome(worker); } }), { reason: "exploration", workers: answers(3) }, undefined)).rejects.toThrow("1 to 2");
+    expect([started, prepared]).toEqual([0, 0]);
+    expect(orchestratorSection(undefined, 2)).toContain("starts up to 2 sub-workers");
+    expect(orchestratorSection(undefined, 2)).toContain(SPLIT_JUDGMENT);
+  });
+
+  it("a cap of 8 runs more than four sub-workers at the same time", async () => {
+    let running = 0;
+    let peak = 0;
+    const assignment = context({ maxSubWorkers: 8, runWorker: async worker => { running++; peak = Math.max(peak, running); await new Promise(resolve => setTimeout(resolve, 20)); running--; return outcome(worker); } });
+    const tool = createSpawnTool(() => assignment, { maxSubWorkers: 8 });
+    expect(schemaMax(tool)).toBe(8);
+    const result = await tool.execute("c1", { reason: "parallelism", workers: answers(8) } as never, undefined, undefined, undefined as never);
+    expect(result.isError).toBeFalsy();
+    expect(peak).toBe(8);
+    expect(() => planSpawn({ reason: "parallelism", workers: answers(9) }, { maxSubWorkers: 8, nextId })).toThrow("1 to 8");
+  });
+
+  it("normal and ultra schemas follow their own cap without touching another tool's", () => {
+    const two = createSpawnTool(() => context(), { maxSubWorkers: 2 });
+    const ultraEight = createSpawnTool(() => context(), { ultra: true, maxSubWorkers: 8 });
+    const ultraDefault = createSpawnTool(() => context(), { ultra: true });
+    expect([schemaMax(two), schemaMax(ultraEight), schemaMax(ultraDefault)]).toEqual([2, 8, 4]);
+    expect(JSON.stringify(ultraEight.parameters)).toContain("candidates (2-8 independent");
+    expect(JSON.stringify(ultraDefault.parameters)).toContain("candidates (2-4 independent");
+    expect(ultraEight.description).toContain("up to 8 sub-workers");
+    expect(() => planSpawn({ reason: "candidates", workers: answers(1) }, { ultra: true, maxSubWorkers: 3, nextId })).toThrow("takes 2 to 3 independent candidates");
   });
 });
 

@@ -58,7 +58,7 @@ export interface RouteConfig {
 export const LEGACY_CONFIG_KEYS: readonly string[] = ["advisors", "audit"];
 export const LEGACY_WORKERS_KEYS: readonly string[] = ["maxWorkers", "answerAngles"];
 export function legacyConfigWarning(keys: readonly string[]): string {
-  return `config.${keys.length === 1 ? keys[0] : `{${keys.join(", ")}}`} ${keys.length === 1 ? "was" : "were"} removed with the multi-worker coordinator and ${keys.length === 1 ? "is" : "are"} ignored${keys.includes("advisors") ? ' (the plan advisor of worker runs is now "single": { "advisor": true } with models.advisor)' : ""}`;
+  return `config.${keys.length === 1 ? keys[0] : `{${keys.join(", ")}}`} ${keys.length === 1 ? "was" : "were"} removed with the multi-worker coordinator and ${keys.length === 1 ? "is" : "are"} ignored${keys.includes("advisors") ? ' (the plan advisor of worker runs is now "single": { "advisor": true } with models.advisor)' : ""}${keys.includes("workers.maxWorkers") ? ' (the cap on sub-workers an orchestrator runs at the same time is now "single": { "maxSubWorkers": 2-8 }, default 4; workers.maxWorkers is not carried over)' : ""}`;
 }
 export const MODEL_TIERS = ["main", "orchestrator", "worker", "advisor", "strong-orchestrator", "strong-worker"] as const;
 export type ModelTier = typeof MODEL_TIERS[number];
