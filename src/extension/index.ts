@@ -27,6 +27,8 @@ import { formatDuration } from "../agent/liveness.js";
 import { LEDGER_ENTRY_TYPE, LEDGER_SUMMARY_TYPE, latestLedgers, type TaskLedger } from "../single/ledger.js";
 import { completeOrcheArguments } from "./completions.js";
 import { discoveredSkills, workerSkills } from "../pi/worker-skills.js";
+import { registerDependencyProvider } from "./dependencies.js";
+import { createOrcheDependencyProvider, runDependencyCommand, type OrcheDependencyOptions } from "./doctor.js";
 
 export const RESULT_MESSAGE_TYPE = "orche-result";
 /** Pi built-ins that stay Pi's own but are switched on next to our tools. */
@@ -102,7 +104,7 @@ export const MESSAGE_CONFIRM_MAX = 2000;
 /** A message to main about an approved queued task that could not start after its job's result said it would. */
 export const QUEUE_MESSAGE_TYPE = "orche-task-queue";
 
-export const ORCHE_USAGE = "Usage: /orche single|strong|ultra|direct <PROMPT> | /orche mode [single|strong|ultra|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche splits [DAYS] | /orche models | /orche cancel | /orche detach";
+export const ORCHE_USAGE = "Usage: /orche single|strong|ultra|direct <PROMPT> | /orche mode [single|strong|ultra|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche splits [DAYS] | /orche models | /orche cancel | /orche detach | /orche doctor | /orche install-deps";
 export type OrcheCommand =
   | { mode: MainMode; prompt: string }
   | { mode: "cancel" }
@@ -112,7 +114,9 @@ export type OrcheCommand =
   | { mode: "splits"; days?: number }
   | { mode: "models" }
   | { mode: "stop"; worker: string }
-  | { mode: "mode"; value?: MainMode };
+  | { mode: "mode"; value?: MainMode }
+  | { mode: "doctor" }
+  | { mode: "install-deps" };
 /** What each mode does to the request of a one-shot `/orche <mode> <prompt>` (usage and refusal texts). */
 const ONE_SHOT_EFFECT: Record<MainMode, string> = {
   single: "delegates it to one worker on the general model tiers (models.orchestrator, models.worker)",
@@ -153,6 +157,9 @@ export function parseOrcheCommand(args: string): OrcheCommand | undefined {
   if (/^\s*workers\s*$/.test(args)) return { mode: "workers" };
   if (/^\s*records\s*$/.test(args)) return { mode: "records" };
   if (/^\s*models\s*$/.test(args)) return { mode: "models" };
+  // Dependency health check and install (doctor.ts). Exact words only: a prompt always follows a mode word, so neither changes a one-shot request.
+  if (/^\s*doctor\s*$/.test(args)) return { mode: "doctor" };
+  if (/^\s*install-deps\s*$/.test(args)) return { mode: "install-deps" };
   const splits = /^\s*splits(?:\s+(\d+))?\s*$/.exec(args);
   if (splits) return splits[1] !== undefined ? (Number(splits[1]) > 0 ? { mode: "splits", days: Number(splits[1]) } : undefined) : { mode: "splits" };
   const stop = /^\s*stop\s+(\S+)\s*$/.exec(args);
@@ -176,10 +183,15 @@ export interface OrcheExtensionOptions extends OrcheControllerOptions {
   longResponse?: LongResponseOptions;
   /** How long orche_task's approval dialog (a delegation while a job runs) waits for the user; default 5 minutes. */
   approvalTimeoutMs?: number;
+  /** Seams of the dependency provider behind `/orche doctor|install-deps` (doctor.ts); agentDir defaults to `agentDir` above. */
+  dependencies?: OrcheDependencyOptions;
 }
 /** Build the extension; options provide config/runtime/run and idle-timeout test seams. */
 export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
   return function orcheExtension(pi: ExtensionAPI): void {
+    // First, before anything that could fail: the umbrella's /oh-my-pi doctor|install-deps asks every package synchronously.
+    const dependencies = createOrcheDependencyProvider({ ...(options.agentDir ? { agentDir: options.agentDir } : {}), ...options.dependencies });
+    registerDependencyProvider(pi.events, dependencies);
     const controller = new OrcheController(options);
     let workers: WorkerPool | undefined;
     /** Task ledgers of this session's branch (restored at session start): a fresh pool picks them up, so a task outlives its worker. */
@@ -818,7 +830,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
 
     // (2) Delegation, one-turn overrides and worker/session controls.
     pi.registerCommand("orche", {
-      description: "/orche single <prompt>: delegate one request to one worker. /orche strong <prompt>: the same on the strong tiers (models.strong-orchestrator, models.strong-worker). /orche ultra <prompt>: one request with quality-first ultra orchestration on the strong tiers. /orche direct <prompt>: edit directly for one turn. These one-shot commands leave the session's mode as it is and start only when the session is idle; with task ledgers (single.ledger) a task started by such a request keeps its mode when continued, otherwise later turns run in the session's mode. /orche mode [single|strong|ultra|direct]: show/set the session's delegation mode. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche splits [days]: the orchestrator's split decisions over all sessions (split rate, criteria, cost and time), optionally of the last N days. /orche models: the main, orchestrator, worker, advisor, strong-orchestrator and strong-worker models now and where each comes from (config, inherited, Pi), and whether the advisor (single.advisor) is on. /orche cancel: stop the active task. /orche detach: stop waiting for the background task (it keeps running; its result arrives as a message).",
+      description: "/orche single <prompt>: delegate one request to one worker. /orche strong <prompt>: the same on the strong tiers (models.strong-orchestrator, models.strong-worker). /orche ultra <prompt>: one request with quality-first ultra orchestration on the strong tiers. /orche direct <prompt>: edit directly for one turn. These one-shot commands leave the session's mode as it is and start only when the session is idle; with task ledgers (single.ledger) a task started by such a request keeps its mode when continued, otherwise later turns run in the session's mode. /orche mode [single|strong|ultra|direct]: show/set the session's delegation mode. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche splits [days]: the orchestrator's split decisions over all sessions (split rate, criteria, cost and time), optionally of the last N days. /orche models: the main, orchestrator, worker, advisor, strong-orchestrator and strong-worker models now and where each comes from (config, inherited, Pi), and whether the advisor (single.advisor) is on. /orche cancel: stop the active task. /orche detach: stop waiting for the background task (it keeps running; its result arrives as a message). /orche doctor: check pi-orche's dependencies (npm packages and native bindings, Node.js, git, orche.config.json, configured models) and say what to do when something is wrong. /orche install-deps: install missing npm dependencies; lists what needs a manual step.",
       // Read-only: the current roster supplies `stop <id>`; completion never creates, starts or stops workers.
       getArgumentCompletions: prefix => {
         let ids: string[] = [];
@@ -830,6 +842,10 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         if (!parsed) {
           // `/orche ultra` without a prompt: the one-shot usage (nothing starts, the mode stays); anything else: the full usage.
           ctx.ui.notify(oneShotUsage(args) ?? ORCHE_USAGE, "warning");
+          return;
+        }
+        if (parsed.mode === "doctor" || parsed.mode === "install-deps") {
+          await runDependencyCommand(dependencies, parsed.mode === "doctor" ? "check" : "install", ctx);
           return;
         }
         if (parsed.mode === "cancel") {

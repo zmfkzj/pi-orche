@@ -29,6 +29,8 @@ export function orcheCompletions(workerIds: readonly string[] = []): CommandComp
     { value: "models", label: "models", description: "Model tiers and where each comes from" },
     { value: "cancel", label: "cancel", description: "Stop the active task" },
     { value: "detach", label: "detach", description: "Stop waiting for the background task" },
+    { value: "doctor", label: "doctor", description: "Check pi-orche's dependencies and configuration" },
+    { value: "install-deps", label: "install-deps", description: "Install missing npm dependencies; list manual steps" },
   ];
   const seen = new Set<string>();
   return items.filter(item => !seen.has(item.value) && !!seen.add(item.value));
