@@ -10,6 +10,7 @@ import { inheritsMain, inheritsMainThinking, isDelegatingMode, MAIN_MODES, modeT
 import { delegationRules, guardBusyToolCall, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
 import { contextWarning, DEFAULT_CONTEXT_WARNING, type ContextWarningSettings, type ContextWarningState } from "./context-warning.js";
 import { CONFIG_FILE, DEFAULT_SINGLE, loadOrcheConfigFile } from "./config.js";
+import { DEFAULT_BASH_REVIEW, guardBashReview, registryAccess, type BashReviewSettings } from "./bash-review.js";
 import { orcheTaskParameters, WORKER_CAPABILITY_CHANNEL, WorkerPool, type GoneWorker, type WorkerCapabilityAnswer } from "./workers.js";
 import { Type } from "typebox";
 import { JOB_ENTRY_TYPE, jobResultContent, TASK_RESULT_TYPE, TaskJobs, WORKER_ENTRY_TYPE, type AttachOptions, type DetachReason, type Job, type JobEntry, type JobToolResult, type QueueArgs, type QueuedTask, type QueueEvent } from "./jobs.js";
@@ -39,24 +40,39 @@ const ACTIVATE_BUILTINS = ["grep", "find", "ls"];
  * extension-only keys (`concurrentSessions`, `records`) that the plain route parser behind `discoverMainMode` (mode.ts) rejects as unknown, which
  * made a config with `records` look invalid at session start and drop its `mainMode`.
  */
-async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup & { contextWarning?: ContextWarningSettings; spawn?: boolean; advisor?: boolean; warnings?: string[]; models?: ModelTiers }> {
+async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup & { contextWarning?: ContextWarningSettings; spawn?: boolean; advisor?: boolean; bashReview?: BashReviewSettings; warnings?: string[]; models?: ModelTiers }> {
   const candidates = [...(options.projectTrusted ? [join(options.cwd, ".pi", CONFIG_FILE)] : []), join(options.agentDir, CONFIG_FILE)];
   for (const path of candidates) {
     try { await access(path); } catch { continue; }
     try {
-      const { routes, contextWarning, single, warnings } = await loadOrcheConfigFile(path);
+      const { routes, contextWarning, single, bashReview, warnings } = await loadOrcheConfigFile(path);
       // The tiers with the top-level extendedContext filled in where a tier leaves it out, as routes resolve it (routing.ts);
       // not for `{ "model": "main" }`, which keeps main's own context window.
       const models = routes.models ? Object.fromEntries(Object.entries(routes.models).map(([tier, route]) => {
         const extendedContext = inheritsMain(route) ? undefined : route.extendedContext ?? routes.extendedContext;
         return [tier, { ...route, ...(extendedContext !== undefined ? { extendedContext } : {}) }];
       })) as ModelTiers : undefined;
-      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), ...(routes.legacyMainMode ? { legacyMode: routes.legacyMainMode } : {}), path, contextWarning, spawn: single.spawn, advisor: single.advisor, ...(warnings.length ? { warnings } : {}), ...(models ? { models } : {}) };
+      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), ...(routes.legacyMainMode ? { legacyMode: routes.legacyMainMode } : {}), path, contextWarning, spawn: single.spawn, advisor: single.advisor, bashReview, ...(warnings.length ? { warnings } : {}), ...(models ? { models } : {}) };
     } catch (error) {
       return { path, error: error instanceof Error ? error.message : String(error) };
     }
   }
   return {};
+}
+/** The text of the latest user message on the session branch: the task main's Bash safety review is told about (clipped there). */
+function lastUserText(ctx: ExtensionContext): string | undefined {
+  try {
+    const branch = ctx.sessionManager.getBranch();
+    for (let i = branch.length - 1; i >= 0; i--) {
+      const entry = branch[i] as { type?: string; message?: { role?: string; content?: unknown } };
+      if (entry.type !== "message" || entry.message?.role !== "user") continue;
+      const content = entry.message.content;
+      if (typeof content === "string") return content;
+      if (Array.isArray(content)) return content.flatMap(block => block && typeof block === "object" && (block as { type?: string }).type === "text" ? [String((block as { text?: unknown }).text ?? "")] : []).join("\n");
+      return undefined;
+    }
+  } catch { /* no session branch */ }
+  return undefined;
 }
 /**
  * The time-budget sentence of the orche_task description, written from the default limits (so that it cannot drift from limits.ts):
@@ -388,6 +404,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     let warningState: ContextWarningState = { warnedLevel: 0 };
     /** `single.spawn` of the config file read at session start: whether the single worker is an orchestrator (orche_spawn). */
     let spawn: boolean = DEFAULT_SINGLE.spawn;
+    /** `bashReview` of the config file read at session start (defaults without a valid file): main's Bash safety review (bash-review.ts). */
+    let bashReview: BashReviewSettings = { ...DEFAULT_BASH_REVIEW };
     /** `models.main` at the last session start: what the config set and what was applied (for /orche models). */
     let mainModel: ModelTiersView["atStart"] = {};
     /** The config's model tiers at the last session start: the mode's orchestrator tier decides main's hand-off rule (its own model or
@@ -471,6 +489,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       warningSettings = found.contextWarning ?? { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
       warningState = { warnedLevel: 0 };
       spawn = found.spawn ?? DEFAULT_SINGLE.spawn;
+      bashReview = found.bashReview ?? { ...DEFAULT_BASH_REVIEW };
       // Only a model or a thinking level of its own changes main's hand-off rule; `{ "model": "main" }` and `thinking: "main"` keep
       // the earlier sentence's "main's CURRENT" for what they inherit.
       configuredTiers = found.models;
@@ -587,9 +606,15 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       if (summary) pi.sendMessage({ customType: LEDGER_SUMMARY_TYPE, content: summary, display: false }, { triggerTurn: false });
     });
     // Second line of defence next to the tool set: `--tools`, another extension or the model can still reach a disabled tool.
-    pi.on("tool_call", event => {
+    // Then, for a Bash call that passed it, the Bash safety review (bash-review.ts): main's own bash, codemode's nested bash
+    // calls included (each its own tool_call). Worker and sub-worker sessions have their own guards and review (workers.ts, sub-worker.ts).
+    pi.on("tool_call", async (event, ctx) => {
       const reason = guardToolCall(state.effective, event.toolName, event.input as Record<string, unknown>) ?? busyGuard(event.toolName);
-      return reason ? { block: true, reason } : undefined;
+      if (reason) return { block: true, reason };
+      const review = await guardBashReview(event.toolName, event.input as Record<string, unknown>, {
+        settings: bashReview, access: () => registryAccess(ctx.modelRegistry), cwd: ctx.cwd, task: lastUserText(ctx), signal: ctx.signal,
+      });
+      return review ? { block: true, reason: review } : undefined;
     });
     /**
      * The read-only window (mode.ts guardBusyToolCall): while a background job runs, or the task the user approved waits for it, main

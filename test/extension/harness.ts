@@ -8,6 +8,7 @@ import {
 import { fauxAssistantMessage as reply, fauxToolCall as call, type FauxResponseStep, type ToolCall } from "@earendil-works/pi-ai";
 import { createOrcheExtension, type OrcheExtensionOptions } from "../../src/extension/index.js";
 import { fauxRuntime } from "../helpers/faux.js";
+import { createFakeClassifier, installFakeClassifier, type FakeClassifier } from "../helpers/classifier.js";
 
 export const tool = (name: string, args: ToolCall["arguments"]) => reply([call(name, args)], { stopReason: "toolUse" });
 export const decision = (value: ToolCall["arguments"]) => tool("coordinator_decision", { decision: value });
@@ -25,6 +26,8 @@ export interface Harness {
   agentDir: string;
   main: Awaited<ReturnType<typeof fauxRuntime>>;
   orche: Awaited<ReturnType<typeof fauxRuntime>>;
+  /** The Bash safety review's classifier (Jev, `typesafe/jev-latest`) on both runtimes: a test-only fake, default answer yes. */
+  classifier: FakeClassifier;
   /** `ctx.ui.notify` calls made by the extension. */
   notifications: { message: string; type?: string }[];
   /** `ctx.ui.setStatus` / `ctx.ui.setWidget` calls made by the extension (newest last; `undefined` clears). */
@@ -57,6 +60,8 @@ export async function createHarness(options: {
   single?: { ledger?: boolean; spawn?: boolean } & Record<string, unknown>;
   /** `models` in the user config (docs/orchestrator.md 12); omitted when unset. */
   models?: Record<string, unknown>;
+  /** `bashReview` in the user config (the Bash safety review; default: omitted, i.e. on with Jev, which the fake classifier answers). */
+  bashReview?: Record<string, unknown>;
   /** Extra providers registered in the main session's model runtime before the session starts (e.g. a `models.main` target). */
   providers?: { provider: Parameters<ModelRuntime["registerNativeProvider"]>[0] }[];
   /** `ctx.mode` the extension sees (default: the SDK default, i.e. not "tui"). */
@@ -84,9 +89,13 @@ export async function createHarness(options: {
   const orche = await fauxRuntime(options.orcheSteps);
   main.runtime.registerNativeProvider(orche.faux.provider);
   for (const extra of options.providers ?? []) main.runtime.registerNativeProvider(extra.provider);
+  // No network in tests: Jev is a fake that answers yes unless a test scripts it (test/helpers/classifier.ts).
+  const classifier = createFakeClassifier();
+  installFakeClassifier(main.runtime, classifier);
+  installFakeClassifier(orche.runtime, classifier);
   if (options.writeUserConfig !== false) {
     const records = options.records === true ? {} : options.records === undefined || options.records === false ? { enabled: false } : options.records;
-    await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: orche.route.model }, records, ...(options.taskContext ? { taskContext: options.taskContext } : {}), ...(options.single ? { single: options.single } : {}), ...(options.models ? { models: options.models } : {}), ...(options.mainMode === "unset" ? {} : { mainMode: options.mainMode ?? "single" }) }));
+    await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: orche.route.model }, records, ...(options.taskContext ? { taskContext: options.taskContext } : {}), ...(options.single ? { single: options.single } : {}), ...(options.models ? { models: options.models } : {}), ...(options.bashReview ? { bashReview: options.bashReview } : {}), ...(options.mainMode === "unset" ? {} : { mainMode: options.mainMode ?? "single" }) }));
   }
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, ...options.settings });
   const resourceLoader = new DefaultResourceLoader({
@@ -112,7 +121,7 @@ export async function createHarness(options: {
   } as unknown as ExtensionUIContext;
   await session.bindExtensions({ ...(options.noUi ? {} : { uiContext }), ...(options.mode ? { mode: options.mode } : {}) });
   return {
-    session, runtime: main.runtime, cwd, agentDir, main, orche, notifications, statuses, widgets,
+    session, runtime: main.runtime, cwd, agentDir, main, orche, classifier, notifications, statuses, widgets,
     async dispose() {
       session.dispose();
       // Late writes of a worker that is still winding down (records, transcripts) can race the removal: retry it.

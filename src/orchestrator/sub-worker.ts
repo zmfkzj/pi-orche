@@ -18,6 +18,7 @@ import { orchestrationResultSchemas } from "../orchestration/result-schemas.js";
 import { WORKER_TOOL_NAMES } from "../tools/index.js";
 import { mergeCapabilities, type WorkerCapabilityProvider } from "../extension/capabilities.js";
 import { runSpecialistSession, SpecialistError, type SpecialistDeadline, type SpecialistReport, type SpecialistStats } from "../specialists/session.js";
+import { guardBashReview, runtimeAccess, type BashReviewSettings } from "../extension/bash-review.js";
 import { DEPTH_LIMIT_MESSAGE, SPAWN_TOOL, subWorkerDeadline, type PlannedWorker, type RunSubWorker, type SubWorkerOutcome, type SubWorkerRole } from "./spawn.js";
 
 export const SUB_WORKER_INSTRUCTIONS = "You are a sub-worker of an orchestrator in a coding agent. Work only on your one assignment; you cannot see the orchestrator's conversation and you cannot spawn workers. Use the available tools to establish evidence. Never edit outside your owned files. Never commit or push. Reply in the language of the request. Complete the assignment with report_result, called alone.";
@@ -26,6 +27,8 @@ export interface SubWorkerEnvironment {
   orchestrator: string;
   cwd: string;
   runtime: ModelRuntime;
+  /** The Bash safety review of every sub-worker (the orchestrator assignment's `bashReview`; src/extension/bash-review.ts), on `runtime`. Absent: none. */
+  bashReview?: BashReviewSettings;
   /** The route standard roles run on: `models.worker` when configured, else the orchestrator's current route. */
   route: ModelRoute;
   /** Where `route` comes from (recorded per sub-worker): `models.worker`'s model, main's model named by it, or the orchestrator's. */
@@ -145,7 +148,9 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
         instructions: [SUB_WORKER_INSTRUCTIONS, ...capabilities.instructions, ...(webFetch.unavailable ? [webFetch.unavailable] : []), ...(codeGraph.unavailable ? [codeGraph.unavailable] : [])].join("\n"),
         tools: [...WORKER_TOOL_NAMES, ...(image ? [image.name] : []), ...capabilities.tools], ...(image ? { customTools: [image] } : {}), report: reportFor(worker.role),
         ...(capabilities.extensionFactories.length ? { extensionFactories: capabilities.extensionFactories } : {}),
-        toolGuard: guard, writeFileGuard: (file, abort) => abort?.aborted ? "cancelled" : guard("ast_rewrite", { path: file }),
+        // The Bash safety review runs after the sub-worker's own guard allowed the call (it can only refuse more), with its own request and cwd.
+        toolGuard: async (name, input) => await guard(name, input) ?? await guardBashReview(name, input, { settings: env.bashReview, access: () => runtimeAccess(env.runtime), cwd, task: worker.request, signal }),
+        writeFileGuard: (file, abort) => abort?.aborted ? "cancelled" : guard("ast_rewrite", { path: file }),
         maxTurns: env.maxTurns, timeoutMs: env.timeoutMs, signal, nudges: 1, onTool,
         ...(env.deadline ? { deadline: { ...env.deadline, toolTimeoutsMs: { ...env.deadline.toolTimeoutsMs, ...capabilities.toolTimeoutsMs }, onExtended: extension => onDeadline?.({ type: "extended", extension }), onObservation: observation => onDeadline?.({ type: "observation", observation }) } } : {}),
         onSession: use => { started = true; onModel?.(use); },

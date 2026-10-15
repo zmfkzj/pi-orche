@@ -5,7 +5,7 @@
  * executeTool() is execute() as a tool result, with such a failure returned as an isError result that keeps the details.
  * formatWorkers(), stop(id|"all") and roster() implement the pool slash commands. */
 import { Type, type Static } from "typebox";
-import { getAgentDir, type AgentToolResult, type ModelRegistry, type Skill } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type AgentToolResult, type ModelRegistry, type ModelRuntime, type Skill } from "@earendil-works/pi-coding-agent";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -33,6 +33,7 @@ import { loadProviderExtensions, type ProviderExtensionHost } from "../pi/provid
 import { InheritedProviders } from "../pi/inherit-providers.js";
 import { ensureBundledImageProvider } from "../pi/register-bundled-image-provider.js";
 import { describeSource, discoverOrcheConfig, NoRouteError, resolveWriteRoots } from "./config.js";
+import { DEFAULT_BASH_REVIEW, guardBashReview, runtimeAccess, type BashReviewSettings } from "./bash-review.js";
 import { OrcheController, recordsIgnorePaths, routesSummary, withConcurrentWarning, withRecordLine, type OrcheRunArgs } from "./controller.js";
 import type { ConcurrentActivitySummary } from "./concurrent-sessions.js";
 import { errorToolResult, failureReason, type ErrorToolResult, type ToolFailure, type ToolFailureKind } from "./tool-result.js";
@@ -334,6 +335,8 @@ interface Worker {
   thinkingPolicy?: ThinkingPolicySettings;
   /** The plan advisor of the assignment in flight (`single.advisor`); started by its first task_plan or edit, cleared when it ends. */
   advisor?: AssignmentAdvisor;
+  /** `bashReview` of the latest assignment's config and the model runtime its classifier runs on (src/extension/bash-review.ts). */
+  bashReview?: { settings: BashReviewSettings; runtime: ModelRuntime };
 }
 
 /**
@@ -913,6 +916,9 @@ export class WorkerPool {
         if (name === "report_result") await worker.advisor?.beforeReport();
         const blocked = await this.guard(worker, name, input);
         if (blocked) return blocked;
+        // Bash safety review, after the existing guards allowed the call: it can only refuse more, never allow what they refused.
+        const reviewed = await this.reviewBash(worker, name, input);
+        if (reviewed) return reviewed;
         await worker.activity?.enter(worker.id, name);
         // A worker that edits before it plans starts the plan advisor at that first edit (single.advisor).
         if (WRITE_TOOLS.has(name)) worker.advisor?.trigger("first_edit");
@@ -1009,6 +1015,23 @@ export class WorkerPool {
       this.providers.clear();
     })();
     return this.disposal;
+  }
+  /** The Bash safety review of one call of this worker: its assignment request, cwd and write roots; the session's current run signal. */
+  private async reviewBash(worker: Worker, toolName: string, input: Record<string, unknown>): Promise<string | undefined> {
+    if (toolName !== "bash") return undefined;
+    const review = worker.bashReview;
+    let signal: AbortSignal | undefined;
+    try { signal = this.manager?.session(worker.id).agent.signal; } catch { signal = undefined; }
+    return guardBashReview(toolName, input, {
+      // No settings recorded (should not happen: every assignment sets them) reviews with the defaults rather than skipping.
+      settings: review?.settings ?? DEFAULT_BASH_REVIEW,
+      access: () => {
+        if (review) return runtimeAccess(review.runtime);
+        const session = this.manager?.session(worker.id);
+        return session ? runtimeAccess(session.modelRuntime) : undefined;
+      },
+      cwd: worker.cwd, task: worker.request, writeRoots: (worker.roots ?? []).map(root => root.path), signal,
+    });
   }
   private async guard(worker: Worker, toolName: string, input: Record<string, unknown>): Promise<string | undefined> {
     // Ultra: candidate copies, the protected basis, and the workspace before an adoption are not the orchestrator's to write.
@@ -1400,6 +1423,8 @@ export class WorkerPool {
       ...(meta.scratch ? [{ path: meta.scratch, kind: "scratch" as const }] : []),
       ...[...new Set([...configRoots, ...(WRITING_KINDS.has(args.role) ? assignedRoots : [])])].map(path => ({ path, kind: "root" as const })),
     ];
+    // The Bash safety review of this assignment (config read per task) runs on the session's own model runtime (Pi's providers when inherited).
+    meta.bashReview = { settings: config.bashReview, runtime: activeSession.modelRuntime };
     const handoffRequest = args.request;
     // Orchestrator assignment: the sub-workers its orche_spawn calls ran, and the reasons it used (its split decision must name them).
     const orchestrating = orchestrate && !!meta.spawnTool;
@@ -1831,6 +1856,8 @@ export class WorkerPool {
           },
           runWorker: createSubWorkerRunner({
             orchestrator: meta.id, cwd: args.cwd, runtime, route: standardSubRoute, routeSource: subSource, thinkingSource: standardSubRoute === subRoute ? subThinkingSource : "orchestrator:step", ...(subWindow ? { inheritedContextWindow: subWindow } : {}),
+            // Every sub-worker's Bash goes through the same safety review as this assignment's own (once per call, in the sub-worker's guard).
+            bashReview: config.bashReview,
             skills: this.options.skills?.() ?? [],
             // Each sub-worker gets its own browser_fetch instance (asked with its own id and role), like an orche_task worker.
             webFetch: planned => webFetchCapability(this.options.capability, { cwd: planned.workspace ?? args.cwd, workerId: planned.id, role: planned.role, readOnly: !WRITING_KINDS.has(planned.role) }),

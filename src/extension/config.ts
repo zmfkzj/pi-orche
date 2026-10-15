@@ -8,6 +8,7 @@ import { DEFAULT_CONTEXT_WARNING, type ContextWarningSettings } from "./context-
 import { DEFAULT_THINKING_POLICY, resolveThinkingPolicy, type ThinkingPolicySettings } from "../pi/thinking-policy.js";
 import { DEFAULT_OUTPUT_CAP, type OutputCapSettings } from "../pi/output-cap.js";
 import { MAX_SUB_WORKERS, SUB_WORKER_CAP_MAX, SUB_WORKER_CAP_MIN } from "../orchestrator/instructions.js";
+import { BASH_REVIEW_TIMEOUT_RANGE, DEFAULT_BASH_REVIEW, type BashReviewSettings } from "./bash-review.js";
 
 export const CONFIG_FILE = "orche.config.json";
 
@@ -38,6 +39,8 @@ export interface DiscoveredConfig {
   outputCap?: OutputCapSettings;
   /** `writeRoots` of the selected file as written (absolute, `~/...` or relative to the task cwd; see {@link resolveWriteRoots}); default []. */
   writeRoots: string[];
+  /** `bashReview` of the selected file with defaults applied (on, Jev `typesafe/jev-latest`, 15 s; src/extension/bash-review.ts). */
+  bashReview: BashReviewSettings;
   /** Settings of the selected file that were ignored (removed `single` keys); absent without a file. */
   warnings?: string[];
   source: ConfigSource;
@@ -334,11 +337,33 @@ export function resolveWriteRoots(cwd: string, roots: readonly string[]): string
 }
 
 /**
+ * `bashReview` in orche.config.json: the pre-execution safety review of Bash invocations that may write (src/extension/bash-review.ts).
+ * `enabled` (default true), `model` (`provider/id` of a classifier model, default `typesafe/jev-latest`), `timeoutMs` (default 15000).
+ */
+export function parseBashReviewConfig(value: unknown): BashReviewSettings {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.bashReview: expected object");
+  const settings = value as Record<string, unknown>;
+  const unknown = Object.keys(settings).filter(key => key !== "enabled" && key !== "model" && key !== "timeoutMs");
+  if (unknown.length) throw new RouteConfigError(`config.bashReview: unknown field ${unknown.join(", ")}`);
+  if (settings.enabled !== undefined && typeof settings.enabled !== "boolean") throw new RouteConfigError("config.bashReview.enabled: expected boolean");
+  const model = settings.model;
+  if (model !== undefined && (typeof model !== "string" || !/^[^/\s]+\/\S+$/.test(model))) throw new RouteConfigError('config.bashReview.model: expected "provider/id" of a classifier model (e.g. "typesafe/jev-latest")');
+  const timeoutMs = settings.timeoutMs;
+  if (timeoutMs !== undefined && (typeof timeoutMs !== "number" || !Number.isSafeInteger(timeoutMs) || timeoutMs < BASH_REVIEW_TIMEOUT_RANGE.min || timeoutMs > BASH_REVIEW_TIMEOUT_RANGE.max))
+    throw new RouteConfigError(`config.bashReview.timeoutMs: expected an integer from ${BASH_REVIEW_TIMEOUT_RANGE.min} to ${BASH_REVIEW_TIMEOUT_RANGE.max}`);
+  return {
+    enabled: (settings.enabled as boolean | undefined) ?? DEFAULT_BASH_REVIEW.enabled,
+    model: (model as string | undefined) ?? DEFAULT_BASH_REVIEW.model,
+    timeoutMs: (timeoutMs as number | undefined) ?? DEFAULT_BASH_REVIEW.timeoutMs,
+  };
+}
+
+/**
  * Load one orche config file: the route settings (validated by `parseRouteConfig`) plus the extension-only
- * `concurrentSessions`, `records`, `taskContext`, `contextWarning`, `single`, `thinkingPolicy` and `writeRoots` settings, validated here and removed before the route parser sees the file.
+ * `concurrentSessions`, `records`, `taskContext`, `contextWarning`, `single`, `thinkingPolicy`, `writeRoots` and `bashReview` settings, validated here and removed before the route parser sees the file.
  * `warnings` lists settings that were ignored (removed `single` keys, keys of the removed coordinator); the file still loads.
  */
-export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings; thinkingPolicy: ThinkingPolicySettings; outputCap: OutputCapSettings; writeRoots: string[]; warnings: string[] }> {
+export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings; thinkingPolicy: ThinkingPolicySettings; outputCap: OutputCapSettings; writeRoots: string[]; bashReview: BashReviewSettings; warnings: string[] }> {
   let value: unknown;
   try { value = JSON.parse(await readFile(path, "utf8")); }
   catch (error) { throw new RouteConfigError(`Cannot load route config ${path}: ${error instanceof Error ? error.message : String(error)}`); }
@@ -351,9 +376,10 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
   let thinkingPolicy: ThinkingPolicySettings = { ...DEFAULT_THINKING_POLICY };
   let outputCap: OutputCapSettings = { ...DEFAULT_OUTPUT_CAP };
   let writeRoots: string[] = [];
+  let bashReview: BashReviewSettings = { ...DEFAULT_BASH_REVIEW };
   const warnings: string[] = [];
   if (value && typeof value === "object" && !Array.isArray(value)) {
-    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, single: singleValue, thinkingPolicy: thinkingPolicyValue, outputCap: outputCapValue, writeRoots: writeRootsValue, ...rest } = value as Record<string, unknown>;
+    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, single: singleValue, thinkingPolicy: thinkingPolicyValue, outputCap: outputCapValue, writeRoots: writeRootsValue, bashReview: bashReviewValue, ...rest } = value as Record<string, unknown>;
     if (Object.hasOwn(value, "concurrentSessions")) concurrent = parseConcurrentSessionsConfig(concurrentSessions);
     if (Object.hasOwn(value, "records")) records = parseRecordsConfig(recordsValue);
     if (Object.hasOwn(value, "taskContext")) taskContext = parseTaskContextConfig(taskContextValue);
@@ -362,9 +388,10 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
     if (Object.hasOwn(value, "thinkingPolicy")) thinkingPolicy = parseThinkingPolicyConfig(thinkingPolicyValue);
     if (Object.hasOwn(value, "outputCap")) outputCap = parseOutputCapConfig(outputCapValue);
     if (Object.hasOwn(value, "writeRoots")) writeRoots = parseWriteRootsConfig(writeRootsValue);
+    if (Object.hasOwn(value, "bashReview")) bashReview = parseBashReviewConfig(bashReviewValue);
     routeValue = rest;
   }
-  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single, thinkingPolicy, outputCap, writeRoots, warnings: warnings.map(warning => `${warning} (${path})`) };
+  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single, thinkingPolicy, outputCap, writeRoots, bashReview, warnings: warnings.map(warning => `${warning} (${path})`) };
 }
 export class NoRouteError extends Error {
   override readonly name = "NoRouteError";
@@ -419,6 +446,7 @@ export async function discoverOrcheConfig(options: {
     thinkingPolicy: { ...DEFAULT_THINKING_POLICY },
     outputCap: { ...DEFAULT_OUTPUT_CAP },
     writeRoots: [],
+    bashReview: { ...DEFAULT_BASH_REVIEW },
     source: { kind: "session", model, ...(thinking ? { thinking } : {}) },
     ignored,
   };
