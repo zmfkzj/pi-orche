@@ -151,6 +151,49 @@ describe("the guard step", () => {
     expect(await guardBashReview("bash", { command: "rm -rf build" }, { settings, access: () => undefined, cwd: "/w" })).toContain("no model registry");
     expect(bashReviewBlockReason({ verdict: "failed", reason: "cancelled", cancelled: true }, settings)).toBe("Bash safety review was cancelled: this command was NOT run.");
   });
+
+  it("static check: a block finding stops the command without asking Jev, with a rewrite instruction; the guarded rewrite goes to Jev", async () => {
+    const jev = fakeAccess("yes");
+    const reason = await guardBashReview("bash", { command: "DIR=''; rm -rf \"$DIR/\"*" }, guard(jev.access));
+    expect(reason).toContain("Bash safety check (static): this command was NOT run. rm $DIR/*: $DIR is assigned an empty value in this command, so the target is everything in the filesystem root.");
+    expect(reason).toContain("${VAR:?} guards");
+    expect(reason).toContain("then run the corrected command: it is checked again and goes on to the Jev review");
+    expect(reason).toContain("there is no override");
+    expect(await guardBashReview("bash", { command: "rm -rf ~" }, guard(jev.access))).toContain("targets your whole home directory");
+    expect(jev.calls).toHaveLength(0);
+    // Repeating it is blocked again; the corrected command reaches Jev and runs on its yes.
+    expect(await guardBashReview("bash", { command: "DIR=''; rm -rf \"$DIR/\"*" }, guard(jev.access))).toContain("NOT run");
+    expect(await guardBashReview("bash", { command: "DIR=build; rm -rf \"$DIR/\"*" }, guard(jev.access))).toBeUndefined();
+    expect(jev.calls.map(call => call.context.state.command)).toEqual(["DIR=build; rm -rf \"$DIR/\"*"]);
+    expect(jev.calls[0]!.context.state.staticFindings).toBeUndefined();
+  });
+
+  it("static check: an unknown variable (e.g. inherited from the environment) is not blocked; Jev gets the warning and its answer decides", async () => {
+    const command = "rm -rf \"$DIR/\"*";
+    const yes = fakeAccess("yes");
+    expect(await guardBashReview("bash", { command }, guard(yes.access))).toBeUndefined();
+    expect(yes.calls).toHaveLength(1);
+    expect(yes.calls[0]!.context.state.staticFindings).toEqual([expect.stringContaining("if $DIR is empty or unset the target is everything in the filesystem root (its value is not known here")]);
+    const no = fakeAccess("no");
+    const reason = await guardBashReview("bash", { command }, guard(no.access));
+    expect(reason).toContain("answered no: this command was NOT run");
+    expect(reason).toContain("The static check noticed: rm $DIR/*: if $DIR is empty or unset");
+    expect(no.calls).toHaveLength(1);
+    const jev = fakeAccess("yes");
+    // Switched off with the rest of the review.
+    expect(await guardBashReview("bash", { command: "rm -rf ~" }, guard(jev.access, { settings: { ...settings, enabled: false } }))).toBeUndefined();
+  });
+
+  it("static check: warnings go to Jev as staticFindings (redacted, it decides) and are repeated in a no", async () => {
+    const yes = fakeAccess("yes");
+    expect(await guardBashReview("bash", { command: "rm -rf ./*" }, guard(yes.access, { cwd: "/w/proj" }))).toBeUndefined();
+    expect(yes.calls[0]!.context.state.staticFindings).toEqual(["rm ./* targets everything in the whole working directory /w/proj"]);
+    const no = fakeAccess("no");
+    const reason = await guardBashReview("bash", { command: "rm -rf $(cat TOKEN=abc123secret)" }, guard(no.access));
+    expect(reason).toContain("answered no");
+    expect(reason).toContain("The static check noticed: rm target $(cat TOKEN=abc123secret) comes from a command substitution");
+    expect(JSON.stringify(no.calls[0]!.context.state.staticFindings)).not.toContain("abc123secret");
+  });
 });
 
 describe("bashReview in orche.config.json", () => {

@@ -14,11 +14,18 @@
  * programs, build/test/package scripts, text it cannot follow) is reviewed. The reviewer sees only the command string and a little
  * context (cwd, home, task, extra write roots); it cannot see what scripts, Makefiles, package scripts, git hooks or other
  * programs the command starts will do, and other tools (edit/write, MCP, GUI) are not reviewed here.
+ *
+ * Static accident check (bash-hazards.ts) before Jev, on the same reviewed invocations: a deletion, move or recursive chmod/chown
+ * whose target, from known facts alone (literals, ~, the cwd, unconditional literal assignments such as DIR=''), is /, a top-level
+ * system directory or the whole home directory is blocked without asking Jev (same rewrite instruction). Targets that depend on an
+ * unknown value (a variable that may come from the environment, a cd) and weaker signals (the working directory or a parent, a
+ * substitution) are passed to Jev as `staticFindings` and repeated in a no. A command with no finding still goes to Jev.
  */
 import { homedir } from "node:os";
 import type { ClassifierContext, ClassifierResult } from "@earendil-works/pi-ai";
 import type { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { bashMayWrite } from "./bash-mutation.js";
+import { findBashHazards, type BashHazard } from "./bash-hazards.js";
 
 /** `bashReview` in orche.config.json, with defaults applied. */
 export interface BashReviewSettings {
@@ -60,6 +67,8 @@ export interface BashReviewRequest {
   task?: string;
   /** Directories outside cwd the agent was explicitly allowed to write. */
   writeRoots?: readonly string[];
+  /** Warnings of the static check (bash-hazards.ts), for the reviewer to weigh. */
+  staticFindings?: readonly string[];
 }
 export type BashReviewVerdict =
   | { verdict: "yes" }
@@ -93,6 +102,7 @@ const RUN_QUESTION = {
     "Answer no for mistakes such as recursive or forced deletes, moves, chmod/chown or overwrites whose target is or could become /, ~ or the whole home directory, a parent directory or a whole project;",
     "targets built from a variable or substitution that may be empty or unset (for example rm -rf \"$DIR/\"* with DIR unset); overly broad globs; wrong or mistyped absolute paths;",
     "or destructive effects the task does not ask for.",
+    "`staticFindings`, when present, lists patterns a static check noticed in the command; weigh them against the task and cwd, they are signals, not verdicts.",
   ].join(" "),
   criteria: {
     yes: "Run it: no likely accidental destructive or overly broad effect",
@@ -107,6 +117,7 @@ function reviewState(request: BashReviewRequest): ClassifierContext["state"] {
     home: homedir(),
     ...(request.task?.trim() ? { task: clip(redactSecrets(request.task.trim()), 2000) } : {}),
     ...(request.writeRoots?.length ? { extraWriteRoots: [...request.writeRoots] } : {}),
+    ...(request.staticFindings?.length ? { staticFindings: request.staticFindings.slice(0, 10).map(finding => clip(redactSecrets(finding), 400)) } : {}),
   };
 }
 
@@ -147,19 +158,29 @@ export async function reviewBashCommand(request: BashReviewRequest, settings: Ba
   return { verdict: answer.choice };
 }
 
-/** The tool-call block reason of a verdict; undefined for yes. */
-export function bashReviewBlockReason(verdict: BashReviewVerdict, settings: BashReviewSettings): string | undefined {
+/** The tool-call block reason of a verdict; undefined for yes. `findings`: static warnings to repeat in a no. */
+export function bashReviewBlockReason(verdict: BashReviewVerdict, settings: BashReviewSettings, findings: readonly string[] = []): string | undefined {
   if (verdict.verdict === "yes") return undefined;
   if (verdict.verdict === "no") {
     return `Bash safety review (${settings.model}) answered no: this command was NOT run. The reviewer judged it likely to cause accidental damage beyond what the task needs `
       + "(for example a delete, move or overwrite whose target could expand to /, ~, a whole project or an empty path, a too-broad glob, or a mistyped absolute path). "
       + "Rewrite the command so every write target is explicit and only as broad as the task needs (literal paths, ${VAR:?} guards for variables, narrower globs, a listing or dry run first), "
       + "then run the corrected command: it is reviewed again and runs on yes. Do not resubmit it unchanged or disguised, and do not route the same effect through another tool. "
-      + "If the task truly needs exactly this effect, report that to the user instead; there is no override.";
+      + "If the task truly needs exactly this effect, report that to the user instead; there is no override."
+      + (findings.length ? ` The static check noticed: ${findings.join("; ")}.` : "");
   }
   if (verdict.cancelled) return "Bash safety review was cancelled: this command was NOT run.";
   return `Bash safety review (${settings.model}) gave no verdict (${verdict.reason}): this command was NOT run. This is not a judgment that the command is unsafe. `
     + `Run the same command again to retry the review; if it keeps failing, stop and tell the user (check the ${settings.model} credentials, or bashReview in orche.config.json).`;
+}
+
+/** The block reason of static findings at level block: the command did not run and Jev was not asked. */
+export function bashHazardBlockReason(hazards: readonly BashHazard[]): string {
+  return `Bash safety check (static): this command was NOT run. ${hazards.map(hazard => hazard.message).join("; ")}. `
+    + "A delete, move or recursive chmod/chown of /, a top-level system directory or your whole home directory is almost always an accident (an empty variable, a wrong cwd, a glob one level too high). "
+    + "Rewrite the command with the exact target the task needs (a literal subdirectory path, ${VAR:?} guards so an empty variable stops the command, narrower globs), "
+    + "then run the corrected command: it is checked again and goes on to the Jev review. Do not resubmit it unchanged or disguised, and do not route the same effect through another tool. "
+    + "If the task truly needs exactly this effect, report that to the user instead; there is no override.";
 }
 
 export interface BashReviewGuard {
@@ -172,16 +193,20 @@ export interface BashReviewGuard {
   signal?: AbortSignal | undefined;
 }
 /**
- * The review step of a tool-call guard: undefined (go on) for every tool but bash, a disabled review, or a known read-only
- * command; otherwise the classifier decides and anything but yes is the block reason.
+ * The review step of a tool-call guard: undefined (go on) for every tool but bash, a disabled review, or a recognised read;
+ * otherwise the static check (a block finding ends it here, without Jev), then the classifier, and anything but yes is the block reason.
  */
 export async function guardBashReview(toolName: string, input: Record<string, unknown>, guard: BashReviewGuard): Promise<string | undefined> {
   const settings = guard.settings;
   if (toolName !== "bash" || !settings?.enabled || !needsBashReview(input.command)) return undefined;
+  const hazards = findBashHazards(input.command, { cwd: guard.cwd, home: homedir() });
+  const blocking = hazards.filter(hazard => hazard.level === "block");
+  if (blocking.length) return bashHazardBlockReason(blocking);
+  const findings = hazards.map(hazard => hazard.message);
   let access: ClassifierAccess | undefined;
   try { access = guard.access(); } catch { access = undefined; }
   const verdict = access
-    ? await reviewBashCommand({ command: input.command, cwd: guard.cwd, ...(guard.task ? { task: guard.task } : {}), ...(guard.writeRoots?.length ? { writeRoots: guard.writeRoots } : {}) }, settings, access, guard.signal)
+    ? await reviewBashCommand({ command: input.command, cwd: guard.cwd, ...(guard.task ? { task: guard.task } : {}), ...(guard.writeRoots?.length ? { writeRoots: guard.writeRoots } : {}), ...(findings.length ? { staticFindings: findings } : {}) }, settings, access, guard.signal)
     : failed("no model registry in this session");
-  return bashReviewBlockReason(verdict, settings);
+  return bashReviewBlockReason(verdict, settings, findings);
 }

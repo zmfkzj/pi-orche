@@ -17,7 +17,7 @@
  * text this reader cannot follow. It never runs anything and cannot see what scripts or programs do inside.
  */
 
-interface Word {
+export interface Word {
   /** The word with quotes removed and expansions kept as written. */
   text: string;
   /** Contains a parameter expansion or a command, arithmetic or process substitution. */
@@ -28,9 +28,12 @@ interface Word {
   quoted: boolean;
   /** Starts like `NAME=` or `NAME+=` before any quoting or expansion. */
   assignment: boolean;
+  /** Starts with an unquoted `~` (tilde expansion). */
+  tilde?: boolean;
 }
-interface Segment { words: Word[]; redirects: { op: string; target: Word }[] }
-interface Parsed { segments: Segment[]; inner: string[] }
+/** `after`: the operator that ended the previous segment (`;`, `&`, `|`, `(`, `)`, a newline, or empty at the start). */
+export interface Segment { words: Word[]; redirects: { op: string; target: Word }[]; after?: string }
+export interface Parsed { segments: Segment[]; inner: string[] }
 
 const WRITE_REDIRECTS = new Set([">", ">>", ">|", "&>", "&>>", "<>"]);
 const HARMLESS_TARGET = /^\/dev\/(null|stdout|stderr|tty|fd\/\d+)$/;
@@ -54,10 +57,10 @@ function captureParen(src: string, open: number): [string, number] | undefined {
 }
 
 /** Split shell text into simple commands; undefined when it cannot be followed (unbalanced quotes, a dangling redirection, ...). */
-function parse(src: string): Parsed | undefined {
+export function parse(src: string): Parsed | undefined {
   const segments: Segment[] = [];
   const inner: string[] = [];
-  let current: Segment = { words: [], redirects: [] };
+  let current: Segment = { words: [], redirects: [], after: "" };
   let word: Word | undefined;
   let pending: string | undefined;
   const heredocs: { delimiter: string; strip: boolean; quoted: boolean }[] = [];
@@ -72,11 +75,11 @@ function parse(src: string): Parsed | undefined {
     current.words.push(done);
     return true;
   };
-  const end = (): boolean => {
+  const end = (separator: string): boolean => {
     flush();
     if (pending || heredocNext) return false;
     if (current.words.length || current.redirects.length) segments.push(current);
-    current = { words: [], redirects: [] };
+    current = { words: [], redirects: [], after: separator };
     return true;
   };
   /** `$(`, `<(`, `>(` or `$((` at i (the `(` at i+1): record the inner command; returns the index after `)`. */
@@ -96,7 +99,7 @@ function parse(src: string): Parsed | undefined {
     if (c === "\\" && src[i + 1] === "\n") { i += 2; continue; }
     if (c === " " || c === "\t") { flush(); i++; continue; }
     if (c === "\n") {
-      if (!end()) return undefined;
+      if (!end("\n")) return undefined;
       i++;
       // Here-document bodies are data. An unquoted delimiter expands substitutions in the body: those count as inner commands.
       for (const doc of heredocs.splice(0)) {
@@ -119,7 +122,7 @@ function parse(src: string): Parsed | undefined {
       continue;
     }
     if (c === ";" || c === "&" || c === "|" || c === "(" || c === ")") {
-      if (!end()) return undefined;
+      if (!end(c)) return undefined;
       i++;
       continue;
     }
@@ -179,18 +182,19 @@ function parse(src: string): Parsed | undefined {
     const w = start();
     if (c === "$" && /[A-Za-z_0-9@*#?$!{-]/.test(src[i + 1] ?? "")) w.dynamic = true;
     if (c === "*" || c === "?" || c === "[") w.glob = true;
+    if (c === "~" && w.text === "" && !w.quoted && !w.dynamic) w.tilde = true;
     if (c === "=" && !w.quoted && !w.dynamic && /^[A-Za-z_][A-Za-z0-9_]*\+?$/.test(w.text)) w.assignment = true;
     w.text += c;
     i++;
   }
-  if (!end() || heredocs.length) return undefined;
+  if (!end("") || heredocs.length) return undefined;
   return { segments, inner };
 }
 
 /** Shell keywords that open a compound command: the command proper follows them. */
-const KEYWORDS = new Set(["!", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "{", "}", "time"]);
+export const KEYWORDS = new Set(["!", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "{", "}", "time"]);
 /** Segments that are syntax rather than a command run on arguments (`for x in ...`, `function f`, `case x in`, `esac`). */
-const SYNTAX = new Set(["for", "select", "function", "case", "esac", "in"]);
+export const SYNTAX = new Set(["for", "select", "function", "case", "esac", "in"]);
 
 /** Read-only whatever their arguments (only their own exec-like options are checked, see EXEC_LIKE). */
 const READERS = new Set((
@@ -206,7 +210,7 @@ const EXEC_LIKE = /^--(pre|exec|exec-batch|hostname-bin|open-files-in-pager|page
 const FIND_ACTIONS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"]);
 
 const SYSTEM_BIN = /^\/(usr\/(local\/)?)?s?bin\/[^/]+$/;
-const commandName = (word: Word): string => SYSTEM_BIN.test(word.text) ? word.text.slice(word.text.lastIndexOf("/") + 1) : word.text;
+export const commandName = (word: Word): string => SYSTEM_BIN.test(word.text) ? word.text.slice(word.text.lastIndexOf("/") + 1) : word.text;
 
 /** Short-option cluster check: does `-abc` (not `--long`) contain one of `letters`? */
 const hasShort = (args: readonly string[], letters: string) => args.some(arg => /^-[^-]/.test(arg) && [...arg.slice(1)].some(letter => letters.includes(letter)));
@@ -224,7 +228,7 @@ const positionals = (args: readonly string[], valued = ""): string[] => {
 };
 
 /** The command after a wrapper's own options; undefined when the wrapper runs nothing (it then only reads). */
-function unwrap(name: string, args: readonly Word[]): readonly Word[] | "opaque" | undefined {
+export function unwrap(name: string, args: readonly Word[]): readonly Word[] | "opaque" | undefined {
   const texts = args.map(arg => arg.text);
   let i = 0;
   const skipOptions = (valued: string, longValued: readonly string[] = []) => {
@@ -266,7 +270,7 @@ function unwrap(name: string, args: readonly Word[]): readonly Word[] | "opaque"
   }
   return i < args.length ? args.slice(i) : undefined;
 }
-const WRAPPERS = new Set(["sudo", "doas", "env", "nice", "ionice", "timeout", "stdbuf", "nohup", "time", "builtin", "exec", "command", "xargs"]);
+export const WRAPPERS = new Set(["sudo", "doas", "env", "nice", "ionice", "timeout", "stdbuf", "nohup", "time", "builtin", "exec", "command", "xargs"]);
 
 const GIT_READ = new Set((
   "status diff log show rev-parse rev-list ls-files ls-tree blame grep shortlog describe cat-file name-rev merge-base diff-tree diff-index "

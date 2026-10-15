@@ -97,6 +97,49 @@ describe("main's own bash", () => {
     expect(toolResults(single)[0]!.content[0]!.text).not.toContain("Bash safety review");
   });
 
+  // Dangerous fixtures sit behind `false &&`: the analysis sees the delete, the shell never reaches it, so a failing guard
+  // shows up only as a marker file from the harmless `touch` after it. The corrected command deletes an empty test directory.
+  it("static check on main: a proven-empty target is blocked before Jev, an unknown (inherited) variable reaches Jev whose answer decides, the corrected command runs", async () => {
+    process.env.ORCHE_TEST_INHERITED = "";
+    const h = await createHarness({
+      mainMode: "direct", orcheSteps: [],
+      mainSteps: [
+        tool("bash", { command: "R=''; false && rm -rf \"$R/\"*; touch static-ran.txt" }),
+        tool("bash", { command: "false && rm -rf \"$ORCHE_TEST_INHERITED/\"*; touch unknown-no.txt" }),
+        tool("bash", { command: "false && rm -rf \"$ORCHE_TEST_INHERITED/\"*; touch unknown-yes.txt" }),
+        tool("bash", { command: "R=old; find \"$R/\" -maxdepth 0 -delete; touch fixed.txt" }),
+        tool("bash", { command: "false && rm -rf ./*; touch warned.txt" }),
+        reply("done"),
+      ],
+    });
+    open.push(h);
+    try {
+      execFileSync("mkdir", [join(h.cwd, "old")]);
+      h.classifier.answer = call => /warned|unknown-no/.test(commandOf(call)) ? "no" : "yes";
+      await h.session.prompt("Remove the old directory");
+    } finally {
+      delete process.env.ORCHE_TEST_INHERITED;
+    }
+    expect(await exists(join(h.cwd, "static-ran.txt"))).toBe(false);
+    expect(await exists(join(h.cwd, "unknown-no.txt"))).toBe(false);
+    expect(await exists(join(h.cwd, "unknown-yes.txt"))).toBe(true);
+    expect(await exists(join(h.cwd, "fixed.txt"))).toBe(true);
+    expect(await exists(join(h.cwd, "old"))).toBe(false);
+    expect(await exists(join(h.cwd, "warned.txt"))).toBe(false);
+    // One Jev call per reviewed invocation that got past the static check: the blocked one never reached Jev.
+    expect(h.classifier.calls.map(commandOf)).toEqual([
+      "false && rm -rf \"$ORCHE_TEST_INHERITED/\"*; touch unknown-no.txt", "false && rm -rf \"$ORCHE_TEST_INHERITED/\"*; touch unknown-yes.txt",
+      "R=old; find \"$R/\" -maxdepth 0 -delete; touch fixed.txt", "false && rm -rf ./*; touch warned.txt",
+    ]);
+    expect(h.classifier.calls[0]!.context.state.staticFindings).toEqual([expect.stringContaining("if $ORCHE_TEST_INHERITED is empty or unset the target is everything in the filesystem root (its value is not known here")]);
+    expect(h.classifier.calls[2]!.context.state.staticFindings).toBeUndefined();
+    expect(h.classifier.calls[3]!.context.state.staticFindings).toEqual([`rm ./* targets everything in the whole working directory ${h.cwd}`]);
+    const results = toolResults(h);
+    expect(results[0]!.content[0]!.text).toContain("Bash safety check (static): this command was NOT run. rm $R/*: $R is assigned an empty value in this command");
+    expect(results[1]!.content[0]!.text).toContain("answered no: this command was NOT run");
+    expect(results[4]!.content[0]!.text).toContain("The static check noticed: rm ./* targets everything in the whole working directory");
+  });
+
   it("bashReview.enabled false switches the review off", async () => {
     const h = await createHarness({ mainMode: "direct", orcheSteps: [], bashReview: { enabled: false }, mainSteps: [tool("bash", { command: "echo x > denied.txt" }), reply("done")] });
     open.push(h);
@@ -148,6 +191,18 @@ async function workerFixture(steps: FauxResponseStep[], bashReview?: Record<stri
 const done = tool("report_result", { kind: "implement", summary: "done", data: { status: "done" } });
 
 describe("an orche_task worker's bash", () => {
+  it("the static check also guards worker bash, before Jev and after the existing write-scope guard", async () => {
+    const { h, execute } = await workerFixture([
+      tool("bash", { command: "false && rm -rf ~; touch static-ran.txt" }),
+      tool("bash", { command: "touch fixed.txt" }),
+      done,
+    ]);
+    await execute();
+    expect(await exists(join(h.cwd, "static-ran.txt"))).toBe(false);
+    expect(await exists(join(h.cwd, "fixed.txt"))).toBe(true);
+    expect(h.classifier.calls.map(commandOf)).toEqual(["touch fixed.txt"]);
+  });
+
   it("is reviewed once per call after the existing guards: no blocks, the corrected command runs, an outside literal write is still refused first", async () => {
     const outside = join(tmpdir(), `orche-review-outside-${process.pid}.txt`);
     const seen: string[] = [];
