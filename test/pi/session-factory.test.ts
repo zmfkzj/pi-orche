@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { fauxAssistantMessage as reply, type AssistantMessage, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { createSession } from "../../src/pi/session-factory.js";
 import { fauxRuntime } from "../helpers/faux.js";
+import { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { InheritedProviders } from "../../src/pi/inherit-providers.js";
+import { beginThinking, lowerThinkingForRecovery } from "../../src/pi/thinking-state.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -162,5 +165,45 @@ describe("session persistence in createSession", () => {
     expect(session.sessionFile).toBeUndefined();
     session.dispose();
     expect(await readFile(file, "utf8")).toBe("this is not a pi session\n");
+  });
+});
+
+describe("Pi 1.3 worker model-switch thinking (real SDK, faux provider)", () => {
+  it("clamps each model without rewriting the default, and recalculates assignment effort after switching", async () => {
+    const root = await temp();
+    const requests: { model: string; thinking: string }[] = [];
+    const host = await fauxRuntime(Array.from({ length: 4 }, () => (_context, options, _state, model) => {
+      requests.push({ model: model.id, thinking: options?.reasoning ?? "off" });
+      return reply("done");
+    }));
+    const base = host.faux.getModel();
+    const capable = { ...base, id: "capable", reasoning: true };
+    const plain = { ...base, id: "plain", reasoning: false };
+    const limited = { ...base, id: "limited", reasoning: true, thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: null, xhigh: null, max: null } };
+    host.runtime.registerNativeProvider({ ...host.faux.provider, getModels: () => [capable, plain, limited] });
+    const child = await fauxRuntime();
+    const runtime = new InheritedProviders().sync(child.runtime, new ModelRegistry(host.runtime));
+    const session = await createSession({ cwd: root, modelRuntime: runtime, route: { ...host.route, model: `${base.provider}/capable`, thinking: "high" }, tools: [], instructions: "test" });
+    try {
+      session.settingsManager.applyOverrides({ defaultThinkingLevel: "high" });
+      expect(beginThinking(session).baseline).toBe("high");
+      await session.prompt("capable");
+      expect(lowerThinkingForRecovery(session)).toBe(true);
+      for (const [model, level] of [[plain, "off"], [limited, "low"], [capable, "high"]] as const) {
+        await session.setModel(model);
+        expect(session.thinkingLevel).toBe(level);
+        const state = beginThinking(session, session.thinkingLevel);
+        expect(state.baseline).toBe(level);
+        expect(state.override).toBeUndefined();
+        expect(session.getAvailableThinkingLevels()).toContain(state.step);
+        await session.prompt(model.id);
+      }
+      expect(requests).toEqual([{ model: "capable", thinking: "high" }, { model: "plain", thinking: "off" }, { model: "limited", thinking: "low" }, { model: "capable", thinking: "high" }]);
+      expect(session.settingsManager.getDefaultThinkingLevel()).toBe("high");
+      expect(child.faux.state.callCount).toBe(0);
+      const before = session.sessionManager.getEntries().length;
+      session.setThinkingLevel("high");
+      expect(session.sessionManager.getEntries()).toHaveLength(before); // no duplicate level entry
+    } finally { session.dispose(); }
   });
 });

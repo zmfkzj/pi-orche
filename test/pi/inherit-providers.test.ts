@@ -181,7 +181,7 @@ describe("host provider inheritance", () => {
   });
 
   it("uses the host's OAuth credential store and locked refresh, not the worker's store", async () => {
-    const f = await fauxRuntime([reply("OAuth answer")]);
+    const f = await fauxRuntime([reply("OAuth answer"), reply("Concurrent OAuth answer")]);
     const credentials = new InMemoryCredentialStore();
     const childCredentials = new InMemoryCredentialStore();
     const id = f.faux.provider.id;
@@ -197,10 +197,11 @@ describe("host provider inheritance", () => {
     await host.refresh({ allowNetwork: false });
     const runtime = new InheritedProviders().sync(child, new ModelRegistry(host));
     const model = runtime.getModel(id, f.faux.getModel().id)!;
-    const result = await runtime.completeSimple(model, { messages: [] });
-    expect(result.stopReason).toBe("stop");
+    const results = await Promise.all([runtime.completeSimple(model, { messages: [] }), runtime.completeSimple(model, { messages: [] })]);
+    expect(results.map(result => result.stopReason)).toEqual(["stop", "stop"]);
     expect(refresh).toHaveBeenCalledTimes(1);
-    expect(stream.mock.calls[0]?.[2]).toMatchObject({ apiKey: "renewed-test-token", headers: { "X-OAuth-Test": "host" } });
+    expect(stream).toHaveBeenCalledTimes(2);
+    for (const call of stream.mock.calls) expect(call[2]).toMatchObject({ apiKey: "renewed-test-token", headers: { "X-OAuth-Test": "host" } });
     expect(await credentials.read(id)).toMatchObject({ access: "renewed-test-token" });
     expect(await childCredentials.read(id)).toBeUndefined();
     expect(runtime.isUsingOAuth(id)).toBe(true);

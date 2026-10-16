@@ -139,7 +139,7 @@ describe("mainMode: external paths", () => {
     const before = await readFile(file, "utf8");
     h.main.faux.setResponses([tool("write", { path, content: "forbidden" }), reply("blocked")]);
     await h.session.prompt(`Please update ${path} without direct mode`);
-    expect(lastResult(h)).toContain('Blocked by orche mode \\"single\\"');
+    expect(lastResult(h)).toContain("Tool write not found"); // removed again before the request
     expect(h.session.systemPrompt).not.toContain(EXTERNAL_PERMISSION);
     expect(await readFile(file, "utf8")).toBe(before);
   });
@@ -160,7 +160,7 @@ describe("mainMode: external paths", () => {
     expect(toolResults(h)).toHaveLength(2);
     for (const result of toolResults(h)) {
       expect(result.isError).toBe(true);
-      expect(JSON.stringify(result)).toContain(`Blocked by orche mode \\"${mainMode}\\"`);
+      expect(JSON.stringify(result)).toContain("Tool write not found");
     }
     expect(h.session.systemPrompt).not.toContain(EXTERNAL_PERMISSION);
     expect(await readFile(file, "utf8")).toBe("unchanged\n");
@@ -263,7 +263,7 @@ describe("mainMode: shell guard diagnostics", () => {
 });
 
 describe("mainMode: single guard", () => {
-  it("blocks edit, write and ast_rewrite even when something re-activates them; the files stay untouched", async () => {
+  it("removes reactivated edit, write and ast_rewrite before requesting; the files stay untouched", async () => {
     const h = await harness({
       mainSteps: [
         tool("edit", { path: "greeting.txt", edits: [{ op: "replace", at: "1#0123456789abcdef", text: "changed" }] }),
@@ -280,8 +280,7 @@ describe("mainMode: single guard", () => {
     expect(results).toHaveLength(3);
     for (const result of results) {
       expect(result).toMatchObject({ isError: true });
-      expect(JSON.stringify(result)).toContain('Blocked by orche mode \\"single\\"');
-      expect(JSON.stringify(result)).toContain("orche_task");
+      expect(JSON.stringify(result)).toContain(`Tool ${result.toolName} not found`);
     }
     expect(await readFile(join(h.cwd, "greeting.txt"), "utf8")).toBe("hello world\n");
     expect(await readdir(h.cwd)).toEqual(["greeting.txt"]);
@@ -316,7 +315,7 @@ describe("mainMode: single guard", () => {
     const h = await harness({ mainSteps: [tool("orche_task", { role: "explore", request: "do it" }), reply("ok")], orcheSteps: answerScript("MUST_NOT_RUN"), mainMode: "direct" });
     h.session.setActiveToolsByName([...h.session.getActiveToolNames(), "orche_task"]);
     await h.session.prompt("go");
-    expect(lastResult(h)).toContain('Blocked by orche mode \\"direct\\"');
+    expect(lastResult(h)).toContain("Tool orche_task not found");
     expect(h.orche.faux.state.callCount).toBe(0);
   });
 });
@@ -381,7 +380,7 @@ describe("/orche direct is a one-turn override", () => {
     h.session.setActiveToolsByName([...h.session.getActiveToolNames(), "write"]);
     h.main.faux.setResponses([tool("write", { path: "second.txt", content: "x" }), reply("blocked")]);
     await h.session.prompt("now try again without the override");
-    expect(lastResult(h)).toContain('Blocked by orche mode \\"single\\"');
+    expect(lastResult(h)).toContain("Tool write not found");
     expect(await readdir(h.cwd)).not.toContain("second.txt");
   });
 

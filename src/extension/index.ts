@@ -551,6 +551,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     // Every run main starts while idle (Pi 1.2.0+: user prompts and runs a triggerTurn message starts alike; older hosts: user
     // prompts only). Both kinds get the skill list and the delegation section of the mode in force, and the first takes the notice.
     pi.on("before_agent_start", event => {
+      // Late/restored tools may have become active since session_start.
+      state.apply();
       mainSkills = workerSkills(event.systemPromptOptions.skills);
       event.systemPromptOptions.sections[DELEGATION_SECTION] = delegationSection(state.effective);
       if (!interruptedNotice || oneShot) return undefined;
@@ -594,6 +596,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     // Every mode: advise the user (not the model) when main's context fills up (context-warning.ts); direct mode names single mode,
     // the delegating modes /compact or a new session, since delegating does not shrink the history main already holds.
     pi.on("turn_end", (_event, ctx) => {
+      state.apply();
       const checked = contextWarning(state.effective, ctx.getContextUsage(), warningSettings, warningState);
       warningState = checked.state;
       if (checked.message) ctx.ui.notify(checked.message, "warning");

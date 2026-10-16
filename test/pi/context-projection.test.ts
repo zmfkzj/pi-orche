@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage as assistant, type AssistantMessage, type ToolCall, type ToolResultMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage as assistant, normalizeContext, type AssistantMessage, type ToolCall, type ToolResultMessage } from "@earendil-works/pi-ai";
 import type { Api, Message, Model, TranscriptContext } from "@earendil-works/pi-ai";
 import { convertResponsesMessages } from "@earendil-works/pi-ai/api/openai-responses-shared";
 import { stream as streamCodex } from "@earendil-works/pi-ai/api/openai-codex-responses";
@@ -329,6 +329,35 @@ describe("projected provider replay", () => {
     expect(converted.filter(block => block.type === "tool_use").map(block => block.id)).toEqual(["toolu_1", "toolu_2", "toolu_3"]);
     expect(converted.filter(block => block.type === "tool_result").map(block => block.tool_use_id)).toEqual(["toolu_1", "toolu_2", "toolu_3"]);
     expect(converted.filter(block => block.type === "thinking").map(block => block.signature)).toEqual(["signature_1"]);
+  });
+
+  it("a model switch drops incompatible signed reasoning without losing projected tool/result pairs", async () => {
+    const original = providerModel("anthropic-messages", "anthropic");
+    const messages = providerTranscript(original, false);
+    const saved = JSON.stringify(messages);
+    const { projected } = project(messages, 6);
+    let payload: unknown;
+    const output = await streamAnthropic({ ...original, id: "different-model" }, normalizeContext({ messages: [...projected] as Message[] }), {
+      apiKey: "test-only", onPayload: value => { payload = value; throw new Error("stop before transport"); },
+    }).result();
+    expect(output.errorMessage).toContain("stop before transport");
+    const body = JSON.stringify(payload);
+    expect(body).not.toContain("signature_1");
+    expect(body).not.toContain("signature_2");
+    expect(body).toContain("tool_use_id");
+    expect(body).toContain("toolu_1");
+    expect(body).toContain("toolu_2");
+    expect(body).toContain("toolu_3");
+    expect(body).not.toContain("No result provided");
+    expect(JSON.stringify(messages)).toBe(saved);
+
+    const responses = providerModel("openai-responses", "openai");
+    const history = providerTranscript(responses);
+    const switched = convertResponsesMessages({ ...responses, id: "different-model" }, normalizeContext({ messages: [...project(history, 6).projected] as Message[] }), new Set(["openai"]));
+    expect(switched.filter(item => item.type === "reasoning")).toHaveLength(0);
+    const calls = switched.filter(item => item.type === "function_call");
+    expect(calls.map(item => item.id)).toEqual([undefined, undefined, undefined]);
+    expect(switched.filter(item => item.type === "function_call_output").map(item => item.call_id)).toEqual(calls.map(item => item.call_id));
   });
 
   it("rewrites only the matching occurrence when Responses IDs are reused", () => {

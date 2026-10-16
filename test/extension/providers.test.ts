@@ -48,6 +48,12 @@ describe("provider extensions in orche's own runtime", () => {
     const host = await loadProviderExtensions(f.runtime, [installed.source], { cwd: installed.root, agentDir: installed.agentDir });
     try {
       expect(f.runtime.getModel("ext-provider", model.id)).toBeDefined();
+      // Registration alone does not prove that the hidden extension session bound provider dispatch.
+      shared.__orcheTestProvider.setResponses([reply("from the loaded package")]);
+      const result = await f.runtime.completeSimple(model, { messages: [{ role: "user", content: "hello", timestamp: 0 }] });
+      expect(result.stopReason).toBe("stop");
+      expect(result.content).toEqual(expect.arrayContaining([expect.objectContaining({ text: "from the loaded package" })]));
+      expect(shared.__orcheTestProvider.state.callCount).toBe(1);
       expect(shared.__orcheRogueLoaded).toBeUndefined(); // the user's other extensions are never loaded
     } finally {
       host.dispose();

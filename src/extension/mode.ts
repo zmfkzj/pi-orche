@@ -249,6 +249,7 @@ export class MainModeState {
   /** Adopt the last `/orche mode` choice recorded in the session branch. */
   restore(entries: readonly SessionEntryLike[]): void {
     this.chosen = undefined;
+    this.override = undefined;
     this.removed.clear();
     this.recorded = "";
     for (const entry of entries) {
@@ -283,9 +284,9 @@ export class MainModeState {
     const next = active.filter(name => !blocked.has(name));
     for (const name of active) if (blocked.has(name)) this.removed.add(name);
     for (const name of [...this.removed]) {
-      if (blocked.has(name)) continue;
+      if (blocked.has(name) || !registered.has(name)) continue;
       this.removed.delete(name);
-      if (registered.has(name) && !next.includes(name)) next.push(name);
+      if (!next.includes(name)) next.push(name);
     }
     if (next.length !== active.length || next.some((name, index) => name !== active[index])) this.host.setActiveTools(next);
     const record = JSON.stringify([...this.removed].sort());
