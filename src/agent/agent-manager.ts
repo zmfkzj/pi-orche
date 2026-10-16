@@ -585,9 +585,10 @@ export class AgentManager {
    * calls, before the next request; while no request runs it is appended to the context at once). Rejected when the worker is not
    * running an assignment, has already reported, or is being stopped: such a message would land in the next assignment, or nowhere.
    * Grants and scope never change through a message; it is text for the model only. `options.source: "advisor"` marks the plan
-   * advisor's notes (single.advisor), and `options.content` replaces main's framing with the caller's own.
+   * advisor's notes (single.advisor), `"peer"` a routed session-bus note (`options.from`: its sender), and `options.content`
+   * replaces main's framing with the caller's own.
    */
-  steer(agentId: string, text: string, options: { source?: "advisor"; content?: (id: string) => string } = {}): SteerReceipt {
+  steer(agentId: string, text: string, options: { source?: "advisor" | "peer"; from?: string; content?: (id: string) => string } = {}): SteerReceipt {
     const w = this.workers.get(agentId);
     const reject = (reason: string): SteerReceipt => ({ status: "rejected", agentId, reason });
     if (this.closed.signal.aborted) return reject("the worker pool is shutting down");
@@ -598,7 +599,7 @@ export class AgentManager {
     if (w.budget === "stopping" || w.budget === "final") return reject(`${agentId} is being stopped (request budget); send the message as a follow-up orche_task instead`);
     if (!text.trim()) return reject("empty message");
     const id = `M${++this.messageSerial}`;
-    const message: InjectedMessage = { id, text, queuedAt: Date.now(), status: "queued", ...(options.source ? { source: options.source } : {}) };
+    const message: InjectedMessage = { id, text, queuedAt: Date.now(), status: "queued", ...(options.source ? { source: options.source } : {}), ...(options.from ? { from: options.from } : {}) };
     w.injected.push(message);
     const session = w.adapter.session;
     const content = options.content?.(id) ?? `[Message from main while you work on this assignment · ${id}]\n${text}\n(Take it into account from now on. It refines this assignment; it does not replace it unless it says so, and it grants no new permissions.)`;

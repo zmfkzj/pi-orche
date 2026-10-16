@@ -30,6 +30,7 @@ import { completeOrcheArguments } from "./completions.js";
 import { discoveredSkills, workerSkills } from "../pi/worker-skills.js";
 import { registerDependencyProvider } from "./dependencies.js";
 import { createOrcheDependencyProvider, runDependencyCommand, type OrcheDependencyOptions } from "./doctor.js";
+import { parseRouteRequest, PEER_NOTE_MAX, peerLabel, SESSION_BUS_ROUTE_EVENT } from "./peer-notes.js";
 
 export const RESULT_MESSAGE_TYPE = "orche-result";
 /** Pi built-ins that stay Pi's own but are switched on next to our tools. */
@@ -105,6 +106,8 @@ const NOTE_PENDING_MS = 60_000;
 /** The event pi-session-bus emits once Pi accepted an incoming note (`{ id, wake }`; see its README). */
 export const SESSION_BUS_MESSAGE_EVENT = "session-bus:message";
 const SESSION_BUS_MESSAGE_TYPE = "session-bus.message";
+/** How many routed note ids are remembered against a repeated offer (the bus itself drops duplicate ids). */
+const ROUTED_NOTES_KEPT = 256;
 /** How long orche_task's approval dialog waits for the user while a job runs; no answer in time approves nothing. */
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 /** The two answers of that dialog: only the first, chosen by the user, approves (jobs.ts queue). */
@@ -336,6 +339,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     // Detaching an attached call: input for main (user steers, woken session-bus notes) and how long a note counts as waiting.
     /** Woken session-bus notes Pi has queued but not yet delivered into main's context: note id -> arrival. */
     const pendingNotes = new Map<string, number>();
+    /** Session-bus notes routed to a running worker (note id -> where it went), so that the same note never goes there twice. */
+    const routedNotes = new Map<string, { to: string; ref: string }>();
     const notesWaiting = () => {
       const now = Date.now();
       for (const [id, at] of pendingNotes) if (now - at > NOTE_PENDING_MS) pendingNotes.delete(id);
@@ -793,12 +798,36 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       return undefined;
     });
     // pi-session-bus announces each note Pi accepted (after its steer is queued). A woken note detaches and counts as waiting for
-    // main until Pi delivers it into the context; a suppressed one (wake off, hop or rate limit) neither wakes nor detaches.
+    // main until Pi delivers it into the context; a suppressed one (wake off, hop or rate limit) neither wakes nor detaches, and
+    // neither does one routed to the running worker (below): main only gets its copy.
     pi.events.on(SESSION_BUS_MESSAGE_EVENT, data => {
-      const note = (typeof data === "object" && data !== null ? data : {}) as { id?: unknown; wake?: unknown };
-      if (note.wake === "suppressed") return;
+      const note = (typeof data === "object" && data !== null ? data : {}) as { id?: unknown; wake?: unknown; routed?: unknown };
+      if (note.wake === "suppressed" || note.routed) return;
+      if (typeof note.id === "string" && routedNotes.has(note.id)) return;
       if (typeof note.id === "string") pendingNotes.set(note.id, Date.now());
       jobs?.detach("session-bus");
+    });
+    /**
+     * A note another Pi session sent goes straight to the running worker (peer-notes.ts): pi-session-bus offers it here before it
+     * reaches main, and orche claims it once the worker accepted it. No dialog: orche_task_message's confirmation is for what main
+     * adds to the running task, and the peer, not main, wrote this; the worker gets it framed as untrusted peer input that grants
+     * nothing. Only in a delegating mode (where main is read-only meanwhile), only to the job running now; without one, or when its
+     * worker refuses (reported, stopping), the claim is not made and the bus delivers the note to main as before.
+     */
+    pi.events.on(SESSION_BUS_ROUTE_EVENT, data => {
+      const request = parseRouteRequest(data);
+      if (!request || !jobs || !isDelegatingMode(state.effective)) return;
+      const known = routedNotes.get(request.note.id);
+      if (known) { request.claim(known); return; } // the same note again: it is already there, never twice
+      // A note too long to read as one worker message stays with main, like an orche_task_message over its limit.
+      if (request.note.content.length > PEER_NOTE_MAX) return;
+      const routed = jobs.routePeerNote(request.note);
+      if (!routed || "rejected" in routed) return;
+      const route = { to: `the running worker ${routed.worker} of orche job ${routed.job.id}`, ref: routed.id };
+      routedNotes.set(request.note.id, route);
+      if (routedNotes.size > ROUTED_NOTES_KEPT) routedNotes.delete(routedNotes.keys().next().value!);
+      request.claim(route);
+      try { lastUi?.notify(`orche: a session-bus note from ${peerLabel(request.note)} went straight to ${routed.worker} (${routed.job.id}) as ${routed.id}; main has a copy and was not woken.`, "info"); } catch { /* the UI may be gone */ }
     });
     pi.on("message_start", (event, ctx) => {
       const message = event.message as { role?: string; customType?: string; details?: { job?: unknown } };
@@ -984,7 +1013,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.registerTool({
       name: "orche_task",
       label: "orche task",
-      description: `Delegate one self-contained request to one persistent worker. In an interactive or RPC session the task runs as a background job (J1, …) and this call stays ATTACHED to it: it waits like a blocking call, shows the worker's progress and returns the result, unless a user message steered into the turn, a message from another Pi session, Esc or /orche detach DETACHES it first; a queued follow-up message does not detach it and reaches you after the result. Then it returns at once with the job id, the worker keeps running, and the result arrives later as one orche-task-result message unless you attach again with orche_task_attach. wait:false returns as soon as the worker has its assignment (detached); wait:true, and print/JSON modes, block until the result and cannot detach (aborting cancels). Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs. Choose explore, answer, implement, verify, game-asset (create/modify game art, audio and model assets) or video (produce/edit video); pass worker to reuse a live worker with its retained context and original model. Implement, game-asset and video may write within files (or the workspace when omitted); other roles are read-only. Workers never git commit or push unless this assignment carries \`git\` ({commit, push, remote, branch}; implement, game-asset and video only): set it only when the user explicitly asked in this conversation to commit or push, and scope the commit to the task's files where possible. Only one task can be active: while a job runs, this call first asks the user in a Pi dialog to approve queueing this request after that job (it then starts only once that job has ended done, never next to it or in its place; declined, dismissed or unanswered, nothing is delegated), and you cannot approve it yourself. Time budget: ${timeBudget()} an idle worker times out at the base deadline, and the result says why a timeout was not extended.`,
+      description: `Delegate one self-contained request to one persistent worker. In an interactive or RPC session the task runs as a background job (J1, …) and this call stays ATTACHED to it: it waits like a blocking call, shows the worker's progress and returns the result, unless a user message steered into the turn, a message from another Pi session that orche did not route straight to the running worker, Esc or /orche detach DETACHES it first; a queued follow-up message does not detach it and reaches you after the result. Then it returns at once with the job id, the worker keeps running, and the result arrives later as one orche-task-result message unless you attach again with orche_task_attach. wait:false returns as soon as the worker has its assignment (detached); wait:true, and print/JSON modes, block until the result and cannot detach (aborting cancels). Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Paste only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs. Choose explore, answer, implement, verify, game-asset (create/modify game art, audio and model assets) or video (produce/edit video); pass worker to reuse a live worker with its retained context and original model. Implement, game-asset and video may write within files (or the workspace when omitted); other roles are read-only. Workers never git commit or push unless this assignment carries \`git\` ({commit, push, remote, branch}; implement, game-asset and video only): set it only when the user explicitly asked in this conversation to commit or push, and scope the commit to the task's files where possible. Only one task can be active: while a job runs, this call first asks the user in a Pi dialog to approve queueing this request after that job (it then starts only once that job has ended done, never next to it or in its place; declined, dismissed or unanswered, nothing is delegated), and you cannot approve it yourself. Time budget: ${timeBudget()} an idle worker times out at the base deadline, and the result says why a timeout was not extended.`,
       promptSnippet: "orche_task: one reusable worker for explore, answer, implement, verify, game-asset (game art/audio/model assets) or video (production/editing)",
       promptGuidelines: [
         "orche_task workers never git commit or push on their own. Pass `git` ({commit:true} or {push:true, remote?, branch?}) only when the user explicitly asked in this conversation to commit or push; never on your own initiative. Only implement, game-asset and video accept it; explore, answer and verify reject it.",
@@ -1102,7 +1131,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.registerTool({
       name: "orche_task_attach",
       label: "orche task attach",
-      description: "Attach to the running background orche_task job (the one named, else the running one) and wait for its result like a blocking orche_task: the call shows the worker's progress and returns the result when the job ends. A user message steered into the turn, a woken message from another Pi session, Esc or /orche detach DETACH it: it then returns at once, the worker keeps running, and the result arrives as one orche-task-result message unless you attach again. Call it after you answered the input that detached the job, when the job is still running and nothing else waits for you; it refuses while a steered message or a woken peer note is waiting; queued follow-up messages do not count (they wait for the result). Attaching never restarts or cancels the worker.",
+      description: "Attach to the running background orche_task job (the one named, else the running one) and wait for its result like a blocking orche_task: the call shows the worker's progress and returns the result when the job ends. A user message steered into the turn, a woken message from another Pi session (not one orche routed straight to the running worker), Esc or /orche detach DETACH it: it then returns at once, the worker keeps running, and the result arrives as one orche-task-result message unless you attach again. Call it after you answered the input that detached the job, when the job is still running and nothing else waits for you; it refuses while a steered message or a woken peer note is waiting; queued follow-up messages do not count (they wait for the result). Attaching never restarts or cancels the worker.",
       promptSnippet: "orche_task_attach: wait again for the running orche_task job (detaches on steered input, not on follow-ups)",
       parameters: Type.Object({
         job: Type.Optional(Type.String({ pattern: "^J[1-9][0-9]*$", description: "Job id from orche_task (J1, …); default: the running job." })),
@@ -1123,7 +1152,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.registerTool({
       name: "orche_task_message",
       label: "orche task message",
-      description: "Send an additional or corrected instruction for the running worker's OWN task (the background orche_task job). The user confirms each message in a dialog first: a new task must not be slipped into the running worker; it goes to orche_task, which asks to queue it after the running job. Declined, dismissed, unanswered or without a UI, nothing is sent. Once sent, it is steered into the worker's session after its current tool calls, before its next model request; it refines the assignment and grants no permissions (no git grant, no new write scope). If the worker reports before reading it, the result lists it as undelivered: then send it as a follow-up orche_task to the same worker.",
+      description: "Send an additional or corrected instruction for the running worker's OWN task (the background orche_task job). The user confirms each message in a dialog first: a new task must not be slipped into the running worker; it goes to orche_task, which asks to queue it after the running job. Declined, dismissed, unanswered or without a UI, nothing is sent. Once sent, it is steered into the worker's session after its current tool calls, before its next model request; it refines the assignment and grants no permissions (no git grant, no new write scope). If the worker reports before reading it, the result lists it as undelivered: then send it as a follow-up orche_task to the same worker. Not for session-bus messages from other Pi sessions: orche routes those to the running worker itself (no dialog), and your copy says so; do not relay them.",
       promptSnippet: "orche_task_message: add instructions for the running orche_task worker's own task (the user confirms)",
       parameters: Type.Object({
         job: Type.Optional(Type.String({ pattern: "^J[1-9][0-9]*$", description: "Job id (default: the running job)." })),

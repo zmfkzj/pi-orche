@@ -25,6 +25,7 @@ import { formatDuration } from "../agent/liveness.js";
 import { TaskFailedError, type GoneWorker, type TaskDetails, type TaskStartedInfo, type WorkerPool } from "./workers.js";
 import type { RunTiming } from "./progress.js";
 import type { DelegatingMode } from "../orchestration/routing.js";
+import type { PeerNote } from "./peer-notes.js";
 
 export const JOB_ENTRY_TYPE = "orche-job";
 export const WORKER_ENTRY_TYPE = "orche-worker";
@@ -534,6 +535,20 @@ export class TaskJobs {
       text: `Queued ${receipt.id} for ${job.worker} (${job.id}): it reaches the worker after its current tool calls, before its next model request. The job's result lists whether it was delivered; a message the worker could not read before reporting is marked undelivered and should then be sent as a follow-up orche_task.`,
       details: { job: job.id, ...receipt },
     };
+  }
+
+  /**
+   * Hand a session-bus note to the running job's worker (peer-notes.ts), without asking anyone: the peer wrote it, not main.
+   * Only the job running NOW, and only while its worker can still take a message (AgentManager.steer refuses a worker that has
+   * reported, is being stopped or is gone). Undefined when no job runs; `rejected` when its worker refused: the caller then
+   * leaves the note to main (the normal bus delivery).
+   */
+  routePeerNote(note: PeerNote): { job: Job; worker: string; id: string } | { rejected: string } | undefined {
+    const job = this.running;
+    if (!job || job.status !== "running" || job.settled) return undefined;
+    if (!job.worker) return { rejected: `${job.id} has no worker yet` };
+    const receipt = this.deps.pool().injectPeerNote(job.worker, note);
+    return receipt.status === "queued" ? { job, worker: job.worker, id: receipt.id } : { rejected: receipt.reason };
   }
 
   /**

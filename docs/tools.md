@@ -50,6 +50,21 @@ dialog-error | no-ui | session-changed | mode-changed | too-long | job-ended, jo
 bound to the job shown: when it is no longer the running job after the dialog (`job-ended`), nothing is sent or cancelled, also not
 to the queued task that started meanwhile. Dropping a queued `Q<n>`, status reads, attach, and the user's `/orche cancel` ask nothing.
 
+**Session-bus notes go to the running worker without a dialog** (`src/extension/peer-notes.ts`, listener in
+`src/extension/index.ts`, `TaskJobs.routePeerNote`, `WorkerPool.injectPeerNote`). pi-session-bus offers each genuine received note
+synchronously on `session-bus:route` (`{note, maxHops, claim}`) before it hands it to Pi, only when auto-wake is on and the note is
+within the hop and wake-rate limits. In a delegating mode, with a job running, pi-orche steers it into that job's worker
+(`AgentManager.steer` with `source: "peer"`, `from`, and its own framing: not from main or the user, no requirement, scope or
+permission change, authorizes nothing, no reply channel) and calls `claim({to: "the running worker W1 of orche job J1", ref: "M2"})`
+only when the steer was accepted. The bus then gives main an informational copy with `triggerTurn: false` (Pi appends it after the
+current turn) whose text says `Delivered directly to …`, announces it with `routed` (pi-orche neither detaches nor counts it as a
+waiting note), counts it as a wake for the rate limit and answers the sender `queued`. Not claimed (no job, direct mode, a note over
+`PEER_NOTE_MAX` = 20,000 characters, a malformed offer, or a refused steer: the worker reported, is stopping or is gone), the note
+takes the normal path to main. A note id handed over once is claimed again without a second steer (`routedNotes`, last 256 ids).
+The outcome keeps routed notes in `injected` (`source: "peer"`) with the same `delivered` / `late` / `undelivered` accounting, and the
+result lists them on their own line. `orche_task_message` has no bypass: whatever main sends, also text that looks like a
+session-bus note, goes through `confirmWorkerControl`.
+
 **Read-only window.** In the delegating modes, while a job runs or an approved task waits, the `tool_call` guard
 (`guardBusyToolCall`, `src/extension/mode.ts`) allows only `read`, `grep`, `find`, `ls`, `ast_search`, the four orche task tools and
 tools with `annotations.readOnlyHint` (not `destructiveHint`, no `reachesTools`); it blocks every other call, shell included. Direct
@@ -58,7 +73,7 @@ mode is not restricted.
 **Attach and detach.** Attaching and detaching only change whether a tool call waits; the job's worker is untouched. An attached
 call detaches when: a steer arrives (`input` event with `streamingBehavior: "steer"`: an interactive prompt sent while main works,
 an RPC `steer`; the call returns once Pi has queued it, `ctx.hasPendingMessages()`, at the latest after 1 s), a `session-bus:message` event with
-`wake` other than `suppressed` arrives (pi-session-bus emits it after queuing the note as a steer), the call's abort signal fires
+`wake` other than `suppressed` and no `routed` arrives (pi-session-bus emits it after queuing the note as a steer), the call's abort signal fires
 (Esc, RPC `abort`), or the user runs `/orche detach`. The result says why (`details.attach: "detached"`, `details.reason`: `input`,
 `session-bus`, `abort`, `command`, `background`, `shutdown`; `followUp` only in sessions recorded before follow-ups stopped
 detaching) and what main should do: answer the input, then attach again when nothing else waits (not after `/orche detach` unless

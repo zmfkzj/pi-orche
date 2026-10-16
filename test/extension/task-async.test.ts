@@ -68,7 +68,11 @@ async function harness(mainSteps: FauxResponseStep[], orcheSteps: FauxResponseSt
   return h;
 }
 
-/** A stand-in for pi-session-bus: delivers a note exactly as it does (custom steer message, then the pi.events announcement). */
+/**
+ * A stand-in for pi-session-bus: delivers a note exactly as it does when no extension claims it on `session-bus:route` (custom steer
+ * message, then the pi.events announcement): the path of a note orche did not route to the running worker. Routed notes:
+ * task-peer-notes.test.ts.
+ */
 function fakeBus() {
   let api: ExtensionAPI | undefined;
   const extension: ExtensionFactory = pi => { api = pi; };

@@ -56,6 +56,7 @@ import { effortMappingFor, type EffortAliasRule } from "../pi/effort-mapping.js"
 import { configureOutputCap } from "../pi/output-cap.js";
 import { setThinkingPhase, stepDownLevel, thinkingStateOf } from "../pi/thinking-state.js";
 import { ADVISOR_TIMEOUT_MS, advisorLines, AssignmentAdvisor, type AdvisorDetails, type AdvisorSource } from "../single/advisor.js";
+import { flat, peerLabel, peerNoteContent, type PeerNote } from "./peer-notes.js";
 
 export const orcheTaskParameters = Type.Object({
   role: Type.Union([Type.Literal("explore"), Type.Literal("answer"), Type.Literal("implement"), Type.Literal("verify"), Type.Literal("game-asset"), Type.Literal("video")]),
@@ -864,11 +865,23 @@ export class WorkerPool {
    * live, not running, or has already reported. It changes no grant, scope or deadline.
    */
   inject(worker: string, text: string): SteerReceipt {
+    return this.steerLive(worker, manager => manager.steer(worker, text));
+  }
+  /**
+   * Hand a session-bus note another Pi session sent to `worker`'s running assignment (peer-notes.ts): steered like {@link inject},
+   * framed as untrusted peer input and marked `source: "peer"` in the outcome. Same refusals; it changes no grant, scope or deadline.
+   */
+  injectPeerNote(worker: string, note: PeerNote): SteerReceipt {
+    return this.steerLive(worker, manager => manager.steer(worker, note.content, {
+      source: "peer", from: `${peerLabel(note)} note ${flat(note.id, 64)}`, content: id => peerNoteContent(id, note),
+    }));
+  }
+  private steerLive(worker: string, steer: (manager: AgentManager) => SteerReceipt): SteerReceipt {
     if (!this.manager || !this.workers.has(worker)) {
       const gone = this.gone.get(worker);
       return { status: "rejected", agentId: worker, reason: gone ? `${worker} is gone (${gone.reason})` : `unknown worker ${worker}` };
     }
-    return this.manager.steer(worker, text);
+    return steer(this.manager);
   }
   /** The main-session summary of the task ledgers (newest first); undefined without any. */
   ledgerSummary(): string | undefined {
@@ -1715,8 +1728,11 @@ export class WorkerPool {
         record?.appendEvent(event);
       }
       if (event.type === "length_stop" || event.type === "injected_message" || event.type === "result_rewrite") record?.appendEvent(event);
-      // New instructions from main mid-assignment: plan again at the baseline until the next accepted task_plan.
-      if (event.type === "injected_message" && event.status === "delivered") requireReplan(this.manager!.session(meta.id), advisor?.messageId === event.id ? "advisor notes" : "message from main");
+      // New instructions from main (or a routed session-bus note) mid-assignment: plan again at the baseline until the next accepted task_plan.
+      if (event.type === "injected_message" && event.status === "delivered") {
+        const peer = this.manager!.injected(meta.id).some(message => message.id === event.id && message.source === "peer");
+        requireReplan(this.manager!.session(meta.id), advisor?.messageId === event.id ? "advisor notes" : peer ? "session-bus note" : "message from main");
+      }
       if (event.type === "usage") { requests++; answered[event.model] = (answered[event.model] ?? 0) + 1; meta.latestInput = event.input + event.cacheRead; if (event.costUSD !== undefined) ownCostUSD = (ownCostUSD ?? 0) + event.costUSD; }
       if (event.type === "tool_started") { tally.tools++; if (WRITE_TOOLS.has(event.toolName)) noteEvidence(`${event.toolName} started`); }
       progress();
@@ -1748,14 +1764,19 @@ export class WorkerPool {
       ...(meta.roots?.length ? { writeRoots: meta.roots.map(root => ({ ...root })) } : {}),
       ...(advisorDetails ? { advisor: structuredClone(advisorDetails) } : {}),
     });
-    /** Lines about the messages main injected, the advisor and the output-limit stops, for the result text (success and failure alike). */
+    /** Lines about the messages main injected, routed session-bus notes, the advisor and the output-limit stops, for the result text (success and failure alike). */
     const outcomeLines = (): string[] => {
       const lines: string[] = [];
-      // The advisor's notes travel the same channel but are not main's messages: they get their own lines below.
-      const injected = (lastOutcome?.injected ?? []).filter(message => message.source !== "advisor");
+      // The advisor's notes travel the same channel but are not main's messages: they get their own lines below. So do peer notes.
+      const injected = (lastOutcome?.injected ?? []).filter(message => message.source !== "advisor" && message.source !== "peer");
       if (injected.length) {
         const missed = injected.filter(message => message.status !== "delivered");
         lines.push(`Messages from main: ${injected.map(message => `${message.id} ${message.status}`).join(", ")}${missed.length ? ` — ${missed.map(message => message.id).join(", ")} did not shape this result (${missed.some(message => message.status === "late") ? "reached the worker after it reported" : "the assignment ended first"}); resend as a follow-up orche_task if still relevant.` : ""}`);
+      }
+      const peer = (lastOutcome?.injected ?? []).filter(message => message.source === "peer");
+      if (peer.length) {
+        const missed = peer.filter(message => message.status !== "delivered");
+        lines.push(`Session-bus notes routed to this worker (peer input, not from main or the user; main has a copy of each): ${peer.map(message => `${message.id} ${message.status}${message.from ? ` (from ${message.from})` : ""}`).join(", ")}${missed.length ? ` — ${missed.map(message => message.id).join(", ")} did not shape this result (${missed.some(message => message.status === "late") ? "reached the worker after it reported" : "the assignment ended first"}); if still relevant, include it in a follow-up orche_task.` : ""}`);
       }
       const stops = lastOutcome?.lengthStops;
       if (stops) lines.push(`Output limit: ${stops.count} response${stops.count === 1 ? "" : "s"} hit the model's output token limit${stops.exhausted ? " and the recovery cap was reached" : "; recovered without compaction"} (see the record's length_stop events).`);

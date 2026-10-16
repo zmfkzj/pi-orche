@@ -45,8 +45,13 @@ export interface InjectedMessage {
   text: string;
   queuedAt: number;
   status: "queued" | "delivered" | "late" | "undelivered";
-  /** `advisor`: the plan advisor's notes (single.advisor), not a message from main. */
-  source?: "advisor";
+  /**
+   * `advisor`: the plan advisor's notes (single.advisor), not a message from main. `peer`: a session-bus note from another Pi
+   * session that orche routed to the running worker (peer-notes.ts), not a message from main either.
+   */
+  source?: "advisor" | "peer";
+  /** For `peer`: the sender and note id, e.g. `"api" (session ab12cd34) note 5f0e…`. */
+  from?: string;
   deliveredAt?: number;
 }
 /** The answer to {@link AgentManager.steer}. */
