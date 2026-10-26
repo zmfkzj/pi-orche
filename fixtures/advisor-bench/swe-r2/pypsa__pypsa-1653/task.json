@@ -1,0 +1,100 @@
+{
+  "id": "pypsa__pypsa-1653",
+  "title": "`NetworkCollection` does not allow for `groupby=[\"name\",...]` in statistics",
+  "repo": "PyPSA/PyPSA",
+  "baseCommit": "50bcbb8c1ba6319167a8bf0059cf18114b2f2eac",
+  "createdAt": "2026-04-13 08:33:16",
+  "problemStatement": "`NetworkCollection` does not allow for `groupby=[\"name\",...]` in statistics\n### Version Checks (indicate both or one)\n\n- [x] I have confirmed this bug exists on the lastest [release](https://github.com/pypsa/pypsa/releases) of PyPSA.\n\n- [ ] I have confirmed this bug exists on the current [`master`](https://github.com/pypsa/pypsa/tree/master) branch of PyPSA.\n\n\n### Issue Description\n\n`NetworkCollection.statistics` does not allow to compare based on a component name `groupby=\"name\"`.\n`Network.statistics` does allow for this.\n\n### Reproducible Example\n\n```python\nnc.statistics.opex(groupby=[\"name\"])\n\n# ValueError: 'name' is both an index level and a column label, which is ambiguous.\n```\n\n### Expected Behavior\n\nGrouping by component name.\n\n### Installed Versions\n\n<details>\nReplace this line.\n</details>",
+  "interface": "",
+  "failToPass": [
+    "test/test_collection_statistics.py::test_network_collection_name_grouper"
+  ],
+  "passToPass": [
+    "test/test_collection_statistics.py::TestNetworkCollectionIndexValidation::test_single_index_without_name_gets_default",
+    "test/test_collection_statistics.py::TestNetworkCollectionIndexValidation::test_multiindex_without_names_raises_error",
+    "test/test_collection_statistics.py::TestNetworkCollectionIndexValidation::test_multiindex_with_partial_names_raises_error",
+    "test/test_collection_statistics.py::test_network_collection_statistics_basic",
+    "test/test_collection_statistics.py::test_network_collection_bus_carrier_grouper",
+    "test/test_collection_statistics.py::test_network_collection_carrier_bus_carrier_grouper",
+    "test/test_collection_statistics.py::test_network_collection_carrier_nice_names",
+    "test/test_collection_statistics.py::test_network_collection_country_grouper",
+    "test/test_collection_statistics.py::test_network_collection_location_grouper",
+    "test/test_collection_statistics.py::test_network_collection_unit_grouper",
+    "test/test_collection_statistics.py::test_network_collection_multiple_groupers",
+    "test/test_collection_statistics.py::test_network_collection_multiindex_scenarios",
+    "test/test_collection_statistics.py::test_network_collection_vs_single_network",
+    "test/test_collection_statistics.py::test_network_collection_empty_results",
+    "test/test_collection_statistics.py::test_network_collection_custom_grouper",
+    "test/test_collection_statistics.py::test_network_collection_get_transmission_branches",
+    "test/test_collection_statistics.py::test_network_collection_get_transmission_carriers",
+    "test/test_collection_statistics.py::test_network_collection_default_energy_balance_groupby",
+    "test/test_collection_statistics.py::test_network_collection_opex_and_capex",
+    "test/test_collection_statistics.py::test_network_collection_transmission",
+    "test/test_collection_statistics.py::test_network_collection_revenue",
+    "test/test_collection_statistics.py::test_network_collection_bus_carrier_filter",
+    "test/test_collection_statistics.py::test_network_collection_different_snapshots",
+    "test/test_collection_statistics.py::test_network_collection_overlapping_snapshots",
+    "test/test_collection_statistics.py::test_network_collection_different_snapshot_weightings"
+  ],
+  "testFiles": [
+    "test/test_collection_statistics.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider test/test_collection_statistics.py",
+  "datasetInstall": "pip install -e \".[test]\" --quiet && pip install pypower --quiet",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "6db47d43642291011aa1deac1c068793bda653a2f934d5c70cb869cb25204765"
+  },
+  "install": "pip install \".[test]\" --quiet && pip install pypower --quiet",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [
+    "test/test_collection_statistics.py::TestNetworkCollectionIndexValidation::test_single_index_without_name_gets_default",
+    "test/test_collection_statistics.py::TestNetworkCollectionIndexValidation::test_multiindex_without_names_raises_error",
+    "test/test_collection_statistics.py::TestNetworkCollectionIndexValidation::test_multiindex_with_partial_names_raises_error",
+    "test/test_collection_statistics.py::test_network_collection_statistics_basic",
+    "test/test_collection_statistics.py::test_network_collection_bus_carrier_grouper",
+    "test/test_collection_statistics.py::test_network_collection_carrier_bus_carrier_grouper",
+    "test/test_collection_statistics.py::test_network_collection_carrier_nice_names",
+    "test/test_collection_statistics.py::test_network_collection_country_grouper",
+    "test/test_collection_statistics.py::test_network_collection_location_grouper",
+    "test/test_collection_statistics.py::test_network_collection_unit_grouper",
+    "test/test_collection_statistics.py::test_network_collection_multiple_groupers",
+    "test/test_collection_statistics.py::test_network_collection_multiindex_scenarios",
+    "test/test_collection_statistics.py::test_network_collection_vs_single_network",
+    "test/test_collection_statistics.py::test_network_collection_empty_results",
+    "test/test_collection_statistics.py::test_network_collection_custom_grouper",
+    "test/test_collection_statistics.py::test_network_collection_get_transmission_branches",
+    "test/test_collection_statistics.py::test_network_collection_get_transmission_carriers",
+    "test/test_collection_statistics.py::test_network_collection_default_energy_balance_groupby",
+    "test/test_collection_statistics.py::test_network_collection_opex_and_capex",
+    "test/test_collection_statistics.py::test_network_collection_transmission",
+    "test/test_collection_statistics.py::test_network_collection_revenue",
+    "test/test_collection_statistics.py::test_network_collection_bus_carrier_filter",
+    "test/test_collection_statistics.py::test_network_collection_different_snapshots",
+    "test/test_collection_statistics.py::test_network_collection_overlapping_snapshots",
+    "test/test_collection_statistics.py::test_network_collection_different_snapshot_weightings"
+  ],
+  "validation": {
+    "at": "2026-10-24T02:56:11.959Z",
+    "valid": false,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": false,
+    "base": {
+      "ms": 1332,
+      "counts": {
+        "MISSING": 26
+      }
+    },
+    "reference": {
+      "ms": 1064,
+      "counts": {
+        "MISSING": 26
+      }
+    },
+    "excludedPassToPass": 25
+  }
+}

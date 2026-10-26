@@ -40,7 +40,7 @@ const MODELS = { orchestrator: { model: "tier-orch/o1" }, "strong-orchestrator":
 describe("one-shot commands: grammar, usage and refusals", () => {
   it("parses /orche strong|ultra <PROMPT> verbatim: one whitespace character delimits; the prompt's own leading/trailing whitespace, lines, quotes and slashes survive", () => {
     const prompt = 'fix "src/a b.ts"  and\n  keep  \'quotes\' / slashes\\n\n\n- item: /orche mode direct';
-    for (const mode of ["strong", "ultra"] as const) {
+    for (const mode of ["strong", "ultra", "mdsd"] as const) {
       expect(parseOrcheCommand(`${mode} ${prompt}`)).toEqual({ mode, prompt });
       // Only the delimiter (one space, tab or line break after the mode word) is syntax; everything after it is the prompt.
       expect(parseOrcheCommand(`  ${mode}\n${prompt}  \n`)).toEqual({ mode, prompt: `${prompt}  \n` });

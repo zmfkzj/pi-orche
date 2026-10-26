@@ -48,6 +48,8 @@ import { ORCHESTRATOR_TEAM_LINE, orchestratorSection, SPLIT_FORMAT, splitError, 
 import { createSpawnTool, outcomeModelUse, scopePaths, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnReason, type SubWorkerOutcome } from "../orchestrator/spawn.js";
 import { createSubWorkerRunner } from "../orchestrator/sub-worker.js";
 import { ADOPT_UNAVAILABLE, createAdoptTool, subWorkerFloor, ultraSection, UltraRun, type UltraState, type UltraSummary } from "../orchestrator/ultra.js";
+import { MdsdRun, mdsdSection, type MdsdSummary } from "../orchestrator/mdsd.js";
+import { DEFAULT_MDSD } from "../orchestrator/mdsd-config.js";
 import { evidenceLedgerOf } from "../pi/tool-evidence.js";
 import { clampThinkingLevel, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -56,6 +58,7 @@ import { effortMappingFor, type EffortAliasRule } from "../pi/effort-mapping.js"
 import { configureOutputCap } from "../pi/output-cap.js";
 import { setThinkingPhase, stepDownLevel, thinkingStateOf } from "../pi/thinking-state.js";
 import { ADVISOR_TIMEOUT_MS, advisorLines, AssignmentAdvisor, type AdvisorDetails, type AdvisorSource } from "../single/advisor.js";
+import { StrongReflection, type ReflectionSummary } from "../single/reflection.js";
 import { flat, peerLabel, peerNoteContent, type PeerNote } from "./peer-notes.js";
 
 export const orcheTaskParameters = Type.Object({
@@ -67,7 +70,7 @@ export const orcheTaskParameters = Type.Object({
   writeRoots: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: 10, description: "Directories OUTSIDE the workspace that this implement/game-asset/video assignment may also write (absolute, or relative to the cwd), e.g. a sibling repository. Set it only when the user explicitly asked to change that location; it applies to this assignment only and is ignored for read-only roles. Every worker already has a private scratch directory for temporary files." })),
   wait: Type.Optional(Type.Boolean({ description: "Omit (default): the task starts in the background, this call returns its job id at once, and the result arrives later as an orche-task-result message; keep talking with the user meanwhile and do not poll. true: block until the worker finishes and return its result (only when you cannot continue without it)." })),
   verificationRounds: Type.Optional(Type.Integer({ minimum: 1, maximum: 5, description: "Fresh-verifier rounds (orche_spawn verification) the orchestrator may start in this assignment; default 2. Raise it only when the user explicitly asked for more independent review rounds. Rounds past the cap are refused and the result lists what stays unresolved." })),
-  task: Type.Optional(Type.String({ pattern: "^T[1-9][0-9]*$", description: "Task ledger id (T1, T2, …) named in an earlier result. Pass it for a follow-up of that same task, also when another or a new worker takes it over; omit it for a different user task, even when reusing a worker. Used only when single.ledger is on." })),
+  task: Type.Optional(Type.String({ pattern: "^T[1-9][0-9]*$", description: "Task ledger id (T1, T2, …) named in an earlier result. Pass it for a follow-up of that same task, also when another or a new worker takes it over; omit it for a different user task, even when reusing a worker. Used when single.ledger is on, and always for ultra implement/answer assignments (it identifies the ultra run a continuation resumes)." })),
   gui: Type.Optional(Type.Boolean({ description: "true: the worker gets its own private GUI desktop (computer use: launch apps, screenshots, click, type), which the user does not see; needs the pi-gui package. Set it only when the task needs GUI applications, including a rendered or interactive web page (the worker browses there with a fresh profile; workers have browser_fetch only otherwise). Read-only roles (explore, answer, verify) get an observe-only desktop (no clicks, typing or form input); interaction needs role implement. false: no desktop. Omitted: a new worker gets none, a reused worker keeps its setting. Changing it on a reused worker starts a fresh worker." })),
   git: Type.Optional(Type.Object({
     commit: Type.Optional(Type.Boolean({ description: "Authorize git commit for this assignment." })),
@@ -194,7 +197,7 @@ export interface TaskDetails {
   observations?: { count: number; everyMs: number; last: WaitObservation };
   /** A timed-out assignment: how to continue it (the same worker while it is retained, else the task ledger), and the checkpoint it left. */
   resume?: { worker: string; task?: string; retainedUntil: number; checkpoint?: { assignment: number; worker: string; done: number; total: number; remaining: string[] } };
-  /** The task ledger this assignment belongs to (single workflow with `single.ledger`; see src/single/ledger.ts). */
+  /** The task ledger this assignment belongs to (single workflow with `single.ledger`, and every ultra implement/answer assignment; see src/single/ledger.ts). */
   task?: string;
   /** Present when the named worker was gone and the task continued with this new worker, briefed from its ledger. */
   continuedFrom?: string;
@@ -207,6 +210,8 @@ export interface TaskDetails {
   modelTier?: string;
   /** Ultra: the stages that ran, the candidates, adoptions and the report gate (src/orchestrator/ultra.ts). */
   ultra?: UltraSummary;
+  /** MDSD: the search rounds, strategies, measured redundancy and new information, findings, budget and report gate (src/orchestrator/mdsd.ts). */
+  mdsd?: MdsdSummary;
   /** The orchestrator's split decision (single workflow with `single.spawn`, implement/answer): none, or the criteria it split by and why. */
   split?: SplitDecision;
   /** The sub-workers its orche_spawn calls ran (docs/orchestrator.md), in order; their transcripts are in the record. */
@@ -221,6 +226,8 @@ export interface TaskDetails {
   codeGraph?: boolean;
   /** Why the worker has no CodeGraph tools although a provider answered (e.g. the project has no index). */
   codeGraphUnavailable?: string;
+  /** Strong mode with `single.strongReflection` (an experiment, src/single/reflection.ts): where the reflection prompt was given. */
+  reflection?: ReflectionSummary;
   /** Messages main injected while the assignment ran (`orche_task_message`), with their delivery status. */
   injected?: InjectedMessage[];
   /** Output-limit stops of this assignment (src/pi/length-recovery.ts). */
@@ -305,7 +312,7 @@ interface Worker {
   codeGraph?: string;
   latestInput: number;
   timer?: ReturnType<typeof setTimeout>;
-  /** The task ledger of this worker's task (single workflow with `single.ledger`), read when the worker compacts. */
+  /** The task ledger of this worker's task (single workflow with `single.ledger`; ultra implement/answer always), read when the worker compacts. */
   taskId?: string;
   ledger?: () => TaskLedger | undefined;
   /** Extra RESULT validation of the current assignment (the orchestrator's split decision); cleared when it ends. */
@@ -322,6 +329,8 @@ interface Worker {
   requestMode?: DelegatingMode;
   /** The session has the ultra tool set (orche_spawn with the ultra reasons, orche_adopt): created in ultra mode. */
   ultraTools?: boolean;
+  /** The session has the MDSD tool set (orche_spawn with the MDSD reasons and strategy specs): created in mdsd mode. */
+  mdsdTools?: boolean;
   /** The ultra run of the orchestrator assignment in flight (orche_adopt, write guard, report gate); cleared when it ends. */
   ultra?: UltraRun;
   /** The ultra state the worker's last ultra assignment left, continued by its next ultra assignment of the same task unless it reported done. */
@@ -336,6 +345,8 @@ interface Worker {
   thinkingPolicy?: ThinkingPolicySettings;
   /** The plan advisor of the assignment in flight (`single.advisor`); started by its first task_plan or edit, cleared when it ends. */
   advisor?: AssignmentAdvisor;
+  /** The strong-mode reflection of the assignment in flight (`single.strongReflection`); cleared when it ends. */
+  reflection?: StrongReflection;
   /** `bashReview` of the latest assignment's config and the model runtime its classifier runs on (src/extension/bash-review.ts). */
   bashReview?: { settings: BashReviewSettings; runtime: ModelRuntime };
 }
@@ -352,7 +363,8 @@ function taskPlanToolFor(worker: Worker, session: () => AgentSession) {
     try { worker.onPlan?.(plan); } catch { /* persistence is best effort */ }
     // The plan advisor (single.advisor) starts at the first accepted plan of the assignment; later plans do not restart it.
     worker.advisor?.trigger("task_plan", plan);
-    return onTaskPlan(session(), plan);
+    // The strong-mode reflection (single.strongReflection) rides on the accepted plan that starts the first integration node.
+    return [...onTaskPlan(session(), plan), ...worker.reflection?.onPlan(plan) ?? []];
   }, () => worker.requirementIds ?? [], {
     previous: () => worker.plan,
     checkpointsRequired: () => !!worker.thinkingPolicy?.checkpoints,
@@ -754,6 +766,25 @@ export function renderHandover(gone: GoneWorker, successor: string): string {
 
 /** A report's `data` as a record (anything else: empty). */
 const dataOf = (data: unknown): Record<string, unknown> => data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
+/** The tool call ids of the latest model response in `session` (the one whose calls are executing). */
+function responseToolCalls(session: { messages: readonly unknown[] }): string[] {
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    const message = session.messages[i] as { role?: string; content?: unknown };
+    if (message?.role !== "assistant") continue;
+    return Array.isArray(message.content) ? message.content.flatMap(part => part && typeof part === "object" && (part as { type?: string }).type === "toolCall" && typeof (part as { id?: unknown }).id === "string" ? [(part as { id: string }).id] : []) : [];
+  }
+  return [];
+}
+/** The text of the tool result of `toolCallId` as `session` holds it (its text parts), or undefined when the session holds no such result. */
+export function toolResultText(session: { messages: readonly unknown[] }, toolCallId: string): string | undefined {
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    const message = session.messages[i] as { role?: string; toolCallId?: unknown; content?: unknown };
+    if (message?.role !== "toolResult" || message.toolCallId !== toolCallId) continue;
+    if (typeof message.content === "string") return message.content;
+    return Array.isArray(message.content) ? message.content.flatMap(part => part && typeof part === "object" && (part as { type?: string }).type === "text" ? [String((part as { text?: unknown }).text ?? "")] : []).join("\n") : "";
+  }
+  return undefined;
+}
 
 /**
  * The prompt of one assignment. `orchestrate` (single workflow with `single.spawn`, implement/answer): the worker is the task's
@@ -766,12 +797,13 @@ export function assignmentPrompt(args: Pick<TaskParameters, "role" | "request" |
   // The single workflow's prompt; strong is the same workflow on other models, ultra replaces the split decision with its stages.
   const workflow = isDelegatingMode(args.mainMode);
   const ultra = args.orchestrate && args.mainMode === "ultra";
-  const split = ultra ? ",ultra:{…, see Ultra mode below}" : args.orchestrate ? `,${SPLIT_FORMAT}` : "";
+  const mdsd = args.orchestrate && args.mainMode === "mdsd";
+  const split = ultra ? ",ultra:{…, see Ultra mode below}" : mdsd ? ",mdsd:{…, see MDSD search policy below}" : args.orchestrate ? `,${SPLIT_FORMAT}` : "";
   const instructions: Record<TaskRole, string> = {
     explore: 'Investigate independently, read source and reproduce. DO NOT EDIT. Report findings with concrete evidence and optionally data.cause. report_result {kind:"explore",summary,data:{cause,evidence}}.',
-    answer: `Strictly read-only.${ultra ? " Run the Ultra mode stages below (sub-workers of a read-only task are read-only too)." : args.orchestrate ? " First decide whether to split the question (Orchestration below; sub-workers of a read-only task are read-only too)." : ""} Inspect relevant files and provide an evidence-backed answer, concrete code references and explanations. Never change files. report_result {kind:"answer",summary:FULL_EVIDENCED_ANSWER,data:{evidence${workflow ? ',checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence"}]' : ""}${split}}}.${workflow ? " Checklist is required when the request contains R-ids." : ""}`,
+    answer: `Strictly read-only.${ultra ? " Run the Ultra mode stages below (sub-workers of a read-only task are read-only too)." : mdsd ? " Follow the MDSD search policy below: first decide whether diversified search pays (sub-workers of a read-only task are read-only too)." : args.orchestrate ? " First decide whether to split the question (Orchestration below; sub-workers of a read-only task are read-only too)." : ""} Inspect relevant files and provide an evidence-backed answer, concrete code references and explanations. Never change files. report_result {kind:"answer",summary:FULL_EVIDENCED_ANSWER,data:{evidence${workflow ? ',checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence"}]' : ""}${split}}}.${workflow ? " Checklist is required when the request contains R-ids." : ""}`,
     implement: workflow
-      ? `Own the task end to end${ultra ? " as its ultra orchestrator (Ultra mode below): the candidates implement, you" : args.orchestrate ? " as its orchestrator: first decide whether to split it (Orchestration below), then" : ": first"} analyse the requirements and create the Task DAG with task_plan, covering every requirement id. If a requirement can be read more than one way with observably different behaviour, choose the reading closest to the Original request text, implement it, and report it in data.ambiguities. Then execute nodes sequentially in dependency order, updating statuses, implementing completely, adding or updating tests, running the project's relevant checks and iterating until they pass, preserving unrelated changes. Main does not intervene while you run. Write scope: ${scope}. Finish with report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks],checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence",verifiedBy:"test name or check command that asserts this requirement's acceptance and passed"}],ambiguities:[{id:"R2",readings:["reading A","reading B"],chosen:"reading A"}]${split}}}. Checklist is required when the request contains R-ids; every met item needs verifiedBy, otherwise report it partial. ambiguities may be omitted when there are none.`
+      ? `Own the task end to end${ultra ? " as its ultra orchestrator (Ultra mode below): the candidates implement, you" : mdsd ? " as its MDSD orchestrator (MDSD search policy below): explorers search, you judge and implement; first decide whether diversified search pays, then" : args.orchestrate ? " as its orchestrator: first decide whether to split it (Orchestration below), then" : ": first"} analyse the requirements and create the Task DAG with task_plan, covering every requirement id. If a requirement can be read more than one way with observably different behaviour, choose the reading closest to the Original request text, implement it, and report it in data.ambiguities. Then execute nodes sequentially in dependency order, updating statuses, implementing completely, adding or updating tests, running the project's relevant checks and iterating until they pass, preserving unrelated changes. Main does not intervene while you run. Write scope: ${scope}. Finish with report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks],checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence",verifiedBy:"test name or check command that asserts this requirement's acceptance and passed"}],ambiguities:[{id:"R2",readings:["reading A","reading B"],chosen:"reading A"}]${split}}}. Checklist is required when the request contains R-ids; every met item needs verifiedBy, otherwise report it partial. ambiguities may be omitted when there are none.`
       : `Implement completely, preserving unrelated changes. Write scope: ${scope}. Run local checks on touched files. report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks]}}.`,
     "game-asset": `Game asset production. Create or modify game assets (sprites, sprite sheets/atlases, tilesets, textures, icons/UI art, 3D models, animations, VFX, SFX/music, fonts, and their engine import/metadata files) inside the write scope ${scope}. First detect the engine and the project's conventions (Unity .meta, Godot .import/.tres, Unreal, Phaser/Pixi atlas JSON; existing naming, folder layout, resolution/pixels-per-unit, palette, pivot/origin, power-of-two, compression). Produce assets with locally available tools via bash (check command -v first: ImageMagick, Inkscape, Blender --background with Python, Aseprite --batch, ffmpeg, sox, Python Pillow/numpy, or hand-written SVG/procedural scripts); keep reusable generator scripts with the assets when the project has a place for them, and leave no temp files in the workspace. Never hand-fabricate binary bytes. Verify every output is valid (identify/file/ffprobe/blender), and view raster outputs or rendered previews with the read tool. Do not download third-party assets unless the request allows it; record source and license when you do. report_result {kind:"game-asset",summary,data:{status:"done" or "blocked",reason,outputs:[{path,type,spec}],evidence:[checks]}}. spec is a descriptive string.`,
     video: `Video production. Plan and produce video deliverables inside the write scope ${scope}: script/storyboard/shot list, editing and compositing, motion graphics (code-based such as Remotion, Motion Canvas or manim when the project uses them), subtitles (SRT/VTT), audio mixing and loudness normalization, thumbnails and final encodes. Use locally available tools via bash (check command -v first: ffmpeg/ffprobe, the project's own video tooling, Python, ImageMagick, sox). Render a short draft before long renders; make final encode settings explicit (container, video codec, resolution, fps, CRF/bitrate, pixel format, audio codec/sample rate, loudness target). Verify every output with ffprobe (duration, streams, resolution, fps) and inspect extracted frames with the read tool. Leave no intermediate files in the workspace unless requested. report_result {kind:"video",summary,data:{status:"done" or "blocked",reason,outputs:[{path,type,spec}],evidence:[checks]}}. spec is a descriptive string.`,
@@ -787,11 +819,15 @@ export function workerSystemInstructions(spawn: boolean): string {
   return `${taskWorkerInstructions}\n${spawn ? "There are no peer workers; you start sub-workers only with orche_spawn, when an assignment's Orchestration rules call for it." : "You work alone: there are no peer workers."} Reply in the language of the request.`;
 }
 
-/** The prompt of one orche_spawn sub-worker: its role text, who spawned it and why, and (verification) that it has not seen the work. */
+/**
+ * The prompt of one orche_spawn sub-worker: its role text, who spawned it and why, and (verification) that it has not seen the work.
+ * An MDSD explorer with a private scratch directory (mdsd.explorerScratch) ends with the same scratch sentence as an orche_task prompt.
+ */
 export function subWorkerPrompt(worker: PlannedWorker, orchestrator: string, commands: readonly string[], imagesAvailable: boolean, ultra = false): string {
-  const preface = `You are sub-worker ${worker.id} ("${worker.name}") of orchestrator ${orchestrator}, spawned for ${worker.reason}. You cannot spawn workers.${worker.reason === "verification" ? " You have not seen how the work was done: judge only from the request below, the repository and your own checks." : ""}${ultra ? ` ${ultraPreface(worker)}` : ""}`;
-  return assignmentPrompt({ role: worker.role, request: `${preface}\n\n${worker.request}`, ...(worker.files ? { files: worker.files } : {}) }, commands, imagesAvailable)
+  const preface = `You are sub-worker ${worker.id} ("${worker.name}") of orchestrator ${orchestrator}, spawned for ${worker.reason}. You cannot spawn workers.${worker.reason === "verification" ? " You have not seen how the work was done: judge only from the request below, the repository and your own checks." : ""}${ultra ? ` ${ultraPreface(worker)}` : ""}${worker.brief ? `\n\n${worker.brief}` : ""}`;
+  const prompt = assignmentPrompt({ role: worker.role, request: `${preface}\n\n${worker.request}`, ...(worker.files ? { files: worker.files } : {}) }, commands, imagesAvailable)
     .replace("You work alone; there are no peers or backlog.", "You work alone on this assignment.");
+  return worker.scratch ? `${prompt}\n${formatWriteRoots([{ path: worker.scratch, kind: "scratch" }], worker.role)}` : prompt;
 }
 
 /** What an ultra sub-worker is for (src/orchestrator/ultra.ts); independence is part of the job, not a courtesy. */
@@ -812,7 +848,7 @@ export class WorkerPool {
   private readonly providers = new Map<string, ProviderExtensionHost>();
   private readonly inheritedProviders = new InheritedProviders();
   private nextId = 1;
-  /** Task ledgers by task id (single workflow with `single.ledger`), including tasks whose worker is gone. */
+  /** Task ledgers by task id (single workflow with `single.ledger`, and ultra implement/answer tasks), including tasks whose worker is gone. */
   private readonly ledgers = new Map<string, TaskLedger>();
   private nextTaskId = 1;
   /** Workers that went away, by id (also restored from the session): naming one continues with a new worker briefed from it. */
@@ -926,7 +962,12 @@ export class WorkerPool {
         if (name === SPAWN_TOOL && !worker.spawn) return SPAWN_UNAVAILABLE;
         // The worker reports: the advisor closes for the rest of the assignment and a running one is awaited (bounded), so the
         // report gate can hand its advice over before any result is accepted.
-        if (name === "report_result") await worker.advisor?.beforeReport();
+        if (name === "report_result") {
+          // Strong-mode reflection (single.strongReflection): a report the prompt did not precede is held (blocked, not a result retry).
+          const held = worker.reflection?.beforeReport(toolCallId);
+          if (held) return held;
+          await worker.advisor?.beforeReport();
+        }
         const blocked = await this.guard(worker, name, input);
         if (blocked) return blocked;
         // Bash safety review, after the existing guards allowed the call: it can only refuse more, never allow what they refused.
@@ -935,8 +976,9 @@ export class WorkerPool {
         await worker.activity?.enter(worker.id, name);
         // A worker that edits before it plans starts the plan advisor at that first edit (single.advisor).
         if (WRITE_TOOLS.has(name)) worker.advisor?.trigger("first_edit");
-        // Ultra: open the call's integrity probe (what the workspace and the candidate copies were before it ran; src/orchestrator/ultra.ts).
-        await worker.ultra?.beginCall(toolCallId, name).catch(() => undefined);
+        // Ultra: open the call's integrity probe (what the workspace and the candidate copies were before it ran; src/orchestrator/ultra.ts),
+        // with its arguments for the hand-off's relevance test (the paths an own check names).
+        await worker.ultra?.beginCall(toolCallId, name, input).catch(() => undefined);
         return undefined;
       },
       writeFileGuard: (file, signal) => signal?.aborted ? "cancelled" : this.guard(worker, "ast_rewrite", { path: file }),
@@ -1166,14 +1208,20 @@ export class WorkerPool {
     const requestMode = this.requestModeOf(args, ledgerOn);
     if (requestMode) args = { ...args, mainMode: requestMode.mode };
     const ultraMode = args.mainMode === "ultra";
+    const mdsdMode = args.mainMode === "mdsd";
     const ledgerNotes: string[] = [];
     // The orchestrator (docs/orchestrator.md): implement/answer workers of the single workflow decide whether to split and may run
     // sub-workers with orche_spawn. `single.spawn: false` keeps the earlier single worker; ultra always orchestrates (its stages
     // are orche_spawn calls), which the result says when single.spawn is off.
-    const orchestrate = singleWorkflow && (config.single.spawn || ultraMode) && (args.role === "implement" || args.role === "answer");
+    const orchestrate = singleWorkflow && (config.single.spawn || ultraMode || mdsdMode) && (args.role === "implement" || args.role === "answer");
     if (orchestrate && ultraMode && !config.single.spawn) ledgerNotes.push("Note: single.spawn: false does not apply in ultra mode: the ultra stages run with orche_spawn (single and strong keep it off).");
+    if (orchestrate && mdsdMode && !config.single.spawn) ledgerNotes.push("Note: single.spawn: false does not apply in mdsd mode: MDSD search rounds run with orche_spawn (single and strong keep it off).");
+    // Ultra: the task ledger is also the continuation identity of an ultra run (candidates, copies, basis, adoptions), whatever
+    // single.ledger says: `task` continues the run, omitting it starts a new task with fresh stages. The request mode still
+    // follows single.ledger alone (requestModeOf above), so a later turn outside a one-shot request keeps the session's mode.
+    const ledgered = ledgerOn || orchestrate && ultraMode;
     let continued: TaskLedger | undefined;
-    if (args.task !== undefined && ledgerOn) {
+    if (args.task !== undefined && ledgered) {
       continued = this.ledgers.get(args.task);
       if (!continued) throw new Error(`Unknown task ${args.task}; known tasks: ${[...this.ledgers.keys()].join(", ") || "none"}. Omit task to start a new task.`);
       if (gone && !handover && continued.primary?.worker !== args.worker && !continued.history.some(item => item.worker === args.worker)) throw unknownWorker();
@@ -1276,11 +1324,16 @@ export class WorkerPool {
     // The ultra tool set (orche_spawn with the ultra reasons, orche_adopt) is installed when a session is created and cannot be
     // removed: a worker crosses the ultra boundary as a fresh worker, briefed from the transcript of the one it replaces.
     let modeHandover: GoneWorker | undefined;
-    if (worker && singleWorkflow && !!worker.ultraTools !== ultraMode) {
+    // The same for the MDSD tool set (orche_spawn with the search reason and strategy specs).
+    const toolSet = ultraMode ? "ultra" : mdsdMode ? "mdsd" : "standard";
+    const workerToolSet = worker?.ultraTools ? "ultra" : worker?.mdsdTools ? "mdsd" : "standard";
+    if (worker && singleWorkflow && workerToolSet !== toolSet) {
       const from = worker.mode ?? "single";
       await this.retire(worker.id, `replaced: mode changed (${from} -> ${args.mainMode})`);
       retired.push(worker.id);
-      retirementLines.push(`${worker.id} retired: ${ultraMode ? "ultra mode needs" : "leaving ultra mode drops"} the ultra tool set (orche_spawn stages, orche_adopt); a fresh worker continues, briefed from ${worker.id}'s transcript.`);
+      retirementLines.push(toolSet === "ultra" || workerToolSet === "ultra"
+        ? `${worker.id} retired: ${ultraMode ? "ultra mode needs" : "leaving ultra mode drops"} the ultra tool set (orche_spawn stages, orche_adopt); a fresh worker continues, briefed from ${worker.id}'s transcript.`
+        : `${worker.id} retired: ${mdsdMode ? "mdsd mode needs" : "leaving mdsd mode drops"} the MDSD tool set (orche_spawn search rounds with strategy specs); a fresh worker continues, briefed from ${worker.id}'s transcript.`);
       modeHandover = this.gone.get(worker.id);
       worker = undefined;
     }
@@ -1363,8 +1416,8 @@ export class WorkerPool {
       const sessionFile = workerSessionFile(resolved, { ...(args.currentSession?.id ? { parentSessionId: args.currentSession.id } : {}), workerId: id, spawnedAt: Date.now() });
       // orche_spawn only with `single.spawn` on: `single.spawn: false` keeps the earlier single worker's tool set exactly.
       // Ultra workers get the ultra tool set (orche_spawn with the ultra reasons, orche_adopt) whatever single.spawn says.
-      const spawnTool = singleWorkflow && (config.single.spawn || ultraMode);
-      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool, ...(spawnTool ? { maxSubWorkers: config.single.maxSubWorkers } : {}), ...(singleWorkflow && ultraMode ? { ultraTools: true } : {}), ...(gui ? { gui: gui.key } : {}), ...(webFetch.provider ? { webFetch: webFetch.provider.key } : {}), ...(codeGraph.provider ? { codeGraph: codeGraph.provider.key } : {}) };
+      const spawnTool = singleWorkflow && (config.single.spawn || ultraMode || mdsdMode);
+      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool, ...(spawnTool ? { maxSubWorkers: config.single.maxSubWorkers } : {}), ...(singleWorkflow && ultraMode ? { ultraTools: true } : {}), ...(singleWorkflow && mdsdMode ? { mdsdTools: true } : {}), ...(gui ? { gui: gui.key } : {}), ...(webFetch.provider ? { webFetch: webFetch.provider.key } : {}), ...(codeGraph.provider ? { codeGraph: codeGraph.provider.key } : {}) };
       const meta = worker;
       meta.model = route.model;
       meta.thinking = route.thinking ?? "off";
@@ -1372,7 +1425,7 @@ export class WorkerPool {
       const customTools = [...(images ? [createGenerateImageTool({ cwd: args.cwd, runtime, images })] : []), ...(singleWorkflow ? [taskPlanToolFor(meta, () => this.manager!.session(meta.id))] : []),
       // orche_spawn: registered once per session; usable only while an orchestrator assignment set `meta.spawn` (the guard refuses it otherwise).
       // Its per-call cap (single.maxSubWorkers) is fixed with the schema here; prompts and the runtime check use the same meta value.
-      ...(spawnTool ? [createSpawnTool(() => meta.spawn ?? SPAWN_UNAVAILABLE, { ultra: !!meta.ultraTools, ...(meta.maxSubWorkers !== undefined ? { maxSubWorkers: meta.maxSubWorkers } : {}) })] : []),
+      ...(spawnTool ? [createSpawnTool(() => meta.spawn ?? SPAWN_UNAVAILABLE, { ultra: !!meta.ultraTools, mdsd: !!meta.mdsdTools, ...(meta.maxSubWorkers !== undefined ? { maxSubWorkers: meta.maxSubWorkers } : {}) })] : []),
       // orche_adopt (ultra): usable only while an ultra implement assignment runs (`meta.ultra`); the tool refuses otherwise.
       ...(meta.ultraTools ? [createAdoptTool(() => meta.ultra ?? ADOPT_UNAVAILABLE)] : [])];
       // generate_image has its own timeout (images.timeoutMs, 180 s by default): liveness bounds a silent call by it, not by the generic tool bound.
@@ -1446,6 +1499,8 @@ export class WorkerPool {
     if (orchestrating && maxSubWorkers !== config.single.maxSubWorkers) ledgerNotes.push(`Note: ${meta.id} keeps orche_spawn's cap of ${maxSubWorkers} sub-workers per call from when its session started; single.maxSubWorkers ${config.single.maxSubWorkers} applies to new workers (omit worker to start one).`);
     /** Ultra: the stage contract of this orchestrator assignment (created with its spawn context; src/orchestrator/ultra.ts). */
     let ultraRun: UltraRun | undefined;
+    /** MDSD: the search policy of this orchestrator assignment (created with its spawn context; src/orchestrator/mdsd.ts). */
+    let mdsdRun: MdsdRun | undefined;
     /** The ultra outcome: a report accepted with stage complete (the next ultra assignment of the task then starts afresh). */
     let ultraDone = false;
     const spawned: SubWorkerOutcome[] = [];
@@ -1506,12 +1561,12 @@ export class WorkerPool {
     meta.compactions = [];
     // This assignment's record. The worker's entry is read from the manager, so `sessionFile` is there only when the transcript really is persisted.
     const workerFile = this.manager.agentRecord(meta.id).sessionFile;
-    // The task ledger (single.ledger): a new task unless `task` continues one; this worker's compaction essentials read it live.
+    // The task ledger (single.ledger; ultra always): a new task unless `task` continues one; this worker's compaction essentials read it live.
     let ledger: TaskLedger | undefined;
     /** The task's previous worker when another worker takes the task over now; the new one gets a briefing from the ledger. */
     let handedFrom: { worker: string; sessionFile?: string; live: boolean } | undefined;
     let briefing = "";
-    if (ledgerOn) {
+    if (ledgered) {
       if (continued) {
         ledger = continued;
         if (ledger.primary && ledger.primary.worker !== meta.id) {
@@ -1566,6 +1621,16 @@ export class WorkerPool {
     if (record) this.inflight.add(record);
     meta.lastRecord = record?.dir;
     meta.recordEvent = event => record?.appendEvent(event);
+    // Strong-mode reflection before the self-review (single.strongReflection, an experiment; src/single/reflection.ts): the effective
+    // mode of this assignment (after requestModeOf) must be exactly strong, and only the implement/answer worker that owns the task gets it.
+    // A new one per assignment, so a reused worker never carries one over from another assignment or mode.
+    const reflection = singleWorkflow && args.mainMode === "strong" && config.single.strongReflection === true && (args.role === "implement" || args.role === "answer")
+      ? new StrongReflection({
+        responseCalls: () => responseToolCalls(this.manager!.session(meta.id)),
+        onDelivered: summary => meta.recordEvent?.({ type: "reflection", timestamp: Date.now(), worker: meta.id, ...summary }),
+      })
+      : undefined;
+    meta.reflection = reflection;
     /** The plan advisor of this assignment (single.advisor): created right before the hand-off, settled when the assignment ends. */
     let advisor: AssignmentAdvisor | undefined;
     let advisorDetails: AdvisorDetails | undefined;
@@ -1589,7 +1654,7 @@ export class WorkerPool {
     const splitLines = (split: SplitDecision | undefined): string[] => {
       if (!orchestrating) return [];
       // Ultra: the stages that ran and the report gate instead of a split decision.
-      const head = ultraRun ? ultraRun.lines() : [split ? `Split: ${split.decision === "none" ? "none" : (split.criteria ?? []).join(" + ") || "split"} — ${split.reason.replace(/\s+/g, " ")}` : "Split: none (not reported)"];
+      const head = ultraRun ? ultraRun.lines() : mdsdRun ? mdsdRun.lines() : [split ? `Split: ${split.decision === "none" ? "none" : (split.criteria ?? []).join(" + ") || "split"} — ${split.reason.replace(/\s+/g, " ")}` : "Split: none (not reported)"];
       if (!spawned.length) return head;
       const cost = spawned.reduce((sum, outcome) => sum + outcome.costUSD, 0);
       return [...head, `Sub-workers: ${spawned.map(outcome => `${outcome.id} ${outcome.name} (${outcome.role}, ${outcome.reason}; ${outcomeModelUse(outcome)}): ${outcome.status}`).join("; ")} — ${spawned.reduce((sum, outcome) => sum + outcome.requests, 0)} requests${cost ? `, $${cost.toFixed(2)}` : ""}`, ...spawnWarnings.map(warning => `Warning (orche_spawn): ${warning}`), ...verificationLines()];
@@ -1612,15 +1677,16 @@ export class WorkerPool {
       return [`Thinking policy: ${summary.mode}${summary.mode === "phase" ? ` (baseline ${summary.baseline ?? "?"}, steps ${summary.step ?? "?"}): ${summary.switches} level switch${summary.switches === 1 ? "" : "es"}` : " (checkpoints)"}${summary.escalated?.length ? `; at baseline: ${summary.escalated.map(item => `${item.node} (${item.reason})`).join(", ")}` : ""}${summary.redecompositions ? `; ${summary.redecompositions} re-decomposition${summary.redecompositions === 1 ? "" : "s"}` : ""}${summary.falseRedecompositions ? `; ${summary.falseRedecompositions} plan update${summary.falseRedecompositions === 1 ? "" : "s"} did not split the node as asked` : ""}${summary.reportRewrites ? `; ${summary.reportRewrites} report${summary.reportRewrites === 1 ? "" : "s"} written below the baseline rewritten at it` : ""}`];
     };
     /** strong and ultra: the mode, the tier the model came from, and (ultra) the stage summary; nothing in single (unchanged details). */
-    const modeDetails = (): Pick<TaskDetails, "mode" | "modelTier" | "ultra" | "requestMode"> => ({
-      ...(usesStrongTiers(args.mainMode) ? { mode: args.mainMode, ...(tierKey && modelSource !== "route" ? { modelTier: tierKey } : {}), ...(ultraRun ? { ultra: ultraRun.summary() } : {}) } : {}),
+    const modeDetails = (): Pick<TaskDetails, "mode" | "modelTier" | "ultra" | "mdsd" | "requestMode"> => ({
+      ...(usesStrongTiers(args.mainMode) ? { mode: args.mainMode, ...(tierKey && modelSource !== "route" ? { modelTier: tierKey } : {}), ...(ultraRun ? { ultra: ultraRun.summary() } : {}), ...(mdsdRun ? { mdsd: mdsdRun.summary() } : {}) } : {}),
       ...(requestMode ? { requestMode } : {}),
     });
     /** A request mode that differs from the session's: where it came from and how the work keeps it (or leaves it). */
     const requestLine = (): string[] => {
       if (!requestMode || requestMode.mode === requestMode.session) return [];
-      // With task ledgers the task is the request; without them nothing outside the one-shot turn identifies it.
-      const keep = ledger
+      // With single.ledger the task is the request; without it nothing outside the one-shot turn identifies it (an ultra task's ledger
+      // identifies its ultra run, not the request: requestModeOf does not read it then).
+      const keep = ledger && ledgerOn
         ? `Task ${ledger.taskId} keeps ${requestMode.mode} for its continuations (task "${ledger.taskId}"); other tasks run in the session's mode`
         : `After this request, assignments to ${meta.id} (worker "${meta.id}") run in the session's mode; to continue in ${requestMode.mode}, the user repeats /orche ${requestMode.mode} <PROMPT>`;
       return [requestMode.source === "one-shot"
@@ -1628,9 +1694,15 @@ export class WorkerPool {
         : `Request mode: ${requestMode.mode} (kept from the one-shot /orche ${requestMode.mode} request that ${requestMode.source} ${requestMode.by} belongs to; the session is in ${requestMode.session ?? "another mode"}). ${keep}.`];
     };
     const modeLines = (): string[] => [...requestLine(), ...(usesStrongTiers(args.mainMode)
-      ? [`Mode: ${args.mainMode} (orchestrator: ${tierKey && modelSource !== "route" ? `models.${tierKey}` : modelSource === "route" ? "a configured route" : "main's model"}${orchestrating ? `; sub-workers: ${subSource === "orchestrator" ? "the orchestrator's model" : `models.${workerKey}`}` : ""})`] : [])];
+      ? [`Mode: ${args.mainMode} (orchestrator: ${tierKey && modelSource !== "route" ? `models.${tierKey}` : modelSource === "route" ? "a configured route" : "main's model"}${orchestrating ? `; sub-workers: ${subSource === "orchestrator" ? "the orchestrator's model" : `models.${workerKey}`}` : ""})`] : []), ...reflectionLines()];
+    const reflectionLines = (): string[] => {
+      if (!reflection) return [];
+      const summary = reflection.summary();
+      const where = summary.delivered === "integrate" ? `given at the start of integration node ${summary.node}` : summary.delivered === "report" ? "given at the first report_result, held once" : "not given (the assignment reported no result)";
+      return [`Reflection (single.strongReflection, experiment): ${where}${summary.sameResponseHolds ? `; ${summary.sameResponseHolds} report_result call${summary.sameResponseHolds === 1 ? "" : "s"} of the same response held until it was read` : ""}.`];
+    };
     const workflowDetails = () => ({ ...modeDetails(), thinking: meta.thinking, ...(Object.keys(answered).length ? { models: { ...answered } } : {}), ...(meta.plan ? { plan: structuredClone(meta.plan) } : {}), ...policyDetails(),
-      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(meta.gui ? { gui: true as const } : {}), ...(meta.webFetch ? { webFetch: true as const } : webFetch.unavailable ? { webFetchUnavailable: webFetch.unavailable } : {}), ...(meta.codeGraph ? { codeGraph: true as const } : codeGraph.unavailable ? { codeGraphUnavailable: codeGraph.unavailable } : {}), ...spawnedDetails() });
+      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(meta.gui ? { gui: true as const } : {}), ...(meta.webFetch ? { webFetch: true as const } : webFetch.unavailable ? { webFetchUnavailable: webFetch.unavailable } : {}), ...(meta.codeGraph ? { codeGraph: true as const } : codeGraph.unavailable ? { codeGraphUnavailable: codeGraph.unavailable } : {}), ...(reflection ? { reflection: reflection.summary() } : {}), ...spawnedDetails() });
     let requests = 0;
     /** Provider-reported cost of this assignment's own requests (the split log); undefined while none was reported. */
     let ownCostUSD: number | undefined;
@@ -1683,9 +1755,9 @@ export class WorkerPool {
         ...(plan ? { checkpoint: { assignment: ledger?.assignments ?? 0, worker: meta.id, done: nodes.length - remaining.length, total: nodes.length, remaining: remaining.map(node => `${node.id} (${node.status})`) } } : {}),
       };
     };
-    /** Ultra after a failure: what survives for a continuation and what must be redone. */
+    /** Ultra after a failure: what survives for a continuation and what must be redone (an ultra orchestrator always has its task ledger). */
     const ultraResumeLine = (): string => ledger
-      ? `Ultra resume: the candidates, their workspace copies (in ${meta.id}'s scratch directory) and the adoptions of task ${ledger.taskId} continue in ${meta.id}'s next ultra assignment of that task (worker "${meta.id}", task "${ledger.taskId}"); evidence refs are per assignment, so the checks are run again. A new worker starts the stages afresh.`
+      ? `Ultra resume: the exploration, the protected basis, the candidates with their workspace copies (in ${meta.id}'s scratch directory) and the adoptions of task ${ledger.taskId} continue in ${meta.id}'s next ultra assignment of that task (worker "${meta.id}", task "${ledger.taskId}"), with or without single.ledger; evidence refs are per assignment, so the checks are run again. Without task it is a new task, and a new worker starts the stages afresh.`
       : `Ultra resume: without a task ledger the next assignment starts the stages afresh; the workspace keeps what was adopted.`;
     const resumeLines = (info: NonNullable<TaskDetails["resume"]>): string[] => {
       const until = new Date(info.retainedUntil).toISOString().replace("T", " ").replace(/:\d{2}\.\d+Z$/, "Z");
@@ -1733,7 +1805,7 @@ export class WorkerPool {
         const peer = this.manager!.injected(meta.id).some(message => message.id === event.id && message.source === "peer");
         requireReplan(this.manager!.session(meta.id), advisor?.messageId === event.id ? "advisor notes" : peer ? "session-bus note" : "message from main");
       }
-      if (event.type === "usage") { requests++; answered[event.model] = (answered[event.model] ?? 0) + 1; meta.latestInput = event.input + event.cacheRead; if (event.costUSD !== undefined) ownCostUSD = (ownCostUSD ?? 0) + event.costUSD; }
+      if (event.type === "usage") { requests++; answered[event.model] = (answered[event.model] ?? 0) + 1; meta.latestInput = event.input + event.cacheRead; if (event.costUSD !== undefined) ownCostUSD = (ownCostUSD ?? 0) + event.costUSD; const run = mdsdRun; if (run) { run.observeOrchestrator({ input: event.input, output: event.output, cacheRead: event.cacheRead, ...(event.costUSD !== undefined ? { cost: { total: event.costUSD } } : {}) }); run.enforceOrchestrator((action, text) => this.manager?.budgetAction(meta.id, action, text, "MDSD total budget") ?? false); } }
       if (event.type === "tool_started") { tally.tools++; if (WRITE_TOOLS.has(event.toolName)) noteEvidence(`${event.toolName} started`); }
       progress();
     });
@@ -1810,7 +1882,7 @@ export class WorkerPool {
         ...(extra.summary ? { summary: extra.summary } : {}),
         ...(extra.failure ? { failure: extra.failure } : {}),
         ...(status === "cancelled" && this.options.controller.cancelledByUser ? { cancelledByUser: true } : {}),
-        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs, model: details.model, thinking: details.thinking, ...(details.models ? { models: { ...details.models } } : {}), modelSource, thinkingSource, checklist: details.checklist, plan: details.plan, compactions: details.compactions, warnings: details.warnings, ...(details.split ? { split: details.split } : {}), ...(details.thinkingPolicy ? { thinkingPolicy: details.thinkingPolicy } : {}), ...(details.mode ? { mode: details.mode } : {}), ...(details.ultra ? { ultra: details.ultra } : {}) },
+        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs, model: details.model, thinking: details.thinking, ...(details.models ? { models: { ...details.models } } : {}), modelSource, thinkingSource, checklist: details.checklist, plan: details.plan, compactions: details.compactions, warnings: details.warnings, ...(details.split ? { split: details.split } : {}), ...(details.thinkingPolicy ? { thinkingPolicy: details.thinkingPolicy } : {}), ...(details.mode ? { mode: details.mode } : {}), ...(details.ultra ? { ultra: details.ultra } : {}), ...(details.mdsd ? { mdsd: details.mdsd } : {}) },
         workspace: { changes: details.changes, otherChanges: details.otherChanges, ...(details.submodules ? { submodules: details.submodules } : {}), ...(details.headMoved ? { headMoved: details.headMoved } : {}) },
         ...(details.git ? { git: details.git } : {}),
         ...(retired.length ? { retired } : {}),
@@ -1861,14 +1933,26 @@ export class WorkerPool {
           // The same worker continuing the same task (after a timeout or a blocked report) keeps its candidates and their copies.
           const carried = reusedContext && ledger && meta.ultraCarry?.task === ledger.taskId ? meta.ultraCarry.state : undefined;
           const session = this.manager.session(meta.id);
-          ultraRun = new UltraRun({ orchestrator: meta.id, cwd: args.cwd, readOnly, ...(meta.scratch ? { scratch: meta.scratch } : {}), ledger: () => evidenceLedgerOf(session), verifyCommands: config.routes.verifyCommands ?? [], ...(carried ? { carried } : {}), maxSubWorkers, onEvent: event => record?.appendEvent(event) });
+          // `scope`: main's files for this assignment; analyst-reported files outside it are recorded as out of scope, never asked of candidates.
+          // `callText`: the orchestrator's own tool results as its session holds them (the hand-off's relevance test of cited checks).
+          ultraRun = new UltraRun({ orchestrator: meta.id, cwd: args.cwd, readOnly, ...(meta.scratch ? { scratch: meta.scratch } : {}), ...(files ? { scope: files } : {}), ledger: () => evidenceLedgerOf(session), callText: toolCallId => toolResultText(session, toolCallId), verifyCommands: config.routes.verifyCommands ?? [], ...(carried ? { carried } : {}), maxSubWorkers, onEvent: event => record?.appendEvent(event) });
           meta.ultra = ultraRun;
           meta.ultraCarry = undefined;
           // Refs on every tool result: the ultra gate checks the cited [orche ref Tn] against this session's calls.
           evidenceLedgerOf(session).tag = true;
         }
+        if (mdsdMode) {
+          const session = this.manager.session(meta.id);
+          // mdsd.replication (an experiment setting): every model a strategy is replicated on must exist in orche's runtime. No
+          // fallback: an unavailable model ends the assignment before any model call, with its name.
+          const unavailable = (config.mdsd?.replication?.models ?? []).filter(item => !runtime.getModel(item.model.slice(0, item.model.indexOf("/")), item.model.slice(item.model.indexOf("/") + 1))).map(item => item.model);
+          if (unavailable.length) throw new Error(`MDSD replication: ${unavailable.join(", ")} ${unavailable.length === 1 ? "is" : "are"} not available in orche's runtime (mdsd.replication.models); no other model is substituted.`);
+          mdsdRun = new MdsdRun({ orchestrator: meta.id, cwd: args.cwd, readOnly, settings: config.mdsd ?? DEFAULT_MDSD, ledger: () => evidenceLedgerOf(session), maxSubWorkers, ...(meta.scratch ? { scratch: meta.scratch } : {}), onEvent: event => record?.appendEvent(event as never) });
+          // Refs on every tool result: the MDSD gate checks that confirmed/refuted findings cite the orchestrator's own calls.
+          evidenceLedgerOf(session).tag = true;
+        }
         meta.spawn = {
-          orchestrator: meta.id, maxSubWorkers, ...(files ? { scope: files } : {}), ...(readOnly ? { readOnly: true } : {}), ...(ultraRun ? { ultra: ultraRun } : {}), signal: AbortSignal.any([signal, assignmentEnd.signal]),
+          orchestrator: meta.id, maxSubWorkers, ...(files ? { scope: files } : {}), ...(readOnly ? { readOnly: true } : {}), ...(ultraRun ? { ultra: ultraRun } : {}), ...(mdsdRun ? { mdsd: mdsdRun } : {}), signal: AbortSignal.any([signal, assignmentEnd.signal]),
           // Sub-worker ids are unique within the assignment; in ultra within the whole task: a continuation numbers after the carried
           // high-water mark, so a new candidate never takes (and replaces) an earlier one's id or copy.
           nextId: () => {
@@ -1898,6 +1982,7 @@ export class WorkerPool {
               let tracker = subTrackers.get(id);
               if (!tracker) { tracker = new LivenessTracker({ id, role: "sub-worker" }); subTrackers.set(id, tracker); }
               tracker.observe(event);
+              mdsdRun?.observe(id, event);
             },
             onSessionEnd: id => { subTrackers.delete(id); },
             sessionFile: id => resolved.enabled ? workerSessionFile(resolved, { ...(args.currentSession?.id ? { parentSessionId: args.currentSession.id } : {}), workerId: id, spawnedAt: Date.now() }) : undefined,
@@ -1917,7 +2002,8 @@ export class WorkerPool {
           },
         } satisfies SpawnContext;
         // Ultra replaces the split decision with its report gate; the verification cap's data.unresolved rule applies to both.
-        meta.roundCheck = (kind, data) => (ultraRun ? ultraRun.gateError(kind, data) : splitError(data, spawnedReasons)) ?? unresolvedError(data, verificationRefused);
+        // MDSD replaces it with its own gate (data.mdsd) in the same way.
+        meta.roundCheck = (kind, data) => (ultraRun ? ultraRun.gateError(kind, data) : mdsdRun ? mdsdRun.gateError(kind, data) : splitError(data, spawnedReasons)) ?? unresolvedError(data, verificationRefused);
       }
       // The scratch dir / extra write roots sentence goes last, after the git line: the role instructions stay as they were.
       const rootsLine = [
@@ -1926,7 +2012,7 @@ export class WorkerPool {
         // The DAG is required for implement; an answer worker that plans gets the same rules from task_plan's own errors and notes.
         singleWorkflow && args.role === "implement" ? thinkingPolicyInstructions(thinkingPolicy) : "",
       ].filter(Boolean).join("\n");
-      const prompt = `${assignmentPrompt({ ...args, request: handoffRequest, orchestrate: orchestrating, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant, orchestrating ? (ultraRun ? ultraSection(readOnly, maxSubWorkers) : orchestratorSection(undefined, maxSubWorkers)) : "")}${rootsLine ? `\n${rootsLine}` : ""}`;
+      const prompt = `${assignmentPrompt({ ...args, request: handoffRequest, orchestrate: orchestrating, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant, orchestrating ? (ultraRun ? ultraSection(readOnly, maxSubWorkers) : mdsdRun ? mdsdSection(readOnly, maxSubWorkers, config.mdsd ?? DEFAULT_MDSD) : orchestratorSection(undefined, maxSubWorkers)) : "")}${rootsLine ? `\n${rootsLine}` : ""}`;
       const handoff = reusedContext && workflowMode ? prompt.replace(/^(Assignment[^\n]*\n)/, "$1This Assignment message supersedes earlier requirement ids and plans, including any assignment preserved at compaction time. Use only this round's requirements and Task DAG.\n") : prompt;
       // The plan advisor (single.advisor): armed before the hand-off, started by the worker's first accepted task_plan (or first edit).
       if (advisorRoute) {
@@ -2079,12 +2165,13 @@ export class WorkerPool {
       const thrown = warning ? withConcurrentWarning(error, warning) : error;
       if (resume) { details.resume = resume; record?.update({ resume }); }
       finishRecord(error.kind === "cancelled" ? "cancelled" : "failed", details, { failure: failureReason(base) });
-      throw new TaskFailedError([thrown instanceof Error ? thrown.message : base, ...modelWarnings, ...modeLines(), ...contextLine(), ...taskLines(), ...(resume ? resumeLines(resume) : []), ...(ultraRun ? [...ultraRun.lines(), ultraResumeLine()] : []), ...advisorResultLines()].join("\n"), details, { kind: error.kind, status: error.status, reason: failureReason(base) });
+      throw new TaskFailedError([thrown instanceof Error ? thrown.message : base, ...modelWarnings, ...modeLines(), ...contextLine(), ...taskLines(), ...(resume ? resumeLines(resume) : []), ...(ultraRun ? [...ultraRun.lines(), ultraResumeLine()] : []), ...(mdsdRun ? [...mdsdRun.lines(), "MDSD resume: search rounds start afresh in the next assignment; the round data files and this record keep what was found."] : []), ...advisorResultLines()].join("\n"), details, { kind: error.kind, status: error.status, reason: failureReason(base) });
     } finally {
       signal.removeEventListener("abort", abort);
       // An advisor still running here (an unexpected error) is stopped and awaited: it never outlives its assignment.
       if (advisor) { await advisor.finish({ reported: false }).catch(() => undefined); this.advisors.delete(advisor); }
       meta.advisor = undefined;
+      meta.reflection = undefined;
       await stopPromise;
       // Whatever happened above, the record ends here (a no-op when the outcome was recorded already) and shows this worker's totals.
       if (record) {
@@ -2102,13 +2189,15 @@ export class WorkerPool {
       meta.roundCheck = undefined;
       assignmentEnd.abort(new Error(`${meta.id} assignment ended`));
       meta.spawn = undefined;
-      // Ultra: what an unfinished run leaves (candidates, copies, adoptions) continues with this worker's next assignment of the same task;
-      // a completed run frees the space of its copies.
+      // Ultra: what an unfinished run leaves (candidates, copies, adoptions) continues with this worker's next assignment of the same task
+      // (its task ledger, with or without single.ledger); a completed run frees the space of its copies.
       if (ultraRun) {
         meta.ultraCarry = ledger && !ultraDone ? { task: ledger.taskId, state: structuredClone(ultraRun.state) } : undefined;
         meta.ultra = undefined;
         await ultraRun.end(ultraDone).catch(() => undefined);
       }
+      // MDSD: the final measured summary of the run (every stage's usage, explorers, findings, gate) for the record, however it ended.
+      if (mdsdRun) { try { record?.appendEvent({ type: "mdsd", timestamp: Date.now(), worker: meta.id, stage: "end", summary: mdsdRun.summary() } as never); } catch { /* records are best effort */ } }
       // Idle at the baseline: a step level or a recovery step-down of this assignment never outlives it.
       try { const ended = this.manager.session(meta.id); thinkingStateOf(ended).onSwitch = undefined; setThinkingPhase(ended, "baseline", "assignment end"); } catch { /* disposed */ }
       meta.files = files;

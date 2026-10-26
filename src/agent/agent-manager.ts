@@ -66,6 +66,10 @@ interface Worker {
   requestBudget: number;
   /** Budget ladder: none → noticed (wrap-up notice sent) → stopping (turn aborted) → final (forced report prompt). */
   budget: "none" | "noticed" | "stopping" | "final";
+  /** A stop by an external budget ({@link AgentManager.budgetAction}: MDSD's total): its forced-report prompt, what it was, and the request count at the stop. */
+  externalStop?: { text: string; reason: string; at: number };
+  /** The last response of the running assignment called report_result (an external stop lets it land). */
+  lastReporting?: boolean;
   /** Messages main injected into the current assignment ({@link AgentManager.steer}). */
   injected: InjectedMessage[];
   /** The output-limit recovery was exhausted and the worker was asked once for a report with what it has. */
@@ -413,6 +417,7 @@ export class AgentManager {
               ? (event.message.errorMessage ?? "Model error")
               : undefined;
           const reporting = event.message.content.some(part => part.type === "toolCall" && part.name === "report_result");
+          worker.lastReporting = reporting;
           if (!budgetAborted) owner.trackBudget(worker, assignment, reporting);
           owner.emit({
             type: "usage", timestamp: Date.now(), agentId: options.id, assignmentId: assignment.id,
@@ -453,7 +458,7 @@ export class AgentManager {
         if (reportable && worker.budget === "stopping") {
           worker.budget = "final";
           reportPhase("forced report (request budget)");
-          owner.runAssignment(worker, assignment, `Your request budget for assignment ${assignment.kind} is exhausted and your turn was stopped. Call report_result alone now with what you have: partial findings are fine; for implement/fix use data.status "blocked" with the reason if the work is unfinished.`);
+          owner.runAssignment(worker, assignment, worker.externalStop?.text ?? `Your request budget for assignment ${assignment.kind} is exhausted and your turn was stopped. Call report_result alone now with what you have: partial findings are fine; for implement/fix use data.status "blocked" with the reason if the work is unfinished.`);
         } else if (reportable && length.exhausted && !worker.lengthReportPrompted) {
           // Output-limit recovery is used up (src/pi/length-recovery.ts): one forced report instead of the generic nudge.
           worker.lengthReportPrompted = true;
@@ -500,6 +505,8 @@ export class AgentManager {
     w.requests = 0;
     w.requestBudget = this.requestBudget;
     w.budget = "none";
+    w.externalStop = undefined;
+    w.lastReporting = false;
     w.injected = [];
     w.lengthReportPrompted = false;
     w.rewrites = 0;
@@ -558,6 +565,14 @@ export class AgentManager {
    */
   private trackBudget(w: Worker, assignment: Assignment, reporting: boolean): void {
     w.snapshot.requestCount = ++w.requests;
+    // After an external budget's stop only its grace applies (the forced report gets BUDGET_GRACE_REQUESTS more requests).
+    if (w.externalStop) {
+      if (w.budget === "final" && w.requests >= w.externalStop.at + BUDGET_GRACE_REQUESTS && !w.result && !w.resultFailure && !reporting) {
+        w.resultFailure = `${w.externalStop.reason} exhausted: no RESULT within ${BUDGET_GRACE_REQUESTS} requests of the forced report (${w.requests} requests)`;
+        void w.adapter.abort().catch(() => undefined);
+      }
+      return;
+    }
     if (!w.requestBudget) return;
     const budget = w.requestBudget;
     const stopAt = Math.ceil(budget * 1.5);
@@ -579,6 +594,22 @@ export class AgentManager {
       emit("abort");
       void w.adapter.abort().catch(() => undefined);
     }
+  }
+  /**
+   * An external budget of the assignment `agentId` runs (the MDSD total, src/orchestrator/mdsd.ts), on the request budget's ladder:
+   * "notice" sends `text` as a wrap-up notice; "stop" stops the turn and prompts one forced report with `text`, which then has
+   * {@link BUDGET_GRACE_REQUESTS} more requests before the assignment fails. A response that calls report_result is let land
+   * (the stop is not applied; the caller tries again after the next response). Returns whether it acted.
+   */
+  budgetAction(agentId: string, action: "notice" | "stop", text: string, reason = "budget"): boolean {
+    const w = this.workers.get(agentId);
+    if (!w || !w.runAssignment || w.result || w.snapshot.status !== "running") return false;
+    if (action === "notice") { void w.adapter.notice(text).catch(() => undefined); return true; }
+    if (w.budget === "stopping" || w.budget === "final" || w.lastReporting) return false;
+    w.budget = "stopping";
+    w.externalStop = { text, reason, at: w.requests };
+    void w.adapter.abort().catch(() => undefined);
+    return true;
   }
   /**
    * Inject a message from main into the assignment `agentId` is running (Pi steering: it reaches the model after the current tool

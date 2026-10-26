@@ -20,7 +20,8 @@ import { sameOutput, type TaskSpec } from "./protocol.js";
 export const REPO = process.env.ADVISOR_BENCH_REPO ?? new URL("../../", import.meta.url).pathname;
 export const SUITE_DIR = join(REPO, "fixtures/suite");
 export const LCB_DIR = join(REPO, "fixtures/advisor-bench/lcb");
-export const SWE_DIR = join(REPO, "fixtures/advisor-bench/swe");
+/** SWE fixtures; ADVISOR_BENCH_SWE_DIR names another root of the same layout (the ultra-ho driver sets it for a plan's `sweFixtures`). */
+export const SWE_DIR = process.env.ADVISOR_BENCH_SWE_DIR || join(REPO, "fixtures/advisor-bench/swe");
 /** Rebuilt by setup-swe.ts (source snapshots and virtualenvs); not tracked. */
 export const SWE_CACHE = process.env.ADVISOR_BENCH_SWE_CACHE ?? join(REPO, "results/advisor-reviewer/cache/swe");
 

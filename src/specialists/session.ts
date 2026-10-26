@@ -70,7 +70,21 @@ export interface SpecialistRun<S extends TSchema> {
   onSession?: (use: { model: string; thinking?: string }) => void;
   /** Every session event, read-only (liveness of the caller: an orche_spawn sub-worker counts for its orchestrator). A throw is ignored. */
   onEvent?: (event: { type: string; [key: string]: unknown }) => void;
+  /**
+   * A budget of the session (an MDSD search worker): once any dimension reaches `wrapUpAt` of its allocation, one steering notice
+   * asks for the report; at `hardStopAt` the call is cancelled. Token, cost and request checks run after each model response (a
+   * response in flight is not cut by them, so it can overshoot); the time dimension also has a timer that cancels in flight.
+   */
+  budget?: SpecialistBudget;
 }
+/** The allocation of a budgeted specialist call and its thresholds (fractions/multiples of the allocation). */
+export interface SpecialistBudget {
+  requests: number; minutes: number; costUSD: number; outputTokens: number; wrapUpAt: number; hardStopAt: number;
+  /** What the wrap-up notice asks for (after the usage figures); absent: the search worker's text (findings, scopes). */
+  notice?: string;
+}
+/** Report responses a budget stop lets through (a report and one retry after an invalid one): part of a worker's worst case. */
+export const REPORT_EXEMPTIONS = 2;
 /** The deadline settings of an activity-aware specialist call (see {@link SpecialistRun.deadline}). */
 export interface SpecialistDeadline {
   /** The resolved limits of the caller: base `assignmentMs`, the extension schedule, the activity window and `observeMs`. */
@@ -109,6 +123,9 @@ export interface SpecialistStats {
   sessionFile?: string;
   /** Present for a call with {@link SpecialistRun.deadline}. */
   deadline?: SpecialistDeadlineStats;
+  /** Present for a call with {@link SpecialistRun.budget}: when the wrap-up notice went out, what stopped the call, and whether a
+   * response was in flight when it stopped (its usage is then unknown: Pi reports usage at the end of a response). */
+  budget?: { wrapUp?: string; stoppedBy?: string; inFlightUnknown?: boolean };
 }
 export interface SpecialistOutcome<T> { value: T; stats: SpecialistStats }
 
@@ -157,6 +174,12 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
   let unsubscribe: (() => void) | undefined;
   let turns = 0;
   let modelError: string | undefined;
+  /** The budget's time check (MDSD search workers): cancels in flight once the time dimension reaches the stop. */
+  let budgetTimer: ReturnType<typeof setInterval> | undefined;
+  // A model request in flight (from turn start to its assistant message end), and a response that ended aborted: for both the
+  // provider's usage is unknown (marked on a budgeted call's stats when it ends by a cancellation, never counted as zero).
+  let inFlight = false, cutResponse = false;
+  const budget = run.budget;
   try {
     const creation = createSession({
       cwd: run.cwd, route: run.route, modelRuntime: run.runtime,
@@ -183,12 +206,41 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
     const active = session;
     const stop = () => { void active.abort().catch(() => undefined); };
     controller.signal.addEventListener("abort", stop, { once: true });
+    // The budget (MDSD search workers): one wrap-up notice, then an explicit cancellation; see SpecialistRun.budget.
+    // `reporting`: the model's last response calls the report tool; the stop lets up to REPORT_EXEMPTIONS such attempts (an invalid
+    // report gets its error and one more try) finish instead of discarding the findings, and no notice interrupts them.
+    let wrapped = false, stopped = false, reporting = false, exempted = 0;
+    const enforce = () => {
+      if (!budget || stopped || captured.value !== undefined || controller.signal.aborted) return;
+      const minutes = (Date.now() - startedAt) / 60_000;
+      const dimensions: [string, number, string][] = [
+        ["requests", stats.requests / budget.requests, `${stats.requests}/${budget.requests} requests`],
+        ["cost", stats.usage.cost / budget.costUSD, `$${stats.usage.cost.toFixed(2)}/$${budget.costUSD}`],
+        ["output tokens", stats.usage.output / budget.outputTokens, `${stats.usage.output}/${budget.outputTokens} output tokens`],
+        ["time", minutes / budget.minutes, `${minutes.toFixed(1)}/${budget.minutes} min`],
+      ];
+      const worst = dimensions.reduce((a, b) => (b[1] > a[1] ? b : a));
+      if (worst[1] >= budget.hardStopAt) {
+        if (reporting && exempted < REPORT_EXEMPTIONS) { exempted++; return; }
+        stopped = true;
+        stats.budget = { ...stats.budget, stoppedBy: `${worst[0]} at ${worst[2]} (${budget.hardStopAt}x the allocation)`, ...(inFlight ? { inFlightUnknown: true } : {}) };
+        controller.abort(new Error(`budget: ${stats.budget.stoppedBy}`));
+      } else if (!wrapped && !reporting && worst[1] >= budget.wrapUpAt) {
+        wrapped = true;
+        stats.budget = { ...stats.budget, wrapUp: worst[2] };
+        void active.steer(`Budget notice: this session used ${worst[2]} of its allocation. ${budget.notice ?? `Stop exploring now and call ${run.report.name} alone with what you have: your findings so far (each with evidence, counter-evidence and uncertainty), explored_scope, and everything you did not get to in unexplored_scope.`} Past ${Math.round(budget.hardStopAt * 100)}% of an allocation the session is stopped and what it has not reported is lost.`).catch(() => undefined);
+      }
+    };
+    if (budget) budgetTimer = setInterval(enforce, 5_000);
     unsubscribe = session.subscribe(event => {
       tracker?.observe(event as unknown as { type: string; [key: string]: unknown });
       if (run.onEvent) { try { run.onEvent(event as unknown as { type: string; [key: string]: unknown }); } catch { /* an observer cannot alter the session */ } }
       if (event.type === "tool_execution_start") run.onTool?.(event.toolName);
       if (event.type === "turn_end" && ++turns >= run.maxTurns && captured.value === undefined) controller.abort(new Error(`no ${run.report.name} within ${run.maxTurns} turns`));
+      // A model request is in flight from the start of a turn until its assistant message ends (tools run after that).
+      if (event.type === "turn_start" || (event.type === "message_start" && event.message.role === "assistant")) { inFlight = true; reporting = false; }
       if (event.type === "message_end" && event.message.role === "assistant") {
+        inFlight = false;
         const { usage } = event.message;
         const answered = `${event.message.provider}/${event.message.model}`;
         stats.requests++;
@@ -196,6 +248,9 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
         stats.usage.input += usage.input; stats.usage.output += usage.output; stats.usage.cacheRead += usage.cacheRead; stats.usage.cacheWrite += usage.cacheWrite;
         stats.usage.cost += usage.cost?.total ?? 0;
         modelError = event.message.stopReason === "error" ? (event.message.errorMessage ?? "model error") : undefined;
+        if (event.message.stopReason === "aborted") cutResponse = true;
+        reporting = event.message.content.some(part => part.type === "toolCall" && part.name === run.report.name);
+        enforce();
       }
     });
     try {
@@ -208,10 +263,14 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
     return { value: captured.value, stats: finish() };
   } catch (error) {
     if (error instanceof SpecialistError) throw error;
+    // A budgeted call that ended by any cancellation (budget, caller, deadline, turn cap) with a response in flight or cut short:
+    // that response's usage is unknown (Pi reports usage when a response ends), so it is marked rather than counted as zero.
+    if (budget && (inFlight || cutResponse)) stats.budget = { ...stats.budget, inFlightUnknown: true };
     const reason = controller.signal.aborted && controller.signal.reason instanceof Error ? controller.signal.reason.message : error instanceof Error ? error.message : String(error);
     throw new SpecialistError(`${run.actor}: ${reason}`, finish(), run.signal.aborted);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    if (budgetTimer !== undefined) clearInterval(budgetTimer);
     // The deadline's timers (wait and observer) end with the call, whatever ended it.
     await watchdog?.stop();
     run.signal.removeEventListener("abort", onAbort);

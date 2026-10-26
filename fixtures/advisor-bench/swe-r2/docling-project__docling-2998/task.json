@@ -1,0 +1,54 @@
+{
+  "id": "docling-project__docling-2998",
+  "title": "ASR pipeline fails on zero-duration Whisper segments",
+  "repo": "docling-project/docling",
+  "baseCommit": "684f59f263094622ee976886d0ce229d1952dd41",
+  "createdAt": "2026-02-16 01:14:19",
+  "problemStatement": "ASR pipeline fails on zero-duration Whisper segments\n### Bug\nWhisper occasionally produces transcription segments where start_time == end_time. When this happens, _NativeWhisperModel.run() (and _MlxWhisperModel.run()) attempt to construct a TrackSource with equal times, which fails the check_order validator in docling-core:\n\n> ERROR    Audio tranciption has an error: 1 validation error for TrackSource           Value error, End time must be greater than start time [type=value_error,           input_value={'start_time': 1681.38, 'end_time': 1681.38, 'voice': None}, input_type=dict]\n\nBecause the exception is caught by the broad except Exception handler in run(), the entire transcription is marked as ConversionStatus.FAILURE -- even though only a single degenerate segment (out of potentially hundreds of valid ones) caused the error.\n\nIn docling/pipeline/asr_pipeline.py, both `_NativeWhisperModel.run()` and `_MlxWhisperModel.run()` iterate over conversation items and construct TrackSource objects without validating that `end_time > start_time`:\nhttps://github.com/docling-project/docling/blob/main/docling/pipeline/asr_pipeline.py#L181-L185\n`TrackSource` (from docling-core) has a `@model_validator` that enforces `end_time > start_time`, raising `ValueError` for equal values.\n\n### Steps to reproduce\n\n1. Transcribe a long audio file (30+ minutes) using the ASR pipeline with WHISPER_BASE\n2. Whisper may produce a segment near the end of the file where start == end\n3. The entire conversion fails with ConversionStatus.FAILURE\n\nThis is non-deterministic and depends on the audio content, but it is reproducible with specific files. This specifically occurred with the .wav retrieved from https://www.youtube.com/watch?v=5tVB9jKOet8\n\n### Docling version\n2.73.1\ndocling-core 2.65.1\n\n### Python version\n3.12",
+  "interface": "",
+  "failToPass": [
+    "tests/test_asr_pipeline.py::test_native_whisper_handles_zero_duration_timestamps",
+    "tests/test_asr_pipeline.py::test_mlx_whisper_handles_zero_duration_timestamps",
+    "tests/test_asr_pipeline.py::test_native_whisper_skips_empty_zero_duration"
+  ],
+  "passToPass": [
+    "tests/test_asr_pipeline.py::test_is_backend_supported_noop_backend",
+    "tests/test_asr_pipeline.py::test_mlx_run_success_and_failure"
+  ],
+  "testFiles": [
+    "tests/test_asr_pipeline.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/test_asr_pipeline.py",
+  "datasetInstall": "pip install -e . --quiet && pip install pytest pytest-cov pytest-xdist --quiet",
+  "datasetPython": "3.12",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_02.jsonl",
+    "recordSha256": "567ea4b984e34b7e1c7dfa900fe2ee1a2cf04252cb1a51125b0745551a26b3f7"
+  },
+  "install": "pip install . --quiet && pip install pytest pytest-cov pytest-xdist --quiet",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-24T04:15:00.269Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 6899,
+      "counts": {
+        "FAILED": 3,
+        "PASSED": 2
+      }
+    },
+    "reference": {
+      "ms": 5121,
+      "counts": {
+        "PASSED": 5
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

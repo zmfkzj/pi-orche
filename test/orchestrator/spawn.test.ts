@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { VARIANTS } from "../../experiments/judgment/variants.js";
@@ -277,6 +277,59 @@ describe("isolation and model routes", () => {
       `W1 → ${id} v (verify · p/m ×2, p/fallback ×1 · thinking medium): passed`,
     ]);
     expect(result.text).toContain(`${id} v (verify, 0s, 1 requests; p/m ×2, p/fallback ×1 · thinking medium): passed`);
+  });
+});
+
+describe("MDSD experiment support: replication cells and explorer scratch (docs/mdsd.md Replication)", () => {
+  const env = () => ({
+    orchestrator: "W1", cwd: tmpdir(), runtime: { getModel: () => undefined } as never,
+    route: { role: "implementer", model: "main/orchestrator-model", thinking: "high" as const }, routeSource: "orchestrator" as const, thinkingSource: "orchestrator" as const,
+    specialistRoute: (role: "game-asset" | "video") => ({ role, model: `routes/${role}-model` }),
+    prompt: (worker: PlannedWorker) => worker.request, timeoutMs: 1_000, maxTurns: 2,
+  });
+  it("a replication cell runs on its own model route (its own thinking, else the orchestrator's); a verifier still inherits", async () => {
+    const run = createSubWorkerRunner(env() as never);
+    const own: PlannedWorker = { id: "W1.7", name: "cell", role: "answer", request: "x", reason: "search", route: { model: "other/cell-model", thinking: "max" } };
+    const borrowed: PlannedWorker = { ...own, id: "W1.8", route: { model: "third/cell-model" } };
+    const { workers } = planSpawn({ reason: "verification", workers: [{ name: "v", role: "verify", request: "Check" }] }, { nextId });
+    const signal = new AbortController().signal;
+    const [a, b, v] = await Promise.all([own, borrowed, workers[0]!].map(worker => run(worker, [worker], signal, () => undefined)));
+    // No such models in the fake runtime: failures, but each outcome keeps the route it was given (never another model).
+    expect([a!.model, a!.thinking, a!.modelSource, a!.thinkingSource]).toEqual(["other/cell-model", "max", "route", "route"]);
+    expect([b!.model, b!.thinking, b!.modelSource, b!.thinkingSource]).toEqual(["third/cell-model", "high", "route", "orchestrator"]);
+    expect([v!.model, v!.modelSource]).toEqual(["main/orchestrator-model", "orchestrator"]);
+  });
+  it("an explorer's private scratch is writable (by real path); the workspace, a sibling's scratch and symlink escapes stay blocked; no scratch without one", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "orche-cell-")), base = await mkdtemp(join(tmpdir(), "orche-cell-scratch-"));
+    roots.push(cwd, base);
+    const own = join(base, "W1.1"), sibling = join(base, "W1.2");
+    await mkdir(own); await mkdir(sibling); await mkdir(join(cwd, "src"));
+    await symlink(cwd, join(own, "repo"));
+    await symlink(sibling, join(own, "peer"));
+    const worker: PlannedWorker = { id: "W1.1", name: "a", role: "answer", request: "x", reason: "search", scratch: own };
+    const guard = subWorkerGuard(worker, [worker], cwd);
+    expect(await guard("write", { path: join(own, "probe.mts") })).toBeUndefined();
+    expect(await guard("edit", { path: join(own, "probe.mts") })).toBeUndefined();
+    expect(await guard("write", { path: join(sibling, "probe.mts") })).toMatch(new RegExp(`outside the workspace\\. Use your scratch directory ${own}`));
+    expect(await guard("write", { path: "src/a.ts" })).toMatch(/assignment answer is read-only/);
+    expect(await guard("write", { path: join(own, "repo", "src", "a.ts") })).toMatch(/resolves into the workspace via a symlink/);
+    expect(await guard("write", { path: join(own, "peer", "x.ts") })).toMatch(/leaves its write root via a symlink/);
+    const plain: PlannedWorker = { ...worker, scratch: undefined };
+    expect(await subWorkerGuard(plain, [plain], cwd)("write", { path: join(own, "probe.mts") })).toMatch(/is outside the workspace/);
+  });
+  it("a stage contract may replace the call before it is validated (resolve) and gets ids for further workers (prepare's nextId)", async () => {
+    const seen: string[] = [];
+    const stage = {
+      resolve: (call: SpawnParameters) => ({ ...call, workers: call.workers.map(worker => ({ ...worker, request: `resolved: ${worker.request}` })) }),
+      validate: (_reason: string, workers: readonly { name: string }[]) => { seen.push(`validate ${workers.map(worker => worker.name).join(",")}`); },
+      prepare: async (_reason: string, workers: PlannedWorker[], _signal: AbortSignal, _call?: unknown, next?: () => string) => [...workers, { ...workers[0]!, id: next!() }],
+      finish: async () => ["stage lines"],
+    };
+    const result = await executeSpawn(context({ mdsd: stage as never, runWorker: async worker => { seen.push(`${worker.id} ${worker.request}`); return outcome(worker); } }), { reason: "verification", workers: [{ name: "v", role: "verify", request: "check" }] }, undefined);
+    const [first, second] = result.details.workers;
+    expect(seen).toEqual(["validate v", `${first!.id} resolved: check`, `${second!.id} resolved: check`]);
+    expect(first!.id).not.toBe(second!.id);
+    expect(result.text).toContain("stage lines");
   });
 });
 

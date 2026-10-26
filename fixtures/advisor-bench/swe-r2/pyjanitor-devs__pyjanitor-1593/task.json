@@ -1,0 +1,87 @@
+{
+  "id": "pyjanitor-devs__pyjanitor-1593",
+  "title": "move `by` methods to groupby",
+  "repo": "pyjanitor-devs/pyjanitor",
+  "baseCommit": "99011fe0f4a994ac13cd040a785a683a2f16e898",
+  "createdAt": "2026-02-11 10:41:24",
+  "problemStatement": "move `by` methods to groupby\nSome functions like `complete` and `expand` have a `by` method, to handle grouped computations. Let's make them methods on the grouped object instead, and keep things consistent.\n\nSo instead of ```df.complete('a','b', by='c')```\n\nWe write ```df.groupby('c').complete('a','b')```",
+  "interface": "",
+  "failToPass": [
+    "tests/functions/test_complete.py::test_complete_groupby2",
+    "tests/functions/test_complete.py::test_complete_groupby3",
+    "tests/functions/test_expand.py::test_expand_grouped"
+  ],
+  "passToPass": [
+    "tests/functions/test_complete.py::test_column_None",
+    "tests/functions/test_complete.py::test_type_sort",
+    "tests/functions/test_complete.py::test_fill_value",
+    "tests/functions/test_complete.py::test_fill_value_column",
+    "tests/functions/test_complete.py::test_fill_value_dict_scalar",
+    "tests/functions/test_complete.py::test_type_explicit",
+    "tests/functions/test_complete.py::test_all_strings_no_nulls",
+    "tests/functions/test_complete.py::test_dict_callable",
+    "tests/functions/test_complete.py::test_dict_Index",
+    "tests/functions/test_complete.py::test_complete_Index",
+    "tests/functions/test_complete.py::test_complete_Series",
+    "tests/functions/test_complete.py::test_complete_callable",
+    "tests/functions/test_complete.py::test_single_column",
+    "tests/functions/test_complete.py::test_seq_column",
+    "tests/functions/test_complete.py::test_expression",
+    "tests/functions/test_complete.py::test_pandas_dataframe",
+    "tests/functions/test_complete.py::test_pandas_multiindex",
+    "tests/functions/test_complete.py::test_complete_multiple_groupings",
+    "tests/functions/test_complete.py::test_fill_value_scalar",
+    "tests/functions/test_complete.py::test_dict_seq_callable",
+    "tests/functions/test_complete.py::test_dict_seq",
+    "tests/functions/test_complete.py::test_complete_groupby",
+    "tests/functions/test_complete.py::test_explicit_scalar",
+    "tests/functions/test_complete.py::test_explicit_scalar_cat",
+    "tests/functions/test_complete.py::test_explicit_dict",
+    "tests/functions/test_complete.py::test_explicit_",
+    "tests/functions/test_complete.py::test_nulls",
+    "tests/functions/test_complete.py::test_groupby_tuple",
+    "tests/functions/test_complete.py::test_MI_1",
+    "tests/functions/test_expand.py::test_columns_wrong_type",
+    "tests/functions/test_expand.py::test_by",
+    "tests/functions/test_expand.py::test_various",
+    "tests/functions/test_expand.py::test_various_sorted",
+    "tests/functions/test_expand.py::test_expand_by"
+  ],
+  "testFiles": [
+    "tests/functions/test_complete.py",
+    "tests/functions/test_expand.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/functions/test_complete.py tests/functions/test_expand.py",
+  "datasetInstall": "pip install -e . --quiet && pip install pytest pytest-xdist pytest-cov hypothesis --quiet && pip install polars --quiet && pip install unyt tqdm biopython pyspark rdkit --quiet && pip install requests tidyxl openpyxl --quiet",
+  "datasetPython": "3.12",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_02.jsonl",
+    "recordSha256": "1476f4ba027ea38015c08c0e968fd7cb6d1a42b2a59f7742452a2afa5fca7129"
+  },
+  "install": "pip install . --quiet && pip install pytest pytest-xdist pytest-cov hypothesis --quiet && pip install polars --quiet && pip install unyt tqdm biopython pyspark rdkit --quiet && pip install requests tidyxl openpyxl --quiet",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-24T02:56:38.104Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 7372,
+      "counts": {
+        "FAILED": 3,
+        "PASSED": 34
+      }
+    },
+    "reference": {
+      "ms": 7483,
+      "counts": {
+        "PASSED": 37
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

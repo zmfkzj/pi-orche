@@ -120,7 +120,7 @@ export function formatModelTiers(view: ModelTiersView): string {
   const orchestrator = view.tiers?.orchestrator;
   const worker = view.tiers?.worker;
   const main = { ...(view.main ? { model: view.main } : {}), current, thinking: view.thinking ?? "off" };
-  // strong and ultra (docs/orchestrator.md 12): the strong tiers; an unset strong-orchestrator falls back to models.orchestrator, an
+  // strong, ultra and mdsd (docs/orchestrator.md 12): the strong tiers; an unset strong-orchestrator falls back to models.orchestrator, an
   // unset strong-worker inherits the strong orchestrator (models.worker never applies there).
   const strong = usesStrongTiers(view.mode as MainMode);
   const strongOrchestrator = view.tiers?.["strong-orchestrator"];
@@ -137,8 +137,8 @@ export function formatModelTiers(view: ModelTiersView): string {
     `- orchestrator (orche_task explore/answer/implement/verify): ${orchestrator ? `${describe(orchestrator, "main's", main)} — ${tierSource("orchestrator", orchestrator)}` : `inherited from main (${current})`}`,
     `- worker (orche_spawn sub-workers, the fresh verifier included): ${worker ? `${describe(worker, "the orchestrator's", main)} — ${tierSource("worker", worker)}` : `inherited from the orchestrator (${orchestratorModel})`}`,
     `- advisor (single.advisor ${view.advisor ? "on" : "off"}: one read-only plan review per orche_task explore/answer/implement/verify assignment): ${advisor ? `${describe(advisor, "the orchestrator's", main)} — ${tierSource("advisor", advisor)}` : `inherited from the orchestrator (${orchestratorModel})`}${view.advisor ? "" : "; turn it on with \"single\": { \"advisor\": true }"}`,
-    `- strong-orchestrator (strong and ultra modes, in place of the orchestrator): ${strongOrchestrator ? `${describe(strongOrchestrator, "main's", main)} — ${tierSource("strong-orchestrator", strongOrchestrator)}` : orchestrator ? `unset: falls back to models.orchestrator (${describe(orchestrator, "main's", main)})` : `unset: inherited from main (${current})`}`,
-    `- strong-worker (strong and ultra modes, in place of the worker): ${strongWorker ? `${describe(strongWorker, "the strong orchestrator's", main)} — ${tierSource("strong-worker", strongWorker)}` : `inherited from the strong orchestrator (${strongOrchestratorModel}); models.worker does not apply`}`,
+    `- strong-orchestrator (strong, ultra and mdsd modes, in place of the orchestrator): ${strongOrchestrator ? `${describe(strongOrchestrator, "main's", main)} — ${tierSource("strong-orchestrator", strongOrchestrator)}` : orchestrator ? `unset: falls back to models.orchestrator (${describe(orchestrator, "main's", main)})` : `unset: inherited from main (${current})`}`,
+    `- strong-worker (strong, ultra and mdsd modes, in place of the worker): ${strongWorker ? `${describe(strongWorker, "the strong orchestrator's", main)} — ${tierSource("strong-worker", strongWorker)}` : `inherited from the strong orchestrator (${strongOrchestratorModel}); models.worker does not apply`}`,
     ...(view.mode === "direct" ? [] : [`- main's thinking (${view.thinking ?? "off"}) reaches at each hand-off: ${reach.length ? reach.join(", ") : "no tier (each sets its own level)"}${reach.length ? "; a model that lacks the level runs the nearest one it supports (Pi's clamp; the task result and run.json record the level used)" : ""}`]),
     ...(view.mode === "direct" || !view.thinkingFloor ? [] : [`- thinking floor ${view.thinkingFloor.level} (${view.thinkingFloor.source === "models.main" ? "models.main's thinking" : "main's level at session start"}): a tier that sets no thinking of its own takes main's current thinking but not below it, so lowering main's thinking does not lower it; thinking "main" (or { "model": "main" } without a level) follows main exactly; give a tier its own level (e.g. "thinking": "high") to keep it independent of main`]),
     "- game-asset, video: their own routes (models does not apply)",

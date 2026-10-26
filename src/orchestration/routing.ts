@@ -5,15 +5,16 @@ import { parseRunLimits, RunLimitsError, type RunLimits } from "./limits.js";
 /**
  * Main-session delegation: single hands work to one orche_task worker, direct edits locally. strong is single on the strong
  * model tiers (`models.strong-orchestrator`/`models.strong-worker`); ultra is the quality-first flow (src/orchestrator/ultra.ts)
- * on the same strong tiers. docs/orchestrator.md 12 and 14.
+ * on the same strong tiers; mdsd is the single workflow with the MDSD search policy (src/orchestrator/mdsd.ts, docs/mdsd.md) on the
+ * same strong tiers. docs/orchestrator.md 12 and 14.
  */
-export const MAIN_MODES = ["single", "strong", "ultra", "direct"] as const;
+export const MAIN_MODES = ["single", "strong", "ultra", "mdsd", "direct"] as const;
 export type MainMode = (typeof MAIN_MODES)[number];
 /** The modes in which main delegates every change to one orche_task worker (the single workflow and its variants). */
 export type DelegatingMode = Exclude<MainMode, "direct">;
-export const isDelegatingMode = (mode: MainMode | undefined): mode is DelegatingMode => mode === "single" || mode === "strong" || mode === "ultra";
-/** strong and ultra run orche_task workers on the strong tiers; single on `models.orchestrator`/`models.worker`. */
-export const usesStrongTiers = (mode: MainMode | undefined): boolean => mode === "strong" || mode === "ultra";
+export const isDelegatingMode = (mode: MainMode | undefined): mode is DelegatingMode => mode === "single" || mode === "strong" || mode === "ultra" || mode === "mdsd";
+/** strong, ultra and mdsd run orche_task workers on the strong tiers; single on `models.orchestrator`/`models.worker`. */
+export const usesStrongTiers = (mode: MainMode | undefined): boolean => mode === "strong" || mode === "ultra" || mode === "mdsd";
 /** Removed modes (multi-agent orche_run delegation): still accepted in config and session history, read as `single`. */
 export const LEGACY_MAIN_MODES = ["auto", "multi"] as const;
 export type LegacyMainMode = (typeof LEGACY_MAIN_MODES)[number];
@@ -139,7 +140,8 @@ function parseThinking(value: unknown, location: string): ThinkingLevel | undefi
     throw new RouteConfigError(`${location}.thinking: expected ${thinkingLevels.join(", ")}`);
   return value as ThinkingLevel | undefined;
 }
-function parseSettings(value: unknown, location: string): RouteSettings {
+/** One route object `{ model: "provider/id", thinking?, extendedContext? }` (routes, `default`, `models.main`, mdsd.replication.models). */
+export function parseSettings(value: unknown, location: string): RouteSettings {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError(`${location}: expected route object`);
   const route = value as Record<string, unknown>;
   if (Object.keys(route).some(key => key !== "model" && key !== "thinking" && key !== "extendedContext")) throw new RouteConfigError(`${location}: unknown route field`);

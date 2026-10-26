@@ -1,0 +1,78 @@
+{
+  "id": "deepset-ai__haystack-10547",
+  "title": "Connection mismatch/error on FallbackChatGenerator",
+  "repo": "deepset-ai/haystack",
+  "baseCommit": "02b86ce990b61ae1661738e39b49d15520df0c5f",
+  "createdAt": "2026-02-10 10:52:48",
+  "problemStatement": "Connection mismatch/error on FallbackChatGenerator\n**Describe the bug**\nTrying to connect a ChatPromptBuilder to the FallbackChatGenerator fails due to the way the type annotation is picked up for the generator.\n\nThis is likely because of `from __future__ import annotations` in this component influencing how the annotation is determined  inside the pipeline.\n\n**Error message**\n```\nPipelineConnectError: Cannot connect 'prompt_builder' with 'llm': no matching connections available.\n'prompt_builder':\n - prompt: list[ChatMessage]\n'llm':\n - messages: 'list[ChatMessage]' (available)\n - generation_kwargs: 'dict[str, Any] | None' (available)\n - tools: 'ToolsType | None' (available)\n - streaming_callback: 'StreamingCallbackT | None' (available)\n ```\n\n**Expected behavior**\nConnection works fine\n\n**To Reproduce**\n```python\nfrom haystack.components.generators.chat import OpenAIChatGenerator\nfrom haystack.components.builders import ChatPromptBuilder\nfrom haystack.dataclasses import ChatMessage\nfrom haystack.utils import Secret\n\nfrom haystack.components.generators.chat import FallbackChatGenerator\n\nprompt_template = [\n    ChatMessage.from_user(\"{{question}}\")\n]\n\nprompt_builder = ChatPromptBuilder(template=prompt_template, required_variables=\"*\")\nfallback_generator = FallbackChatGenerator(chat_generators=[\n    OpenAIChatGenerator(api_key=Secret.from_token(\"abcd\"), model=\"gpt-4o-mini\")\n])\n\npipeline = Pipeline()\npipeline.add_component(\"prompt_builder\", prompt_builder)\npipeline.add_component(\"llm\", fallback_generator)\npipeline.connect(\"prompt_builder\", \"llm\")\n```\n**FAQ Check**\n- [ ] Have you had a look at [our new FAQ page](https://docs.haystack.deepset.ai/docs/faq)?\n\n**System:**\n - OS:\n - GPU/CPU:\n - Haystack version (commit or version number):\n - DocumentStore:\n - Reader:\n - Retriever:",
+  "interface": "",
+  "failToPass": [
+    "test/core/component/test_component.py::test_set_input_types_postponed_annotations"
+  ],
+  "passToPass": [
+    "test/core/component/test_component.py::test_correct_declaration",
+    "test/core/component/test_component.py::test_correct_declaration_with_async",
+    "test/core/component/test_component.py::test_correct_declaration_with_additional_readonly_property",
+    "test/core/component/test_component.py::test_correct_declaration_with_additional_writable_property",
+    "test/core/component/test_component.py::test_missing_run",
+    "test/core/component/test_component.py::test_async_run_not_async",
+    "test/core/component/test_component.py::test_async_run_not_coroutine",
+    "test/core/component/test_component.py::test_parameters_mismatch_run_and_async_run",
+    "test/core/component/test_component.py::test_set_input_types",
+    "test/core/component/test_component.py::test_set_input_types_no_kwarg",
+    "test/core/component/test_component.py::test_set_input_types_overrides_run",
+    "test/core/component/test_component.py::test_set_output_types",
+    "test/core/component/test_component.py::test_output_types_decorator_with_compatible_type",
+    "test/core/component/test_component.py::test_output_types_decorator_wrong_method",
+    "test/core/component/test_component.py::test_output_types_decorator_and_set_output_types",
+    "test/core/component/test_component.py::test_output_types_decorator_and_set_output_types_async",
+    "test/core/component/test_component.py::test_output_types_decorator_mismatch_run_async_run",
+    "test/core/component/test_component.py::test_output_types_decorator_missing_async_run",
+    "test/core/component/test_component.py::test_component_decorator_set_it_as_component",
+    "test/core/component/test_component.py::test_input_has_default_value",
+    "test/core/component/test_component.py::test_keyword_only_args",
+    "test/core/component/test_component.py::test_repr",
+    "test/core/component/test_component.py::test_repr_added_to_pipeline",
+    "test/core/component/test_component.py::test_pre_init_hooking",
+    "test/core/component/test_component.py::test_pre_init_hooking_variadic_positional_args",
+    "test/core/component/test_component.py::test_pre_init_hooking_variadic_kwargs"
+  ],
+  "testFiles": [
+    "haystack/testing/sample_components/__init__.py",
+    "haystack/testing/sample_components/future_annotations.py",
+    "test/core/component/test_component.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider haystack/testing/sample_components/__init__.py haystack/testing/sample_components/future_annotations.py test/core/component/test_component.py",
+  "datasetInstall": "pip install -q hatch && pip install -q -e . && pip install -q pytest pytest-cov pytest-asyncio pandas numpy numba opentelemetry-sdk ddtrace structlog 'httpx[http2]' azure-identity pytest-bdd pytest-rerunfailures coverage mypy pylint ipython colorama anyio jsonref openapi3 openapi-llm nltk tiktoken rich pillow pypdfium2 pypdf 'pdfminer.six' markdown-it-py mdit_plain trafilatura python-pptx python-docx jq openpyxl tabulate python-oxmsg langdetect arrow azure-ai-formrecognizer",
+  "datasetPython": "3.12",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_02.jsonl",
+    "recordSha256": "21def28dc6ef7f568eb88f21f460f1fbaa73df0126579423bcb67a7e2f24ce0d"
+  },
+  "install": "pip install -q hatch && pip install -q . && pip install -q pytest pytest-cov pytest-asyncio pandas numpy numba opentelemetry-sdk ddtrace structlog 'httpx[http2]' azure-identity pytest-bdd pytest-rerunfailures coverage mypy pylint ipython colorama anyio jsonref openapi3 openapi-llm nltk tiktoken rich pillow pypdfium2 pypdf 'pdfminer.six' markdown-it-py mdit_plain trafilatura python-pptx python-docx jq openpyxl tabulate python-oxmsg langdetect arrow azure-ai-formrecognizer",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-24T04:16:46.603Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 2076,
+      "counts": {
+        "FAILED": 1,
+        "PASSED": 26
+      }
+    },
+    "reference": {
+      "ms": 1857,
+      "counts": {
+        "PASSED": 27
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

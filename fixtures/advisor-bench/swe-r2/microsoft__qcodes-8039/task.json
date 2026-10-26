@@ -1,0 +1,57 @@
+{
+  "id": "microsoft__qcodes-8039",
+  "title": "Acccessing a faulty property of an instrument throws obscure error.",
+  "repo": "microsoft/Qcodes",
+  "baseCommit": "fb48ab0c58eb2c144ab634d0b4209e70334c89ab",
+  "createdAt": "2026-04-13 10:36:33",
+  "problemStatement": "Acccessing a faulty property of an instrument throws obscure error.\n### Acccessing a faulty property of an instrument raises obscure error.\r\nIf an instrument has a `property` which raises an exception when gotten, the resulting error trace obscures the source of the error.\r\n\r\n### Steps to reproduce\r\nTake the following subclass of an instrument:\r\n```python\r\nIn [1]: import qcodes\r\n\r\nIn [2]: class Foo(qcodes.Instrument):\r\n   ...:    @property\r\n   ...:    def foo(self):\r\n   ...:        return self.bar\r\n```\r\nAccessing the `foo` property raises the following error, which has no traceback or reference whatsoever to what actually causes the error, which is the missing `bar` attribute:\r\n```python\r\nIn [3]: foo = Foo('foo')\r\nIn [4]: foo.foo\r\nTraceback (most recent call last):\r\n\r\n  Cell In[4], line 1\r\n    foo.foo\r\n\r\n  File ~\\Documents\\Qcodes\\src\\qcodes\\utils\\attribute_helpers.py:69 in __getattr__\r\n    raise AttributeError(\r\n\r\nAttributeError: 'Foo' object and its delegates have no attribute 'foo'\r\n```\r\nThis behavior makes these sorts of errors extremely cumbersome to debug if you're not aware of it. Instead, there should be a traceback to an `AttributeError` when getting `self.bar` in this example.\r\n\r\nBranch: **main** @ **42c74833d227a85ee45d7812e1ac0f66b8d948b0**",
+  "interface": "",
+  "failToPass": [
+    "tests/helpers/test_delegate_attribues.py::test_faulty_property_surfaces_original_attribute_error",
+    "tests/helpers/test_delegate_attribues.py::test_faulty_property_preserves_inner_traceback"
+  ],
+  "passToPass": [
+    "tests/helpers/test_delegate_attribues.py::test_delegate_dict",
+    "tests/helpers/test_delegate_attribues.py::test_delegate_dicts",
+    "tests/helpers/test_delegate_attribues.py::test_delegate_object",
+    "tests/helpers/test_delegate_attribues.py::test_delegate_objects",
+    "tests/helpers/test_delegate_attribues.py::test_delegate_both",
+    "tests/helpers/test_delegate_attribues.py::test_working_property_still_returns_value"
+  ],
+  "testFiles": [
+    "tests/helpers/test_delegate_attribues.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/helpers/test_delegate_attribues.py",
+  "datasetInstall": "pip install -e \".[test]\" --quiet",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "c4d7cc0206c0b481e5f1a6c3616ad15b93012c77b1131e28b628aca0c7ccc672"
+  },
+  "install": "pip install \".[test]\" --quiet",
+  "generatedFiles": [],
+  "pythonPath": "src",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-24T04:16:40.975Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 3315,
+      "counts": {
+        "FAILED": 2,
+        "PASSED": 6
+      }
+    },
+    "reference": {
+      "ms": 3211,
+      "counts": {
+        "PASSED": 8
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

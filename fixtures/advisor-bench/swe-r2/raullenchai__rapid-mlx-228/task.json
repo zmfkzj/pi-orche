@@ -1,0 +1,81 @@
+{
+  "id": "raullenchai__rapid-mlx-228",
+  "title": "feat: migrate DeepSeek R1 reasoning parser to OutputRouter (token-level)",
+  "repo": "raullenchai/Rapid-MLX",
+  "baseCommit": "85f2b2f429556cb59458452119ab657ada8b705c",
+  "createdAt": "2026-05-05 17:40:54",
+  "problemStatement": "feat: migrate DeepSeek R1 reasoning parser to OutputRouter (token-level)\n## Task\n\nMigrate DeepSeek R1's reasoning parser from regex-based to token-level OutputRouter.\n\n## Context\n\nParent issue: #63\n\nDeepSeek R1 uses `<think>`/`</think>` tags similar to Qwen3 but with unicode special tokens. Currently handled by `vllm_mlx/reasoning/deepseek_r1_parser.py`.\n\n## Steps\n\n1. Find DeepSeek R1's special token IDs from tokenizer vocabulary\n2. Add detection in `OutputRouter.from_tokenizer()`\n3. Add state transitions (likely same as Qwen3 since both use think tags)\n4. Add unit tests with real token IDs\n5. E2E verify\n\n## Reference\n\n- Gemma 4 implementation (reference pattern)\n- Current parser: `vllm_mlx/reasoning/deepseek_r1_parser.py`\n- Qwen3 migration: #64 (likely very similar)",
+  "interface": "",
+  "failToPass": [
+    "tests/test_output_router.py::TestFromTokenizer::test_deepseek_r1_think_tags_detected",
+    "tests/test_output_router.py::TestDeepSeekR1ThinkRouting::test_unicode_bos_eos_are_suppressed"
+  ],
+  "passToPass": [
+    "tests/test_output_router.py::TestBasicRouting::test_content_passthrough",
+    "tests/test_output_router.py::TestBasicRouting::test_bos_eos_pad_suppressed",
+    "tests/test_output_router.py::TestBasicRouting::test_turn_tokens_suppressed",
+    "tests/test_output_router.py::TestThinkingChannel::test_thought_channel_detected",
+    "tests/test_output_router.py::TestThinkingChannel::test_thought_ends_at_channel_close",
+    "tests/test_output_router.py::TestThinkingChannel::test_thought_then_content_channel",
+    "tests/test_output_router.py::TestThinkingChannel::test_implicit_content_after_thought",
+    "tests/test_output_router.py::TestToolCallRouting::test_tool_call_accumulated",
+    "tests/test_output_router.py::TestToolCallRouting::test_tool_call_emitted_on_close",
+    "tests/test_output_router.py::TestToolCallRouting::test_content_after_tool_call",
+    "tests/test_output_router.py::TestOrphanTokens::test_orphan_tool_call_end_suppressed",
+    "tests/test_output_router.py::TestOrphanTokens::test_orphan_tool_response_suppressed",
+    "tests/test_output_router.py::TestOrphanTokens::test_orphan_tool_markers_suppressed",
+    "tests/test_output_router.py::TestOrphanTokens::test_content_after_orphan_tokens",
+    "tests/test_output_router.py::TestFeedSequence::test_thought_then_content",
+    "tests/test_output_router.py::TestFeedSequence::test_tool_call_sequence",
+    "tests/test_output_router.py::TestFeedSequence::test_plain_content",
+    "tests/test_output_router.py::TestFromTokenizer::test_gemma4_detected",
+    "tests/test_output_router.py::TestFromTokenizer::test_unknown_tokenizer",
+    "tests/test_output_router.py::TestFromTokenizer::test_qwen3_think_tags_detected",
+    "tests/test_output_router.py::TestQwen3ThinkRouting::test_think_block_routes_to_reasoning_then_content",
+    "tests/test_output_router.py::TestQwen3ThinkRouting::test_orphan_think_end_switches_to_content",
+    "tests/test_output_router.py::TestQwen3ThinkRouting::test_no_tag_output_routes_as_content",
+    "tests/test_output_router.py::TestQwen3ThinkRouting::test_feed_sequence_separates_reasoning_and_content",
+    "tests/test_output_router.py::TestDeepSeekR1ThinkRouting::test_think_block_routes_to_reasoning_then_content",
+    "tests/test_output_router.py::TestDeepSeekR1ThinkRouting::test_orphan_think_end_switches_to_content",
+    "tests/test_output_router.py::TestDeepSeekR1ThinkRouting::test_no_tag_output_routes_as_content",
+    "tests/test_output_router.py::TestDeepSeekR1ThinkRouting::test_feed_sequence_separates_reasoning_and_content",
+    "tests/test_output_router.py::TestStateReset::test_reset_clears_state",
+    "tests/test_output_router.py::TestStateReset::test_multiple_requests"
+  ],
+  "testFiles": [
+    "tests/test_output_router.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/test_output_router.py",
+  "datasetInstall": "pip install -e . --quiet --root-user-action=ignore && pip install pytest --quiet --root-user-action=ignore",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "0341dcbf86255bc4aaf14a9ad7328d33cd27250fa132d7be00e974b966a93f93"
+  },
+  "install": "pip install . --quiet  && pip install pytest --quiet ",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-24T02:58:08.488Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 364,
+      "counts": {
+        "FAILED": 2,
+        "PASSED": 30
+      }
+    },
+    "reference": {
+      "ms": 344,
+      "counts": {
+        "PASSED": 32
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

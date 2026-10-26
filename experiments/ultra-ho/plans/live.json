@@ -1,0 +1,26 @@
+{
+  "out": "results/ultra-ho/live",
+  "phase": "live",
+  "seed": "ultra-ho-live-2026-10-24",
+  "repeats": 1,
+  "concurrency": 2,
+  "scratch": "/tmp/pi-orche/01a152d6-1832-7291-b05c-3e9a404e5ca3/W6.10/uho-live",
+  "tasks": [{ "task": "a1-rounding", "kind": "suite" }],
+  "arms": [
+    {
+      "name": "normal",
+      "mode": "ultra",
+      "runtime": "fixed",
+      "note": "default limits: orche 60 min base per assignment + at most 2 x 15 min extensions while active, 300 requests; Pi process-group guard 150 min"
+    },
+    {
+      "name": "interrupted",
+      "mode": "ultra",
+      "runtime": "fixed",
+      "limits": { "overallMs": 720000, "assignmentMs": 720000, "maxExtensions": 0 },
+      "piGuardMs": 5400000,
+      "note": "12 min per assignment, never extended: the first ultra assignment times out mid-run and main continues it as the Resume line says; Pi guard 90 min"
+    }
+  ],
+  "note": "LIVE validation of the ultra execution-stability fixes in the working tree (frozen as runtime 'fixed'). Task: cli.ts pick-task (the first fixtures/suite task ultra-ab's loadTask accepts that no earlier study used)."
+}

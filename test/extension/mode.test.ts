@@ -336,7 +336,7 @@ describe("/orche mode", () => {
 
     for (const removed of ["auto", "multi"]) {
       await h.session.prompt(`/orche mode ${removed}`);
-      expect(notes(h).at(-1)).toContain("/orche mode [single|strong|ultra|direct]");
+      expect(notes(h).at(-1)).toContain("/orche mode [single|strong|ultra|mdsd|direct]");
     }
     await h.session.prompt("/orche mode single");
     await h.session.reload();
@@ -350,7 +350,7 @@ describe("/orche mode", () => {
   it("rejects unknown modes with the usage text and changes nothing", async () => {
     const h = await harness({ mainSteps: [], orcheSteps: [], mainMode: "single" });
     await h.session.prompt("/orche mode turbo");
-    expect(notes(h)).toEqual([expect.stringContaining("/orche mode [single|strong|ultra|direct]")]);
+    expect(notes(h)).toEqual([expect.stringContaining("/orche mode [single|strong|ultra|mdsd|direct]")]);
     for (const name of MUTATORS) expect(h.session.getActiveToolNames()).not.toContain(name);
   });
 });
@@ -463,7 +463,7 @@ describe("mainMode config discovery", () => {
     const bad = await layout({ user: cfg({ mainMode: "turbo" }) });
     const found = await discoverMainMode({ ...bad, projectTrusted: true });
     expect(found.mode).toBeUndefined();
-    expect(found.error).toContain("config.mainMode: expected single, strong, ultra, direct");
+    expect(found.error).toContain("config.mainMode: expected single, strong, ultra, mdsd, direct");
     expect(() => parseRouteConfig({ routes: {}, mainMode: 3 })).toThrow("config.mainMode");
     for (const mainMode of ["single", "direct"] as const) expect(parseRouteConfig({ routes: {}, mainMode }).mainMode).toBe(mainMode);
     // The removed modes are still read, as single, and flagged so the extension can warn.

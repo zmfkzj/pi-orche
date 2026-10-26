@@ -1,0 +1,48 @@
+{
+  "id": "conan-io__conan-19604",
+  "title": "[bug] JSON serialization of CppInfo _Component is broken",
+  "repo": "conan-io/conan",
+  "baseCommit": "ad7f30275329c63c924d3201463a1143ba1a739c",
+  "createdAt": "2026-02-11 16:04:19",
+  "problemStatement": "[bug] JSON serialization of CppInfo _Component is broken\n### Describe the bug\n\nWe only just are updating from conan 2.11 and hit this issue.\n\nAs of https://github.com/conan-io/conan/commit/eb95f5b9472f8d75888d0ffcecba32e17a882423 CppInfo _Component _type is being stored as a PackageType instead of a str:\nhttps://github.com/conan-io/conan/blob/ad7f30275329c63c924d3201463a1143ba1a739c/conan/internal/model/cpp_info.py#L298-L300\n\nBut the serialize() method just stores it directly https://github.com/conan-io/conan/blob/ad7f30275329c63c924d3201463a1143ba1a739c/conan/internal/model/cpp_info.py#L130\n\nThis means later when you format a graph as json (e.g. via conan install -f json), you will get an error trying to JSON serialize PackageType\nhttps://github.com/conan-io/conan/blob/ad7f30275329c63c924d3201463a1143ba1a739c/conan/cli/formatters/graph/graph.py#L50-L52\n```\nERROR: Traceback (most recent call last):\n  File \"pyvenv\\Lib\\site-packages\\conan\\cli\\cli.py\", line 297, in main\n    cli.run(args)\n    ~~~~~~~^^^^^^\n  File \"pyvenv\\Lib\\site-packages\\conan\\cli\\cli.py\", line 194, in run\n    command.run(self._conan_api, args[0][1:])\n    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"pyvenv\\Lib\\site-packages\\conan\\cli\\command.py\", line 200, in run\n    self._format(parser, info, *args)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^\n  File \"pyvenv\\Lib\\site-packages\\conan\\cli\\command.py\", line 113, in _format\n    formatter(info)\n    ~~~~~~~~~^^^^^^\n  File \"pyvenv\\Lib\\site-packages\\conan\\cli\\formatters\\graph\\graph.py\", line 52, in format_graph_json\n    json_result = json.dumps({\"graph\": serial}, indent=4)\n  File \"python\\bin\\Lib\\json\\__init__.py\", line 242, in dumps\n    **kw).encode(obj)\n          ~~~~~~^^^^^\n  File \"python\\bin\\Lib\\json\\encoder.py\", line 202, in encode\n    chunks = self.iterencode(o, _one_shot=True)\n  File \"python\\bin\\Lib\\json\\encoder.py\", line 263, in iterencode\n    return _iterencode(o, 0)\n  File \"python\\bin\\Lib\\json\\encoder.py\", line 182, in default\n    raise TypeError(f'Object of type {o.__class__.__name__} '\n                    f'is not JSON serializable')\nTypeError: Object of type PackageType is not JSON serializable\nwhen serializing dict item 'type'\nwhen serializing dict item 'root'\nwhen serializing collections.OrderedDict item 'cpp_info'\nwhen serializing dict item '1'\nwhen serializing collections.OrderedDict item 'nodes'\nwhen serializing dict item 'graph'\n```\n\nNow you could simply fix that by changing serialize to str it like other serialize methods do:\n```\n\"type\": str(self._type), \n```\n\nHowever we still would have a problem with deserialize not turning it back into a PackageType as it just uses setattr on the _type which skips past the type property setter.\nhttps://github.com/conan-io/conan/blob/ad7f30275329c63c924d3201463a1143ba1a739c/conan/internal/model/cpp_info.py#L136-L141\n\n### How to reproduce it\n\nWe hit it when doing a conan install for something containing a zlib dependency where the package_info for that recipe looks like\n\n```\n    def package_info(self):\n        self.cpp_info.set_property(\"cmake_find_mode\", \"both\")\n        self.cpp_info.set_property(\"cmake_file_name\", \"ZLIB\")\n        self.cpp_info.set_property(\"cmake_target_name\", \"ZLIB::ZLIB\")\n        self.cpp_info.set_property(\"pkg_config_name\", \"zlib\")\n\n        if self.settings.os == \"Windows\" and not self._is_mingw:\n            libname = \"zdll\" if self.options.shared else \"zlib\"\n            if self.options.shared:\n                self.cpp_info.location = \"bin/zlib1.dll\"\n                self.cpp_info.link_location = \"lib/zdll.lib\"\n                self.cpp_info.type = str(PackageType.SHARED)\n        else:\n            libname = \"z\"\n        self.cpp_info.libs = [libname]\n```\n\nHere you can see the value of `serial[\"nodes\"][\"1\"][\"cpp_info\"][\"root\"]` which contains the PackageType:\n```\n{'includedirs': ['.conan\\\\p\\\\zlibce2b531051340\\\\p\\\\include'], 'srcdirs': None, 'libdirs': ['.conan\\\\p\\\\zlibce2b531051340\\\\p\\\\lib'], 'resdirs': None, 'bindirs': ['.conan\\\\p\\\\zlibce2b531051340\\\\p\\\\bin'], 'builddirs': None, 'frameworkdirs': None, 'system_libs': None, 'frameworks': None, 'libs': ['zdll'], 'defines': None, 'cflags': None, 'cxxflags': None, 'sharedlinkflags': None, 'exelinkflags': None, 'objects': None, 'sources': None, 'sysroot': None, 'requires': [], 'requires_private': None, 'properties': {'cmake_find_mode': 'both', 'cmake_file_name': 'ZLIB', 'cmake_target_name': 'ZLIB::ZLIB', 'pkg_config_name': 'zlib'}, 'exe': None, 'type': <PackageType.SHARED: 'shared-library'>, 'location': 'bin/zlib1.dll', 'link_location': 'lib/zdll.lib', 'languages': None}\n```",
+  "interface": "",
+  "failToPass": [
+    "test/integration/conanfile/test_cpp_info_serialize.py::test_cpp_info_serialize_round_trip"
+  ],
+  "passToPass": [],
+  "testFiles": [
+    "test/integration/conanfile/test_cpp_info_serialize.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider test/integration/conanfile/test_cpp_info_serialize.py",
+  "datasetInstall": "pip install -e \".[dev]\" --quiet",
+  "datasetPython": "3.12",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_02.jsonl",
+    "recordSha256": "d526dffb125672386d6ae0eca6a62c11326ca8d11eca8053668250a1d881bfa5"
+  },
+  "install": "pip install \".[dev]\" --quiet",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-24T02:57:20.188Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 676,
+      "counts": {
+        "FAILED": 1
+      }
+    },
+    "reference": {
+      "ms": 609,
+      "counts": {
+        "PASSED": 1
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

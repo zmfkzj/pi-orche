@@ -1,0 +1,51 @@
+{
+  "id": "run-llama__llama_index-20748_interface",
+  "title": "[Feature Request]: Double double-pass merging semantic chunker with Transformers and other languages",
+  "repo": "run-llama/llama_index",
+  "baseCommit": "b7bc643d36e3a6122b153758825d756084fdcd6c",
+  "createdAt": "2026-02-19 14:24:24",
+  "problemStatement": "[Feature Request]: Double double-pass merging semantic chunker with Transformers and other languages\n### Feature Description\n\nHi.\r\nPlease enhance the SemanticDoubleMergingSplitterNodeParser to support Hugging Face models like SemanticSplitterNodeParser. Currently, only Spacy models for languages such as English and German are supported.\n\n### Reason\n\nFor example, if I need to chunk files with multilanguage texts or with other languages, such as Spanish, I cannot use the SemanticDoubleMergingSplitterNodeParser.\n\n### Value of Feature\n\n_No response_\nType: Class\nName: SemanticDoubleMergingSplitterNodeParser\nPath: llama-index-core/llama_index/core/node_parser/text/semantic_double_merging_splitter.py\nPublic API: from_defaults(language_config=None, embed_model=None, initial_threshold=0.6, appending_threshold=0.8, merging_threshold=0.8, max_chunk_size=..., ...) -> SemanticDoubleMergingSplitterNodeParser; _similarity(text_a: str, text_b: str) -> float\nDescription: Splits documents into semantically related sentence groups, now supporting either a Spacy language model or an optional embedding model (e.g. Hugging Face) for multilingual use. Pass `embed_model` to `from_defaults` to bypass Spacy entirely.",
+  "interface": "Type: Class\nName: SemanticDoubleMergingSplitterNodeParser\nPath: llama-index-core/llama_index/core/node_parser/text/semantic_double_merging_splitter.py\nPublic API: from_defaults(language_config=None, embed_model=None, initial_threshold=0.6, appending_threshold=0.8, merging_threshold=0.8, max_chunk_size=..., ...) -> SemanticDoubleMergingSplitterNodeParser; _similarity(text_a: str, text_b: str) -> float\nDescription: Splits documents into semantically related sentence groups, now supporting either a Spacy language model or an optional embedding model (e.g. Hugging Face) for multilingual use. Pass `embed_model` to `from_defaults` to bypass Spacy entirely.",
+  "failToPass": [
+    "llama-index-core/tests/node_parser/test_semantic_double_merging_splitter.py::test_embed_model_path_returns_nodes",
+    "llama-index-core/tests/node_parser/test_semantic_double_merging_splitter.py::test_embed_model_similarity_in_range",
+    "llama-index-core/tests/node_parser/test_semantic_double_merging_splitter.py::test_embed_model_single_sentence_document"
+  ],
+  "passToPass": [],
+  "testFiles": [
+    "llama-index-core/tests/node_parser/test_semantic_double_merging_splitter.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider llama-index-core/tests/node_parser/test_semantic_double_merging_splitter.py",
+  "datasetInstall": "pip install -e ./llama-index-core --quiet && pip install pytest pytest-asyncio pytest-mock openai --quiet",
+  "datasetPython": "3.12",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_02.jsonl",
+    "recordSha256": "cb0a832194a5157dff9743c3504d587bd391a1c6ae9cd7bb5450f7098ab05349"
+  },
+  "install": "pip install ./llama-index-core --quiet && pip install pytest pytest-asyncio pytest-mock openai --quiet",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-24T04:15:59.512Z",
+    "valid": false,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": false,
+    "base": {
+      "ms": 2266,
+      "counts": {
+        "FAILED": 3
+      }
+    },
+    "reference": {
+      "ms": 2284,
+      "counts": {
+        "FAILED": 1,
+        "PASSED": 2
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

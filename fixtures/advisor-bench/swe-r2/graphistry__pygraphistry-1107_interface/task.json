@@ -1,0 +1,59 @@
+{
+  "id": "graphistry__pygraphistry-1107_interface",
+  "title": "M1-PR1: Binder skeleton + hook points",
+  "repo": "graphistry/pygraphistry",
+  "baseCommit": "38d8507564fd38971fbe16d603d8226892d2e8fc",
+  "createdAt": "2026-04-08 23:33:51",
+  "problemStatement": "M1-PR1: Binder skeleton + hook points\n# M1-PR1: Binder skeleton + hook points\n\n## Objective\nLand the typed skeleton for Cypher Binder and wire invocation points, with no semantic behavior change.\n\n## Deliverables\n- Add `graphistry/compute/gfql/frontends/cypher/binder.py` with `FrontendBinder.bind(ast, ctx) -> BoundIR` skeleton.\n- Add minimal dataclass/type scaffolding needed for imports and strict typing.\n- Wire binder entry hook points in compile/lowering path behind current behavior-preserving flow.\n- Add smoke tests/import tests for binder path presence.\n\n## Non-goals\n- No full name/type/nullability binding logic yet.\n- No `_StageScope` field migration yet.\n\n## Acceptance criteria\n- New binder module imports cleanly.\n- Existing runtime behavior unchanged.\n- Full suite green.\n- `mypy --strict` passes on binder and touched files.\n\n## Parent\nPart of M1 meta issue (PR-1..PR-3 wave).\n\n## Interface\n\nType: Class\nName: FrontendBinder\nPath: graphistry/compute/gfql/frontends/cypher/binder.py\nPublic API: `__init__()`, `bind(ast: CypherAST, ctx: PlanContext) -> BoundIR`\nDescription: Typed binder interface for Cypher frontend ASTs. Provides the integration surface to bind a parsed Cypher AST into a frontend-neutral intermediate representation, with full semantic binding deferred to later iterations.\n\nType: Function\nName: bind\nPath: graphistry/compute/gfql/frontends/cypher/binder.py\nInput: ast: CypherAST, ctx: PlanContext\nOutput: BoundIR\nDescription: Binds a Cypher frontend AST into a frontend-neutral IR. In this skeleton version it returns an empty `BoundIR` without semantic changes, serving as a hook point in the compilation pipeline.",
+  "interface": "Type: Class\nName: FrontendBinder\nPath: graphistry/compute/gfql/frontends/cypher/binder.py\nPublic API: `__init__()`, `bind(ast: CypherAST, ctx: PlanContext) -> BoundIR`\nDescription: Typed binder interface for Cypher frontend ASTs. Provides the integration surface to bind a parsed Cypher AST into a frontend-neutral intermediate representation, with full semantic binding deferred to later iterations.\n\nType: Function\nName: bind\nPath: graphistry/compute/gfql/frontends/cypher/binder.py\nInput: ast: CypherAST, ctx: PlanContext\nOutput: BoundIR\nDescription: Binds a Cypher frontend AST into a frontend-neutral IR. In this skeleton version it returns an empty `BoundIR` without semantic changes, serving as a hook point in the compilation pipeline.",
+  "failToPass": [
+    "graphistry/tests/compute/gfql/cypher/test_binder.py::test_cypher_frontend_binder_module_imports",
+    "graphistry/tests/compute/gfql/cypher/test_binder.py::test_cypher_frontend_binder_returns_bound_ir_placeholder",
+    "graphistry/tests/compute/gfql/cypher/test_binder.py::test_compile_cypher_invokes_binder_prepass",
+    "graphistry/tests/compute/gfql/cypher/test_binder.py::test_cypher_to_gfql_invokes_binder_prepass",
+    "graphistry/tests/compute/gfql/cypher/test_binder.py::test_compile_cypher_union_invokes_binder_with_union_ast",
+    "graphistry/tests/compute/gfql/cypher/test_binder.py::test_compile_cypher_graph_constructor_invokes_binder_with_graph_ast",
+    "graphistry/tests/compute/gfql/cypher/test_binder.py::test_binder_does_not_mutate_input_ast"
+  ],
+  "passToPass": [],
+  "testFiles": [
+    "graphistry/tests/compute/gfql/cypher/test_binder.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider graphistry/tests/compute/gfql/cypher/test_binder.py",
+  "datasetInstall": "pip install -e \".[test]\" -q",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "6178136468b5a825ce5eb13a3f1198f833a4a2f03dabe7134a230f7b5ee8fd9a"
+  },
+  "install": "pip install \".[test]\" -q",
+  "generatedFiles": [
+    "docs/_python/__init__.py",
+    "docs/_python/filters.py",
+    "docs/gendocs.py",
+    "test/test_installed.py"
+  ],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-24T04:17:12.067Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 1673,
+      "counts": {
+        "MISSING": 7
+      }
+    },
+    "reference": {
+      "ms": 1711,
+      "counts": {
+        "PASSED": 7
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

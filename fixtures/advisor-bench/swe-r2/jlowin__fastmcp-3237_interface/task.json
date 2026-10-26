@@ -1,0 +1,91 @@
+{
+  "id": "jlowin__fastmcp-3237_interface",
+  "title": "SkillResource in list_resources not available for mounted servers",
+  "repo": "jlowin/fastmcp",
+  "baseCommit": "390a11d7d2307dbe555a86d4f6f54ff049bd55cc",
+  "createdAt": "2026-02-19 17:18:11",
+  "problemStatement": "SkillResource in list_resources not available for mounted servers\n### Description\n\nIt seems the list_resources for the main MCP server cannot get to the `SkillResource` object if the skills were on a mounted MCP and not the primary MCP.\n```Python\nmcp = FastMCP('test')\nmcp.add_provider(SkillsDirectoryProvider(Path('tests/test_skills')))\nresources = asyncio.run(mcp.list_resources())\n```\nvs. \n\n```Python\nmcp = FastMCP('test')\ntest_mcp = FastMCP('sub')\ntest_mcp.add_provider(SkillsDirectoryProvider(Path('tests/test_skills')))\nmcp.mount(test_mcp, 'test-skills')\nresources = asyncio.run(mcp.list_resources())\n```\n\nThe 2nd one returns `FastMCPProviderResource` instead of a `SkillResource` and therefore is missing some of the data that would be available if the skill was on the top level MCP server.\n\n\n\n### Version Information\n\n```Text\n3.0.0rc2\n```\nType: Function\nName: get_meta\nPath: src/fastmcp/server/providers/skills/skill_provider.py\nInput: self\nOutput: dict[str, Any] — returns metadata dict with a \"fastmcp.skill\" key containing \"name\" and \"is_manifest\" fields\nDescription: Overrides the base `get_meta` on `SkillResource` to embed skill-specific metadata (name and is_manifest flag) into the returned meta dict. Used to preserve skill identity when resources are wrapped by a mounted server.\n\nType: Function\nName: get_meta\nPath: src/fastmcp/server/providers/skills/skill_provider.py\nInput: self\nOutput: dict[str, Any] — returns metadata dict with a \"fastmcp.skill\" key containing the \"name\" field\nDescription: Overrides the base `get_meta` on `SkillFileResource` to embed the skill name into the returned meta dict. Ensures skill file resources retain their skill association when accessed through a mounted server.",
+  "interface": "Type: Function\nName: get_meta\nPath: src/fastmcp/server/providers/skills/skill_provider.py\nInput: self\nOutput: dict[str, Any] — returns metadata dict with a \"fastmcp.skill\" key containing \"name\" and \"is_manifest\" fields\nDescription: Overrides the base `get_meta` on `SkillResource` to embed skill-specific metadata (name and is_manifest flag) into the returned meta dict. Used to preserve skill identity when resources are wrapped by a mounted server.\n\nType: Function\nName: get_meta\nPath: src/fastmcp/server/providers/skills/skill_provider.py\nInput: self\nOutput: dict[str, Any] — returns metadata dict with a \"fastmcp.skill\" key containing the \"name\" field\nDescription: Overrides the base `get_meta` on `SkillFileResource` to embed the skill name into the returned meta dict. Ensures skill file resources retain their skill association when accessed through a mounted server.",
+  "failToPass": [
+    "tests/server/providers/test_skills_provider.py::TestSkillProvider::test_skill_resource_meta",
+    "tests/server/providers/test_skills_provider.py::TestSkillProvider::test_skill_file_resource_meta",
+    "tests/server/providers/test_skills_provider.py::TestSkillProvider::test_skill_meta_survives_mounting"
+  ],
+  "passToPass": [
+    "tests/server/providers/test_skills_provider.py::TestParseFrontmatter::test_no_frontmatter",
+    "tests/server/providers/test_skills_provider.py::TestParseFrontmatter::test_basic_frontmatter",
+    "tests/server/providers/test_skills_provider.py::TestParseFrontmatter::test_frontmatter_with_tags_list",
+    "tests/server/providers/test_skills_provider.py::TestParseFrontmatter::test_frontmatter_with_quoted_strings",
+    "tests/server/providers/test_skills_provider.py::TestSkillProvider::test_loads_skill_at_init",
+    "tests/server/providers/test_skills_provider.py::TestSkillProvider::test_raises_if_directory_missing",
+    "tests/server/providers/test_skills_provider.py::TestSkillProvider::test_raises_if_main_file_missing",
+    "tests/server/providers/test_skills_provider.py::TestSkillProvider::test_list_resources_default_template_mode",
+    "tests/server/providers/test_skills_provider.py::TestSkillProvider::test_list_resources_supporting_files_as_resources",
+    "tests/server/providers/test_skills_provider.py::TestSkillProvider::test_list_templates_default_mode",
+    "tests/server/providers/test_skills_provider.py::TestSkillProvider::test_list_templates_resources_mode",
+    "tests/server/providers/test_skills_provider.py::TestSkillProvider::test_read_main_file",
+    "tests/server/providers/test_skills_provider.py::TestSkillProvider::test_read_manifest",
+    "tests/server/providers/test_skills_provider.py::TestSkillProvider::test_read_supporting_file_via_template",
+    "tests/server/providers/test_skills_provider.py::TestSkillProvider::test_read_supporting_file_via_resource_mode",
+    "tests/server/providers/test_skills_provider.py::TestSkillsDirectoryProvider::test_list_resources_discovers_skills",
+    "tests/server/providers/test_skills_provider.py::TestSkillsDirectoryProvider::test_list_resources_includes_descriptions",
+    "tests/server/providers/test_skills_provider.py::TestSkillsDirectoryProvider::test_read_main_skill_file",
+    "tests/server/providers/test_skills_provider.py::TestSkillsDirectoryProvider::test_read_manifest",
+    "tests/server/providers/test_skills_provider.py::TestSkillsDirectoryProvider::test_list_resource_templates",
+    "tests/server/providers/test_skills_provider.py::TestSkillsDirectoryProvider::test_read_supporting_file_via_template",
+    "tests/server/providers/test_skills_provider.py::TestSkillsDirectoryProvider::test_read_nested_file_via_template",
+    "tests/server/providers/test_skills_provider.py::TestSkillsDirectoryProvider::test_empty_skills_directory",
+    "tests/server/providers/test_skills_provider.py::TestSkillsDirectoryProvider::test_nonexistent_skills_directory",
+    "tests/server/providers/test_skills_provider.py::TestSkillsDirectoryProvider::test_reload_mode",
+    "tests/server/providers/test_skills_provider.py::TestSkillsDirectoryProvider::test_skill_without_frontmatter_uses_header_as_description",
+    "tests/server/providers/test_skills_provider.py::TestSkillsDirectoryProvider::test_supporting_files_as_resources",
+    "tests/server/providers/test_skills_provider.py::TestSkillsDirectoryProvider::test_supporting_files_as_resources_no_templates",
+    "tests/server/providers/test_skills_provider.py::TestMultiDirectoryProvider::test_multiple_roots_discover_all_skills",
+    "tests/server/providers/test_skills_provider.py::TestMultiDirectoryProvider::test_duplicate_skill_names_first_wins",
+    "tests/server/providers/test_skills_provider.py::TestMultiDirectoryProvider::test_single_path_as_list",
+    "tests/server/providers/test_skills_provider.py::TestMultiDirectoryProvider::test_single_path_as_string",
+    "tests/server/providers/test_skills_provider.py::TestMultiDirectoryProvider::test_nonexistent_roots_handled_gracefully",
+    "tests/server/providers/test_skills_provider.py::TestMultiDirectoryProvider::test_empty_roots_list",
+    "tests/server/providers/test_skills_provider.py::TestSkillsProviderAlias::test_skills_provider_is_alias",
+    "tests/server/providers/test_skills_provider.py::TestClaudeSkillsProvider::test_default_root_is_claude_skills_dir",
+    "tests/server/providers/test_skills_provider.py::TestClaudeSkillsProvider::test_main_file_name_is_skill_md",
+    "tests/server/providers/test_skills_provider.py::TestClaudeSkillsProvider::test_supporting_files_parameter",
+    "tests/server/providers/test_skills_provider.py::TestPathTraversalPrevention::test_path_traversal_blocked"
+  ],
+  "testFiles": [
+    "tests/server/providers/test_skills_provider.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/server/providers/test_skills_provider.py",
+  "datasetInstall": "pip install -e . -q && pip install pytest pytest-asyncio pytest-timeout -q && pip install opentelemetry-sdk -q && pip install \"inline-snapshot[dirty-equals]>=0.27.2\" -q && pip install psutil pytest-env dirty-equals pytest-flakefinder pytest-httpx pytest-report pytest-retry pytest-xdist -q && pip install pydocket anthropic openai -q && pip install fastapi -q",
+  "datasetPython": "3.12",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_02.jsonl",
+    "recordSha256": "35ddae8c47160e17073b327ac87479a2b4fce0f28e757d9cfb2df710fdde7bd8"
+  },
+  "install": "pip install . -q && pip install pytest pytest-asyncio pytest-timeout -q && pip install opentelemetry-sdk -q && pip install \"inline-snapshot[dirty-equals]>=0.27.2\" -q && pip install psutil pytest-env dirty-equals pytest-flakefinder pytest-httpx pytest-report pytest-retry pytest-xdist -q && pip install pydocket anthropic openai -q && pip install fastapi -q",
+  "generatedFiles": [],
+  "pythonPath": "src",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-24T02:57:32.484Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 2162,
+      "counts": {
+        "FAILED": 3,
+        "PASSED": 39
+      }
+    },
+    "reference": {
+      "ms": 2034,
+      "counts": {
+        "PASSED": 42
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

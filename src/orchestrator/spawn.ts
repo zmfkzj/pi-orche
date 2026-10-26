@@ -13,13 +13,13 @@ import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-
 import { isAbsolute } from "node:path";
 import { normalizeOwnedPath, validateBacklog, type TaskItem } from "../orchestration/backlog.js";
 import { ownsPath, WRITING_KINDS } from "../orchestration/ownership.js";
-import type { SubWorkerModelSource, SubWorkerThinkingSource } from "../orchestration/routing.js";
+import type { RouteSettings, SubWorkerModelSource, SubWorkerThinkingSource } from "../orchestration/routing.js";
 import type { WorkspaceChange } from "../orchestration/workspace.js";
 import { MAX_SUB_WORKERS, MAX_VERIFICATION_ROUNDS } from "./instructions.js";
 import { formatModelUse } from "../orchestration/model-use.js";
 import { formatDuration } from "../agent/liveness.js";
 import type { DeadlineExtension, NotExtendedReason, WaitObservation } from "../orchestration/run/extension.js";
-import type { SpecialistDeadlineStats } from "../specialists/session.js";
+import type { SpecialistBudget, SpecialistDeadlineStats } from "../specialists/session.js";
 
 export const SPAWN_TOOL = "orche_spawn";
 export const SPAWN_REASONS = ["parallelism", "isolation", "verification"] as const;
@@ -30,7 +30,13 @@ export const SPAWN_REASONS = ["parallelism", "isolation", "verification"] as con
  * writers in the shared workspace would bypass the candidate/adoption contract.
  */
 export const ULTRA_SPAWN_REASONS = ["exploration", "candidates", "verification", "isolation"] as const;
-export type SpawnReason = (typeof SPAWN_REASONS)[number] | (typeof ULTRA_SPAWN_REASONS)[number];
+/**
+ * The reasons of the MDSD search policy (src/orchestrator/mdsd.ts): `search` (a round of independent explorers, each with a strategy
+ * spec), `parallelism` (writers implementing after the judgment), `verification` (fresh verifiers, the same cap) and `isolation`
+ * (game-asset/video specialists only).
+ */
+export const MDSD_SPAWN_REASONS = ["search", "parallelism", "verification", "isolation"] as const;
+export type SpawnReason = (typeof SPAWN_REASONS)[number] | (typeof ULTRA_SPAWN_REASONS)[number] | (typeof MDSD_SPAWN_REASONS)[number];
 export const SUB_WORKER_ROLES = ["implement", "answer", "verify", "game-asset", "video"] as const;
 export type SubWorkerRole = (typeof SUB_WORKER_ROLES)[number];
 /** The guard's answer when a sub-worker tries to spawn (it never has the tool; this is the second line). */
@@ -53,7 +59,7 @@ export function spawnParametersFor(maxSubWorkers: number) {
 }
 export const spawnParameters = spawnParametersFor(MAX_SUB_WORKERS);
 export type SpawnParameters = Static<typeof spawnParameters>;
-/** orche_spawn of an ultra orchestrator: the ultra reasons and, for a fix candidate, `from` (an earlier candidate to start from). */
+/** orche_spawn of an ultra orchestrator: the ultra reasons, for a fix candidate `from` (an earlier candidate to start from), and for a candidates call `excluded` and `reference` (analyst-reported files left out of the candidates, or given to them as read-only context, with their grounds). */
 export function ultraSpawnParametersFor(maxSubWorkers: number) {
   return Type.Object({
     reason: Type.Union(literals(ULTRA_SPAWN_REASONS), { description: `exploration (before any candidate: independent verification-basis builders, role implement owning the test/check files they write, and hypothesis analysts, role answer), candidates (2-${maxSubWorkers} independent implementations, each in its own workspace copy, or independent answers for a read-only task), verification (fresh verifiers, role verify only), isolation (a game-asset/video specialist).` }),
@@ -64,11 +70,38 @@ export function ultraSpawnParametersFor(maxSubWorkers: number) {
       files: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Owned files or directories of a writing role (for a candidate: inside its own workspace copy; candidates may own the same paths)." })),
       from: Type.Optional(Type.String({ minLength: 1, description: "candidates only: id of an earlier candidate (e.g. W1.3) whose workspace this fix candidate starts from; the earlier one stays unchanged." })),
     }, { additionalProperties: false }), { minItems: 1, maxItems: maxSubWorkers }),
+    // The analysts' hand-off (ultra.ts, docs/orchestrator.md 14.2): a reported file no candidate gets, left out with its grounds.
+    excluded: Type.Optional(Type.Array(Type.Object({
+      path: Type.String({ minLength: 1, description: "A workspace file an exploration analyst reported (as the exploration result or the refusal lists it)." }),
+      reason: Type.String({ minLength: 1, description: "Why the candidates need not handle it." }),
+      evidence: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 10, description: "[orche ref Tn] of your own successful checks (read, grep, bash) made after the exploration round that reported it, whose arguments or output name the file." }),
+    }, { additionalProperties: false }), { maxItems: 100, description: "candidates only: files the exploration analysts reported that no candidate gets, each with a reason and evidence. Every other reported file must be assigned (the same candidate owns it in its files and names it in its request) or listed in reference; files outside your write scope are recorded as out of scope automatically." })),
+    // The analysts' hand-off: a reported file the candidates only read (context, no transfer), named in a request, with its grounds.
+    reference: Type.Optional(Type.Array(Type.Object({
+      path: Type.String({ minLength: 1, description: "A workspace file an exploration analyst reported (as the exploration result or the refusal lists it), named in at least one candidate's request of this call." }),
+      reason: Type.String({ minLength: 1, description: "Why the candidates only read it, as context, and change nothing there." }),
+      evidence: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 10, description: "[orche ref Tn] of your own successful checks (read, grep, bash) made after the exploration round that reported it, whose arguments or output name the file." }),
+    }, { additionalProperties: false }), { maxItems: 100, description: "candidates only: analyst-reported files the candidates get as read-only context (no transfer of a change), each named in a candidate's request, with a reason and evidence." })),
   }, { additionalProperties: false });
 }
 export const ultraSpawnParameters = ultraSpawnParametersFor(MAX_SUB_WORKERS);
-/** One orche_spawn call of either tool variant. */
-export interface SpawnCall { reason: SpawnReason; workers: { name: string; role: SubWorkerRole; request: string; files?: string[]; from?: string }[] }
+/** orche_spawn of an MDSD orchestrator: the MDSD reasons, a strategy per search worker, the plan (first search) and adapt (later rounds). */
+export function mdsdSpawnParametersFor(maxSubWorkers: number) {
+  return Type.Object({
+    reason: Type.Union(literals(MDSD_SPAWN_REASONS), { description: `search (a round of 2-${maxSubWorkers} independent read-only explorers, role answer, each with its strategy; the first round also takes plan, a later one adapt), parallelism (writers implementing after the judgment, role implement, disjoint owned files), verification (fresh read-only verifiers, role verify), isolation (a game-asset/video specialist).` }),
+    workers: Type.Array(Type.Object({
+      name: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$", description: "Short unit name, unique in this call (e.g. invert-gate, decompose-resume)." }),
+      role: Type.Union(literals(SUB_WORKER_ROLES), { description: "answer (a search explorer: read-only), implement (a parallelism writer), verify (a fresh verifier), game-asset or video (specialists)." }),
+      request: Type.String({ minLength: 1, description: "Self-contained request: the task, references and the user's wording where it matters; never another path's conclusions. The runtime puts the strategy brief (objective, constraints, strategy, budget, output contract) in front of it." }),
+      files: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Owned files or directories of a parallelism writer." })),
+      strategy: Type.Optional(Type.Unknown({ description: "search only: {framing, operators: 1-3 of EXPAND|DECOMPOSE|INVERT|TRANSFER|CHALLENGE|VALIDATE, hypothesis_space:[…], evidence_scope:[…], method:[…], reasoning: 1-3 of deduction|induction|abduction|backtracking|comparison|experiment, direction: bottom-up|top-down|backward|cross-cutting, validation: 1-3 of falsification|reproduction|comparison|constraint-check, purpose?: explore|exploit (adaptive rounds), targets?: [aggregation ids], budget?: {requests, minutes, costUSD, outputTokens}}" })),
+    }, { additionalProperties: false }), { minItems: 1, maxItems: maxSubWorkers }),
+    plan: Type.Optional(Type.Unknown({ description: "search, first round: {objective: the user's goal unchanged, constraints: [mandatory constraints verbatim], success: [criteria], rationale: why diversifying pays here}." })),
+    adapt: Type.Optional(Type.Unknown({ description: "search, later rounds: {basis: [aggregation ids F…/D…/C…/G… that justify the round], reason}." })),
+  }, { additionalProperties: false });
+}
+/** One orche_spawn call of any tool variant. */
+export interface SpawnCall { reason: SpawnReason; workers: { name: string; role: SubWorkerRole; request: string; files?: string[]; from?: string; strategy?: unknown }[]; plan?: unknown; adapt?: unknown; excluded?: { path: string; reason: string; evidence: string[] }[]; reference?: { path: string; reason: string; evidence: string[] }[] }
 
 /** Canonical ownership paths: concrete files or directory prefixes (`dir/`, `dir/**`, `dir/**\/*` → `dir/`); globs, absolute and outside paths are errors. */
 export function scopePaths(files: readonly string[]): string[] {
@@ -88,13 +121,22 @@ export interface PlannedWorker {
   id: string; name: string; role: SubWorkerRole; request: string; reason: SpawnReason; files?: string[]; workspace?: string; from?: string; protectedPaths?: readonly string[];
   /** Ultra candidate: submodule paths, empty in its copy and never adopted (its file tools are blocked there). */
   outsidePaths?: readonly string[];
+  /** MDSD search worker: its strategy spec (validated by the stage hooks), the brief put in front of its request, its budget, its report contract. */
+  strategy?: unknown;
+  brief?: string;
+  budget?: SpecialistBudget;
+  check?: (data: unknown) => string | undefined;
+  /** MDSD replication cell (mdsd.replication): its own model route instead of the inherited one (thinking: its own, else the orchestrator's). */
+  route?: RouteSettings;
+  /** MDSD explorer with mdsd.explorerScratch: its private scratch directory, a write root like every orche worker's scratch. */
+  scratch?: string;
 }
 
 /**
  * Validate one call and give the workers their ids (only after it is valid, so a refused call uses none). Throws an Error whose
  * message tells the orchestrator what to change. `maxSubWorkers`: the session's per-call cap (default MAX_SUB_WORKERS).
  */
-export function planSpawn(params: SpawnCall, options: { scope?: readonly string[]; readOnly?: boolean; ultra?: boolean; maxSubWorkers?: number; nextId: () => string }): { workers: PlannedWorker[]; notes: string[] } {
+export function planSpawn(params: SpawnCall, options: { scope?: readonly string[]; readOnly?: boolean; ultra?: boolean; mdsd?: boolean; maxSubWorkers?: number; nextId: () => string }): { workers: PlannedWorker[]; notes: string[] } {
   const { reason, workers } = params;
   const notes: string[] = [];
   const max = options.maxSubWorkers ?? MAX_SUB_WORKERS;
@@ -108,7 +150,15 @@ export function planSpawn(params: SpawnCall, options: { scope?: readonly string[
   if (reason !== "verification" && workers.some(worker => worker.role === "verify")) throw new Error('role verify is an independent verifier: use reason "verification".');
   if (reason === "parallelism" && workers.length < 2) throw new Error('reason "parallelism" needs two or more workers; do a single part yourself.');
   const candidates = reason === "candidates";
-  if ((candidates || reason === "exploration") && !options.ultra) throw new Error(`reason "${reason}" belongs to ultra mode; use parallelism, isolation or verification.`);
+  if ((candidates || reason === "exploration") && !options.ultra) throw new Error(`reason "${reason}" belongs to ultra mode; use ${options.mdsd ? "search, parallelism, isolation or verification" : "parallelism, isolation or verification"}.`);
+  if (reason === "search" && !options.mdsd) throw new Error('reason "search" belongs to the MDSD search policy (mode mdsd); use parallelism, isolation or verification.');
+  if (!options.mdsd && (params.plan !== undefined || params.adapt !== undefined || workers.some(worker => worker.strategy !== undefined))) throw new Error("plan, adapt and strategy belong to the MDSD search policy (mode mdsd).");
+  if (options.ultra && params.excluded !== undefined && !candidates) throw new Error('excluded (analyst-reported files left out of the candidates, each with a reason and evidence) belongs to reason "candidates" only.');
+  if (options.ultra && params.reference !== undefined && !candidates) throw new Error('reference (analyst-reported files the candidates get as read-only context, each with a reason and evidence) belongs to reason "candidates" only.');
+  if (options.mdsd) {
+    if (reason === "parallelism" && workers.some(worker => worker.role !== "implement")) throw new Error('in mdsd mode reason "parallelism" is for writers implementing after the judgment (role implement); independent exploration paths are reason "search" (each with its strategy).');
+    if (reason === "isolation" && workers.some(worker => worker.role !== "game-asset" && worker.role !== "video")) throw new Error('in mdsd mode reason "isolation" is for game-asset and video specialists only; exploration goes through reason "search".');
+  }
   if (options.ultra) {
     if (reason === "parallelism") throw new Error('ultra mode has no reason "parallelism": independent implementations are candidates (reason "candidates", each in its own workspace copy), and the verification basis and hypotheses are exploration.');
     if (reason === "isolation" && workers.some(worker => worker.role !== "game-asset" && worker.role !== "video")) throw new Error('in ultra mode reason "isolation" is for game-asset and video specialists only; other work goes through exploration and candidates.');
@@ -128,7 +178,7 @@ export function planSpawn(params: SpawnCall, options: { scope?: readonly string[
     if (!writes) {
       if (worker.files?.length) notes.push(`files ignored for read-only ${worker.name}.`);
       if (worker.from !== undefined) throw new Error(`${worker.name}: from applies to implement candidates only (an answer candidate has no workspace).`);
-      return { name: worker.name, role: worker.role, request: worker.request, reason };
+      return { name: worker.name, role: worker.role, request: worker.request, reason, ...(worker.strategy !== undefined ? { strategy: worker.strategy } : {}) };
     }
     if (options.readOnly) throw new Error(`${worker.name} (${worker.role}) would write files, but this assignment is read-only: spawn answer or verify workers only.`);
     if (!worker.files?.length) throw new Error(`${worker.name} (${worker.role}) must name the files or directories it owns in files.`);
@@ -174,6 +224,10 @@ export interface SubWorkerOutcome {
   startedAt: number;
   durationMs: number;
   costUSD: number;
+  /** Token usage of the session as the provider reported it (absent when the session never answered). */
+  usage?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  /** MDSD search worker: when its budget wrap-up notice went out and what stopped it (src/specialists/session.ts). */
+  budget?: { wrapUp?: string; stoppedBy?: string; inFlightUnknown?: boolean };
   sessionFile?: string;
   /** Workspace paths changed during the call inside this worker's owned files (an ultra candidate: in its own workspace copy). */
   changes: string[];
@@ -258,21 +312,29 @@ export interface SpawnContext {
   maxVerificationRounds?: number;
   /** A verification call refused at the cap (the result then has to state what stays unresolved; see workers.ts). */
   onVerificationRefused?(rounds: number, cap: number): void;
-  /** Ultra mode: the stage contract of this assignment (src/orchestrator/ultra.ts); absent in single and strong. */
+  /** Ultra mode: the stage contract of this assignment (src/orchestrator/ultra.ts); absent in single, strong and mdsd. */
   ultra?: UltraSpawnHooks;
+  /** MDSD mode: the search policy of this assignment (src/orchestrator/mdsd.ts); absent in the other modes. */
+  mdsd?: SpawnStageHooks;
 }
 
 /**
- * The ultra stage contract around one orche_spawn call. `prepare` checks the call against the stages and caps and gives candidates
- * their workspace copies (it throws with what to change, before anything runs); `finish` records the outcomes (candidate diffs,
- * the protected verification basis, stage progress) and returns lines for the tool result.
+ * A stage contract around one orche_spawn call (ultra's stages, MDSD's search policy). `resolve` (optional) gives the call that runs
+ * (MDSD: a pinned first search round of mdsd.replication); `validate` checks the call before any id is given out; `prepare` checks it
+ * again with the ids and may give workers what they need (ultra: workspace copies; MDSD: the strategy brief, budget and report
+ * contract, and with replication further cells with fresh ids from `nextId`); `finish` records the outcomes and returns lines for the
+ * tool result. `call` is the whole orche_spawn call (MDSD reads its plan and adapt); ultra ignores it.
  */
-export interface UltraSpawnHooks {
+export interface SpawnStageHooks {
+  /** The call that runs instead of `call` (default: `call`); may refuse it by throwing, before any id is given out. */
+  resolve?(call: SpawnCall): SpawnCall;
   /** Stage order, caps and roles, checked before any id is given out (a refused call uses none); throws with what to change. */
-  validate(reason: SpawnReason, workers: readonly { role: string; name: string; from?: string }[]): void;
-  prepare(reason: SpawnReason, workers: PlannedWorker[], signal: AbortSignal): Promise<PlannedWorker[]>;
+  validate(reason: SpawnReason, workers: readonly { role: string; name: string; from?: string; strategy?: unknown; request?: string; files?: readonly string[] }[], call?: SpawnCall): void;
+  prepare(reason: SpawnReason, workers: PlannedWorker[], signal: AbortSignal, call?: SpawnCall, nextId?: () => string): Promise<PlannedWorker[]>;
   finish(reason: SpawnReason, workers: readonly PlannedWorker[], outcomes: SubWorkerOutcome[]): Promise<string[]>;
 }
+/** The ultra stage contract (src/orchestrator/ultra.ts): candidates get their workspace copies in `prepare`. */
+export type UltraSpawnHooks = SpawnStageHooks;
 
 export interface SpawnDetails { reason: SpawnReason; workers: SubWorkerOutcome[]; warnings: string[]; durationMs: number; ultra?: string[] }
 
@@ -290,8 +352,9 @@ export function formatSpawn(details: SpawnDetails): string {
   const lines = [`orche_spawn (${details.reason}): ${details.workers.length} sub-worker${details.workers.length === 1 ? "" : "s"}, ${Math.round(details.durationMs / 1000)}s, ${requests} requests${cost ? `, $${cost.toFixed(2)}` : ""}`];
   for (const worker of details.workers) {
     lines.push("", `${worker.id} ${worker.name} (${worker.role}, ${Math.round(worker.durationMs / 1000)}s, ${worker.requests} requests; ${outcomeModelUse(worker)}): ${worker.status}${worker.error ? ` — ${clip(worker.error, 300)}` : ""}`);
-    if (worker.summary) lines.push(clip(worker.summary, 4_000));
-    const data = dataLine(worker.data);
+    // An MDSD explorer's complete report is in the round data the MDSD lines point to; its summary stays short here.
+    if (worker.summary) lines.push(clip(worker.summary, worker.reason === "search" ? 900 : 4_000));
+    const data = worker.reason === "search" ? undefined : dataLine(worker.data);
     if (data) lines.push(data);
     if (worker.files) lines.push(`Owned: ${worker.files.join(", ")}; changed: ${worker.changes.length ? worker.changes.join(", ") : "none"}`);
     if (worker.workspace) lines.push(`Workspace (candidate copy): ${worker.workspace}${worker.tampered?.length ? `; changed protected basis files ${worker.tampered.join(", ")}: not adoptable` : ""}`);
@@ -305,15 +368,20 @@ export function formatSpawn(details: SpawnDetails): string {
 }
 
 /** Run one validated call: all workers at once, then the conflict check. Never rejects for a sub-worker's failure (that is its outcome). */
-export async function executeSpawn(context: SpawnContext, params: SpawnCall, signal: AbortSignal | undefined, onUpdate?: (text: string) => void): Promise<{ text: string; details: SpawnDetails }> {
-  context.ultra?.validate(params.reason, params.workers);
-  const planned = planSpawn(params, { ...(context.scope ? { scope: context.scope } : {}), ...(context.readOnly ? { readOnly: true } : {}), ...(context.ultra ? { ultra: true } : {}), ...(context.maxSubWorkers !== undefined ? { maxSubWorkers: context.maxSubWorkers } : {}), nextId: () => context.nextId() });
+export async function executeSpawn(context: SpawnContext, submitted: SpawnCall, signal: AbortSignal | undefined, onUpdate?: (text: string) => void): Promise<{ text: string; details: SpawnDetails }> {
+  // A stage contract (ultra's stages or MDSD's search policy) may replace the call (MDSD: a pinned first round of mdsd.replication)
+  // and refuse it before any id is given out.
+  const stage = context.ultra ?? context.mdsd;
+  const params = stage?.resolve ? stage.resolve(submitted) : submitted;
+  stage?.validate(params.reason, params.workers, params);
+  const planned = planSpawn(params, { ...(context.scope ? { scope: context.scope } : {}), ...(context.readOnly ? { readOnly: true } : {}), ...(context.ultra ? { ultra: true } : {}), ...(context.mdsd ? { mdsd: true } : {}), ...(context.maxSubWorkers !== undefined ? { maxSubWorkers: context.maxSubWorkers } : {}), nextId: () => context.nextId() });
   const notes = planned.notes;
   const started = Date.now();
   const signals = [signal, context.signal].filter((item): item is AbortSignal => !!item);
   const abort = signals.length ? AbortSignal.any(signals) : new AbortController().signal;
-  // Ultra: the stage contract may refuse the call (nothing ran yet) and gives candidates their workspace copies.
-  const workers = context.ultra ? await context.ultra.prepare(params.reason, planned.workers, abort) : planned.workers;
+  // The stage contract may still refuse the call (nothing ran yet); ultra gives candidates their workspace copies, MDSD gives
+  // explorers their strategy brief, budget and report contract (and, with replication, the further cells their own ids).
+  const workers = stage ? await stage.prepare(params.reason, planned.workers, abort, params, () => context.nextId()) : planned.workers;
   const before = context.snapshot && context.diff ? await context.snapshot().catch(() => undefined) : undefined;
   const status = new Map(workers.map(worker => [worker.id, "starting"]));
   /** What each sub-worker's session runs on, once it exists. */
@@ -369,9 +437,10 @@ export async function executeSpawn(context: SpawnContext, params: SpawnCall, sig
     } catch { warnings.push("workspace check after orche_spawn failed; check the changed files yourself"); }
   }
   // Ultra: candidate diffs, the protected verification basis and the stage record, after the shared-workspace check above.
+  // MDSD: the round's measured footprints, redundancy, aggregation and budget (the same `ultra` lines slot of the result).
   let ultra: string[] | undefined;
-  if (context.ultra) {
-    try { ultra = await context.ultra.finish(params.reason, workers, outcomes); } catch (error) { ultra = [`Ultra: recording this call failed (${error instanceof Error ? error.message : String(error)}); its candidates cannot be adopted.`]; }
+  if (stage) {
+    try { ultra = await stage.finish(params.reason, workers, outcomes); } catch (error) { ultra = [context.ultra ? `Ultra: recording this call failed (${error instanceof Error ? error.message : String(error)}); its candidates cannot be adopted.` : `MDSD: recording this call failed (${error instanceof Error ? error.message : String(error)}); its measurements are incomplete.`]; }
   }
   const details: SpawnDetails = { reason: params.reason, workers: outcomes, warnings, durationMs: Date.now() - started, ...(ultra?.length ? { ultra } : {}) };
   context.onSpawned?.(params.reason, outcomes, warnings);
@@ -386,34 +455,67 @@ export async function executeSpawn(context: SpawnContext, params: SpawnCall, sig
  * Verification rounds (orche_spawn calls with reason "verification") one orchestrator assignment may start. A review loop that
  * finds something new in every round does not converge by itself (one real task ran five rounds and 116 minutes); past the cap the
  * orchestrator fixes what is clearly in scope and reports the remaining findings (`data.unresolved`) for main and the user to decide.
+ * A round counts once a verifier finished its review (passed or not passed). A call refused before any verifier ran (an invalid call,
+ * a stage contract's refusal) counts nothing, and a round in which every verifier failed or was cancelled (a provider disconnect, a
+ * crash) reviewed nothing: it counts apart (`voidVerificationRounds`, against the same cap), so it does not use up the review a later
+ * adoption still needs, while repeated failures stop too.
  */
 const verificationRounds = new WeakMap<SpawnContext, number>();
+const voidVerificationRounds = new WeakMap<SpawnContext, number>();
+const reviewed = (outcome: SubWorkerOutcome) => outcome.status === "passed" || outcome.status === "not passed";
 
 /** `maxSubWorkers`: the session's per-call cap (`single.maxSubWorkers`, read when the session starts), in the schema and the description. */
-export function createSpawnTool(context: () => SpawnContext | string, options: { ultra?: boolean; maxSubWorkers?: number } = {}): ToolDefinition {
+export function createSpawnTool(context: () => SpawnContext | string, options: { ultra?: boolean; mdsd?: boolean; maxSubWorkers?: number } = {}): ToolDefinition {
   const max = options.maxSubWorkers ?? MAX_SUB_WORKERS;
   return {
     name: SPAWN_TOOL,
     label: "orche spawn",
     description: options.ultra
       ? `Start up to ${max} sub-workers in fresh sessions at the same time and wait for all of them, by the ultra stage contract of your assignment: exploration (independent verification basis and hypotheses), candidates (independent implementations, each in its own workspace copy, or independent answers), verification (fresh read-only verifiers) or isolation (a game-asset/video specialist). Sub-workers see only their request and cannot spawn.`
+      : options.mdsd
+      ? `Start up to ${max} sub-workers in fresh sessions at the same time and wait for all of them, by the MDSD search policy of your assignment: search (independent read-only explorers, each with a strategy spec; plan on the first round, adapt on later ones), parallelism (writers implementing after the judgment), verification (fresh read-only verifiers) or isolation (a game-asset/video specialist). Sub-workers see only their request and cannot spawn.`
       : `Start up to ${max} sub-workers in fresh sessions at the same time and wait for all of them: independent parallel parts (each writer owns disjoint files), an isolated game-asset/video specialist, or fresh read-only verifiers. Sub-workers see only their request and cannot spawn. Use it only when the orchestration rules of your assignment say the task should be split.`,
-    parameters: options.ultra ? ultraSpawnParametersFor(max) : spawnParametersFor(max),
+    parameters: options.ultra ? ultraSpawnParametersFor(max) : options.mdsd ? mdsdSpawnParametersFor(max) : spawnParametersFor(max),
     executionMode: "sequential",
     execute: async (_id, params, signal, onUpdate): Promise<AgentToolResult<SpawnDetails | undefined>> => {
       const current = context();
       if (typeof current === "string") return { content: [{ type: "text", text: current }], details: undefined, isError: true } as AgentToolResult<undefined>;
-      if ((params as SpawnCall).reason === "verification") {
+      const verification = (params as SpawnCall).reason === "verification";
+      const cap = current.maxVerificationRounds ?? MAX_VERIFICATION_ROUNDS;
+      if (verification) {
         const rounds = verificationRounds.get(current) ?? 0;
-        const cap = current.maxVerificationRounds ?? MAX_VERIFICATION_ROUNDS;
+        const voids = voidVerificationRounds.get(current) ?? 0;
         if (rounds >= cap) {
           current.onVerificationRefused?.(rounds, cap);
           return { content: [{ type: "text", text: `Refused: this assignment already ran ${rounds} verification round${rounds === 1 ? "" : "s"} (the cap is ${cap}; only main can raise it, with orche_task verificationRounds when the user asks for more review). Do not start another review round: fix only clear, in-scope defects the last verifiers found, run the project checks yourself (the cap limits fresh verifier sessions, not your own tests), and report_result with data.unresolved listing the remaining findings and any verification you could not do (one short item each, with file references; [] only when nothing remains) so main and the user can decide on them.` }], details: undefined, isError: true } as AgentToolResult<undefined>;
         }
+        if (voids >= cap) {
+          current.onVerificationRefused?.(rounds + voids, cap);
+          return { content: [{ type: "text", text: `Refused: ${voids} verification round${voids === 1 ? "" : "s"} of this assignment ended without any verifier's verdict (each verifier failed or was cancelled; the cap for such rounds is ${cap}). Do not start another review round: run the project checks yourself, and report_result with data.unresolved listing the review that could not run and the remaining findings (one short item each, with file references) so main and the user can decide on them.` }], details: undefined, isError: true } as AgentToolResult<undefined>;
+        }
+        // Taken while the call runs (orche_spawn calls run one at a time) and given back below when the round reviewed nothing.
         verificationRounds.set(current, rounds + 1);
       }
-      const result = await executeSpawn(current, params as SpawnCall, signal, text => onUpdate?.({ content: [{ type: "text", text }], details: undefined }));
-      return { content: [{ type: "text", text: result.text }], details: result.details };
+      const giveBack = () => verificationRounds.set(current, Math.max(0, (verificationRounds.get(current) ?? 1) - 1));
+      const voidRound = () => { const voids = (voidVerificationRounds.get(current) ?? 0) + 1; voidVerificationRounds.set(current, voids); return voids; };
+      // executeSpawn publishes its status lines once the call is valid and prepared, right before its workers start.
+      let started = false;
+      let result: Awaited<ReturnType<typeof executeSpawn>>;
+      try {
+        result = await executeSpawn(current, params as SpawnCall, signal, text => { started = true; onUpdate?.({ content: [{ type: "text", text }], details: undefined }); });
+      } catch (error) {
+        // Refused before any verifier ran: no round. Failed after they started: no verdict reached the orchestrator, a round without one.
+        if (verification) { giveBack(); if (started) voidRound(); }
+        throw error;
+      }
+      let text = result.text;
+      if (verification && !result.details.workers.some(reviewed)) {
+        giveBack();
+        const voids = voidRound();
+        const left = Math.max(0, cap - voids);
+        text += `\n\nNo verifier finished with a verdict (each failed or was cancelled): this round does not count against the verification cap (${left} such round${left === 1 ? "" : "s"} left).`;
+      }
+      return { content: [{ type: "text", text }], details: result.details };
     },
   } as ToolDefinition;
 }

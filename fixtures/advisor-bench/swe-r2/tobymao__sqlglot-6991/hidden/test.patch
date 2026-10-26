@@ -1,0 +1,19 @@
+diff --git a/tests/dialects/test_clickhouse.py b/tests/dialects/test_clickhouse.py
+index 79fcca52af..89852b0192 100644
+--- a/tests/dialects/test_clickhouse.py
++++ b/tests/dialects/test_clickhouse.py
+@@ -941,6 +941,14 @@ def test_ddl(self):
+         self.validate_identity(
+             'CREATE TABLE t1 ("x" UInt32, "y" Dynamic, "z" Dynamic(max_types = 10)) ENGINE=MergeTree ORDER BY x'
+         )
++        self.validate_identity(
++            "CREATE TABLE test_table (id Int32, name String) ENGINE=MergeTree PRIMARY KEY id",
++            "CREATE TABLE test_table (id Int32, name String) ENGINE=MergeTree PRIMARY KEY (id)",
++        )
++        self.validate_identity(
++            "CREATE TABLE test_table (id Int32, name String) ENGINE=MergeTree PRIMARY KEY tuple()",
++            "CREATE TABLE test_table (id Int32, name String) ENGINE=MergeTree PRIMARY KEY (tuple())",
++        )
+ 
+         self.validate_all(
+             "CREATE DATABASE x",

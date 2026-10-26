@@ -1,0 +1,70 @@
+{
+  "id": "huggingface__huggingface_hub-4056",
+  "title": "tqdm_class progress tracking silently broken in non-TTY environments (disable=None auto-detection)",
+  "repo": "huggingface/huggingface_hub",
+  "baseCommit": "6983a4d3d2bdcbd09c6ea08acae64cdf83ccb2e4",
+  "createdAt": "2026-04-06 15:39:13",
+  "problemStatement": "tqdm_class progress tracking silently broken in non-TTY environments (disable=None auto-detection)\n## Describe the bug\n\nWhen passing a custom `tqdm_class` to `hf_hub_download()`, progress tracking is silently broken in non-TTY environments (web servers, background threads, Docker, etc.). The custom class's `update()` becomes a no-op because `disable` is set to `True` by tqdm's TTY auto-detection.\n\n## Root cause\n\nIn `_get_progress_bar_context()` (`huggingface_hub/utils/tqdm.py`), the custom `tqdm_class` is instantiated with:\n\n```python\nreturn (tqdm_class or tqdm)(\n    ...\n    disable=is_tqdm_disabled(log_level=log_level),\n    ...\n)\n```\n\n`is_tqdm_disabled()` returns `None` in the common case (logger level is WARNING, no `TQDM_POSITION` env var). When tqdm receives `disable=None`, it auto-detects via `sys.stderr.isatty()`. In non-TTY environments, `isatty()` returns `False`, so tqdm sets `self.disable = True` — making `update()` a complete no-op where `self.n` stays at 0.\n\nThis TTY auto-detection makes sense for the default terminal progress bar, but conflicts with the `tqdm_class` feature. Passing a custom class means \"I want to track progress my way\" — it shouldn't be silently disabled based on terminal detection.\n\n## Reproduction\n\n```python\nfrom tqdm.auto import tqdm\nfrom huggingface_hub import hf_hub_download\n\nclass MyProgress(tqdm):\n    def update(self, n=1):\n        super().update(n)\n        print(f\"Progress: {self.n}/{self.total}\")  # Never prints in non-TTY\n\n# In a non-TTY context (e.g. subprocess, web server, run_in_executor):\nhf_hub_download(\n    repo_id=\"some/repo\",\n    filename=\"some-file\",\n    tqdm_class=MyProgress,\n)\n# MyProgress.update() is called but self.n stays at 0\n```\n\n## Suggested fix\n\nWhen `tqdm_class` is explicitly provided, pass `disable=False` instead of deferring to TTY auto-detection:\n\n```python\ndisable = False if tqdm_class is not None else is_tqdm_disabled(log_level=log_level)\nreturn (tqdm_class or tqdm)(\n    ...\n    disable=disable,\n    ...\n)\n```\n\n## Workaround\n\nOverride `disable` in your custom class:\n\n```python\nclass MyProgress(tqdm):\n    def __init__(self, *args, **kwargs):\n        kwargs.pop(\"name\", None)  # strip hf-specific kwarg\n        kwargs[\"disable\"] = False\n        super().__init__(*args, **kwargs)\n```\n\nOr set the environment variable `TQDM_POSITION=-1`.\n\n## Context\n\n- `disable=None` TTY auto-detection was added in #2000 (Docker/TGI fix)\n- `tqdm_class` support was added per #1110\n- These two features interact poorly — the auto-detection predates `tqdm_class` and wasn't updated to account for it\n\n## System info\n\n- `huggingface_hub` version: 1.7.2\n- Python: 3.14",
+  "interface": "",
+  "failToPass": [
+    "tests/test_utils_tqdm.py::TestCreateProgressBarCustomClass::test_custom_tqdm_class_not_disabled_in_non_tty",
+    "tests/test_utils_tqdm.py::TestCreateProgressBarCustomClass::test_custom_tqdm_class_ignores_hf_disable_signal"
+  ],
+  "passToPass": [
+    "tests/test_utils_tqdm.py::TestTqdmUtils::test_cannot_disable_tqdm_when_env_variable_is_set",
+    "tests/test_utils_tqdm.py::TestTqdmUtils::test_cannot_enable_tqdm_when_env_variable_is_set",
+    "tests/test_utils_tqdm.py::TestTqdmUtils::test_tqdm_can_be_disabled_when_globally_enabled",
+    "tests/test_utils_tqdm.py::TestTqdmUtils::test_tqdm_disabled",
+    "tests/test_utils_tqdm.py::TestTqdmUtils::test_tqdm_disabled_cannot_be_forced",
+    "tests/test_utils_tqdm.py::TestTqdmUtils::test_tqdm_enabled",
+    "tests/test_utils_tqdm.py::TestTqdmUtils::test_tqdm_helpers",
+    "tests/test_utils_tqdm.py::TestTqdmUtils::test_tqdm_stream_file",
+    "tests/test_utils_tqdm.py::TestTqdmGroup::test_disable_override_by_environment_variable",
+    "tests/test_utils_tqdm.py::TestTqdmGroup::test_disable_specific_group",
+    "tests/test_utils_tqdm.py::TestTqdmGroup::test_empty_group_is_root",
+    "tests/test_utils_tqdm.py::TestTqdmGroup::test_enable_override_by_environment_variable",
+    "tests/test_utils_tqdm.py::TestTqdmGroup::test_enable_specific_subgroup",
+    "tests/test_utils_tqdm.py::TestTqdmGroup::test_multiple_level_toggling",
+    "tests/test_utils_tqdm.py::TestTqdmGroup::test_nested_subgroup_behavior",
+    "tests/test_utils_tqdm.py::TestTqdmGroup::test_partial_group_name_not_affected",
+    "tests/test_utils_tqdm.py::TestTqdmGroup::test_progress_bar_context_respects_group",
+    "tests/test_utils_tqdm.py::TestTqdmGroup::test_progress_bar_respects_group",
+    "tests/test_utils_tqdm.py::TestCreateProgressBarCustomClass::test_custom_tqdm_class_no_name_kwarg"
+  ],
+  "testFiles": [
+    "tests/test_utils_tqdm.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/test_utils_tqdm.py",
+  "datasetInstall": "pip install -e \".[testing]\" --quiet",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "3e49d7e117e05143f9ac7d74c40331ef557ae6ecebbe458245043bbc43c86bca"
+  },
+  "install": "pip install \".[testing]\" --quiet",
+  "generatedFiles": [],
+  "pythonPath": "src",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-24T02:59:35.022Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 777,
+      "counts": {
+        "FAILED": 2,
+        "PASSED": 19
+      }
+    },
+    "reference": {
+      "ms": 733,
+      "counts": {
+        "PASSED": 21
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "id": "pennylaneai__pennylane-9298",
+  "title": "[BUG] minimize_work_wires = True sets work wires to zero when it should not",
+  "repo": "PennyLaneAI/pennylane",
+  "baseCommit": "4c31d796dcaa6f6ef96cc46b311f9171ea26102e",
+  "createdAt": "2026-04-13 19:33:03",
+  "problemStatement": "[BUG] minimize_work_wires = True sets work wires to zero when it should not\n### Expected behavior\n\nI think this is a bug:\n\nWhen I set a specific number of work wires in the decomposer, and at the same time set minimize_work_wires = True , it simply does not use the work wires at all, even though the only possible/allowed decomposition requires the provided single work wire.\n\nMWE this should work with minimize_work_wires set to True or not.\n\n```python\nimport pennylane as qp\nqp.decomposition.enable_graph()\n\nn = 4\nwires = range(n)\n\n@qp.decompose(\n    gate_set={\"TemporaryAND\", \"Adjoint(TemporaryAND)\", \"CNOT\", \"X\", \"Toffoli\", \"GlobalPhase\"},\n    num_work_wires=1,\n    # minimize_work_wires=True,\n)\n@qp.qnode(qp.device(\"default.qubit\"))\ndef circuit():\n    qp.MultiControlledX(wires)\n    return qp.state()\n\nprint(qp.draw(circuit)())\n```\n\n```\n<DynamicWire>: ──Allocate─╭⊕─╭●──⊕╮──Deallocate─┤  State\n            2: ───────────├●─│───●┤─────────────┤  State\n            1: ───────────╰●─│───●╯─────────────┤  State\n            0: ──────────────├●─────────────────┤  State\n            3: ──────────────╰X─────────────────┤  State\n```\n\n### Actual behavior\n\nThe graph decomposer fails and it falls back on the legacy decomposition system\n\n### Additional information\n\n[slack thread](https://xanaduhq.slack.com/archives/C0743CNS9E3/p1776076743240279)\n\n### Source code\n\n```shell\n\n```\n\n### Tracebacks\n\n```shell\n\n```\n\n### System information\n\n```shell\nName: pennylane\nVersion: 0.45.0.dev76\n```\n\n### Existing GitHub issues\n\n- [x] I have searched existing GitHub issues to make sure the issue does not already exist.",
+  "interface": "",
+  "failToPass": [
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_min_work_wires_unreacheable_rule"
+  ],
+  "passToPass": [
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_weighted_graph_solve",
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_get_decomp_rule",
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_graph_construction",
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_graph_construction_non_applicable_rules",
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_gate_set",
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_graph_solve",
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_graph_strict",
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_strict_no_decomp_op_with_alternative",
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_decomposition_not_found_warning",
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_decomposition_not_found_ignored_op_no_warning[op0]",
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_decomposition_not_found_ignored_op_no_warning[op1]",
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_lazy_solve",
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_decomposition_with_resource_params",
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_work_wire_requirement",
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_multiple_nodes_with_different_work_wire_budget",
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_non_work_wire_dependent_ops_reused",
+    "tests/decomposition/test_decomposition_graph.py::TestDecompositionGraph::test_min_work_wires",
+    "tests/decomposition/test_decomposition_graph.py::TestControlledDecompositions::test_controlled_global_phase",
+    "tests/decomposition/test_decomposition_graph.py::TestControlledDecompositions::test_custom_controlled_op",
+    "tests/decomposition/test_decomposition_graph.py::TestControlledDecompositions::test_controlled_base_decomposition",
+    "tests/decomposition/test_decomposition_graph.py::TestControlledDecompositions::test_flip_controlled_adjoint",
+    "tests/decomposition/test_decomposition_graph.py::TestControlledDecompositions::test_decompose_with_single_work_wire",
+    "tests/decomposition/test_decomposition_graph.py::TestSymbolicDecompositions::test_cancel_adjoint",
+    "tests/decomposition/test_decomposition_graph.py::TestSymbolicDecompositions::test_adjoint_custom",
+    "tests/decomposition/test_decomposition_graph.py::TestSymbolicDecompositions::test_adjoint_general",
+    "tests/decomposition/test_decomposition_graph.py::TestSymbolicDecompositions::test_nested_powers",
+    "tests/decomposition/test_decomposition_graph.py::TestSymbolicDecompositions::test_trivial_powers[0-expected0]",
+    "tests/decomposition/test_decomposition_graph.py::TestSymbolicDecompositions::test_trivial_powers[1-expected1]",
+    "tests/decomposition/test_decomposition_graph.py::TestSymbolicDecompositions::test_custom_symbolic_decompositions",
+    "tests/decomposition/test_decomposition_graph.py::TestSymbolicDecompositions::test_special_pow_decomps",
+    "tests/decomposition/test_decomposition_graph.py::TestSymbolicDecompositions::test_general_pow_decomps"
+  ],
+  "testFiles": [
+    "tests/decomposition/test_decomposition_graph.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/decomposition/test_decomposition_graph.py",
+  "datasetInstall": "pip install -e . --quiet && pip install pytest pytest-cov pytest-mock pytest-xdist pytest-rng flaky pytest-forked pytest-split sybil --quiet",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "9527007cce16429c97a3c4af395d602e47a4d317cf863b8b6008b1ddbe8785b7"
+  },
+  "install": "pip install . --quiet && pip install pytest pytest-cov pytest-mock pytest-xdist pytest-rng flaky pytest-forked pytest-split sybil --quiet",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-24T02:57:57.498Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 2076,
+      "counts": {
+        "FAILED": 1,
+        "PASSED": 31
+      }
+    },
+    "reference": {
+      "ms": 1937,
+      "counts": {
+        "PASSED": 32
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

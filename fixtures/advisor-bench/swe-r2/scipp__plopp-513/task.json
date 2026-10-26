@@ -1,0 +1,65 @@
+{
+  "id": "scipp__plopp-513",
+  "title": "Inspector 'ymax' and 'ymin' wrongfully set ymax and ymin for both figures",
+  "repo": "scipp/plopp",
+  "baseCommit": "a5e7043936c5987a98423bf8244600a3b520f3ea",
+  "createdAt": "2026-01-22 12:50:06",
+  "problemStatement": "Inspector 'ymax' and 'ymin' wrongfully set ymax and ymin for both figures\nAs the title says, setting the optional parameters 'ymax' and 'ymin' will set both an upper and lower limit on the y-axis of the 2D plot as well as the y-axis of the 1D plot. Code snippet to reproduce:\n\n```python\nimport scipp as sc\nimport numpy as np\nimport plopp as pp\ntof = sc.arange('t', 0, 10, 1, unit='s')\nx = sc.arange('x', 0, 7, 1, unit='m')\ny = sc.arange('y', 0, 7, 1, unit='m')\ndata = sc.array(dims=['x', 'y', 't'], values=np.random.rand(6,6,10))\n\ntest = sc.DataArray(data=data, coords={'tof': tof, 'x': x, 'y': y})\n\npp.inspector(test, dim='t', ymax=5, ymin=1)\n```\n\n<img width=\"1323\" height=\"482\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/5ec17853-4651-4ce0-8413-6f57b151ae2e\" />",
+  "interface": "",
+  "failToPass": [
+    "tests/plotting/inspector_test.py::test_kwargs_propagation"
+  ],
+  "passToPass": [
+    "tests/plotting/inspector_test.py::test_creation",
+    "tests/plotting/inspector_test.py::test_from_node",
+    "tests/plotting/inspector_test.py::test_multiple_inputs_raises",
+    "tests/plotting/inspector_test.py::test_bad_number_of_dims_raises",
+    "tests/plotting/inspector_test.py::test_raises_ValueError_when_given_binned_data",
+    "tests/plotting/inspector_test.py::test_line_creation",
+    "tests/plotting/inspector_test.py::test_line_removal",
+    "tests/plotting/inspector_test.py::test_operation"
+  ],
+  "testFiles": [
+    "tests/plotting/inspector_test.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider -W ignore::DeprecationWarning tests/plotting/inspector_test.py",
+  "datasetInstall": "pip install -q -e .[test]",
+  "datasetPython": "3.12",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_01.jsonl",
+    "recordSha256": "49a7dfdf6609c9d69728f6a05feaa66e5d1f299ff761517acef94a071deec871"
+  },
+  "install": "pip install -q .[test]",
+  "generatedFiles": [],
+  "pythonPath": "src",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [
+    "tests/plotting/inspector_test.py::test_creation",
+    "tests/plotting/inspector_test.py::test_from_node",
+    "tests/plotting/inspector_test.py::test_line_creation",
+    "tests/plotting/inspector_test.py::test_line_removal",
+    "tests/plotting/inspector_test.py::test_operation"
+  ],
+  "validation": {
+    "at": "2026-10-24T02:56:46.315Z",
+    "valid": false,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": false,
+    "base": {
+      "ms": 1764,
+      "counts": {
+        "FAILED": 6,
+        "PASSED": 3
+      }
+    },
+    "reference": {
+      "ms": 1256,
+      "counts": {
+        "FAILED": 6,
+        "PASSED": 3
+      }
+    },
+    "excludedPassToPass": 5
+  }
+}

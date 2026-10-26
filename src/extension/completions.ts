@@ -11,6 +11,7 @@ const MODE_DESCRIPTIONS: Partial<Record<string, string>> = {
   single: "Delegate this request to one worker (session mode unchanged)",
   strong: "This request on the strong model tiers (session mode unchanged)",
   ultra: "This request with quality-first ultra orchestration (session mode unchanged)",
+  mdsd: "This request with the MDSD search policy: diversified exploration paths (session mode unchanged)",
   direct: "Edit directly for one turn",
 };
 const describeMode = (mode: MainMode) => MODE_DESCRIPTIONS[mode] ?? `${mode} for one turn`;

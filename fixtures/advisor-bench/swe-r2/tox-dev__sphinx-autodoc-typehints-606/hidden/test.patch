@@ -1,0 +1,61 @@
+diff --git a/tests/roots/test-dummy/dummy_module.py b/tests/roots/test-dummy/dummy_module.py
+index 0ced791..1dd98a5 100644
+--- a/tests/roots/test-dummy/dummy_module.py
++++ b/tests/roots/test-dummy/dummy_module.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass
++from typing import NamedTuple
+ 
+ 
+ def undocumented_function(x: int) -> str:
+@@ -15,6 +16,13 @@ def undocumented_function_with_defaults(x: int, y: str = "hello") -> str:
+     return str(x) + y
+ 
+ 
++class MyNamedTuple(NamedTuple):
++    """A named tuple."""
++
++    x: int
++    y: str = "hello"
++
++
+ @dataclass
+ class DataClass:
+     """Class docstring."""
+diff --git a/tests/test_sphinx_autodoc_typehints.py b/tests/test_sphinx_autodoc_typehints.py
+index 0242292..e92b310 100644
+--- a/tests/test_sphinx_autodoc_typehints.py
++++ b/tests/test_sphinx_autodoc_typehints.py
+@@ -666,6 +666,30 @@ def test_always_document_param_types_with_defaults_braces_after(
+     assert "build succeeded" in status.getvalue()
+ 
+ 
++@pytest.mark.sphinx("text", testroot="dummy")
++@patch("sphinx.writers.text.MAXWIDTH", 2000)
++def test_namedtuple_new_no_warning(
++    app: SphinxTestApp,
++    status: StringIO,
++    warning: StringIO,
++) -> None:
++    """Regression test for #601: NamedTuple __new__ causes 'NoneType' attribute error."""
++    set_python_path()
++
++    for rst_file in Path(app.srcdir).glob("*.rst"):
++        rst_file.unlink()
++    index_content = """\
++        .. autoclass:: dummy_module.MyNamedTuple
++            :special-members: __new__
++    """
++    (Path(app.srcdir) / "index.rst").write_text(dedent(index_content))
++
++    app.build()
++
++    assert "build succeeded" in status.getvalue()
++    assert "NoneType" not in warning.getvalue()
++
++
+ @pytest.mark.sphinx("text", testroot="dummy")
+ @patch("sphinx.writers.text.MAXWIDTH", 2000)
+ def test_sphinx_output_future_annotations(app: SphinxTestApp, status: StringIO) -> None:

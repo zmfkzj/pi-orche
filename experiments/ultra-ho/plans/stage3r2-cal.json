@@ -1,0 +1,58 @@
+{
+  "out": "results/ultra-ho/stage3-r2/calibration",
+  "phase": "s3r2-cal",
+  "seed": "ultra-ho-r2-cal-2026-10-24",
+  "repeats": 1,
+  "concurrency": 4,
+  "scratch": "/tmp/pi-orche/01a152d6-1832-7291-b05c-3e9a404e5ca3/W7/uho-r2cal",
+  "sweCache": "/tmp/pi-orche/01a152d6-1832-7291-b05c-3e9a404e5ca3/W7/uho-swe-r2",
+  "sweFixtures": "fixtures/advisor-bench/swe-r2",
+  "sweCacheSource": "results/advisor-reviewer/cache/swe-r2",
+  "tasks": [
+    {
+      "task": "narwhals-dev__narwhals-3478",
+      "kind": "swe"
+    },
+    {
+      "task": "huggingface__huggingface_hub-4056",
+      "kind": "swe"
+    },
+    {
+      "task": "stanfordnlp__dspy-9478_interface",
+      "kind": "swe"
+    },
+    {
+      "task": "vprusso__toqito-1484_interface",
+      "kind": "swe"
+    },
+    {
+      "task": "celestoai__smolvm-172",
+      "kind": "swe"
+    },
+    {
+      "task": "jlowin__fastmcp-3237_interface",
+      "kind": "swe"
+    },
+    {
+      "task": "jlowin__fastmcp-3235",
+      "kind": "swe"
+    },
+    {
+      "task": "pyjanitor-devs__pyjanitor-1593",
+      "kind": "swe"
+    },
+    {
+      "task": "kubeflow__pipelines-13112",
+      "kind": "swe"
+    }
+  ],
+  "arms": [
+    {
+      "name": "F",
+      "mode": "ultra",
+      "runtime": "fixed",
+      "note": "stability-fixed baseline (results/ultra-ho/live/rt-fixed, digest fd01d201), calibration only"
+    }
+  ],
+  "note": "Stage 3 round 2 calibration (results/ultra-ho/stage3-r2/PREREGISTRATION.md 'Calibration' + H2-A1 item 5): one F unit per pool task; selection only, never validation. Gated on the stage-1 round-2 readout (H2-A1 item 4). Concurrency lowered from 9 to 4 before any unit started (the first launch failed while staging environments: /tmp tmpfs full; no unit ran). Resumed by W7 on 2026-10-24 after W6's session ended (06:41Z) and the machine rebooted (10:55Z, /tmp wiped): scratch and sweCache moved to W7's scratch and concurrency set back to 9 (the value frozen at 06:34Z); none of these enters the plan hash. Still no unit had started. H2-A2: the reruns of the provider-capacity stops run at concurrency 4 (where/how only)."
+}

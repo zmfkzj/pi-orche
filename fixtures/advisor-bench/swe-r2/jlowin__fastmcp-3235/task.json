@@ -1,0 +1,86 @@
+{
+  "id": "jlowin__fastmcp-3235",
+  "title": "ToolTransform AttributeError: 'function' object has no attribute 'parameters' when creating tool without registering it ",
+  "repo": "jlowin/fastmcp",
+  "baseCommit": "3f2090f10a72f36772ce8872671d2ac195df2ad2",
+  "createdAt": "2026-02-19 16:16:53",
+  "problemStatement": "ToolTransform AttributeError: 'function' object has no attribute 'parameters' when creating tool without registering it in v3.0\n### Description\n\nWhen trying to create a tool using the decorator without registering it, same as [the docs proposal](https://gofastmcp.com/servers/transforms/tool-transformation#tooltransform) I got the following error\n\n`Traceback (most recent call last):\n  File \"/example.py\", line 14, in <module>\n    better_search = Tool.from_tool(\n                    ^^^^^^^^^^^^^^^\n  File \".venv/lib/python3.11/site-packages/fastmcp/tools/tool.py\", line 381, in from_tool\n    return TransformedTool.from_tool(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \".venv/lib/python3.11/site-packages/fastmcp/tools/tool_transform.py\", line 479, in from_tool\n    parent_params = set(tool.parameters.get(\"properties\", {}).keys())`\n\n### Example Code\n\n```Python\nfrom fastmcp import FastMCP\nfrom fastmcp.tools import Tool, tool\nfrom fastmcp.tools.tool_transform import ArgTransform\n\n\n# Create a tool without registering it\n@tool\ndef search(q: str, limit: int = 10) -> list[str]:\n    \"\"\"Search for items.\"\"\"\n    return [f\"Result {i} for {q}\" for i in range(limit)]\n\n\n# Transform it before registration\nbetter_search = Tool.from_tool(\n    search,\n    name=\"find_items\",\n    description=\"Find items matching your search query.\",\n    transform_args={\n        \"q\": ArgTransform(\n            name=\"query\",\n            description=\"The search terms to look for.\",\n        ),\n    },\n)\n\nmcp = FastMCP(\"Server\")\nmcp.add_tool(better_search)\n\nif __name__ == \"__main__\":\n    # Defaults to STDIO transport\n    mcp.run()\n```\n\n### Version Information\n\n```Text\nFastMCP version:                                                                    3.0.0\nMCP version:                                                                       1.26.0\nPython version:                                                                   3.11.13\nPlatform:                    Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35\nFastMCP root path: /.venv/lib/python3.11/site-packages\n```",
+  "interface": "",
+  "failToPass": [
+    "tests/tools/tool_transform/test_tool_transform.py::test_from_tool_accepts_decorated_function",
+    "tests/tools/tool_transform/test_tool_transform.py::test_from_tool_accepts_plain_function",
+    "tests/tools/tool_transform/test_tool_transform.py::test_from_tool_decorated_function_preserves_metadata",
+    "tests/tools/tool_transform/test_tool_transform.py::test_from_tool_decorated_function_runs",
+    "tests/tools/tool_transform/test_tool_transform.py::test_from_tool_decorated_function_via_client"
+  ],
+  "passToPass": [
+    "tests/tools/tool_transform/test_tool_transform.py::test_tool_from_tool_no_change",
+    "tests/tools/tool_transform/test_tool_transform.py::test_renamed_arg_description_is_maintained",
+    "tests/tools/tool_transform/test_tool_transform.py::test_tool_defaults_are_maintained_on_unmapped_args",
+    "tests/tools/tool_transform/test_tool_transform.py::test_tool_defaults_are_maintained_on_mapped_args",
+    "tests/tools/tool_transform/test_tool_transform.py::test_tool_change_arg_name",
+    "tests/tools/tool_transform/test_tool_transform.py::test_tool_change_arg_description",
+    "tests/tools/tool_transform/test_tool_transform.py::test_tool_drop_arg",
+    "tests/tools/tool_transform/test_tool_transform.py::test_dropped_args_error_if_provided",
+    "tests/tools/tool_transform/test_tool_transform.py::test_hidden_arg_with_constant_default",
+    "tests/tools/tool_transform/test_tool_transform.py::test_hidden_arg_without_default_uses_parent_default",
+    "tests/tools/tool_transform/test_tool_transform.py::test_mixed_hidden_args_with_custom_function",
+    "tests/tools/tool_transform/test_tool_transform.py::test_hide_required_param_without_default_raises_error",
+    "tests/tools/tool_transform/test_tool_transform.py::test_hide_required_param_with_user_default_works",
+    "tests/tools/tool_transform/test_tool_transform.py::test_hidden_param_prunes_defs",
+    "tests/tools/tool_transform/test_tool_transform.py::test_forward_with_argument_mapping",
+    "tests/tools/tool_transform/test_tool_transform.py::test_forward_with_incorrect_args_raises_error",
+    "tests/tools/tool_transform/test_tool_transform.py::test_forward_raw_without_argument_mapping",
+    "tests/tools/tool_transform/test_tool_transform.py::test_custom_fn_with_kwargs_and_no_transform_args",
+    "tests/tools/tool_transform/test_tool_transform.py::test_fn_with_kwargs_passes_through_original_args",
+    "tests/tools/tool_transform/test_tool_transform.py::test_fn_with_kwargs_receives_transformed_arg_names",
+    "tests/tools/tool_transform/test_tool_transform.py::test_fn_with_kwargs_handles_partial_explicit_args",
+    "tests/tools/tool_transform/test_tool_transform.py::test_fn_with_kwargs_mixed_mapped_and_unmapped_args",
+    "tests/tools/tool_transform/test_tool_transform.py::test_fn_with_kwargs_dropped_args_not_in_kwargs",
+    "tests/tools/tool_transform/test_tool_transform.py::test_forward_outside_context_raises_error",
+    "tests/tools/tool_transform/test_tool_transform.py::test_forward_raw_outside_context_raises_error",
+    "tests/tools/tool_transform/test_tool_transform.py::test_transform_args_with_parent_defaults",
+    "tests/tools/tool_transform/test_tool_transform.py::test_transform_args_validation_unknown_arg",
+    "tests/tools/tool_transform/test_tool_transform.py::test_transform_args_creates_duplicate_names",
+    "tests/tools/tool_transform/test_tool_transform.py::test_function_without_kwargs_missing_params",
+    "tests/tools/tool_transform/test_tool_transform.py::test_function_without_kwargs_can_have_extra_params",
+    "tests/tools/tool_transform/test_tool_transform.py::test_function_with_kwargs_can_add_params",
+    "tests/tools/tool_transform/test_tool_transform.py::TestProxy::test_transform_proxy"
+  ],
+  "testFiles": [
+    "tests/tools/tool_transform/test_tool_transform.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/tools/tool_transform/test_tool_transform.py",
+  "datasetInstall": "pip install -e . -q && pip install pytest pytest-asyncio pytest-timeout -q && pip install opentelemetry-sdk -q && pip install \"inline-snapshot[dirty-equals]>=0.27.2\" -q && pip install psutil pytest-env dirty-equals pytest-flakefinder pytest-httpx pytest-report pytest-retry pytest-xdist -q && pip install pydocket anthropic openai -q && pip install fastapi -q",
+  "datasetPython": "3.12",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_02.jsonl",
+    "recordSha256": "78dc5ec5da458183f6d906a3e429bd98e896046d541ff2f79d3ff764983f4677"
+  },
+  "install": "pip install . -q && pip install pytest pytest-asyncio pytest-timeout -q && pip install opentelemetry-sdk -q && pip install \"inline-snapshot[dirty-equals]>=0.27.2\" -q && pip install psutil pytest-env dirty-equals pytest-flakefinder pytest-httpx pytest-report pytest-retry pytest-xdist -q && pip install pydocket anthropic openai -q && pip install fastapi -q",
+  "generatedFiles": [],
+  "pythonPath": "src",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-24T02:59:23.706Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 2139,
+      "counts": {
+        "FAILED": 5,
+        "PASSED": 32
+      }
+    },
+    "reference": {
+      "ms": 2068,
+      "counts": {
+        "PASSED": 37
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

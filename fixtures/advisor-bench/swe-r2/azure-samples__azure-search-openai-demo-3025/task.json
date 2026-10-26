@@ -1,0 +1,56 @@
+{
+  "id": "azure-samples__azure-search-openai-demo-3025",
+  "title": "Data ingestion fails (400 error) when text_token_length exceeds batch_token_limit",
+  "repo": "Azure-Samples/azure-search-openai-demo",
+  "baseCommit": "7f704ea62ab717dd88b42fd5aabb05cbd09d92ff",
+  "createdAt": "2026-04-06 23:17:47",
+  "problemStatement": "Data ingestion fails (400 error) when text_token_length exceeds batch_token_limit\n### This issue is for a:\n```\n- [X] bug report\n- [ ] feature request\n- [ ] documentation issue or request\n- [ ] regression (a behavior that used to work and stopped in a new release)\n```\n### Minimal steps to reproduce\nUpload the Digital Project Development Manual PDF found on the Connecticut DOT website using either local ingestion or using the new cloud ingestion. This is the only PDF (out of many) that throws this error for me.\n\n- Website: [CT DOT](https://portal.ct.gov/DOT/Engineering-Applications/Digital-Project-Development-Manual?language=en_US)\n- Direct link to PDF: [digitalprojectdevelopmentpdf.pdf](https://github.com/user-attachments/files/25188454/digitalprojectdevelopmentpdf.pdf)\n\n### Any log messages given by the failure\nWeb Api skill response contains errors: 'Web Api response contains both data and errors. Will not process Data.;Error code: 400 - {'error': {'message': \"This model's maximum context length is 8192 tokens, however you requested 9175 tokens (9175 in your prompt; 0 for the completion). Please reduce your prompt; or completion length.\", 'type': 'invalid_request_error', 'param': None, 'code': None}}'.\n\n### Expected/desired behavior\nThe document should be successfully ingested without exceeding the model token limit.\n\n### OS\nWindows 11\n\n### azd version\nazd version 1.23.3\n\n### Mention any other details that might be useful\nI first encountered this issue several weeks ago while using local ingestion. I waited to see whether switching to the cloud ingestion architecture would resolve it, but the same error persists. From my investigation, I was able to trace it to the file `embeddings.py` in the def `split_text_into_batches`. \n\nI believe part of the error is in the logic around the following statement: `if batch_token_length + text_token_length >= batch_token_limit and len(batch) > 0`. At the very least, I think this is where the error is surfacing.\n\nIf `text_token_length > batch_token_limit` but `len(batch) = 0` then the text gets appended to `batch` even though it's greater than the `batch_token_limit`. I'm sure this goes even deeper into the chunking logic, but I haven't found the time yet to chase it all the way down.",
+  "interface": "",
+  "failToPass": [
+    "tests/test_embeddings.py::test_split_text_into_batches_splits_oversized_text",
+    "tests/test_embeddings.py::test_split_text_into_batches_splits_oversized_text_with_others"
+  ],
+  "passToPass": [
+    "tests/test_embeddings.py::test_split_text_into_batches_single_batch",
+    "tests/test_embeddings.py::test_split_text_into_batches_multiple_batches",
+    "tests/test_embeddings.py::test_split_text_into_batches_respects_max_batch_size",
+    "tests/test_embeddings.py::test_split_text_into_batches_empty",
+    "tests/test_embeddings.py::test_split_text_unsupported_model"
+  ],
+  "testFiles": [
+    "tests/test_embeddings.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/test_embeddings.py",
+  "datasetInstall": "pip install -q -r requirements-dev.txt",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "6632038f42eb1a7ff7c6b7bc5598996e8171c6962ae17c62cb05750906856aa0"
+  },
+  "install": "pip install -q -r requirements-dev.txt",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-24T02:59:48.829Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 4144,
+      "counts": {
+        "FAILED": 2,
+        "PASSED": 5
+      }
+    },
+    "reference": {
+      "ms": 2025,
+      "counts": {
+        "PASSED": 7
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

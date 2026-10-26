@@ -1,0 +1,62 @@
+{
+  "id": "zarr-developers__virtualizarr-979",
+  "title": "Error reading inlined reference data when trying to roundtrip virtual dataset",
+  "repo": "zarr-developers/VirtualiZarr",
+  "baseCommit": "3194b095ede4abaa9d9d0daaa91a6f0424cc4a93",
+  "createdAt": "2026-04-24 16:09:18",
+  "problemStatement": "Error reading inlined reference data when trying to roundtrip virtual dataset\nHi,\n\nI've been working on trying to use virtualizarr to create virtual datasets of GOES/Himawari/G2KA AWS data. The end goal is to generate virtual references appended along the `t` dimension  for GOES data. One of the main issues I've encountered so far with using virtualizarr is after writing virtualizarr to disk, reading it back results in this error\n\n```bash\nNotImplementedError: Reading inlined reference data is currently not supported. [ToDo]\n```\n\nI can read it with `xr.open_dataset` but I want to eventually combine all the virtual references into one large virtual dataset, so need to be able to open the virtual datasets.\n\n```python\nimport xarray as xr\nfrom virtualizarr import open_virtual_dataset\nimport s3fs\n\nfs = s3fs.S3FileSystem(anon=True)\nfilepath = \"s3://noaa-goes19/ABI-L1b-RadF/2025/001/00/OR_ABI-L1b-RadF-M6C08_G19_s20250010010205_e20250010019513_c20250010019570.nc\"\nvd = open_virtual_dataset(filepath, loadable_variables=[\"t\",],reader_options={'storage_options': {\"anon\": True}})\nprint(vd)\nvd.virtualize.to_kerchunk('g19.json', format='json')\nd = xr.open_dataset(\"g19.json\", engine=\"kerchunk\", backend_kwargs={\"storage_options\": {\"remote_options\": {\"anon\": True}}})\nprint(d)\nvd1 = open_virtual_dataset(\"g19.json\", filetype=\"kerchunk\")\nprint(vd1)\n\n```\n\nI get that its not supported yet, but either, how would I have virtualizarr not write inlined data, or is there any information/resources to point to where I could try adding support for it?\n\nxarray version: 2025.1.2\ns3fs version: 2025.2.0\nvirtualizarr version: 1.3.2",
+  "interface": "",
+  "failToPass": [
+    "virtualizarr/tests/test_parsers/test_kerchunk.py::test_parse_inline_refs_json[base64]",
+    "virtualizarr/tests/test_parsers/test_kerchunk.py::test_parse_inline_refs_json[raw_string]",
+    "virtualizarr/tests/test_parsers/test_kerchunk.py::test_read_inline_and_virtual_refs_end_to_end"
+  ],
+  "passToPass": [
+    "virtualizarr/tests/test_parsers/test_kerchunk.py::test_dataset_from_df_refs",
+    "virtualizarr/tests/test_parsers/test_kerchunk.py::test_dataset_from_df_refs_with_filters",
+    "virtualizarr/tests/test_parsers/test_kerchunk.py::test_empty_chunk_manifest",
+    "virtualizarr/tests/test_parsers/test_kerchunk.py::test_null_chunk_reference_treated_as_missing",
+    "virtualizarr/tests/test_parsers/test_kerchunk.py::test_scalar_variable_manifest_shape",
+    "virtualizarr/tests/test_parsers/test_kerchunk.py::test_handle_relative_paths",
+    "virtualizarr/tests/test_parsers/test_kerchunk.py::test_relative_path_to_absolute_cloud_url",
+    "virtualizarr/tests/test_parsers/test_kerchunk.py::test_skip_variables[a]",
+    "virtualizarr/tests/test_parsers/test_kerchunk.py::test_skip_variables[skip_variables1]",
+    "virtualizarr/tests/test_parsers/test_kerchunk.py::test_parse_dict_via_memorystore"
+  ],
+  "testFiles": [
+    "virtualizarr/tests/test_parsers/test_kerchunk.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider virtualizarr/tests/test_parsers/test_kerchunk.py",
+  "datasetInstall": "pip install -e \".[hdf]\" --quiet && pip install netCDF4 --quiet && pip install pytest pytest-asyncio pytest-timeout --quiet",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "1286892484b9fa25959b63e1949843e97684660323bde8f88f9ac4661ca9bddf"
+  },
+  "install": "pip install \".[hdf]\" --quiet && pip install netCDF4 --quiet && pip install pytest pytest-asyncio pytest-timeout --quiet",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-24T02:58:28.052Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 1648,
+      "counts": {
+        "FAILED": 3,
+        "PASSED": 10
+      }
+    },
+    "reference": {
+      "ms": 1407,
+      "counts": {
+        "PASSED": 13
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, normalize, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parseRouteConfig, RouteConfigError, type RouteConfig } from "../orchestration/routing.js";
+import { parseMdsdConfig, type MdsdSettings } from "../orchestrator/mdsd-config.js";
 import { DEFAULT_WINDOW_MS } from "./concurrent-sessions.js";
 import { DEFAULT_CONTEXT_WARNING, type ContextWarningSettings } from "./context-warning.js";
 import { DEFAULT_THINKING_POLICY, resolveThinkingPolicy, type ThinkingPolicySettings } from "../pi/thinking-policy.js";
@@ -41,6 +42,8 @@ export interface DiscoveredConfig {
   writeRoots: string[];
   /** `bashReview` of the selected file with defaults applied (on, Jev `typesafe/jev-latest`, 15 s; src/extension/bash-review.ts). */
   bashReview: BashReviewSettings;
+  /** `mdsd` of the selected file (the MDSD search policy's bounds, src/orchestrator/mdsd-config.ts); absent: DEFAULT_MDSD. */
+  mdsd?: MdsdSettings;
   /** Settings of the selected file that were ignored (removed `single` keys); absent without a file. */
   warnings?: string[];
   source: ConfigSource;
@@ -194,6 +197,10 @@ export function parseContextWarningConfig(value: unknown): ContextWarningSetting
  * worker session starts (its tool schema carries it); a reused worker keeps its value. Not the session's job queue or the idle
  * worker pool (pool cap 3).
  *
+ * `strongReflection` (experiment, off when unset; docs/strong-reflection.md): in strong mode only, the implement/answer worker gets
+ * one fixed reflection prompt right before its self-review (the first integration node it starts, else its first report_result,
+ * which is held once). Single, ultra, mdsd and direct are unchanged whatever its value.
+ *
  * The keys of the removed v2 pipeline and workflow policies (`pipeline`, `frame`, `checker`, `nav`, `mainReview`, `investigation`,
  * `creation`) are ignored with a warning, whatever their value, so an old config still loads.
  */
@@ -202,9 +209,11 @@ export interface SingleSettings {
   spawn: boolean;
   advisor: boolean;
   maxSubWorkers: number;
+  /** Experiment (src/single/reflection.ts): absent unless the config sets it; only `true` turns it on, and only in strong mode. */
+  strongReflection?: boolean;
 }
 export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false, spawn: true, advisor: false, maxSubWorkers: MAX_SUB_WORKERS };
-const SINGLE_KEYS = new Set(["ledger", "spawn", "advisor", "maxSubWorkers"]);
+const SINGLE_KEYS = new Set(["ledger", "spawn", "advisor", "maxSubWorkers", "strongReflection"]);
 /** Keys of the removed single pipeline v2, `mainReview` and workflow policies (docs/orchestrator.md 4): ignored with a warning. */
 export const LEGACY_SINGLE_KEYS: ReadonlySet<string> = new Set(["pipeline", "frame", "checker", "nav", "mainReview", "investigation", "creation"]);
 export function legacySingleWarning(keys: readonly string[]): string {
@@ -219,6 +228,7 @@ export function parseSingleConfig(value: unknown, warnings?: string[]): SingleSe
   if (settings.ledger !== undefined && typeof settings.ledger !== "boolean") throw new RouteConfigError("config.single.ledger: expected boolean");
   if (settings.spawn !== undefined && typeof settings.spawn !== "boolean") throw new RouteConfigError("config.single.spawn: expected boolean");
   if (settings.advisor !== undefined && typeof settings.advisor !== "boolean") throw new RouteConfigError("config.single.advisor: expected boolean");
+  if (settings.strongReflection !== undefined && typeof settings.strongReflection !== "boolean") throw new RouteConfigError("config.single.strongReflection: expected boolean");
   const max = settings.maxSubWorkers;
   if (max !== undefined && (typeof max !== "number" || !Number.isInteger(max) || max < SUB_WORKER_CAP_MIN || max > SUB_WORKER_CAP_MAX))
     throw new RouteConfigError(`config.single.maxSubWorkers: expected an integer from ${SUB_WORKER_CAP_MIN} to ${SUB_WORKER_CAP_MAX} (sub-workers per orche_spawn call; default ${MAX_SUB_WORKERS}); got ${JSON.stringify(max)}`);
@@ -228,6 +238,7 @@ export function parseSingleConfig(value: unknown, warnings?: string[]): SingleSe
     spawn: (settings.spawn as boolean | undefined) ?? DEFAULT_SINGLE.spawn,
     advisor: (settings.advisor as boolean | undefined) ?? DEFAULT_SINGLE.advisor,
     maxSubWorkers: (max as number | undefined) ?? DEFAULT_SINGLE.maxSubWorkers,
+    ...(settings.strongReflection !== undefined ? { strongReflection: settings.strongReflection as boolean } : {}),
   };
 }
 
@@ -360,10 +371,10 @@ export function parseBashReviewConfig(value: unknown): BashReviewSettings {
 
 /**
  * Load one orche config file: the route settings (validated by `parseRouteConfig`) plus the extension-only
- * `concurrentSessions`, `records`, `taskContext`, `contextWarning`, `single`, `thinkingPolicy`, `writeRoots` and `bashReview` settings, validated here and removed before the route parser sees the file.
+ * `concurrentSessions`, `records`, `taskContext`, `contextWarning`, `single`, `thinkingPolicy`, `writeRoots`, `bashReview` and `mdsd` settings, validated here and removed before the route parser sees the file.
  * `warnings` lists settings that were ignored (removed `single` keys, keys of the removed coordinator); the file still loads.
  */
-export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings; thinkingPolicy: ThinkingPolicySettings; outputCap: OutputCapSettings; writeRoots: string[]; bashReview: BashReviewSettings; warnings: string[] }> {
+export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings; thinkingPolicy: ThinkingPolicySettings; outputCap: OutputCapSettings; writeRoots: string[]; bashReview: BashReviewSettings; mdsd?: MdsdSettings; warnings: string[] }> {
   let value: unknown;
   try { value = JSON.parse(await readFile(path, "utf8")); }
   catch (error) { throw new RouteConfigError(`Cannot load route config ${path}: ${error instanceof Error ? error.message : String(error)}`); }
@@ -377,9 +388,10 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
   let outputCap: OutputCapSettings = { ...DEFAULT_OUTPUT_CAP };
   let writeRoots: string[] = [];
   let bashReview: BashReviewSettings = { ...DEFAULT_BASH_REVIEW };
+  let mdsd: MdsdSettings | undefined;
   const warnings: string[] = [];
   if (value && typeof value === "object" && !Array.isArray(value)) {
-    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, single: singleValue, thinkingPolicy: thinkingPolicyValue, outputCap: outputCapValue, writeRoots: writeRootsValue, bashReview: bashReviewValue, ...rest } = value as Record<string, unknown>;
+    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, single: singleValue, thinkingPolicy: thinkingPolicyValue, outputCap: outputCapValue, writeRoots: writeRootsValue, bashReview: bashReviewValue, mdsd: mdsdValue, ...rest } = value as Record<string, unknown>;
     if (Object.hasOwn(value, "concurrentSessions")) concurrent = parseConcurrentSessionsConfig(concurrentSessions);
     if (Object.hasOwn(value, "records")) records = parseRecordsConfig(recordsValue);
     if (Object.hasOwn(value, "taskContext")) taskContext = parseTaskContextConfig(taskContextValue);
@@ -389,9 +401,10 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
     if (Object.hasOwn(value, "outputCap")) outputCap = parseOutputCapConfig(outputCapValue);
     if (Object.hasOwn(value, "writeRoots")) writeRoots = parseWriteRootsConfig(writeRootsValue);
     if (Object.hasOwn(value, "bashReview")) bashReview = parseBashReviewConfig(bashReviewValue);
+    if (Object.hasOwn(value, "mdsd")) mdsd = parseMdsdConfig(mdsdValue);
     routeValue = rest;
   }
-  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single, thinkingPolicy, outputCap, writeRoots, bashReview, warnings: warnings.map(warning => `${warning} (${path})`) };
+  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single, thinkingPolicy, outputCap, writeRoots, bashReview, ...(mdsd ? { mdsd } : {}), warnings: warnings.map(warning => `${warning} (${path})`) };
 }
 export class NoRouteError extends Error {
   override readonly name = "NoRouteError";

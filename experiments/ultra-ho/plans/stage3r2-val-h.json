@@ -1,0 +1,40 @@
+{
+  "out": "results/ultra-ho/stage3-r2/validation",
+  "phase": "s3r2-val-h",
+  "seed": "ultra-ho-r2-val-h-2026-10-24",
+  "repeats": 2,
+  "concurrency": 6,
+  "scratch": "/tmp/pi-orche/01a152d6-1832-7291-b05c-3e9a404e5ca3/W7/uho-r2val",
+  "sweCache": "/tmp/pi-orche/01a152d6-1832-7291-b05c-3e9a404e5ca3/W7/uho-swe-r2val",
+  "sweFixtures": "fixtures/advisor-bench/swe-r2",
+  "sweCacheSource": "results/advisor-reviewer/cache/swe-r2",
+  "tasks": [
+    {
+      "task": "narwhals-dev__narwhals-3478",
+      "kind": "swe"
+    },
+    {
+      "task": "huggingface__huggingface_hub-4056",
+      "kind": "swe"
+    },
+    {
+      "task": "celestoai__smolvm-172",
+      "kind": "swe"
+    }
+  ],
+  "arms": [
+    {
+      "name": "F",
+      "mode": "ultra",
+      "runtime": "fixed",
+      "note": "the stability-fixed baseline (results/ultra-ho/live/rt-fixed, digest fd01d201), unchanged"
+    },
+    {
+      "name": "H2",
+      "mode": "ultra",
+      "runtime": "handoff2",
+      "note": "the corrected actionable hand-off (results/ultra-ho/stage3-r2/rt-handoff2, digest 5d094e16), frozen before any round-2 run"
+    }
+  ],
+  "note": "Stage 3 round 2 validation, headroom tasks (PREREGISTRATION.md 'Validation units'): F x 2 and H2 x 2 on each task selected in results/ultra-ho/stage3-r2/calibration/selection.json (H2-A1 item 5, pool order). Launched in one batch with the mechanism (s3r2-val-m) and control (s3r2-val-c) phases. Fresh SWE cache copy (uho-swe-r2val), not the calibration's."
+}

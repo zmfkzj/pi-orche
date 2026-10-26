@@ -1,0 +1,107 @@
+{
+  "id": "joshuadavidthomas__django-bird-239",
+  "title": "Isolated components (using `only`) do not receive props correctly",
+  "repo": "joshuadavidthomas/django-bird",
+  "baseCommit": "337ab6d4341e04ac3f048eabbd295546519ccef0",
+  "createdAt": "2026-02-11 06:20:26",
+  "problemStatement": "Isolated components (using `only`) do not receive props correctly\nUnless I'm misunderstanding what's meant to happen, it seems that isolated components specified with `only` don't receive props correctly when the values of the props come from the parent context.\n\nWith a basic view:\n\n```python\ndef view(request):\n    return render(request, \"index.html\", {\"a_string_var\": \"Hello World\"})\n```\n\nAnd the following basic component:\n\n```django\n# bird/basic_component.html\n{% bird:prop text %}\n<p>Text: {{ props.text }}</p>\n```\n\nRendered by the following template:\n\n```django\n{% bird basic_component text=\"Hello World\" / %}\n{% bird basic_component text=\"Hello World\" only / %}\n{% bird basic_component text=a_string_var / %}\n{% bird basic_component text=a_string_var only / %}\n```\n\nResults in the following HTML:\n\n```html\n<p>Text: Hello World</p>\n<p>Text: Hello World</p>\n<p>Text: Hello World</p>\n<p>Text: a_string_var</p>\n```\n\nThe final isolated component only receives the stringified name of the variable passed to the prop, not the value of the variable. This feels unhelpful and counter intuitive, and against my understanding of the docs:\n\n> When only is used:\n> \n> * The component cannot access variables from the parent context\n> * **Props, slots, and other component-specific context still work normally**\n> * Default values in the component template will be used when parent context variables are not available\n\nEmphasis mine.\n\nTested using Django 4.2 (current LTS) and `django-bird` 0.17.3.",
+  "interface": "",
+  "failToPass": [
+    "tests/templatetags/test_bird.py::test_only_flag[Only"
+  ],
+  "passToPass": [
+    "tests/templatetags/test_bird.py::TestSlots::test_named[Handles",
+    "tests/templatetags/test_bird.py::TestSlots::test_with_outside_templatetag[Filters",
+    "tests/templatetags/test_bird.py::TestSlots::test_named[Renders",
+    "tests/templatetags/test_bird.py::TestSlots::test_default[Default",
+    "tests/templatetags/test_bird.py::TestSlots::test_default[Named",
+    "tests/templatetags/test_bird.py::TestSlots::test_with_outside_templatetag[Filter",
+    "tests/templatetags/test_bird.py::TestSlots::test_default[Empty",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_missing_name_do_bird",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_nonexistent_name_templatetag",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_nested_name_templatetag",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_attrs_do_bird[class=dynamic-expected_attrs4]",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_attrs_do_bird[class=item.name",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_dynamic_name_with_string",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_basic_name_templatetag[Basic",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_dynamic_name_template_context_templatetag[Dynamic",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_name_do_bird['button'-'button']",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_basic_name_templatetag[Single-quoted",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_attrs_do_bird[class='btn'-expected_attrs1]",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_attrs_do_bird[disabled-expected_attrs3]",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_name_do_bird[button.label-button.label]",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_attrs_do_bird[class=\"btn\"",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_basic_name_templatetag[Double-quoted",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_name_do_bird[button-button]",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_dynamic_name_template_context_templatetag[Quoted",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_attrs_do_bird[class=\"btn\"-expected_attrs0]",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_attrs_do_bird[data-foo=\"bar=qux\"-expected_attrs6]",
+    "tests/templatetags/test_bird.py::TestTagParsing::test_name_do_bird[\"button\"-\"button\"]",
+    "tests/templatetags/test_bird.py::test_self_closing_tag",
+    "tests/templatetags/test_bird.py::test_attrs_and_props",
+    "tests/templatetags/test_bird.py::test_parent_context_access[Access",
+    "tests/templatetags/test_bird.py::test_nested_components_with_loops",
+    "tests/templatetags/test_bird.py::test_parent_context_access[Component-specific",
+    "tests/templatetags/test_bird.py::TestProperties::test_dynamic[Filter",
+    "tests/templatetags/test_bird.py::TestProperties::test_basic[Quoted",
+    "tests/templatetags/test_bird.py::TestProperties::test_basic[Default",
+    "tests/templatetags/test_bird.py::TestProperties::test_error_handling[Empty",
+    "tests/templatetags/test_bird.py::TestProperties::test_dynamic[Literal",
+    "tests/templatetags/test_bird.py::TestProperties::test_dynamic[Missing",
+    "tests/templatetags/test_bird.py::TestProperties::test_basic[Basic",
+    "tests/templatetags/test_bird.py::TestProperties::test_error_handling[Undefined",
+    "tests/templatetags/test_bird.py::TestProperties::test_basic[No",
+    "tests/templatetags/test_bird.py::TestProperties::test_dynamic[Dynamic",
+    "tests/templatetags/test_bird.py::TestProperties::test_basic[Override",
+    "tests/templatetags/test_bird.py::TestProperties::test_error_handling[Missing",
+    "tests/templatetags/test_bird.py::TestProperties::test_filter_expression_in_attrs",
+    "tests/templatetags/test_bird.py::TestBirdNode::test_get_component_name[test_case0]",
+    "tests/templatetags/test_bird.py::TestBirdNode::test_get_component_name[test_case1]",
+    "tests/templatetags/test_bird.py::TestAttributes::test_basic[Renders",
+    "tests/templatetags/test_bird.py::TestAttributes::test_data_bird_attributes[attr_app_setting1-False]",
+    "tests/templatetags/test_bird.py::TestAttributes::test_boolean[Explicit",
+    "tests/templatetags/test_bird.py::TestAttributes::test_boolean[Omits",
+    "tests/templatetags/test_bird.py::TestAttributes::test_error_handling[Handles",
+    "tests/templatetags/test_bird.py::TestAttributes::test_nested_template_context[Preserves",
+    "tests/templatetags/test_bird.py::TestAttributes::test_dynamic_template_context[Literal",
+    "tests/templatetags/test_bird.py::TestAttributes::test_dynamic_template_context[Dynamic",
+    "tests/templatetags/test_bird.py::TestAttributes::test_data_bird_attributes[attr_app_setting0-True]",
+    "tests/templatetags/test_bird.py::TestAttributes::test_boolean[Implicit",
+    "tests/templatetags/test_bird.py::TestAttributes::test_nested_template_context[Resolves"
+  ],
+  "testFiles": [
+    "tests/templatetags/test_bird.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/templatetags/test_bird.py",
+  "datasetInstall": "pip install -q -e \".[angles]\" && pip install -q pytest pytest-cov pytest-django pytest-randomly pytest-xdist faker model-bakery coverage",
+  "datasetPython": "3.12",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_02.jsonl",
+    "recordSha256": "ad4219459be0cff784a8c74ddb9a778b1b44cfc55b0b3d0f1299bbbc9365e39b"
+  },
+  "install": "pip install -q \".[angles]\" && pip install -q pytest pytest-cov pytest-django pytest-randomly pytest-xdist faker model-bakery coverage",
+  "generatedFiles": [],
+  "pythonPath": "src",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-24T02:59:55.191Z",
+    "valid": false,
+    "f2pFailOnBase": false,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 3092,
+      "counts": {
+        "PASSED": 59
+      }
+    },
+    "reference": {
+      "ms": 3205,
+      "counts": {
+        "PASSED": 59
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

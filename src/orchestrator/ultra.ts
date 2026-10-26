@@ -8,13 +8,20 @@
  * What the runtime enforces (this module, spawn.ts, sub-worker.ts, candidate-workspace.ts) and what stays prompt-based:
  *  - enforced: stage order (no candidate before an exploration round with a finished verification-basis builder and a finished
  *    analyst; for a read-only task a finished analyst), caps (exploration and candidate rounds ≤ 2 each, ≤ 4 workers per call,
- *    verification rounds keep their cap, depth 1), ≥ 2 distinct candidate requests per round, isolation of implementation
+ *    verification rounds keep their cap (spawn.ts: a round counts once a verifier finished its review; a call refused before any verifier
+ *    ran counts nothing, a round in which every verifier failed or was cancelled counts apart against the same cap), depth 1), ≥ 2
+ *    distinct candidate requests per round, the analysts' hand-off (every existing workspace file a finished analyst's report names
+ *    is a finding of that exploration round; before any candidate copy is made each pending finding is assigned, i.e. owned through
+ *    its files and named in its request by one implementation candidate (an answer candidate: named), kept as read-only context
+ *    (`reference`, named in a request) or excluded with a reason and a later own check of the orchestrator that names the file, or
+ *    recorded as outside the assignment's write scope; else the candidates call is refused), isolation of implementation
  *    candidates in their own workspace copies made before any candidate runs (private dependency copies, every link verified,
  *    fail-closed), the protected verification basis (refused to candidates and to the orchestrator; a candidate that changes it by
  *    shell is not adoptable; a basis changed in the workspace fails the report), no orchestrator edits in the workspace before an
  *    adoption, an escape check around each candidates round (the workspace's content and its own dependency directories unchanged,
  *    else none of the round's candidates is adoptable), adoption only of a finished candidate whose copy is byte for byte what a
- *    successful check of the orchestrator saw before and after it ran (refused when the workspace moved underneath, rolled back on a
+ *    successful check of the orchestrator saw before and after it ran (refused when the workspace moved underneath: for a fix candidate,
+ *    unless the workspace holds exactly what the fix started from there, i.e. its earlier candidate's adoption; rolled back on a
  *    failed write or when the copy changed meanwhile), and the report gate (`gateError`): ≥ 2 candidates with a report, every
  *    candidate accounted for once, every other finished candidate evaluated (a check of its own copy, passing or failing, that saw
  *    the copy as it is at the report; "failed" needs a failing one) unless the runtime recorded why it is out (not done, isolation
@@ -24,34 +31,40 @@
  *    new checks), the report alone (no call that can change files in flight), a verification round after the last adoption, every
  *    reproduced counterexample fixed or the task blocked, and a non-empty review when a verifier did not pass;
  *  - prompt-based (the model's judgment, not checkable): that basis checks really encode the acceptance criteria, that hypotheses
- *    and candidates are semantically diverse, that a cited check run actually supports the claim (a passing command proves only
- *    that it ran and exited 0, and that it targets the copy is read from its command text), the tie-break between equally passing
- *    candidates, and the classification of review findings beyond the cited refs.
+ *    and candidates are semantically diverse, that a candidate really acts on a finding assigned to it and that a reference's or an
+ *    exclusion's reason holds (the runtime checks paths, ownership and that the cited evidence is a later own success naming the file),
+ *    that a cited check run actually supports the claim (a passing command proves only that it ran and exited 0, and that it targets
+ *    the copy is read from its command text), the tie-break between equally passing candidates, and the classification of review
+ *    findings beyond the cited refs.
  * Fingerprints are content-based (candidate-workspace.ts: raw bytes and modes of every in-scope file AND of the dependency directories
  * a check runs with); a probe that is missing, failed or overlapped another call that can change files never counts as evidence.
  * Sub-worker ids are unique within a task's ultra run (`subWorkerFloor`, carried with the state), and a copy is never made over an
- * existing candidate's id.
+ * existing candidate's id. A continuation's carried candidates and adoptions date from before all of its calls (ref 0; refs and probes
+ * restart with every assignment): only its own fresh checks count for them, and a carried adoption needs a review of this assignment.
  * Failure path: any stage may end the assignment with status "blocked" and `data.ultra.stage` naming where it stopped (a read-only
- * answer: `data.unresolved`); the gate checks only that shape then.
+ * answer: `data.unresolved`); the gate checks only that shape then, and records the stop no further than the stages this run reached.
  */
 import { Type } from "typebox";
 import { Value } from "typebox/value";
-import { readFile, writeFile } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
+import { lstat, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ToolDefinition, AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { formatSchemaErrors } from "../orchestration/schema-errors.js";
-import { WRITE_TOOLS } from "../orchestration/ownership.js";
+import { ownsPath, WRITE_TOOLS } from "../orchestration/ownership.js";
 import { READ_ONLY_TOOL_NAMES } from "../tools/index.js";
 import { BOOKKEEPING_TOOLS, type EvidenceLedger, type ToolRecord } from "../pi/tool-evidence.js";
 import { MAX_SUB_WORKERS, MAX_VERIFICATION_ROUNDS, SUB_WORKER_CAP_MAX } from "./instructions.js";
 import { CandidateWorkspaces, DEPENDENCY_DIRS, manifestDiff, UnsafeLinksError, type Manifest, type MaterializeReport } from "./candidate-workspace.js";
-import type { PlannedWorker, SpawnReason, SubWorkerOutcome, UltraSpawnHooks } from "./spawn.js";
+import { scopePaths, SPAWN_TOOL, type PlannedWorker, type SpawnCall, type SpawnReason, type SubWorkerOutcome, type UltraSpawnHooks } from "./spawn.js";
 
 export const ADOPT_TOOL = "orche_adopt";
 export const MAX_EXPLORATION_ROUNDS = 2;
 export const MAX_CANDIDATE_ROUNDS = 2;
 export const ULTRA_STAGES = ["criteria", "exploration", "candidates", "evaluation", "selection", "review", "integration", "complete"] as const;
 export type UltraStage = (typeof ULTRA_STAGES)[number];
+/** Another name a report may give a stage: "verification" is the orche_spawn reason of the review stage (blocked reports used it). */
+const STAGE_ALIASES: Readonly<Record<string, UltraStage>> = { verification: "review" };
+const stageOf = (stage: string | undefined): UltraStage | undefined => stage === undefined ? undefined : STAGE_ALIASES[stage] ?? stage as UltraStage;
 export const ADOPT_UNAVAILABLE = "orche_adopt is available only to the orchestrator of an ultra implement assignment; do the work yourself.";
 
 const text = (max: number) => Type.String({ minLength: 1, maxLength: max });
@@ -59,30 +72,33 @@ const refs = Type.Array(text(600), { maxItems: 20 });
 const lit = <T extends string>(values: readonly T[]) => Type.Union(values.map(value => Type.Literal(value)));
 /** `data.ultra` of an ultra orchestrator's report. */
 export const ultraReportSchema = Type.Object({
-  stage: lit(ULTRA_STAGES),
+  stage: lit([...ULTRA_STAGES, ...Object.keys(STAGE_ALIASES)]),
   criteria: Type.Optional(Type.Array(text(600), { minItems: 1, maxItems: 30 })),
   hypotheses: Type.Optional(Type.Array(Type.Object({ claim: text(600), verdict: lit(["supported", "refuted", "open"] as const), evidence: Type.Optional(refs) }), { maxItems: 20 })),
   candidates: Type.Optional(Type.Array(Type.Object({ id: text(40), verdict: lit(["chosen", "rejected", "failed"] as const), reason: text(1000), evidence: Type.Optional(refs) }), { maxItems: SUB_WORKER_CAP_MAX * MAX_CANDIDATE_ROUNDS })),
   selection: Type.Optional(Type.Object({ chosen: text(40), reason: text(1000), evidence: refs })),
-  review: Type.Optional(Type.Array(Type.Object({ finding: text(1000), source: Type.Optional(text(40)), status: lit(["reproduced-fixed", "reproduced-open", "unverified", "refuted"] as const), evidence: Type.Optional(refs) }), { maxItems: 30 })),
+  // source: a free-text label of where a finding came from (never evidence: that is the refs).
+  review: Type.Optional(Type.Array(Type.Object({ finding: text(1000), source: Type.Optional(text(300)), status: lit(["reproduced-fixed", "reproduced-open", "unverified", "refuted"] as const), evidence: Type.Optional(refs) }), { maxItems: 30 })),
   integration: Type.Optional(Type.Object({ evidence: refs })),
   claims: Type.Optional(Type.Array(Type.Object({ claim: text(1000), sources: refs, status: lit(["supported", "contested", "unsupported"] as const) }), { maxItems: 40 })),
 });
 type UltraReport = {
-  stage: UltraStage; criteria?: string[]; hypotheses?: { claim: string; verdict: string; evidence?: string[] }[];
+  stage: string; criteria?: string[]; hypotheses?: { claim: string; verdict: string; evidence?: string[] }[];
   candidates?: { id: string; verdict: "chosen" | "rejected" | "failed"; reason: string; evidence?: string[] }[];
   selection?: { chosen: string; reason: string; evidence: string[] };
   review?: { finding: string; source?: string; status: "reproduced-fixed" | "reproduced-open" | "unverified" | "refuted"; evidence?: string[] }[];
   integration?: { evidence: string[] }; claims?: { claim: string; sources: string[]; status: string }[];
 };
-const FORMAT = 'ultra:{stage:"complete" (or the stage where it stopped),criteria:[acceptance criteria],hypotheses:[{claim,verdict:"supported"|"refuted"|"open",evidence:[refs]}],candidates:[{id,verdict:"chosen"|"rejected"|"failed",reason,evidence:[refs]}],selection:{chosen:candidate id,reason,evidence:[refs]},review:[{finding,source,status:"reproduced-fixed"|"reproduced-open"|"unverified"|"refuted",evidence:[refs]}],integration:{evidence:[refs]} (implement) | claims:[{claim,sources:[refs, paths or URLs],status:"supported"|"contested"|"unsupported"}] (answer)}';
+const FORMAT = `ultra:{stage:"complete" (or the stage where it stopped: ${ULTRA_STAGES.filter(stage => stage !== "complete").join("|")}),criteria:[acceptance criteria],hypotheses:[{claim,verdict:"supported"|"refuted"|"open",evidence:[refs]}],candidates:[{id,verdict:"chosen"|"rejected"|"failed",reason,evidence:[refs]}],selection:{chosen:candidate id,reason,evidence:[refs]},review:[{finding,source,status:"reproduced-fixed"|"reproduced-open"|"unverified"|"refuted",evidence:[refs]}],integration:{evidence:[refs]} (implement) | claims:[{claim,sources:[refs, paths or URLs],status:"supported"|"contested"|"unsupported"}] (answer)}`;
 
 export interface UltraCandidate {
   id: string; name: string; role: string; round: number; status: string;
-  /** Ultra spawn call (ledger ref number) that ran it. */ spawnRef: number;
+  /** Ultra spawn call (ledger ref number) that ran it; 0 once carried into a later assignment (refs restart with every assignment). */ spawnRef: number;
   workspace?: string; base?: string; from?: string; changes: string[]; tampered: string[];
   /** The workspace's manifest when its copy was made (a JSON file in the copies directory): the adoption's conflict check. */
   workspaceBase?: string;
+  /** A fix candidate (`from`): its copy's manifest when it was made (a JSON file in the copies directory), what it started from at each path. */
+  start?: string;
   /** Why it cannot be adopted although it finished: its round changed the workspace or the workspace's dependency directories. */
   escaped?: string[];
 }
@@ -102,8 +118,33 @@ export interface UltraState {
    * same task numbers its sub-workers after it, so no id (and no candidate copy named by it) is ever reused.
    */
   subWorkers?: number;
+  /**
+   * The analysts' hand-off (docs/orchestrator.md 14.2): the findings of finished exploration analysts (`findings`, one per reported
+   * workspace file and exploration round) and how each left the hand-off (`dispositions`, one per finding). Absent in a state carried
+   * from before it existed.
+   */
+  handoff?: UltraHandoff;
 }
-export const newUltraState = (): UltraState => ({ explorationRounds: 0, basisDone: 0, analystsDone: 0, protectedPaths: [], candidateRounds: 0, candidates: [], adoptions: [], verifications: [], subWorkers: 0 });
+/**
+ * An analyst finding: a workspace file the finished analysts of one exploration round named in their reports, keyed by its path and
+ * that round, with its provenance (line references, the analysts' ids, an excerpt). A later round that reports the same file makes a
+ * new finding: an earlier finding's disposition never discharges it.
+ */
+export interface HandoffFinding { path: string; round: number; lines?: string; analysts: string[]; excerpt: string }
+/** How a finding can leave the hand-off (docs/orchestrator.md 14.2); only `assigned` transfers it to a candidate. */
+export type HandoffDispositionKind = "assigned" | "reference" | "excluded" | "out-of-scope";
+/**
+ * The disposition of the finding (`path`, exploration round `exploration`), recorded when the candidates call of candidates round
+ * `round` was accepted: `assigned` (`by`: the candidates of that call that own the path through their files and name it in their
+ * request; answer candidates: that name it), `reference` (read-only context named in a candidate's request, no transfer) or `excluded`,
+ * both with the orchestrator's `reason` and the `evidence` refs of its own checks that name the file, or `out-of-scope` (outside the
+ * assignment's write scope: never required of the candidates).
+ */
+export interface HandoffDisposition { path: string; exploration: number; disposition: HandoffDispositionKind; by?: string[]; reason?: string; evidence?: string[]; round: number }
+export interface UltraHandoff { findings: HandoffFinding[]; dispositions: HandoffDisposition[] }
+export const newUltraState = (): UltraState => ({ explorationRounds: 0, basisDone: 0, analystsDone: 0, protectedPaths: [], candidateRounds: 0, candidates: [], adoptions: [], verifications: [], subWorkers: 0, handoff: { findings: [], dispositions: [] } });
+/** The key of a finding: its path and its exploration round. */
+const findingKey = (path: string, round: number) => `${round}\u0000${path}`;
 /**
  * The number after which `orchestrator`'s next sub-worker of this ultra run is numbered: the recorded high-water mark, and never below
  * a candidate id of the state (a state carried from before the mark existed).
@@ -131,6 +172,11 @@ interface Probe {
   name: string; before?: Fingerprints; after?: Fingerprints; overlapped: boolean; ended: boolean;
   /** Dependency paths this bash call itself changed, by space ("workspace" or a candidate id): named when its evidence is refused. */
   dependencyWrites?: Record<string, string[]>;
+  /**
+   * The hand-off's relevance test (an own check that can ground a reference or an exclusion): the workspace-relative paths its arguments
+   * and its result text name; `read`: its result text was read from the session, `misses`: attempts that found no result there.
+   */
+  paths?: Set<string>; read?: boolean; misses?: number;
 }
 /** The dependency manifests behind a probe's fingerprints, by space ("workspace" or a candidate id); kept only while its call runs. */
 type DependencyManifests = Record<string, Manifest>;
@@ -142,6 +188,69 @@ const citedRefs = (items: readonly string[] | undefined) => [...new Set((items ?
 const under = (path: string, owned: string) => path === owned || path.startsWith(`${owned.replace(/\/$/, "")}/`);
 const dataOf = (data: unknown): Record<string, unknown> => data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
 
+/** Directories whose files are never analyst locations: version control, orche's own files, dependency directories. */
+const NOT_LOCATIONS: ReadonlySet<string> = new Set([".git", ".orche", ...DEPENDENCY_DIRS]);
+/** Path-like tokens: ASCII path characters only, so a path written next to other text (a Korean particle, punctuation) ends where that starts. */
+const PATH_TOKEN = /[A-Za-z0-9_@+~.\/-]+/g;
+/** A line reference right after a path: `:12`, `:12-30` (also with an en or em dash), comma lists. */
+const LINE_REF = /^:(\d+(?:[-–—]\d+)?(?:,\d+(?:[-–—]\d+)?)*)/;
+const LINE_SUFFIX = /:\d+(?:[-–—]\d+)?(?:,\d+(?:[-–—]\d+)?)*$/;
+/** How much of one report text is scanned for locations (a bound on the work, far above a real report). */
+const MAX_REPORT_SCAN = 200_000;
+const clipText = (value: string, max: number) => value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+
+/** A path-like token as a workspace-relative path: trailing dots dropped, `./` and `..` resolved, an absolute path under `cwd` made relative; undefined outside `cwd`. */
+function workspacePath(token: string, cwd: string): string | undefined {
+  const raw = token.replace(/\.+$/, "");
+  if (!raw) return undefined;
+  const rel = relative(cwd, resolve(cwd, raw));
+  if (!rel || isAbsolute(rel) || rel.split(sep)[0] === "..") return undefined;
+  return rel.split(sep).join("/");
+}
+
+interface PathMention { path: string; bare: boolean; lines?: string; at: number; end: number }
+/** The path-like tokens of `text` as workspace-relative paths, with where they are and the line reference after them (`bare`: no `/` or `.`). */
+function pathMentions(text: string, cwd: string): PathMention[] {
+  const mentions: PathMention[] = [];
+  for (const match of text.matchAll(PATH_TOKEN)) {
+    const token = match[0].replace(/\.+$/, "");
+    const path = token ? workspacePath(token, cwd) : undefined;
+    if (!path) continue;
+    const at = match.index ?? 0;
+    const end = at + token.length;
+    const lines = LINE_REF.exec(text.slice(end, end + 80))?.[1]?.replace(/[–—]/g, "-");
+    mentions.push({ path, bare: !/[./]/.test(token), ...(lines ? { lines } : {}), at, end });
+  }
+  return mentions;
+}
+
+/** The text around a mention: its line from at most 80 characters before it, whitespace collapsed, at most 200 characters. */
+function excerptAround(text: string, at: number, end: number): string {
+  const lineStart = text.lastIndexOf("\n", at - 1) + 1;
+  const next = text.indexOf("\n", end);
+  const from = Math.max(lineStart, at - 80);
+  const body = text.slice(from, Math.min(next < 0 ? text.length : next, from + 400)).replace(/\s+/g, " ").trim();
+  return clipText(`${from > lineStart ? "…" : ""}${body}`, 200);
+}
+
+/** The candidates of a call as the hand-off rule sees them (validate: the call's workers; prepare: the planned ones, ids aside). */
+type HandoffWorker = { role: string; name: string; request?: string; files?: readonly string[] };
+/** A `reference` or `excluded` entry of a candidates call, by the workspace-relative path it names (the first entry per path counts). */
+interface HandoffEntry { reason: string; evidence: string[] }
+/** What the hand-off rule decides for one candidates call. */
+interface HandoffDecision {
+  /** The pending findings it disposes of, in their order (`by`: indexes of the assigned candidates in the call). */
+  disposed: { finding: HandoffFinding; disposition: HandoffDispositionKind; by?: number[]; reason?: string; evidence?: string[] }[];
+  /** The pending findings it leaves open, with every reason why (the assignment test, then a reference or exclusion not accepted). */
+  open: { finding: HandoffFinding; problems: string[] }[];
+  /** `reference` and `excluded` entries that name no pending finding. */
+  unmatched: { reference: string[]; excluded: string[] };
+}
+/** An own check of the orchestrator: neither orche_spawn nor orche_adopt nor bookkeeping (task_plan, report_result, send_message). */
+const ownCheck = (name: string) => !BOOKKEEPING_TOOLS.has(name) && name !== SPAWN_TOOL && name !== ADOPT_TOOL;
+/** Tool arguments as text to scan for paths: JSON with its escapes and structure turned into separators (as an analyst's data). */
+const argumentText = (input: Record<string, unknown>): string => (JSON.stringify(input) ?? "").slice(0, MAX_REPORT_SCAN).replace(/\\(?:u[0-9a-fA-F]{4}|.)/g, " ").replace(/["{}[\]]/g, " ");
+
 export interface UltraRunOptions {
   orchestrator: string;
   cwd: string;
@@ -149,6 +258,8 @@ export interface UltraRunOptions {
   readOnly: boolean;
   /** The orchestrator's private scratch directory; candidate copies live under `<scratch>/ultra`. */
   scratch?: string;
+  /** The assignment's authorized write scope (main's `files`, normalized ownership paths); undefined: none given (the whole workspace). */
+  scope?: readonly string[];
   /** The orchestrator session's tool-call ledger (refs T1, T2, …; tagging on for ultra). */
   ledger(): EvidenceLedger;
   /** Shell checks the project runs (orche.config.json `verifyCommands`), suggested for candidate evaluation. */
@@ -157,6 +268,12 @@ export interface UltraRunOptions {
   carried?: UltraState;
   /** Sub-workers per orche_spawn call (`single.maxSubWorkers` of the orchestrator's session; default MAX_SUB_WORKERS). */
   maxSubWorkers?: number;
+  /**
+   * The text of one of the orchestrator's own tool results (`toolCallId`) as its session holds it; undefined when the session does not
+   * hold it (src/extension/workers.ts reads the session's messages). With the call's arguments it is what the hand-off's relevance test
+   * reads: a cited check grounds a reference or an exclusion only when its arguments or its result text name the finding's file.
+   */
+  callText?(toolCallId: string): string | undefined;
   onEvent?(event: Record<string, unknown>): void;
 }
 
@@ -187,10 +304,14 @@ export class UltraRun implements UltraSpawnHooks {
   private queue: Promise<unknown> = Promise.resolve();
   /** The open candidates round: the workspace (manifest) and its dependency directories before it ran (escape check), notes for its result. */
   private round?: { manifest?: Manifest; dependencies: string | { error: string }; notes: string[] };
+  /** The ledger ref of each exploration round's orche_spawn call of this assignment (a carried round has none: 0, before every call). */
+  private readonly explorationRefs = new Map<number, number>();
 
   constructor(private readonly options: UltraRunOptions) {
     this.carried = !!options.carried;
-    this.state = options.carried ? { ...structuredClone(options.carried), adoptions: options.carried.adoptions.map(item => ({ ...item, files: [...item.files], ref: 0 })), verifications: [] } : newUltraState();
+    // Refs and probes restart with every assignment: what is carried dates from before all of this assignment's calls (ref 0), so the
+    // carried candidates count this assignment's fresh checks, and a carried adoption still needs a review of this assignment after it.
+    this.state = options.carried ? { ...structuredClone(options.carried), candidates: options.carried.candidates.map(item => ({ ...structuredClone(item), spawnRef: 0 })), adoptions: options.carried.adoptions.map(item => ({ ...item, files: [...item.files], ref: 0 })), verifications: [] } : newUltraState();
   }
 
   private serial<T>(work: () => Promise<T>): Promise<T> {
@@ -235,11 +356,15 @@ export class UltraRun implements UltraSpawnHooks {
 
   /**
    * The worker's guard allowed a call: open its probe. A call that can change files and runs while another is in flight marks both
-   * overlapped (Pi runs the calls of one response in parallel); a bash call gets the fingerprints before it runs.
+   * overlapped (Pi runs the calls of one response in parallel); a bash call gets the fingerprints before it runs. An own check keeps
+   * the paths its arguments (`input`) name, and the results of the calls that ended before it are read while the session holds them
+   * (the hand-off's relevance test).
    */
-  async beginCall(toolCallId: string | undefined, name: string): Promise<void> {
+  async beginCall(toolCallId: string | undefined, name: string, input?: Record<string, unknown>): Promise<void> {
     if (!toolCallId || this.probes.has(toolCallId)) return;
+    this.readResults();
     const probe: Probe = { name, overlapped: false, ended: false };
+    if (ownCheck(name)) probe.paths = new Set(input ? pathMentions(argumentText(input), this.options.cwd).map(mention => mention.path) : []);
     for (const id of this.inFlight) {
       const other = this.probes.get(id);
       if (!other) continue;
@@ -302,8 +427,8 @@ export class UltraRun implements UltraSpawnHooks {
   }
 
   // ---- orche_spawn hooks ----
-  /** The stage order, caps and roles of one call, before any id is given out (a refused call uses none). */
-  validate(reason: SpawnReason, workers: readonly { role: string; name: string; from?: string }[]): void {
+  /** The stage order, caps, roles and the analysts' hand-off of one call, before any id is given out (a refused call uses none). */
+  validate(reason: SpawnReason, workers: readonly { role: string; name: string; from?: string; request?: string; files?: readonly string[] }[], call?: SpawnCall): void {
     const state = this.state;
     if (reason === "exploration") {
       if (state.explorationRounds >= MAX_EXPLORATION_ROUNDS) throw new Error(`Refused: ${state.explorationRounds} exploration rounds ran (cap ${MAX_EXPLORATION_ROUNDS}). Continue with candidates, or report status "blocked" with data.ultra.stage "exploration".`);
@@ -321,25 +446,32 @@ export class UltraRun implements UltraSpawnHooks {
       if (!earlier?.workspace || !earlier.base) throw new Error(`Refused: ${worker.name}: from ${worker.from} is not an earlier implementation candidate with a workspace.`);
       if (earlier.tampered.length) throw new Error(`Refused: ${worker.name}: ${worker.from} changed the protected basis (${earlier.tampered.join(", ")}); start from the workspace instead.`);
     }
+    // Last: a call refused for an analyst finding it leaves open makes no copy, runs nothing and uses no round or id.
+    this.enforceHandoff(workers, call);
   }
 
-  async prepare(reason: SpawnReason, workers: PlannedWorker[], signal: AbortSignal): Promise<PlannedWorker[]> {
+  async prepare(reason: SpawnReason, workers: PlannedWorker[], signal: AbortSignal, call?: SpawnCall): Promise<PlannedWorker[]> {
     const state = this.state;
-    this.validate(reason, workers);
+    this.validate(reason, workers, call);
     if (reason === "exploration") {
       state.explorationRounds++;
+      // The analysts' findings of this round date from this call: a reference's or an exclusion's evidence must come after it.
+      this.explorationRefs.set(state.explorationRounds, this.nextRef());
       this.event({ stage: "exploration", round: state.explorationRounds, workers: workers.map(worker => worker.id) });
       return workers;
     }
     if (reason === "candidates") {
       const round = state.candidateRounds + 1;
       const spawnRef = this.nextRef();
+      // What this call does with each pending analyst finding (validate refused any it leaves open); recorded once the call is accepted.
+      const disposal = this.handoffDecision(workers, call);
       // A new candidate never takes an existing one's id (its copy and its record stay as they are): refused, nothing runs.
       const taken = workers.filter(worker => state.candidates.some(item => item.id === worker.id) || worker.from === worker.id).map(worker => worker.id);
       if (taken.length) throw new Error(`Refused: candidate id(s) ${taken.join(", ")} belong to existing candidates of this task; no candidate ran and the existing ones are unchanged. Report status "blocked" with data.ultra.stage "candidates" if this persists.`);
       if (this.options.readOnly) {
         state.candidateRounds = round;
         for (const worker of workers) state.candidates.push({ id: worker.id, name: worker.name, role: worker.role, round, status: "running", spawnRef, changes: [], tampered: [] });
+        this.recordHandoff(disposal, workers, round);
         this.event({ stage: "candidates", round, workers: workers.map(worker => worker.id) });
         return workers;
       }
@@ -362,15 +494,19 @@ export class UltraRun implements UltraSpawnHooks {
             reports.push(await spaces.materialize(worker.id, earlier?.base ?? base, earlier?.id, signal));
             const workspace = spaces.path(worker.id);
             const submodules = reports.at(-1)!.submodules;
-            added.push({ id: worker.id, name: worker.name, role: worker.role, round, status: "running", spawnRef, workspace, base: earlier?.base ?? base, workspaceBase: earlier?.workspaceBase ?? workspaceBase, ...(earlier ? { from: earlier.id } : {}), changes: [], tampered: [] });
+            // A fix candidate starts from the earlier copy, not from the workspace: what it started from at each path (its adoption's conflict check).
+            const start = earlier ? join(spaces.root, `${worker.id}.start.json`) : undefined;
+            added.push({ id: worker.id, name: worker.name, role: worker.role, round, status: "running", spawnRef, workspace, base: earlier?.base ?? base, workspaceBase: earlier?.workspaceBase ?? workspaceBase, ...(earlier ? { from: earlier.id } : {}), ...(start ? { start } : {}), changes: [], tampered: [] });
+            if (start) await writeFile(start, JSON.stringify(await spaces.copyManifest(worker.id, signal)));
             prepared.push({ ...worker, workspace, protectedPaths: [...state.protectedPaths], ...(submodules.length ? { outsidePaths: submodules } : {}) });
           }
         } catch (error) {
-          for (const item of added) await spaces.remove(item.id);
+          for (const item of added) { await spaces.remove(item.id); if (item.start) await rm(item.start, { force: true }).catch(() => undefined); }
           throw new Error(`Refused: the candidate copies could not be made (${error instanceof Error ? error.message : String(error)}); no candidate ran. ${error instanceof UnsafeLinksError ? "Those links would let a candidate write outside its copy: remove or replace them (e.g. a venv made with --copies), or use strong mode, or" : "Fix the cause (e.g. free space for the private dependency copies) and call again, or"} report status "blocked" with data.ultra.stage "candidates".`);
         }
         state.candidates.push(...added);
         state.candidateRounds = round;
+        this.recordHandoff(disposal, prepared, round);
         this.round = { manifest, dependencies, notes: copyNotes(reports) };
         this.event({ stage: "candidates", round, workers: prepared.map(worker => ({ id: worker.id, workspace: worker.workspace, ...(worker.from ? { from: worker.from } : {}) })), copies: reports.map(report => ({ dependencies: report.dependencies, relinked: report.relinked, rewritten: report.rewritten, readOnly: report.readOnly.length, privatized: report.privatized.length, submodules: report.submodules.length })) });
         return prepared;
@@ -399,9 +535,19 @@ export class UltraRun implements UltraSpawnHooks {
         const manifest = await spaces.workspaceManifest();
         state.basis = Object.fromEntries(Object.entries(manifest).filter(([path]) => state.protectedPaths.some(owned => under(path, owned))));
       });
+      // The analysts' hand-off: the findings, workspace files their whole reports name (after the basis above, whose files never count).
+      let handoff: string;
+      try {
+        await this.captureHandoff(done.filter(outcome => outcome.role === "answer"), state.explorationRounds);
+        handoff = this.pendingLine();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.event({ stage: "handoff", exploration: state.explorationRounds, error: message });
+        handoff = `Ultra hand-off: the analysts' reports could not be scanned for workspace files (${message}); assign every file they reported to a candidate yourself (owned in its files and named in its request).`;
+      }
       lines.push(`Ultra exploration round ${state.explorationRounds}/${MAX_EXPLORATION_ROUNDS}: ${basis.length} basis builder(s) and ${done.length - basis.length} analyst(s) finished (${outcomes.length - done.length} did not).`,
         state.protectedPaths.length ? `Protected verification basis (candidates and you cannot change it; only another exploration round can): ${state.protectedPaths.join(", ")}.` : this.options.readOnly ? "" : "No basis file was written: the candidates are judged by the existing project checks only; say so in data.ultra.criteria.",
-        state.basisDone && state.analystsDone || this.options.readOnly && state.analystsDone ? `Next: orche_spawn reason "candidates" with 2-${this.options.maxSubWorkers ?? MAX_SUB_WORKERS} independent ${this.options.readOnly ? "answers" : "implementations, each with a different approach or hypothesis"}.` : `Candidates still need a finished ${state.basisDone ? "analyst" : "verification-basis builder"}: run another exploration round (cap ${MAX_EXPLORATION_ROUNDS}) or report status "blocked".`);
+        state.basisDone && state.analystsDone || this.options.readOnly && state.analystsDone ? `Next: orche_spawn reason "candidates" with 2-${this.options.maxSubWorkers ?? MAX_SUB_WORKERS} independent ${this.options.readOnly ? "answers" : "implementations, each with a different approach or hypothesis"}.` : `Candidates still need a finished ${state.basisDone ? "analyst" : "verification-basis builder"}: run another exploration round (cap ${MAX_EXPLORATION_ROUNDS}) or report status "blocked".`, handoff);
       this.event({ stage: "exploration", round: state.explorationRounds, basisDone: state.basisDone, analystsDone: state.analystsDone, protected: [...state.protectedPaths] });
       return lines.filter(Boolean);
     }
@@ -441,6 +587,7 @@ export class UltraRun implements UltraSpawnHooks {
       const { escaped, notes } = this.options.readOnly ? await record() : await this.serial(record);
       const checks = this.options.verifyCommands?.length ? this.options.verifyCommands.join(" && ") : "<the project's checks and the basis tests>";
       lines.push(`Ultra candidates round ${state.candidateRounds}/${MAX_CANDIDATE_ROUNDS}: ${outcomes.map(outcome => `${outcome.id} ${outcome.name} ${outcome.status}${outcome.workspace ? `, ${outcome.changes.length} file(s) changed` : ""}`).join("; ")}.`, ...notes);
+      lines.push(`Ultra ${this.handoffLine()}.`);
       if (escaped.length) lines.push(`Isolation breach: ${escaped.join("; ")}. A candidate (or another process) wrote outside its copy, so none of this round's candidates can be adopted. Find and undo the change, then run another candidates round, or report status "blocked" with data.ultra.stage "candidates".`);
       if (!this.options.readOnly) lines.push(`Evaluate EVERY candidate that finished (done) with the same checks in its own copy, one call at a time, e.g. bash: cd '<workspace>' && ${checks}; judge by those runs, not by the candidates' reports, and cite their [orche ref Tn] in each candidate's data.ultra.candidates entry and in data.ultra.selection. A failing run is evidence too (verdict "failed" needs one; "rejected" means it lost the comparison); a completed candidate is never dropped unchecked. Candidates that did not finish, broke isolation, changed the protected basis or changed no file are excluded by the runtime's record (no check needed; give the reason). A check counts for a copy only if the copy (files and dependency directories, every file there including tool caches) was the same before and after it, is still the same at your report, and nothing else ran meanwhile: run checks so they write nothing into node_modules/.venv/venv (e.g. vitest run --no-cache, PYTHONDONTWRITEBYTECODE=1), or run them again when their writes there repeat identically. Adopt the best verified candidate with orche_adopt; a second candidates round (from: <id>) may fix one from its failure evidence while the earlier stays unchanged.`);
       else lines.push("Check the key claims of every candidate answer against the sources yourself (read, grep, bash) and cite those [orche ref Tn] in each candidate's data.ultra.candidates entry; a claim without a checked source stays unsupported.");
@@ -457,6 +604,270 @@ export class UltraRun implements UltraSpawnHooks {
       }
     }
     return lines;
+  }
+
+  // ---- the analysts' hand-off: every analyst finding is assigned to a candidate, kept as context or left out on the record ----
+  private get handoff(): UltraHandoff { return this.state.handoff ??= { findings: [], dispositions: [] }; }
+
+  /** Outside the assignment's write scope (main's files): never asked of the candidates. A read-only task has no write scope. */
+  private outsideScope(path: string): boolean {
+    const scope = this.options.readOnly ? undefined : this.options.scope;
+    return !!scope && !scope.some(owned => owned === "/" || ownsPath(owned, path));
+  }
+
+  /** Findings no accepted candidates call disposed of yet (one whose file the protected basis took over since needs nothing). */
+  private pendingFindings(): HandoffFinding[] {
+    const disposed = new Set(this.handoff.dispositions.map(item => findingKey(item.path, item.exploration)));
+    return this.handoff.findings.filter(item => !disposed.has(findingKey(item.path, item.round)) && !this.state.protectedPaths.some(owned => under(item.path, owned)));
+  }
+
+  /**
+   * Records the findings of one exploration round: the existing regular workspace files that each finished analyst's whole report
+   * (its summary and its data as JSON, not the shortened spawn result) names, one finding per file with every analyst that named it.
+   * Paths outside the workspace (also through a link), under .git, .orche or a dependency directory, in the scratch directory (the
+   * candidate copies) or in the protected basis never count; a bare name (no `/` or `.`) counts only as the exact name of a file at the
+   * top of the workspace. A file an earlier round reported is a new finding of this round, whatever became of the earlier one. Returns
+   * the findings it added.
+   */
+  private async captureHandoff(analysts: readonly SubWorkerOutcome[], round: number): Promise<HandoffFinding[]> {
+    const cwd = this.options.cwd;
+    const state = this.state;
+    const root = await realpath(cwd).catch(() => resolve(cwd));
+    const scratch = this.options.scratch ? resolve(this.options.scratch) : undefined;
+    const topFiles = new Set(await readdir(cwd, { withFileTypes: true }).then(entries => entries.filter(entry => entry.isFile()).map(entry => entry.name), () => [] as string[]));
+    const known = new Map<string, boolean>();
+    const isLocation = async (path: string, bare: boolean): Promise<boolean> => {
+      const key = `${bare ? "bare" : "path"}:${path}`;
+      const cached = known.get(key);
+      if (cached !== undefined) return cached;
+      const abs = join(cwd, path);
+      let result = false;
+      if (path.split("/").some(part => NOT_LOCATIONS.has(part)) || state.protectedPaths.some(owned => under(path, owned)) || scratch && (abs === scratch || abs.startsWith(`${scratch}${sep}`))) result = false;
+      else if (bare) result = topFiles.has(path);
+      else {
+        try {
+          if ((await lstat(abs)).isFile()) {
+            const inside = relative(root, await realpath(abs));
+            result = !!inside && !isAbsolute(inside) && inside.split(sep)[0] !== "..";
+          }
+        } catch { result = false; }
+      }
+      known.set(key, result);
+      return result;
+    };
+    const found = new Map<string, { lines: string[]; analysts: string[]; excerpt: string }>();
+    for (const outcome of analysts) {
+      // The data as JSON text, its escapes and structure turned into separators (an escaped newline must not glue to the next path).
+      const data = outcome.data === undefined ? "" : (JSON.stringify(outcome.data) ?? "").replace(/\\(?:u[0-9a-fA-F]{4}|.)/g, " ").replace(/["{}[\]]/g, " ");
+      for (const text of [outcome.summary ?? "", data]) {
+        const scanned = text.slice(0, MAX_REPORT_SCAN);
+        for (const mention of pathMentions(scanned, cwd)) {
+          if (!await isLocation(mention.path, mention.bare)) continue;
+          let entry = found.get(mention.path);
+          if (!entry) found.set(mention.path, entry = { lines: [], analysts: [], excerpt: excerptAround(scanned, mention.at, mention.end) });
+          if (!entry.analysts.includes(outcome.id)) entry.analysts.push(outcome.id);
+          for (const lines of mention.lines?.split(",") ?? []) if (!entry.lines.includes(lines)) entry.lines.push(lines);
+        }
+      }
+    }
+    const handoff = this.handoff;
+    const disposed = new Set(handoff.dispositions.map(item => findingKey(item.path, item.exploration)));
+    // A pending finding whose file a basis builder has written since is the protected basis now: nobody may change it, nothing to hand off.
+    handoff.findings = handoff.findings.filter(item => disposed.has(findingKey(item.path, item.round)) || !state.protectedPaths.some(owned => under(item.path, owned)));
+    const added: HandoffFinding[] = [];
+    const again: string[] = [];
+    for (const [path, entry] of found) {
+      const same = handoff.findings.find(item => item.path === path && item.round === round);
+      if (same) {
+        // The same round once more (never twice in practice): the provenance grows.
+        for (const id of entry.analysts) if (!same.analysts.includes(id)) same.analysts.push(id);
+        const lines = [...new Set([...(same.lines?.split(",") ?? []), ...entry.lines])];
+        if (lines.length) same.lines = lines.join(",");
+        continue;
+      }
+      // Keyed by file and round: a file an earlier round reported (disposed of or not) is a new finding of this round that needs its own
+      // disposition; no earlier disposition discharges it.
+      if (handoff.findings.some(item => item.path === path)) again.push(path);
+      const finding: HandoffFinding = { path, round, ...(entry.lines.length ? { lines: entry.lines.join(",") } : {}), analysts: entry.analysts, excerpt: entry.excerpt };
+      handoff.findings.push(finding);
+      added.push(finding);
+    }
+    this.event({ stage: "handoff", exploration: round, analysts: analysts.map(outcome => outcome.id), findings: added.map(item => ({ ...item, analysts: [...item.analysts] })), ...(again.length ? { reportedAgain: again } : {}), pending: this.pendingFindings().length });
+    return added;
+  }
+
+  /** Reads the result texts of the own checks that ended (once each, while the session still holds them): the hand-off's relevance test. */
+  private readResults(): void {
+    if (!this.options.callText) return;
+    for (const [id, probe] of this.probes) if (probe.ended && probe.paths && !probe.read && (probe.misses ?? 0) < 3) this.readResult(id, probe);
+  }
+
+  /** Adds the paths an own check's result text names to its probe, when the session holds that result. */
+  private readResult(id: string, probe: Probe): void {
+    if (!probe.paths || probe.read || !this.options.callText) return;
+    let text: string | undefined;
+    try { text = this.options.callText(id); } catch { text = undefined; }
+    if (text === undefined) { probe.misses = (probe.misses ?? 0) + 1; return; }
+    probe.read = true;
+    for (const mention of pathMentions(text.slice(0, MAX_REPORT_SCAN), this.options.cwd)) probe.paths.add(mention.path);
+  }
+
+  /** Whether the own check `call` names `path` (relative, or absolute under the workspace): in its arguments or in its result text. */
+  private callNames(call: ToolRecord, path: string): boolean {
+    const probe = this.probes.get(call.toolCallId);
+    if (probe?.paths) {
+      if (probe.ended) this.readResult(call.toolCallId, probe);
+      if (probe.paths.has(path)) return true;
+    }
+    // What the ledger kept of it (its command or path): for a call whose arguments were not seen.
+    return !!call.target && pathMentions(call.target, this.options.cwd).some(mention => mention.path === path);
+  }
+
+  /**
+   * Which of `evidence`'s cited refs ground a reference or an exclusion of `finding` (`refs`), else why none does (`problems`). A ref
+   * grounds it when it is a successful own check of the orchestrator (not orche_spawn, orche_adopt or bookkeeping) made after the
+   * exploration round that reported the finding (a carried finding: any call of this assignment) whose arguments or result text name
+   * the finding's file; an unrelated check (one that reads another file) does not.
+   */
+  private grounding(finding: HandoffFinding, evidence: readonly string[]): { refs: string[]; problems: string[] } {
+    const after = this.explorationRefs.get(finding.round) ?? 0;
+    const hint = `cite a successful check of yours${after ? ` after T${after}` : ""} whose arguments or output name ${finding.path}`;
+    const cited = citedRefs(evidence);
+    if (!cited.length) return { refs: [], problems: [`its evidence cites no [orche ref Tn] (${hint})`] };
+    const calls = new Map(this.options.ledger().calls.map(call => [call.ref, call]));
+    const refs: string[] = [];
+    const problems: string[] = [];
+    for (const ref of cited) {
+      const call = calls.get(ref);
+      const problem = !call ? `${ref} is no call of yours`
+        : call.isError ? `${ref} failed`
+        : !ownCheck(call.name) ? `${ref} is ${call.name}, not your own check`
+        : refNumber(ref) <= after ? `${ref} ran before exploration round ${finding.round} reported it`
+        : !this.callNames(call, finding.path) ? `${ref} does not name this path in its arguments or output`
+        : undefined;
+      if (problem) problems.push(problem); else refs.push(ref);
+    }
+    return refs.length ? { refs, problems: [] } : { refs, problems: [...problems.slice(0, -1), `${problems.at(-1)} (${hint})`] };
+  }
+
+  /**
+   * The hand-off rule for one candidates call, before anything runs. Each pending finding is out of scope (outside the assignment's
+   * write scope: recorded, never asked of the candidates); assigned (a write run: the same implementation candidate owns its path
+   * through its files, by the ownership normalization, a directory owning its files and "/" every file, and names it in its request,
+   * relative or absolute under the workspace; a read-only run: an answer candidate's request names it); reference (a `reference` entry
+   * with a reason and grounded evidence, the path named in a candidate's request: read-only context, no transfer); excluded (an
+   * `excluded` entry with a reason and grounded evidence); or open, with every reason why (`grounding`).
+   */
+  private handoffDecision(workers: readonly HandoffWorker[], call: Pick<SpawnCall, "reference" | "excluded"> | undefined): HandoffDecision {
+    const cwd = this.options.cwd;
+    const readOnly = this.options.readOnly;
+    const decision: HandoffDecision = { disposed: [], open: [], unmatched: { reference: [], excluded: [] } };
+    const pending = this.pendingFindings();
+    const pendingPaths = new Set(pending.map(item => item.path));
+    const entries = (kind: "reference" | "excluded"): Map<string, HandoffEntry> => {
+      const out = new Map<string, HandoffEntry>();
+      const list = call?.[kind];
+      for (const entry of Array.isArray(list) ? list : []) {
+        if (!entry || typeof entry.path !== "string") continue;
+        const path = workspacePath(entry.path.trim().replace(LINE_SUFFIX, ""), cwd);
+        if (!path || !pendingPaths.has(path)) { decision.unmatched[kind].push(entry.path); continue; }
+        if (!out.has(path)) out.set(path, { reason: typeof entry.reason === "string" ? entry.reason.trim() : "", evidence: Array.isArray(entry.evidence) ? entry.evidence.filter((item): item is string => typeof item === "string") : [] });
+      }
+      return out;
+    };
+    const references = entries("reference");
+    const exclusions = entries("excluded");
+    if (!pending.length) return decision;
+    // Only candidates of this run's kind take findings: implementations in a write run, answers in a read-only one (planSpawn refuses a mix).
+    const eligible = workers.map(worker => worker.role === (readOnly ? "answer" : "implement"));
+    const named = workers.map((worker, index) => new Set(eligible[index] ? pathMentions(worker.request ?? "", cwd).map(mention => mention.path) : []));
+    // Owned paths by the ownership normalization (planSpawn's); "/" is its normalized whole workspace (a planned worker's "./").
+    const owned = workers.map((worker, index) => eligible[index] && !readOnly ? (worker.files ?? []).flatMap(file => { if (file === "/") return ["/"]; try { return scopePaths([file]); } catch { return []; } }) : []);
+    const who = (indexes: readonly number[]) => indexes.map(index => `#${index + 1} ${workers[index]!.name}`).join(", ");
+    for (const finding of pending) {
+      if (this.outsideScope(finding.path)) { decision.disposed.push({ finding, disposition: "out-of-scope" }); continue; }
+      const namedBy = workers.flatMap((_, index) => named[index]!.has(finding.path) ? [index] : []);
+      const ownedBy = workers.flatMap((_, index) => owned[index]!.some(scope => scope === "/" || ownsPath(scope, finding.path)) ? [index] : []);
+      // Assigned: one candidate owns the file and names it (an answer candidate: names it). A mention or ownership alone is no transfer.
+      const by = readOnly ? namedBy : namedBy.filter(index => ownedBy.includes(index));
+      if (by.length) { decision.disposed.push({ finding, disposition: "assigned", by }); continue; }
+      const problems = [readOnly ? "named in no candidate's request"
+        : namedBy.length && ownedBy.length ? `named in the request of ${who(namedBy)} but owned only by ${who(ownedBy)}: one candidate must both own it and name it`
+        : namedBy.length ? `named in the request of ${who(namedBy)} but owned by no candidate`
+        : ownedBy.length ? `owned by ${who(ownedBy)} but named in no candidate's request`
+        : "in no candidate's request or files"];
+      const reference = references.get(finding.path);
+      const exclusion = exclusions.get(finding.path);
+      if (reference && exclusion) { decision.open.push({ finding, problems: [...problems, "listed in both reference and excluded: give it one disposition"] }); continue; }
+      const entry = reference ?? exclusion;
+      if (!entry) { decision.open.push({ finding, problems }); continue; }
+      const kind = reference ? "reference" as const : "excluded" as const;
+      const grounding = this.grounding(finding, entry.evidence);
+      const issues = [
+        ...(entry.reason ? [] : ["its reason is empty"]),
+        ...(kind === "reference" && !namedBy.length ? ["its path is named in no candidate's request (a reference reaches the candidates as read-only context through a request)"] : []),
+        ...grounding.problems,
+      ];
+      if (issues.length) decision.open.push({ finding, problems: [...problems, `${kind} not accepted: ${issues.join("; ")}`] });
+      else decision.disposed.push({ finding, disposition: kind, reason: entry.reason, evidence: grounding.refs });
+    }
+    return decision;
+  }
+
+  /** Refuses a candidates call that leaves an analyst finding open, naming each with its problems and the ways to resolve it (nothing ran or was made). */
+  private enforceHandoff(workers: readonly HandoffWorker[], call: SpawnCall | undefined): void {
+    const { open, unmatched } = this.handoffDecision(workers, call);
+    if (!open.length) return;
+    this.event({ stage: "handoff", candidates: this.state.candidateRounds + 1, refused: open.map(({ finding, problems }) => ({ path: finding.path, exploration: finding.round, ...(finding.lines ? { lines: finding.lines } : {}), analysts: [...finding.analysts], problems: [...problems] })) });
+    const listed = open.slice(0, 20).map(({ finding, problems }) => `- ${finding.path}${finding.lines ? `:${finding.lines}` : ""} (analyst ${finding.analysts.join(", ")}, exploration round ${finding.round}): "${finding.excerpt}"\n  ${problems.join("; ")}`);
+    const grounded = "a successful check of yours (read, grep, bash; not orche_spawn or orche_adopt) made after the exploration round that reported the file, whose arguments or output name the file";
+    throw new Error([
+      `Refused (ultra hand-off): ${open.length} analyst finding(s) have no accepted disposition; no copy was made, no candidate ran and no candidate round was used.`,
+      ...listed,
+      ...(open.length > 20 ? [`- … ${open.length - 20} more: ${open.slice(20).map(item => `${item.finding.path} (round ${item.finding.round})`).join(", ")}`] : []),
+      ...(unmatched.reference.length ? [`Ignored reference entries (no open analyst finding): ${unmatched.reference.join(", ")}.`] : []),
+      ...(unmatched.excluded.length ? [`Ignored excluded entries (no open analyst finding): ${unmatched.excluded.join(", ")}.`] : []),
+      this.options.readOnly
+        ? `Resolve each in this call: (1) name its path in at least one candidate's request, with what to examine; or (2) leave it out on the record: excluded: [{path, reason, evidence: ["[orche ref Tn] …"]}], the evidence citing ${grounded}, showing why the candidates need not consider it.`
+        : `Resolve each in this call: (1) assign it: the same candidate owns it in its files (a directory dir/ owns its files) and names it in its request, with what to do about it (a mention without ownership, or ownership without a mention, is no transfer); (2) reference: [{path, reason, evidence}] gives it to the candidates as read-only context (name it in a candidate's request); or (3) excluded: [{path, reason, evidence}] leaves it out. The evidence of (2) and (3) cites ${grounded}, showing why it is only context or why the candidates need not handle it.${this.options.scope ? " Files outside your write scope are recorded as out of scope automatically and are not listed; never give a candidate files outside your write scope." : ""}`,
+    ].join("\n"));
+  }
+
+  /** The dispositions of an accepted candidates call (`workers`: its candidates with their ids, in the call's order), recorded with each finding's provenance. */
+  private recordHandoff(decision: HandoffDecision, workers: readonly PlannedWorker[], round: number): void {
+    if (!decision.disposed.length) return;
+    const items = decision.disposed.map(({ finding, disposition, by, reason, evidence }): HandoffDisposition => ({
+      path: finding.path, exploration: finding.round, disposition, ...(by ? { by: by.map(index => workers[index]?.id ?? `#${index + 1}`) } : {}),
+      ...(reason !== undefined ? { reason } : {}), ...(evidence ? { evidence: [...evidence] } : {}), round,
+    }));
+    this.handoff.dispositions.push(...items);
+    this.event({ stage: "handoff", candidates: round, dispositions: items.map((item, index) => { const { finding } = decision.disposed[index]!; return { ...structuredClone(item), analysts: [...finding.analysts], ...(finding.lines ? { lines: finding.lines } : {}), excerpt: finding.excerpt }; }) });
+  }
+
+  /** `hand-off: N analyst finding(s): assigned A, reference R, excluded E, out of scope O`, with what is still open and the out-of-scope files named. */
+  private handoffLine(): string {
+    const { findings, dispositions } = this.handoff;
+    const kind = new Map<string, HandoffDispositionKind>();
+    for (const item of dispositions) { const key = findingKey(item.path, item.exploration); if (!kind.has(key)) kind.set(key, item.disposition); }
+    const of = (disposition: HandoffDispositionKind) => findings.filter(item => kind.get(findingKey(item.path, item.round)) === disposition);
+    const outside = [...new Set(of("out-of-scope").map(item => item.path))];
+    const open = this.pendingFindings().length;
+    return `hand-off: ${findings.length} analyst finding(s): assigned ${of("assigned").length}, reference ${of("reference").length}, excluded ${of("excluded").length}, out of scope ${of("out-of-scope").length}${open ? `, not yet disposed ${open}` : ""}${outside.length ? ` (outside the assignment's write scope, not required of the candidates: ${outside.slice(0, 10).join(", ")}${outside.length > 10 ? `, … ${outside.length - 10} more` : ""})` : ""}`;
+  }
+
+  /** The exploration result's hand-off line: the findings no accepted candidates call has disposed of yet; "" when none. */
+  private pendingLine(): string {
+    const open = this.pendingFindings();
+    if (!open.length) return "";
+    const due = open.filter(item => !this.outsideScope(item.path));
+    const outside = [...new Set(open.filter(item => this.outsideScope(item.path)).map(item => item.path))];
+    const name = (item: HandoffFinding) => `${item.path}${item.lines ? `:${item.lines}` : ""} (${item.analysts.join(", ")}, round ${item.round})`;
+    const evidence = "the evidence citing your own successful check (read, grep, bash) after the exploration round that reported the file, whose arguments or output name it";
+    return [
+      `Ultra hand-off: the analysts' reports name ${open.length} workspace file(s) no candidates call has disposed of yet (analyst findings).`,
+      due.length ? `Your next candidates call is refused unless each of these is ${this.options.readOnly ? `named in at least one candidate's request, or listed in its excluded [{path, reason, evidence}], ${evidence}` : `assigned (the same candidate owns it in its files and names it in its request; a mention alone or ownership alone is no transfer), or listed in its reference [{path, reason, evidence}] (read-only context, also named in a candidate's request) or excluded [{path, reason, evidence}], ${evidence}`}: ${due.slice(0, 20).map(name).join("; ")}${due.length > 20 ? `; … ${due.length - 20} more` : ""}.` : "",
+      outside.length ? `Outside your write scope (recorded as out of scope, not required of the candidates): ${outside.slice(0, 10).join(", ")}${outside.length > 10 ? `, … ${outside.length - 10} more` : ""}.` : "",
+    ].filter(Boolean).join(" ");
   }
 
   // ---- orche_adopt ----
@@ -481,8 +892,11 @@ export class UltraRun implements UltraSpawnHooks {
       if (!checks.some(call => this.sawCandidate(call, id, print))) throw new Error(`${id}'s copy is not what your checks in it (${checks.map(call => call.ref).join(", ")}) evaluated: its files or its dependency directories (${DEPENDENCY_DIRS.join(", ")}) changed during or after them, or another call that can change files ran at the same time. Run the checks in its copy again, alone, then adopt.${this.dependencyWritesNote(checks, id)}`);
       const base = candidate.workspaceBase ? JSON.parse(await readFile(candidate.workspaceBase, "utf8")) as Manifest : undefined;
       if (!base) throw new Error(`${id}'s base (the workspace when its copy was made) is unavailable; it cannot be adopted safely.`);
+      const { paths, against } = await this.adoptionScope(candidate, changes, base, spaces, signal);
+      const undone = paths.filter(path => !changes.includes(path) && this.state.protectedPaths.some(owned => under(path, owned)));
+      if (undone.length) { candidate.tampered = undone; throw new Error(`${id} changed the protected verification basis (${undone.join(", ")}); it cannot be adopted.`); }
       const ref = this.nextRef();
-      const { applied } = await spaces.adopt(id, changes, base, signal, async () => await spaces.fingerprint(id, signal) === print ? undefined : `${id}'s copy changed while it was copied`);
+      const { applied } = await spaces.adopt(id, paths, against, signal, async () => await spaces.fingerprint(id, signal) === print ? undefined : `${id}'s copy changed while it was copied`);
       candidate.changes = changes;
       this.state.adoptions.push({ candidate: id, files: applied, ref, fingerprint: print });
       // Dependency changes stay in the copy (never adopted): the workspace's checks then run with the workspace's own dependencies. A fix
@@ -498,6 +912,25 @@ export class UltraRun implements UltraSpawnHooks {
       const note = dependencies === undefined ? ` Its dependency directories could not be compared with how its copy started; if it installed or changed dependencies there, do the same in the workspace.` : dependencies.length ? ` ${id} also changed its private dependency directories (${dependencies.length} path(s): ${dependencies.slice(0, 5).join(", ")}${dependencies.length > 5 ? ", …" : ""}); those changes are NOT adopted: install or apply them in the workspace before the integration checks.` : "";
       return `Adopted ${id} into the workspace: ${applied.length} file(s): ${applied.slice(0, 30).join(", ")}${applied.length > 30 ? ", …" : ""}.${note} Next: run the full checks in the workspace (cite them in data.ultra.integration.evidence) and an orche_spawn verification round on the integrated result (counterexamples). Integration edits are allowed from now on; the checks you cite must have run after the last change of the workspace (its files or its dependency directories, by any tool or command), alone.`;
     });
+  }
+
+  /**
+   * What adopting `candidate` writes, and the workspace state it must find there (`against`; any other state refuses it). A fix
+   * candidate started from its earlier candidate's copy, not from the workspace: a path the workspace changed since the base that holds
+   * exactly what the fix started from (its earlier candidate's adoption) is one the fix saw, so it is no conflict, and the fix's own
+   * content is written there too (a change of the earlier candidate that the fix undid is undone in the workspace). Every other change
+   * of the workspace since the base stays a conflict (no blind merge); without the fix's start manifest nothing is relaxed.
+   */
+  private async adoptionScope(candidate: UltraCandidate, changes: string[], base: Manifest, spaces: CandidateWorkspaces, signal?: AbortSignal): Promise<{ paths: string[]; against: Manifest }> {
+    const start = candidate.start ? await readFile(candidate.start, "utf8").then(text => JSON.parse(text) as Manifest, () => undefined) : undefined;
+    if (!start) return { paths: changes, against: base };
+    const now = await spaces.workspaceManifest(signal);
+    const seen = manifestDiff(base, now).map(change => change.path).filter(path => now[path] === start[path]);
+    if (!seen.length) return { paths: changes, against: base };
+    const copy = await spaces.copyManifest(candidate.id, signal);
+    const against: Manifest = { ...base };
+    for (const path of seen) { const entry = now[path]; if (entry === undefined) delete against[path]; else against[path] = entry; }
+    return { paths: [...changes, ...seen.filter(path => !changes.includes(path) && copy[path] !== now[path])], against };
   }
 
   // ---- the orchestrator's own writes ----
@@ -550,10 +983,12 @@ export class UltraRun implements UltraSpawnHooks {
     const error = this.check(record);
     // A fingerprint serves exactly one report: the next report_result takes its own (or is refused without one).
     this.current = { error: "not taken for this report", candidates: {} };
-    const stage = (record.ultra as { stage?: UltraStage } | undefined)?.stage;
+    const stage = stageOf((record.ultra as { stage?: string } | undefined)?.stage);
     const complete = stage === "complete" && record.status !== "blocked";
-    this.gateResult = error ? `rejected: ${error.slice(0, 300)}` : complete ? "passed" : `accepted as incomplete (stopped at ${stage})`;
-    if (!error) this.reported = stage;
+    // Where an accepted incomplete report stopped, as recorded: its stage, but never one this run did not reach (nor "complete").
+    const stopped = error || complete || !stage ? stage : this.stoppedAt(stage);
+    this.gateResult = error ? `rejected: ${error.slice(0, 300)}` : complete ? "passed" : `accepted as incomplete (stopped at ${stopped})`;
+    if (!error) this.reported = stopped;
     if (error) this.event({ stage: "gate", rejected: error.slice(0, 2000) });
     // What the comparison rested on: the current checks of each evaluated candidate and the runtime fact behind each exclusion.
     else if (complete) { const verdicts = this.verdicts as { evaluated: Record<string, string[]>; excluded: Record<string, string> } | undefined; if (verdicts) this.event({ stage: "gate", passed: true, ...verdicts }); }
@@ -567,7 +1002,7 @@ export class UltraRun implements UltraSpawnHooks {
     const readOnly = this.options.readOnly;
     const blocked = !readOnly && record.status === "blocked";
     if (blocked) return typeof record.reason === "string" && record.reason.trim() ? undefined : "A blocked ultra report needs data.reason: where it stopped (data.ultra.stage), why, and what is preserved (candidates, adopted changes).";
-    if (report.stage !== "complete") {
+    if (stageOf(report.stage) !== "complete") {
       if (!readOnly) return `data.ultra.stage is "${report.stage}": an ultra task that did not complete reports status "blocked" with data.reason; status "done" needs stage "complete".`;
       return Array.isArray(record.unresolved) && record.unresolved.length ? undefined : `data.ultra.stage is "${report.stage}": an incomplete ultra answer lists what is missing in data.unresolved.`;
     }
@@ -712,6 +1147,18 @@ export class UltraRun implements UltraSpawnHooks {
     return "exploration";
   }
 
+  /**
+   * The stage an accepted incomplete report stopped at, as recorded: the one it names, unless that is beyond what this run reached
+   * (an implement run with nothing adopted is at most at selection; an adoption without a review after it is at review), then this
+   * run's own stage. "complete" is reached only through the gate.
+   */
+  private stoppedAt(stage: UltraStage): UltraStage {
+    const now = this.stage();
+    if (this.options.readOnly) return stage === "complete" ? now : stage;
+    const furthest = now === "evaluation" ? "selection" : now;
+    return ULTRA_STAGES.indexOf(stage) <= ULTRA_STAGES.indexOf(furthest) ? stage : now;
+  }
+
   summary(): UltraSummary {
     const state = this.state;
     return {
@@ -724,9 +1171,14 @@ export class UltraRun implements UltraSpawnHooks {
   /** The `Ultra:` lines of the task result. */
   lines(): string[] {
     const summary = this.summary();
+    // The cap counts rounds in which a verifier finished; rounds without any verdict are listed apart (spawn.ts).
+    const finished = this.state.verifications.filter(round => round.finished > 0).length;
+    const unfinished = this.state.verifications.length - finished;
     return [
-      `Ultra: stage ${summary.stage}; exploration ${summary.explorationRounds}/${MAX_EXPLORATION_ROUNDS} round(s), candidates ${summary.candidateRounds}/${MAX_CANDIDATE_ROUNDS} round(s) (${summary.candidates.map(item => `${item.id} ${item.status}${item.adopted ? " adopted" : ""}${item.tampered ? " basis-changed" : ""}`).join(", ") || "none"}), verification ${summary.verificationRounds}/${MAX_VERIFICATION_ROUNDS} round(s); report gate ${summary.gate ?? "not reached"}${summary.carried ? "; continued from the previous assignment of this task" : ""}`,
+      `Ultra: stage ${summary.stage}; exploration ${summary.explorationRounds}/${MAX_EXPLORATION_ROUNDS} round(s), candidates ${summary.candidateRounds}/${MAX_CANDIDATE_ROUNDS} round(s) (${summary.candidates.map(item => `${item.id} ${item.status}${item.adopted ? " adopted" : ""}${item.tampered ? " basis-changed" : ""}`).join(", ") || "none"}), verification ${finished}/${MAX_VERIFICATION_ROUNDS} round(s)${unfinished ? ` (+${unfinished} without a finished verifier)` : ""}; report gate ${summary.gate ?? "not reached"}${summary.carried ? "; continued from the previous assignment of this task" : ""}`,
       ...(summary.protectedBasis.length ? [`Ultra protected basis: ${summary.protectedBasis.join(", ")}`] : []),
+      // The analysts' hand-off, once an exploration ran (or carried findings exist): how their findings left the hand-off.
+      ...(this.state.explorationRounds || this.state.handoff?.findings.length ? [`Ultra ${this.handoffLine()}`] : []),
     ];
   }
 }
@@ -776,6 +1228,7 @@ export function ultraSection(readOnly: boolean, maxSubWorkers: number = MAX_SUB_
     "1. Criteria: fix the question's explicit evaluation criteria (what a correct, complete answer must show) in data.ultra.criteria.",
     `2. Exploration (orche_spawn reason "exploration", 2-${maxSubWorkers} answer workers): independent source finders/criteria builders and hypothesis analysts; give them only the question and references, never a draft answer.`,
     `3. Candidates (reason "candidates", 2-${maxSubWorkers} answer workers): independent answers, each from a different angle, each claim with its sources.`,
+    "Hand-off (enforced): each existing workspace file a finished exploration analyst names in its report is a finding of that exploration round. Before any candidate runs, the candidates call must name each pending finding's file in at least one candidate's request, or list it in that orche_spawn call's excluded [{path, reason, evidence}] citing a successful check of yours made after that exploration round whose arguments or output name the file; otherwise the call is refused (no round used). A later round that reports the same file makes a new finding.",
     "4. Evaluation: check every candidate's key claims against the sources yourself (read, grep, bash); no code tests are required for a question.",
     "5. Selection: choose the best-supported candidate answer by the criteria; merge only claims you checked. 6. Review: orche_spawn reason \"verification\" with fresh verifiers that try to refute the selected answer's claims; reproduce or refute each finding yourself.",
     `Report data.ultra: ${FORMAT}. ${evidence} If a stage cannot be completed, set data.ultra.stage to where it stopped and list what is missing in data.unresolved. ${caps}`,
@@ -785,6 +1238,7 @@ export function ultraSection(readOnly: boolean, maxSubWorkers: number = MAX_SUB_
     "1. Requirements: fix the requirements and acceptance criteria in your Task DAG (task_plan) and in data.ultra.criteria; report an ambiguity you cannot resolve instead of guessing.",
     `2. Exploration (orche_spawn reason "exploration", 2-${maxSubWorkers} workers, before any candidate): verification-basis builders (role implement) write tests or executable checks for the acceptance criteria in files they own, from the requirements alone, so that a wrong solution fails them; hypothesis/approach analysts (role answer) propose causes or approaches, each with a prediction and a check that would falsify it. Give them only the requirements and references, never a planned solution. The files the basis builders changed become the protected verification basis: nobody changes it afterwards except another exploration round.`,
     `3. Candidates (reason "candidates", 2-${maxSubWorkers} implement workers): independent implementations, each with a different approach or hypothesis, each in its own workspace copy (named in the result); they cannot see each other. A second round may fix a candidate from its failure evidence only (from: its id); the earlier candidate stays unchanged as the incumbent.`,
+    "Hand-off (enforced): each existing workspace file a finished exploration analyst names in its report is a finding of that exploration round. Before any candidate copy is made, the candidates call must dispose of every pending finding: assign it (the same candidate owns the file in its files, a directory dir/ owning its files, and names it in its request with what to do; a mention without ownership, or ownership without a mention, is no transfer), or list it in that orche_spawn call's reference [{path, reason, evidence}] (read-only context, also named in a candidate's request) or excluded [{path, reason, evidence}], the evidence citing a successful check of yours made after that exploration round whose arguments or output name the file. Files outside your assignment's write scope are recorded as out of scope: never give them to a candidate. Otherwise the call is refused (no copy, no round used). A later round that reports the same file makes a new finding.",
     "4. Evaluation: run the same checks (the protected basis, the project's tests, typecheck/lint) in every finished candidate's copy yourself (bash: cd '<workspace>' && <checks>), one tool call per response; judge only by these runs. Every finished (done) candidate needs such a run of its current copy in its data.ultra.candidates entry, passing or failing (verdict \"failed\" needs a failing one); only candidates that did not finish, broke isolation, changed the protected basis or changed no file are excluded without one. A check counts only for the exact content it saw: the runtime fingerprints the copies and the workspace (their files and their dependency directories node_modules/.venv/venv) before and after every bash call and again at your report, so a check that changed files or dependencies (every file there counts, tool caches included: run checks without writing there, e.g. vitest run --no-cache or PYTHONDONTWRITEBYTECODE=1), overlapped another call, or was followed by a change (by any tool, shell command, install or process) has to be run again.",
     "5. Selection and adoption: choose the candidate with the best execution evidence (on a tie the simpler, smaller, less risky change); orche_adopt {candidate} copies its changed files into the workspace (refused unless a successful check of yours saw its copy exactly as it is now, when its round broke isolation, or when the workspace changed underneath). Dependency changes a candidate made in its copy are not adopted: install them in the workspace before the integration checks.",
     "6. Counterexample review: orche_spawn reason \"verification\" on the integrated result, asking for concrete counterexamples with reproduction commands. Reproduce each finding yourself: reproduced-fixed (fixed and re-checked), reproduced-open (keeps the task blocked), unverified (could not reproduce), refuted (your run disproves it).",

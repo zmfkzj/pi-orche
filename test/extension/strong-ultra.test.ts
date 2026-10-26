@@ -106,12 +106,12 @@ describe("strong/ultra: config, commands and texts", () => {
   it("/orche models names the strong tiers, their fallbacks and which tiers the mode uses", () => {
     const view = { main: "p/m", thinking: "high", atStart: {}, advisor: false };
     const unset = formatModelTiers({ ...view, mode: "strong", tiers: { orchestrator: { model: "a/o" }, worker: { model: "a/w" } } });
-    expect(unset).toContain("- strong-orchestrator (strong and ultra modes, in place of the orchestrator): unset: falls back to models.orchestrator (a/o (thinking: main's))");
-    expect(unset).toContain("- strong-worker (strong and ultra modes, in place of the worker): inherited from the strong orchestrator (a/o); models.worker does not apply");
+    expect(unset).toContain("- strong-orchestrator (strong, ultra and mdsd modes, in place of the orchestrator): unset: falls back to models.orchestrator (a/o (thinking: main's))");
+    expect(unset).toContain("- strong-worker (strong, ultra and mdsd modes, in place of the worker): inherited from the strong orchestrator (a/o); models.worker does not apply");
     expect(unset).toContain("Mode strong: orche_task workers run on the strong tiers above");
     const set = formatModelTiers({ ...view, mode: "single", tiers: { "strong-orchestrator": { model: "a/s", thinking: "max" }, "strong-worker": { model: "a/sw" } } });
-    expect(set).toContain("- strong-orchestrator (strong and ultra modes, in place of the orchestrator): a/s max — config models.strong-orchestrator");
-    expect(set).toContain("- strong-worker (strong and ultra modes, in place of the worker): a/sw (thinking: the strong orchestrator's) — config models.strong-worker");
+    expect(set).toContain("- strong-orchestrator (strong, ultra and mdsd modes, in place of the orchestrator): a/s max — config models.strong-orchestrator");
+    expect(set).toContain("- strong-worker (strong, ultra and mdsd modes, in place of the worker): a/sw (thinking: the strong orchestrator's) — config models.strong-worker");
     expect(set).toContain("- worker (orche_spawn sub-workers, the fresh verifier included): inherited from the orchestrator (p/m)");
     expect(set).not.toContain("Mode single:");
   });
@@ -361,7 +361,7 @@ describe("ultra: end to end (faux models)", () => {
       orchestrator: turn => {
         switch (turn) {
           case 0: return tool(SPAWN_TOOL, { reason: "exploration", workers: [{ name: "basis", role: "implement", request: "Write test/basis.sh for R1.", files: ["test/"] }, { name: "cause", role: "answer", request: "Hypotheses for R1." }] });
-          case 1: return tool(SPAWN_TOOL, { reason: "candidates", workers: [{ name: "cand-a", role: "implement", request: "Approach A, installing in the copy by shell.", files: ["greeting.txt"] }, { name: "cand-b", role: "implement", request: "Approach B, patching a dependency file.", files: ["greeting.txt", "node_modules/"] }] });
+          case 1: return tool(SPAWN_TOOL, { reason: "candidates", workers: [{ name: "cand-a", role: "implement", request: "Approach A for greeting.txt, installing in the copy by shell.", files: ["greeting.txt"] }, { name: "cand-b", role: "implement", request: "Approach B, patching a dependency file.", files: ["greeting.txt", "node_modules/"] }] });
           case 2: return tool(SPAWN_TOOL, { reason: "candidates", workers: [{ name: "fix-a", role: "implement", request: "Fix W1.3.", files: ["greeting.txt"], from: "W1.3" }, { name: "cand-c", role: "implement", request: "Approach C.", files: ["greeting.txt"] }] });
           default: return tool("report_result", { kind: "implement", summary: "Stopped after the candidates", data: { status: "blocked", reason: "test stops here", checklist: partial, ultra: { stage: "evaluation" } } });
         }
@@ -400,7 +400,7 @@ describe("ultra: end to end (faux models)", () => {
     mainFaux.setResponses(scripted(6, {
       orchestrator: (turn, context) => {
         if (turn === 0) return tool(SPAWN_TOOL, { reason: "exploration", workers: [{ name: "basis", role: "implement", request: "Write test/basis.sh for R1.", files: ["test/"] }, { name: "cause", role: "answer", request: "Hypotheses for R1." }] });
-        if (turn === 1) return tool(SPAWN_TOOL, { reason: "candidates", workers: [{ name: "cand-a", role: "implement", request: "Approach A.", files: ["greeting.txt"] }, { name: "cand-b", role: "implement", request: "Approach B.", files: ["greeting.txt"] }] });
+        if (turn === 1) return tool(SPAWN_TOOL, { reason: "candidates", workers: [{ name: "cand-a", role: "implement", request: "Approach A for greeting.txt.", files: ["greeting.txt"] }, { name: "cand-b", role: "implement", request: "Approach B.", files: ["greeting.txt"] }] });
         refused = resultsOf(context).at(-1)!.text;
         return tool("report_result", { kind: "implement", summary: "Blocked: candidate copies cannot be isolated", data: { status: "blocked", reason: "bridge links outside the workspace", checklist: partial, ultra: { stage: "candidates" } } });
       },
@@ -478,7 +478,7 @@ describe("ultra: resume", () => {
     mainFaux.setResponses(scripted(5, { ...scripts, orchestrator: turn => turn === 0 ? tool(SPAWN_TOOL, { reason: "exploration", workers: [{ name: "basis", role: "implement", request: "Write test/basis.sh for R1.", files: ["test/"] }, { name: "cause", role: "answer", request: "Hypotheses for R1." }] }) : blocked("candidates") }));
     const first = await execute({ mainMode: "ultra" });
     expect(first.details.spawned?.map(item => item.id)).toEqual(["W1.1", "W1.2"]);
-    mainFaux.setResponses(scripted(6, { ...scripts, orchestrator: turn => turn === 2 ? tool(SPAWN_TOOL, { reason: "candidates", workers: [{ name: "cand-a", role: "implement", request: "Approach A.", files: ["greeting.txt"] }, { name: "cand-b", role: "implement", request: "Approach B.", files: ["greeting.txt"] }] }) : blocked("evaluation") }));
+    mainFaux.setResponses(scripted(6, { ...scripts, orchestrator: turn => turn === 2 ? tool(SPAWN_TOOL, { reason: "candidates", workers: [{ name: "cand-a", role: "implement", request: "Approach A for greeting.txt.", files: ["greeting.txt"] }, { name: "cand-b", role: "implement", request: "Approach B.", files: ["greeting.txt"] }] }) : blocked("evaluation") }));
     const second = await execute({ mainMode: "ultra", worker: "W1", task: "T1" });
     expect(second.details.spawned?.map(item => item.id)).toEqual(["W1.3", "W1.4"]);
     const incumbent = second.details.spawned!.find(item => item.id === "W1.3")!.workspace!;

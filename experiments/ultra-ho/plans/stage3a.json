@@ -1,0 +1,15 @@
+{
+  "out": "results/ultra-ho/stage3",
+  "phase": "s3a",
+  "seed": "ultra-ho-s3a-2026-10-24",
+  "repeats": 2,
+  "concurrency": 8,
+  "scratch": "/tmp/pi-orche/01a152d6-1832-7291-b05c-3e9a404e5ca3/W6/uho-s3a",
+  "sweCache": "/tmp/pi-orche/01a152d6-1832-7291-b05c-3e9a404e5ca3/W6/uho-swe",
+  "tasks": [{ "task": "tox-dev__tox-3904", "kind": "swe" }, { "task": "pytest-dev__pyfakefs-1286", "kind": "swe" }],
+  "arms": [
+    { "name": "F", "mode": "ultra", "runtime": "fixed", "note": "stability-fixed baseline (stage 2), frozen before any hand-off code" },
+    { "name": "H", "mode": "ultra", "runtime": "handoff", "note": "F + analyst-location hand-off prevention (stage 3)" }
+  ],
+  "note": "Stage 3 preregistered units (results/ultra-ho/stage3/PREREGISTRATION.md): mechanism (tox, exposed) and fresh scope-related (pyfakefs), 2 repeats per arm."
+}

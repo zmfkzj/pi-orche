@@ -123,7 +123,7 @@ export const MESSAGE_CONFIRM_MAX = 2000;
 /** A message to main about an approved queued task that could not start after its job's result said it would. */
 export const QUEUE_MESSAGE_TYPE = "orche-task-queue";
 
-export const ORCHE_USAGE = "Usage: /orche single|strong|ultra|direct <PROMPT> | /orche mode [single|strong|ultra|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche splits [DAYS] | /orche models | /orche cancel | /orche detach | /orche doctor | /orche install-deps";
+export const ORCHE_USAGE = "Usage: /orche single|strong|ultra|mdsd|direct <PROMPT> | /orche mode [single|strong|ultra|mdsd|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche splits [DAYS] | /orche models | /orche cancel | /orche detach | /orche doctor | /orche install-deps";
 export type OrcheCommand =
   | { mode: MainMode; prompt: string }
   | { mode: "cancel" }
@@ -141,15 +141,16 @@ const ONE_SHOT_EFFECT: Record<MainMode, string> = {
   single: "delegates it to one worker on the general model tiers (models.orchestrator, models.worker)",
   strong: "delegates it to one worker on the strong model tiers (models.strong-orchestrator, models.strong-worker)",
   ultra: "runs it with the quality-first ultra orchestration on the strong model tiers",
+  mdsd: "runs it with the MDSD search policy (multi-dimensional search diversification: independent exploration paths that differ in interpretation, hypotheses, sources, reasoning, direction and validation, then integration, adaptive search and verification) on the strong model tiers",
   direct: "lets main edit directly, without workers",
 };
 /**
- * The usage of `/orche strong` or `/orche ultra` given without a prompt (or only whitespace): what the one-shot command does, and that
+ * The usage of `/orche strong`, `/orche ultra` or `/orche mdsd` given without a prompt (or only whitespace): what the one-shot command does, and that
  * the session's mode stays unless `/orche mode <mode>` sets it. Undefined for anything else (`single`/`direct` keep the general usage).
  */
 export function oneShotUsage(args: string): string | undefined {
   const mode = /^\s*(\S+)\s*$/.exec(args)?.[1];
-  if (mode !== "strong" && mode !== "ultra") return undefined;
+  if (mode !== "strong" && mode !== "ultra" && mode !== "mdsd") return undefined;
   return `Usage: /orche ${mode} <PROMPT>: ${ONE_SHOT_EFFECT[mode]} for this one request (the prompt may span lines). The session's mode does not change; /orche mode ${mode} switches it.`;
 }
 /**
@@ -887,7 +888,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
 
     // (2) Delegation, one-turn overrides and worker/session controls.
     pi.registerCommand("orche", {
-      description: "/orche single <prompt>: delegate one request to one worker. /orche strong <prompt>: the same on the strong tiers (models.strong-orchestrator, models.strong-worker). /orche ultra <prompt>: one request with quality-first ultra orchestration on the strong tiers. /orche direct <prompt>: edit directly for one turn. These one-shot commands leave the session's mode as it is and start only when the session is idle; with task ledgers (single.ledger) a task started by such a request keeps its mode when continued, otherwise later turns run in the session's mode. /orche mode [single|strong|ultra|direct]: show/set the session's delegation mode. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche splits [days]: the orchestrator's split decisions over all sessions (split rate, criteria, cost and time), optionally of the last N days. /orche models: the main, orchestrator, worker, advisor, strong-orchestrator and strong-worker models now and where each comes from (config, inherited, Pi), and whether the advisor (single.advisor) is on. /orche cancel: stop the active task. /orche detach: stop waiting for the background task (it keeps running; its result arrives as a message). /orche doctor: check pi-orche's dependencies (npm packages and native bindings, Node.js, git, orche.config.json, configured models) and say what to do when something is wrong. /orche install-deps: install missing npm dependencies; lists what needs a manual step.",
+      description: "/orche single <prompt>: delegate one request to one worker. /orche strong <prompt>: the same on the strong tiers (models.strong-orchestrator, models.strong-worker). /orche ultra <prompt>: one request with quality-first ultra orchestration on the strong tiers. /orche mdsd <prompt>: one request with the MDSD search policy (diversified exploration paths, integration, adaptive search, verification; docs/mdsd.md) on the strong tiers. /orche direct <prompt>: edit directly for one turn. These one-shot commands leave the session's mode as it is and start only when the session is idle; with task ledgers (single.ledger) a task started by such a request keeps its mode when continued, otherwise later turns run in the session's mode. /orche mode [single|strong|ultra|mdsd|direct]: show/set the session's delegation mode. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche splits [days]: the orchestrator's split decisions over all sessions (split rate, criteria, cost and time), optionally of the last N days. /orche models: the main, orchestrator, worker, advisor, strong-orchestrator and strong-worker models now and where each comes from (config, inherited, Pi), and whether the advisor (single.advisor) is on. /orche cancel: stop the active task. /orche detach: stop waiting for the background task (it keeps running; its result arrives as a message). /orche doctor: check pi-orche's dependencies (npm packages and native bindings, Node.js, git, orche.config.json, configured models) and say what to do when something is wrong. /orche install-deps: install missing npm dependencies; lists what needs a manual step.",
       // Read-only: the current roster supplies `stop <id>`; completion never creates, starts or stops workers.
       getArgumentCompletions: prefix => {
         let ids: string[] = [];

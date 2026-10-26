@@ -1,0 +1,96 @@
+{
+  "id": "itsdnns__docsight-437",
+  "title": "Hide unsupported DOCSIS errors in Before/After Comparison",
+  "repo": "itsDNNS/docsight",
+  "baseCommit": "f478c6eeded6e97b3b1dafc55108522b6c693c3b",
+  "createdAt": "2026-05-06 09:32:16",
+  "problemStatement": "Hide unsupported DOCSIS errors in Before/After Comparison\n## Problem\n\nFollow-up from #372: the unsupported DOCSIS error chart is still visible in the standalone **Before/After Comparison** view.\n\nThe previous issue covered the dashboard, Signal Trends, and the Channels timeline/comparison surfaces. The closed follow-up comment points out that the separate Before/After Comparison module still renders the \"Uncorr. Errors\" chart even when DOCSIS error reporting is unsupported.\n\n## Confirmed scope\n\nCode inspection confirms this is a separate surface from the Channels comparison tab:\n\n- `app/modules/comparison/static/main.js` renders `cmp-chart-errors` unconditionally in `_cmpRenderCharts()`.\n- `app/modules/comparison/templates/comparison_tab.html` contains the standalone comparison \"Uncorr. Errors\" card/canvas.\n- Existing E2E coverage hides unsupported errors in Signal Trends, Channels timeline, and Channels comparison, but does not yet cover the standalone Before/After Comparison module.\n\n## Goal\n\nKeep the Before/After Comparison view consistent with the rest of DOCSight: if DOCSIS error counters are unsupported, the unsupported/misleading error chart should not occupy space.\n\n## Suggested scope\n\n- Add a regression test for the Before/After Comparison module using comparison API data with unsupported/null DOCSIS error counters.\n- Hide the `cmp-chart-errors` card/canvas when both selected periods have unsupported error counters.\n- Keep DS power, DS SNR, US power, health distribution, and the comparison delta table available.\n- Avoid converting unsupported counters to `0`; unsupported values should remain absent/unknown rather than implying zero errors.\n\n## Non-goals\n\n- Do not remove error comparison when the data source actually reports error counters.\n- Do not change modem driver behavior or storage semantics for unsupported DOCSIS counters.\n- Do not redesign the Before/After Comparison workflow.\n\n## Acceptance criteria\n\n- With unsupported DOCSIS error counters, the standalone Before/After Comparison view does not show the \"Uncorr. Errors\" chart.\n- With supported DOCSIS error counters, the error comparison chart still renders normally.\n- The regression covers the standalone comparison module, not only the Channels comparison tab.\n- No unsupported DOCSIS error counter is displayed or summarized as `0` unless the source really reported zero.\n\nRefs #372",
+  "interface": "",
+  "failToPass": [
+    "tests/test_comparison_module.py::TestAggregatePeriod::test_unsupported_error_counters_remain_none",
+    "tests/test_comparison_module.py::TestAggregatePeriod::test_zero_error_counters_stay_supported_zeroes",
+    "tests/test_comparison_module.py::TestAggregatePeriod::test_partially_supported_error_counters_do_not_invent_zeroes",
+    "tests/test_comparison_module.py::TestComputeDelta::test_delta_ignores_unsupported_error_counters",
+    "tests/test_correlation.py::TestCorrelationTimeline::test_modem_unsupported_error_counters_remain_none[True]"
+  ],
+  "passToPass": [
+    "tests/test_comparison_module.py::TestCompareEndpoint::test_missing_params_returns_400",
+    "tests/test_comparison_module.py::TestCompareEndpoint::test_partial_params_returns_400",
+    "tests/test_comparison_module.py::TestCompareEndpoint::test_valid_request_returns_periods_and_delta",
+    "tests/test_comparison_module.py::TestCompareEndpoint::test_empty_period_returns_zero_snapshots",
+    "tests/test_comparison_module.py::TestCompareEndpoint::test_delta_verdict_degraded",
+    "tests/test_comparison_module.py::TestCompareEndpoint::test_delta_verdict_improved",
+    "tests/test_comparison_module.py::TestCompareEndpoint::test_delta_verdict_unchanged",
+    "tests/test_comparison_module.py::TestCompareEndpoint::test_timeseries_included",
+    "tests/test_comparison_module.py::TestCompareEndpoint::test_health_distribution",
+    "tests/test_comparison_module.py::TestCompareEndpoint::test_period_from_to_echoed",
+    "tests/test_comparison_module.py::TestAggregatePeriod::test_empty_snapshots",
+    "tests/test_comparison_module.py::TestAggregatePeriod::test_single_snapshot",
+    "tests/test_comparison_module.py::TestAggregatePeriod::test_multiple_snapshots_averages",
+    "tests/test_comparison_module.py::TestAggregatePeriod::test_compare_periods_helper",
+    "tests/test_comparison_module.py::TestComputeDelta::test_basic_delta",
+    "tests/test_comparison_module.py::TestComputeDelta::test_delta_with_empty_period",
+    "tests/test_comparison_module.py::TestComputeDelta::test_both_periods_empty",
+    "tests/test_comparison_module.py::TestComputeDelta::test_extreme_snr_improvement",
+    "tests/test_comparison_module.py::TestModuleDiscovery::test_comparison_module_discovered",
+    "tests/test_comparison_module.py::TestModuleDiscovery::test_comparison_module_has_correct_type",
+    "tests/test_comparison_module.py::TestModuleDiscovery::test_comparison_module_loads_i18n",
+    "tests/test_comparison_module.py::TestModuleDiscovery::test_comparison_manifest_valid",
+    "tests/test_correlation.py::TestSpeedtestTimestampIndex::test_index_created",
+    "tests/test_correlation.py::TestSpeedtestTimestampIndex::test_speedtest_in_range",
+    "tests/test_correlation.py::TestSpeedtestTimestampIndex::test_speedtest_in_range_empty",
+    "tests/test_correlation.py::TestCorrelationTimeline::test_all_sources",
+    "tests/test_correlation.py::TestCorrelationTimeline::test_filtered_sources",
+    "tests/test_correlation.py::TestCorrelationTimeline::test_sorted_by_timestamp",
+    "tests/test_correlation.py::TestCorrelationTimeline::test_modem_fields_present",
+    "tests/test_correlation.py::TestCorrelationTimeline::test_modem_unsupported_error_counters_remain_none[False]",
+    "tests/test_correlation.py::TestCorrelationTimeline::test_speedtest_fields_present",
+    "tests/test_correlation.py::TestCorrelationTimeline::test_event_fields_present",
+    "tests/test_correlation.py::TestCorrelationTimeline::test_empty_range",
+    "tests/test_correlation.py::TestCorrelationAPI::test_correlation_endpoint_no_auth",
+    "tests/test_correlation.py::TestCorrelationAPI::test_correlation_endpoint_with_data",
+    "tests/test_correlation.py::TestCorrelationAPI::test_correlation_source_filter",
+    "tests/test_correlation.py::TestCorrelationAPI::test_correlation_speedtest_enrichment",
+    "tests/test_correlation.py::TestCorrelationAPI::test_correlation_hours_clamped",
+    "tests/test_correlation.py::TestCorrelationAPI::test_correlation_segment_source_filter",
+    "tests/test_correlation.py::TestCorrelationAPI::test_correlation_segment_excluded_when_not_requested"
+  ],
+  "testFiles": [
+    "tests/e2e/test_comparison.py",
+    "tests/test_comparison_module.py",
+    "tests/test_correlation.py"
+  ],
+  "testCmd": "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/e2e/test_comparison.py tests/test_comparison_module.py tests/test_correlation.py",
+  "datasetInstall": "pip install -q -r requirements.txt && pip install -q pytest && pip install -q playwright",
+  "datasetPython": "3.13",
+  "source": {
+    "dataset": "SWE-rebench (nebius/SWE-rebench, 2026 releases)",
+    "file": "results/iso-token/raw/rebench-2026_03.jsonl",
+    "recordSha256": "d6161283f6969b89ecfafdf523d08f6597da9688f13a6c307e5f0a4c44003cf2"
+  },
+  "install": "pip install -q -r requirements.txt && pip install -q pytest && pip install -q playwright",
+  "generatedFiles": [],
+  "pythonPath": ".",
+  "pythonVersion": "Python 3.14.4",
+  "excludedPassToPass": [],
+  "validation": {
+    "at": "2026-10-24T04:17:03.532Z",
+    "valid": true,
+    "f2pFailOnBase": true,
+    "f2pPassWithReference": true,
+    "base": {
+      "ms": 8302,
+      "counts": {
+        "FAILED": 5,
+        "PASSED": 40
+      }
+    },
+    "reference": {
+      "ms": 8389,
+      "counts": {
+        "PASSED": 45
+      }
+    },
+    "excludedPassToPass": 0
+  }
+}

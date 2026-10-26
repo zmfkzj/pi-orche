@@ -1,0 +1,28 @@
+{
+  "out": "results/ultra-ho/stage3-r2/validation",
+  "scratch": "/tmp/pi-orche/01a152d6-1832-7291-b05c-3e9a404e5ca3/W7/uho-r2val",
+  "sweCache": "/tmp/pi-orche/01a152d6-1832-7291-b05c-3e9a404e5ca3/W7/uho-swe",
+  "phase": "s3r2-val-c",
+  "seed": "ultra-ho-r2-val-c-2026-10-24",
+  "repeats": 1,
+  "concurrency": 2,
+  "tasks": [
+    {
+      "task": "stravalib__stravalib-709_interface",
+      "kind": "swe"
+    },
+    {
+      "task": "tobymao__sqlglot-7187",
+      "kind": "swe"
+    }
+  ],
+  "arms": [
+    {
+      "name": "H2",
+      "mode": "ultra",
+      "runtime": "handoff2",
+      "note": "the corrected actionable hand-off (results/ultra-ho/stage3-r2/rt-handoff2, digest 5d094e16), frozen before any round-2 run"
+    }
+  ],
+  "note": "Stage 3 round 2 validation, passing controls (PREREGISTRATION.md 'Validation units'): H2 x 1 each; comparator round 1's F units (historical). Launched in one batch with the headroom and mechanism phases."
+}

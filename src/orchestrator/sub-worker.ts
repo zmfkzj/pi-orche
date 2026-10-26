@@ -3,7 +3,8 @@
  * with the worker tool set, may write only its own files, cannot spawn, and ends with one report_result. Standard roles inherit the
  * orchestrator's model and thinking unless the config sets `models.worker` (strong/ultra: `models.strong-worker`; under `"thinkingPolicy": "phase"` implement/answer run one
  * supported level below the orchestrator's assignment level and verify at it: docs/thinking-policy.md); game-asset and video use their
- * specialist routes (and generate_image when images are set up).
+ * specialist routes (and generate_image when images are set up). An MDSD replication cell (mdsd.replication) runs on its own model
+ * route (`worker.route`); an MDSD explorer with mdsd.explorerScratch may also write its private scratch directory (`worker.scratch`).
  */
 import { Type } from "typebox";
 import { Value } from "typebox/value";
@@ -78,7 +79,7 @@ const reportSchema = Type.Object({ kind: Type.String(), summary: Type.String({ m
 interface Report { kind: string; summary: string; data?: unknown }
 
 /** report_result of a sub-worker: the kind must be its role and `data` must satisfy that role's result contract. */
-function reportFor(role: SubWorkerRole): SpecialistReport<typeof reportSchema> {
+function reportFor(role: SubWorkerRole, extra?: (data: unknown) => string | undefined): SpecialistReport<typeof reportSchema> {
   return {
     name: "report_result",
     label: "Report result",
@@ -87,9 +88,10 @@ function reportFor(role: SubWorkerRole): SpecialistReport<typeof reportSchema> {
     check: value => {
       if (value.kind !== role) return `Expected report kind "${role}"; received "${value.kind}".`;
       const contract = orchestrationResultSchemas[role];
-      if (!contract || ((value.data === undefined || value.data === null) && contract.optional)) return undefined;
-      if (Value.Check(contract.schema, value.data)) return undefined;
-      return `Invalid data: ${formatSchemaErrors(contract.schema, value.data, 6)}. Expected data: ${JSON.stringify(contract.schema)}.`;
+      // An extra contract (an MDSD search worker's output fields) applies after the role's own, also to absent data.
+      if (contract && !((value.data === undefined || value.data === null) && contract.optional) && !Value.Check(contract.schema, value.data))
+        return `Invalid data: ${formatSchemaErrors(contract.schema, value.data, 6)}. Expected data: ${JSON.stringify(contract.schema)}.`;
+      return extra?.(value.data);
     },
   };
 }
@@ -101,7 +103,9 @@ function statusOf(role: SubWorkerRole, data: unknown): string {
 }
 
 /**
- * The guard of one sub-worker: no spawning; writes only inside its own files and never into a sibling's (symlinks resolved). An
+ * The guard of one sub-worker: no spawning; writes only inside its own files and never into a sibling's (symlinks resolved), plus its
+ * private scratch directory when it has one (an MDSD explorer with mdsd.explorerScratch: the `scratch` write root every orche worker
+ * has, checked by real path like any other root). An
  * ultra candidate works in its own workspace copy: its siblings' copies are elsewhere, so only its own files count, the protected
  * verification basis is refused, and literal shell writes outside its copy are blocked.
  */
@@ -123,7 +127,7 @@ export function subWorkerGuard(worker: PlannedWorker, siblings: readonly Planned
       if (protectedPaths.some(owned => under(path, owned))) return `Blocked: ${path} is part of the protected verification basis of this ultra task; implement against it, never change it (report a basis problem in your result instead).`;
       if (outsidePaths.some(owned => under(path, owned))) return `Blocked: ${path} is inside a submodule, which ultra candidate copies do not contain; a candidate cannot change submodules (report what it would need there instead).`;
     }
-    return (await checkWriteRealPath({ toolName, input, cwd: root, agentId: worker.id, assignmentKind: worker.role, tasks }))?.reason;
+    return (await checkWriteRealPath({ toolName, input, cwd: root, agentId: worker.id, assignmentKind: worker.role, tasks, ...(worker.scratch ? { extraRoots: [{ path: worker.scratch, kind: "scratch" as const }] } : {}) }))?.reason;
   };
 }
 
@@ -131,7 +135,9 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
   return async (worker, siblings, signal, onTool, onModel, onDeadline) => {
     const specialist = worker.role === "game-asset" || worker.role === "video";
     const verifyRoute = worker.role === "verify" && env.verifyRoute ? env.verifyRoute : undefined;
-    const route = specialist ? env.specialistRoute(worker.role as "game-asset" | "video") : verifyRoute ?? env.route;
+    // An MDSD replication cell runs on its own model (its own thinking, else the orchestrator's); everyone else as before.
+    const cellRoute = !specialist && worker.route ? { role: env.route.role, model: worker.route.model, ...(worker.route.thinking ?? env.route.thinking ? { thinking: (worker.route.thinking ?? env.route.thinking)! } : {}), ...(worker.route.extendedContext !== undefined ? { extendedContext: worker.route.extendedContext } : {}) } : undefined;
+    const route = specialist ? env.specialistRoute(worker.role as "game-asset" | "video") : cellRoute ?? verifyRoute ?? env.route;
     const image = specialist ? env.imageTool?.() : undefined;
     const guard = subWorkerGuard(worker, siblings, env.cwd);
     const webFetch = env.webFetch?.(worker) ?? {};
@@ -139,23 +145,24 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
     const capabilities = mergeCapabilities([webFetch.provider, codeGraph.provider]);
     const cwd = worker.workspace ?? env.cwd;
     const sessionFile = env.sessionFile?.(worker.id);
-    const base = { id: worker.id, name: worker.name, role: worker.role, reason: worker.reason, ...(worker.files ? { files: [...worker.files] } : {}), ...(worker.workspace ? { workspace: worker.workspace } : {}), changes: [] as string[], modelSource: specialist ? "route" as const : env.routeSource, thinkingSource: specialist ? "route" as const : verifyRoute ? env.verifyThinkingSource ?? env.thinkingSource : env.thinkingSource };
+    const ownThinking = specialist || (!!cellRoute && worker.route?.thinking !== undefined);
+    const base = { id: worker.id, name: worker.name, role: worker.role, reason: worker.reason, ...(worker.files ? { files: [...worker.files] } : {}), ...(worker.workspace ? { workspace: worker.workspace } : {}), changes: [] as string[], modelSource: specialist || cellRoute ? "route" as const : env.routeSource, thinkingSource: ownThinking ? "route" as const : verifyRoute ? env.verifyThinkingSource ?? env.thinkingSource : env.thinkingSource };
     let started = false;
-    const fromStats = (stats: SpecialistStats) => ({ model: stats.model, ...(stats.thinking ? { thinking: stats.thinking } : {}), ...(started ? {} : { notStarted: true as const }), requests: stats.requests, models: { ...stats.models }, startedAt: stats.startedAt, durationMs: stats.durationMs, costUSD: stats.usage.cost, ...(stats.sessionFile ? { sessionFile: stats.sessionFile } : {}), ...(stats.deadline ? { deadline: subWorkerDeadline(stats.deadline) } : {}) });
+    const fromStats = (stats: SpecialistStats) => ({ model: stats.model, ...(stats.thinking ? { thinking: stats.thinking } : {}), ...(started ? {} : { notStarted: true as const }), requests: stats.requests, models: { ...stats.models }, startedAt: stats.startedAt, durationMs: stats.durationMs, costUSD: stats.usage.cost, ...(stats.requests ? { usage: { input: stats.usage.input, output: stats.usage.output, cacheRead: stats.usage.cacheRead, cacheWrite: stats.usage.cacheWrite } } : {}), ...(stats.budget ? { budget: { ...stats.budget } } : {}), ...(stats.sessionFile ? { sessionFile: stats.sessionFile } : {}), ...(stats.deadline ? { deadline: subWorkerDeadline(stats.deadline) } : {}) });
     try {
       const { value, stats } = await runSpecialistSession({
         actor: worker.id, route, runtime: env.runtime, cwd, prompt: env.prompt(worker, !!image),
         instructions: [SUB_WORKER_INSTRUCTIONS, ...capabilities.instructions, ...(webFetch.unavailable ? [webFetch.unavailable] : []), ...(codeGraph.unavailable ? [codeGraph.unavailable] : [])].join("\n"),
-        tools: [...WORKER_TOOL_NAMES, ...(image ? [image.name] : []), ...capabilities.tools], ...(image ? { customTools: [image] } : {}), report: reportFor(worker.role),
+        tools: [...WORKER_TOOL_NAMES, ...(image ? [image.name] : []), ...capabilities.tools], ...(image ? { customTools: [image] } : {}), report: reportFor(worker.role, worker.check),
         ...(capabilities.extensionFactories.length ? { extensionFactories: capabilities.extensionFactories } : {}),
         // The Bash safety review runs after the sub-worker's own guard allowed the call (it can only refuse more), with its own request and cwd.
         toolGuard: async (name, input) => await guard(name, input) ?? await guardBashReview(name, input, { settings: env.bashReview, access: () => runtimeAccess(env.runtime), cwd, task: worker.request, signal }),
         writeFileGuard: (file, abort) => abort?.aborted ? "cancelled" : guard("ast_rewrite", { path: file }),
-        maxTurns: env.maxTurns, timeoutMs: env.timeoutMs, signal, nudges: 1, onTool,
+        maxTurns: env.maxTurns, timeoutMs: env.timeoutMs, signal, nudges: 1, onTool, ...(worker.budget ? { budget: worker.budget } : {}),
         ...(env.deadline ? { deadline: { ...env.deadline, toolTimeoutsMs: { ...env.deadline.toolTimeoutsMs, ...capabilities.toolTimeoutsMs }, onExtended: extension => onDeadline?.({ type: "extended", extension }), onObservation: observation => onDeadline?.({ type: "observation", observation }) } } : {}),
         onSession: use => { started = true; onModel?.(use); },
         ...(env.onSessionEvent ? { onEvent: (event: { type: string; [key: string]: unknown }) => env.onSessionEvent!(worker.id, event) } : {}),
-        ...(sessionFile ? { sessionFile } : {}), ...(!specialist && env.inheritedContextWindow ? { inheritedContextWindow: env.inheritedContextWindow } : {}),
+        ...(sessionFile ? { sessionFile } : {}), ...(!specialist && !cellRoute && env.inheritedContextWindow ? { inheritedContextWindow: env.inheritedContextWindow } : {}),
         ...(env.skills?.length ? { skills: env.skills } : {}),
         ...(!specialist && env.lengthLadder ? { lengthRecovery: { ladder: env.lengthLadder } } : {}),
       });
