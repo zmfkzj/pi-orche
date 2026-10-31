@@ -4,10 +4,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { sha } from "../../experiments/mdsd-ab/run.js";
 import { analyze, validateScores } from "../../experiments/cb-ab/analysis-r2.js";
-import { BIN_MOUNT, HOME, NODE, PROVIDER_MOUNT, REPO, sandboxCommand } from "../../experiments/cb-ab/env.js";
+import { BIN_MOUNT, HOME, NODE, PI_CLI, PROVIDER_MOUNT, REPO, sandboxCommand } from "../../experiments/cb-ab/env.js";
 import { packetOrder, prepareScoring, probeSelection, scoreCase, seedFor } from "../../experiments/cb-ab/sol-score.js";
 import {
   BRIDGE_SCRIPT, NET_MOUNT, SANDBOX_PROXY_PORT, SUPPORT_MOUNT, bridged, hostBridge, mountProblems, parseSolCheck, runSession, solCheckScript, solPiArgs, solSandboxArgs, type SessionResult, type SessionSpec,
@@ -224,6 +224,17 @@ describe("scorer re-run rule", () => {
   });
 });
 
+/** The evaluator's Pi command: host Node and Pi CLI, then flags that load only the provider extension, on Sol/high (never xhigh/max, never orche).
+ * Host install paths are checked by equality, so a home or scratch directory named after orche does not count as loading it. */
+function expectSolPi(pi: string[], paths: { node: string; cli: string; provider: string }) {
+  expect(pi.slice(0, 2)).toEqual([paths.node, paths.cli]);
+  expect(pi.join(" ")).toContain("--no-extensions --no-skills --no-prompt-templates --no-mcp --no-approve --no-context-files -e");
+  expect(pi.join(" ")).toContain("--model cliproxyapi/gpt-6.1-sol --thinking high --mode json --session-id sid-1");
+  const extension = join(paths.provider, "extensions/index.ts");
+  expect(pi.filter(arg => arg.endsWith(".ts"))).toEqual([extension]);
+  expect(pi.slice(2).filter(arg => arg !== extension).join(" ")).not.toMatch(/xhigh|\bmax\b|orche/);
+}
+
 describe("evaluator session sandbox", () => {
   const layout = (root: string) => ({ agent: join(root, "agent"), provider: join(root, "provider"), bin: join(root, "bin"), support: join(root, "support"), net: join(root, "net"), scratch: join(root, "scratch"), cwd: join(HOME, "work"), mounts: [{ host: join(root, "work"), sandbox: join(HOME, "work"), writable: true }, { host: join(root, "in"), sandbox: join(HOME, "in"), writable: false }] });
 
@@ -236,12 +247,22 @@ describe("evaluator session sandbox", () => {
     expect(pairs("--bind")).toEqual([["/s/agent", join(HOME, ".pi/agent")], ["/s/net", NET_MOUNT], ["/s/work", join(HOME, "work")], ["/s/scratch", "/tmp/pi-orche"]]);
     expect(args.join(" ")).not.toMatch(/orche-runtime|node_modules/);
     expect(args.slice(-2)).toEqual(["--chdir", join(HOME, "work")]);
-    const pi = solPiArgs("sid-1", "PROMPT");
-    expect(pi.join(" ")).toContain("--no-extensions --no-skills --no-prompt-templates --no-mcp --no-approve --no-context-files -e");
-    expect(pi.join(" ")).toContain("--model cliproxyapi/gpt-6.1-sol --thinking high --mode json --session-id sid-1");
-    expect(pi.filter(arg => arg.endsWith(".ts"))).toEqual([join(PROVIDER_MOUNT, "extensions/index.ts")]);
-    expect(pi.join(" ")).not.toMatch(/xhigh|\bmax\b|orche/);
+    expectSolPi(solPiArgs("sid-1", "PROMPT"), { node: NODE, cli: PI_CLI, provider: PROVIDER_MOUNT });
     expect(bridged(["x"]).slice(-3)).toEqual([join(NET_MOUNT, "s"), "--", "x"]);
+  });
+
+  it("the Pi command stays free of orche and of xhigh/max whatever the host paths are named (home under a pi-orche scratch dir)", async () => {
+    vi.stubEnv("HOME", "/var/tmp/pi-orche/W1/compat/home");
+    vi.resetModules();
+    try {
+      const env = await import("../../experiments/cb-ab/env.js");
+      const session = await import("../../experiments/cb-ab/sol-session.js");
+      expect(env.PROVIDER_MOUNT).toBe("/var/tmp/pi-orche/W1/compat/home/.local/share/cliproxyapi-provider");
+      expectSolPi(session.solPiArgs("sid-1", "PROMPT"), { node: env.NODE, cli: env.PI_CLI, provider: env.PROVIDER_MOUNT });
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
   });
 
   it("the sandbox check refuses a reachable upstream or external address, an unreachable bridge, a visible repository, extra home entries and host paths in the process list", () => {
