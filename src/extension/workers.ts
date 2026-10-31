@@ -22,7 +22,7 @@ import { createTaskPlanTool, renderTaskPlan, type TaskPlan } from "../tools/task
 import { configureTaskWorkflow, enableTaskWorkflow, taskCompactionSettings, type CompactionStats } from "../pi/session-factory.js";
 import { withExtendedContext } from "../pi/extended-context.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { inheritsMain, inheritsMainThinking, isDelegatingMode, modeTiers, type DelegatingMode, resolveRoute, resolveSpecialistRoute, tierThinking, usesStrongTiers, type AssignmentModelSource, type AssignmentThinkingSource, type MainMode, type ModelRoute, type SubWorkerModelSource, type SubWorkerThinkingSource, type TierSettings } from "../orchestration/routing.js";
+import { advisorTiers, inheritsMain, inheritsMainThinking, isDelegatingMode, modeTiers, type DelegatingMode, resolveRoute, resolveSpecialistRoute, tierThinking, usesStrongTiers, type AssignmentModelSource, type AssignmentThinkingSource, type MainMode, type ModelRoute, type ModelTier, type SubWorkerModelSource, type SubWorkerThinkingSource, type TierCandidate, type TierSettings } from "../orchestration/routing.js";
 import { formatModelUse } from "../orchestration/model-use.js";
 import { WorkspaceAudit, type GitlinkChange, type WorkspaceChange } from "../orchestration/workspace.js";
 import { CHANGED_WHILE_QUIET, WorkspaceActivity } from "../orchestration/run/activity.js";
@@ -401,29 +401,37 @@ function stepRouteThinking(runtime: { getModel(provider: string, id: string): Pa
 
 /**
  * The route of a helper that inherits the orchestrator, by the rules of `models.worker` (docs/orchestrator.md 12), for
- * `models.advisor`: the tier's own model (`config`) or main's model named by `"main"` (`config:main`), else the orchestrator's
- * current route (`orchestrator`); thinking likewise (the tier's level, main's current one named by it, else the orchestrator's). A
- * model orche's runtime cannot resolve is replaced by the orchestrator's, with a warning.
+ * `models.advisor` (strong, ultra and mdsd: `models.strong-advisor`, then `models.advisor`; {@link advisorTiers}): the first
+ * resolvable tier's own model (`config`) or main's model named by `"main"` (`config:main`), else the orchestrator's current
+ * route (`orchestrator`); thinking likewise (the tier's level, main's current one named by it, else the orchestrator's). A
+ * model orche's runtime cannot resolve is replaced by the next tier's, or by the orchestrator's, with a warning.
  */
 function helperTierRoute(input: {
-  name: string; tier: TierSettings | undefined; current: ModelRoute; runtime: { getModel(provider: string, id: string): unknown };
+  name: string; tiers: readonly TierCandidate[]; current: ModelRoute; runtime: { getModel(provider: string, id: string): unknown };
   sessionModel?: string; mainResolvable: boolean; mainThinking?: ThinkingLevel; extendedContext?: boolean; warnings: string[];
-}): { route: ModelRoute; source: AdvisorSource; thinkingSource: AdvisorSource } {
-  const { tier, current } = input;
+}): { route: ModelRoute; source: AdvisorSource; thinkingSource: AdvisorSource; key?: ModelTier } {
+  const { current } = input;
+  const isResolvable = (tier: TierSettings) => inheritsMain(tier) ? input.mainResolvable : !!input.runtime.getModel(tier.model.slice(0, tier.model.indexOf("/")), tier.model.slice(tier.model.indexOf("/") + 1));
+  let picked: TierCandidate | undefined;
+  for (const [index, candidate] of input.tiers.entries()) {
+    if (isResolvable(candidate.tier)) { picked = candidate; break; }
+    const next = input.tiers[index + 1];
+    const instead = next ? `falling back to models.${next.key} ${next.tier.model}` : `the ${input.name} inherits the orchestrator's model instead`;
+    input.warnings.push(inheritsMain(candidate.tier)
+      ? `Warning: models.${candidate.key} "main": ${input.sessionModel ? `main's model ${input.sessionModel} is unresolvable in orche's runtime` : "main's model is absent"}; ${instead}.`
+      : `Warning: models.${candidate.key} ${candidate.tier.model} is unresolvable in orche's runtime; ${instead}.`);
+  }
+  const tier = picked?.tier;
   const main = inheritsMain(tier);
   const level = tierThinking(tier);
-  const resolvable = !tier ? false : main ? input.mainResolvable : !!input.runtime.getModel(tier.model.slice(0, tier.model.indexOf("/")), tier.model.slice(tier.model.indexOf("/") + 1));
-  if (tier && !resolvable) input.warnings.push(main
-    ? `Warning: models.${input.name} "main": ${input.sessionModel ? `main's model ${input.sessionModel} is unresolvable in orche's runtime` : "main's model is absent"}; the ${input.name} inherits the orchestrator's model instead.`
-    : `Warning: models.${input.name} ${tier.model} is unresolvable in orche's runtime; the ${input.name} inherits the orchestrator's model instead.`);
-  const source: AdvisorSource = tier && resolvable ? (main ? "config:main" : "config") : "orchestrator";
+  const source: AdvisorSource = tier ? (main ? "config:main" : "config") : "orchestrator";
   const thinkingSource: AdvisorSource = source === "orchestrator" ? "orchestrator" : level ? "config" : inheritsMainThinking(tier) ? "config:main" : "orchestrator";
   const thinking = thinkingSource === "config" ? level : thinkingSource === "config:main" ? input.mainThinking ?? "off" : current.thinking;
   const extended = tier?.extendedContext ?? input.extendedContext;
   const route: ModelRoute = source === "config:main" ? { role: current.role, model: input.sessionModel!, thinking: thinking ?? "off", extendedContext: false }
     : source === "config" ? { role: current.role, model: tier!.model, ...(thinking ? { thinking } : {}), ...(extended !== undefined ? { extendedContext: extended } : {}) }
     : current;
-  return { route, source, thinkingSource };
+  return { route, source, thinkingSource, ...(picked ? { key: picked.key } : {}) };
 }
 
 function taskCompactionFor(worker: Worker) {
@@ -1546,10 +1554,11 @@ export class WorkerPool {
     // implement, verify) started by orche_task; never for specialists (game-asset, video), direct mode, orche_spawn sub-workers or
     // the advisor itself. `models.advisor` follows the rules of `models.worker`: its own model and thinking, main's named by
     // "main", otherwise the worker's current model and thinking (the assignment's baseline). Resolved here so that run.json and the
-    // result carry an unresolvable models.advisor warning.
+    // result carry an unresolvable models.advisor warning. strong, ultra and mdsd try `models.strong-advisor` first, then
+    // `models.advisor` (unset or unresolvable strong tier), then the (strong) orchestrator's route.
     const advisorOn = singleWorkflow && config.single.advisor;
     const advisorRoute = advisorOn ? helperTierRoute({
-      name: "advisor", tier: config.routes.models?.advisor, current: { ...current, role: "advisor" }, runtime, sessionModel,
+      name: "advisor", tiers: advisorTiers(config.routes.models, args.mainMode), current: { ...current, role: "advisor" }, runtime, sessionModel,
       mainResolvable: !!args.model && !!runtime.getModel(args.model.provider, args.model.id), mainThinking: args.thinking, extendedContext: config.routes.extendedContext, warnings: modelWarnings,
     }) : undefined;
     const advisorWindow = advisorRoute && (advisorRoute.source === "config:main" || advisorRoute.source === "orchestrator" && mainModel) ? mainWindow : undefined;
@@ -1612,7 +1621,7 @@ export class WorkerPool {
       manifest: {
         config: describeSource(config.source), routes: routesSummary(config.routes),
         worker: { id: meta.id, role: args.role, ...(workerFile ? { sessionFile: workerFile } : {}) },
-        assignment: { role: args.role, reusedWorker: reusedContext, model: meta.model, thinking: meta.thinking, modelSource, thinkingSource, ...(files ? { files } : {}), ...(grant ? { git: grant } : {}), ...(meta.gui ? { gui: true } : {}), ...(advisorRoute ? { advisor: { model: advisorRoute.route.model, ...(advisorRoute.route.thinking ? { thinking: advisorRoute.route.thinking } : {}), modelSource: advisorRoute.source, thinkingSource: advisorRoute.thinkingSource } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(usesStrongTiers(args.mainMode) ? { mode: args.mainMode, ...(tierKey ? { tier: tierKey } : {}) } : {}), ...(requestMode ? { requestMode } : {}) },
+        assignment: { role: args.role, reusedWorker: reusedContext, model: meta.model, thinking: meta.thinking, modelSource, thinkingSource, ...(files ? { files } : {}), ...(grant ? { git: grant } : {}), ...(meta.gui ? { gui: true } : {}), ...(advisorRoute ? { advisor: { model: advisorRoute.route.model, ...(advisorRoute.route.thinking ? { thinking: advisorRoute.route.thinking } : {}), modelSource: advisorRoute.source, thinkingSource: advisorRoute.thinkingSource, ...(usesStrongTiers(args.mainMode) && advisorRoute.key ? { tier: advisorRoute.key } : {}) } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(usesStrongTiers(args.mainMode) ? { mode: args.mainMode, ...(tierKey ? { tier: tierKey } : {}) } : {}), ...(requestMode ? { requestMode } : {}) },
         ...(concurrent ? { concurrentSessions: concurrent.activity } : {}),
         // The process that runs it: a later session start tells an orphan (that process is gone) from a record still being written.
         owner: { pid: process.pid },
@@ -1694,7 +1703,7 @@ export class WorkerPool {
         : `Request mode: ${requestMode.mode} (kept from the one-shot /orche ${requestMode.mode} request that ${requestMode.source} ${requestMode.by} belongs to; the session is in ${requestMode.session ?? "another mode"}). ${keep}.`];
     };
     const modeLines = (): string[] => [...requestLine(), ...(usesStrongTiers(args.mainMode)
-      ? [`Mode: ${args.mainMode} (orchestrator: ${tierKey && modelSource !== "route" ? `models.${tierKey}` : modelSource === "route" ? "a configured route" : "main's model"}${orchestrating ? `; sub-workers: ${subSource === "orchestrator" ? "the orchestrator's model" : `models.${workerKey}`}` : ""})`] : []), ...reflectionLines()];
+      ? [`Mode: ${args.mainMode} (orchestrator: ${tierKey && modelSource !== "route" ? `models.${tierKey}` : modelSource === "route" ? "a configured route" : "main's model"}${orchestrating ? `; sub-workers: ${subSource === "orchestrator" ? "the orchestrator's model" : `models.${workerKey}`}` : ""}${advisorRoute ? `; advisor: ${advisorRoute.key ? `models.${advisorRoute.key}` : "the orchestrator's model"}` : ""})`] : []), ...reflectionLines()];
     const reflectionLines = (): string[] => {
       if (!reflection) return [];
       const summary = reflection.summary();

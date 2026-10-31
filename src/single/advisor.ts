@@ -3,8 +3,9 @@
  * `"single": { "advisor": true }`, docs/orchestrator.md 13). Not for specialists, direct mode, orche_spawn sub-workers or itself.
  *
  * Off by default. When on, the worker's first accepted Task DAG (`task_plan`; or its first edit when it edits before planning)
- * starts ONE fresh read-only advisor session (src/specialists/session.ts) on `models.advisor` (unset: the worker's own model and
- * thinking). It reads the worker's assignment, that plan and the workspace and reports short advice, which is steered into the
+ * starts ONE fresh read-only advisor session (src/specialists/session.ts) on `models.advisor` (strong, ultra and mdsd:
+ * `models.strong-advisor`, then `models.advisor`; unset: the worker's own model and thinking). It reads the worker's assignment,
+ * that plan and the workspace and reports short advice, which is steered into the
  * still-running worker as advisory text (AgentManager.steer, the channel of orche_task_message). The advice changes no
  * requirement, scope or grant and the worker decides what to apply, but it must decide: no success result leaves advice unprocessed.
  *

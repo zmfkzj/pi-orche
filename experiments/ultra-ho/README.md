@@ -12,7 +12,7 @@ at the copy), run without a cap.
 Every role runs `cliproxyapi/gpt-6.1-sol` at effort **high**, never xhigh or max (`protocol.ts`):
 
 - Pi: `--model cliproxyapi/gpt-6.1-sol --thinking high`; private `settings.json` with `defaultThinkingLevel: "high"`, SSE transport.
-- Private `orche.config.json` (`orcheConfig`): `models.{main, orchestrator, worker, strong-orchestrator, strong-worker, advisor}` and
+- Private `orche.config.json` (`orcheConfig`): `models.{main, orchestrator, worker, strong-orchestrator, strong-worker, advisor, strong-advisor}` and
   the `default` route all `{model: "cliproxyapi/gpt-6.1-sol", thinking: "high"}`; `single: {ledger: false, spawn: true, advisor: false}`
   (product default `maxSubWorkers`); `thinkingPolicy: {mode: "fixed", lengthRecovery: "redecompose"}`; `concurrentSessions` off;
   `bashReview: {enabled: false}`; `limits` from the plan (default: 60 min base per assignment + at most 2 × 15 min extensions while

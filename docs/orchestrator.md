@@ -650,7 +650,7 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
 직전 실측(`docs/advisor-reviewer-bench.md`: 10과제×2회, baseline 9/20, advisor 12/20, reviewer 10/20, advisor 비용 +30%·wall time +9%, 통계적으로 유의하지 않음)에서 쓴 "계획 단계에서 한 번, 읽기 전용 advisor가 조언하고 실행 중인 worker에 주입" 방식을 제품의 일반 worker 실행 경로에 넣었다. 벤치 harness를 연결한 것이 아니라 `WorkerPool.executeAssignment` 안에서 기존 부품(one-shot 세션 `runSpecialistSession`, `orche_task_message`와 같은 주입 경로 `AgentManager.steer`, 모델 계층 해석, run record)으로 다시 구현했다(`src/single/advisor.ts`).
 
 - **켜기/끄기**: `orche.config.json`의 `"single": { "advisor": true }`. 기본값은 `false`이고, 키가 없는 예전 설정 파일도 off로 읽는다. `ledger`·`spawn`과 같은 boolean 스위치이고 같은 방식으로 검증한다(`config.single.advisor: expected boolean`). 설정 파일은 orche_task 호출마다 다시 읽으므로 다음 호출부터 바로 적용된다. `/orche models`가 `- advisor (single.advisor on|off …)` 줄로 지금 상태와 모델을 보여 준다.
-- **모델·effort**: `models.advisor` 계층. 다른 계층과 같은 모양(`model`, `thinking?`, `extendedContext?`)과 같은 예약값(`{ "model": "main" }`, `"thinking": "main"`)을 쓰고, 해석 규칙은 `models.worker`와 같다(12절 표). 지정하지 않으면 조언받는 worker의 실제 모델과 thinking(assignment baseline)을 쓴다. 해석할 수 없는 모델은 경고 후 worker 모델로 대체한다. effort는 Pi의 clamp를 따르고, 실제로 쓴 단계가 기록된다. 특정 모델을 코드에 넣지 않았다.
+- **모델·effort**: `models.advisor` 계층. 다른 계층과 같은 모양(`model`, `thinking?`, `extendedContext?`)과 같은 예약값(`{ "model": "main" }`, `"thinking": "main"`)을 쓰고, 해석 규칙은 `models.worker`와 같다(12절 표). 지정하지 않으면 조언받는 worker의 실제 모델과 thinking(assignment baseline)을 쓴다. 해석할 수 없는 모델은 경고 후 worker 모델로 대체한다. strong·ultra·mdsd 모드에서는 `models.strong-advisor`를 먼저 쓰고, 미설정·해석 불가이면 `models.advisor`, 그다음 worker(strong orchestrator) 모델 순서다(14.1절). effort는 Pi의 clamp를 따르고, 실제로 쓴 단계가 기록된다. 특정 모델을 코드에 넣지 않았다.
 
   ```json
   {
@@ -695,14 +695,14 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
 
 ### 14.1 모드와 모델 계층
 
-| 모드 | orchestrator 모델 | sub-worker 모델 | 흐름 |
-|---|---|---|---|
-| `single` (기본) | `models.orchestrator` → 미설정·해석 불가 시 main | `models.worker` → 미설정 시 orchestrator 상속 | single workflow (§1~13) |
-| `strong` | `models.strong-orchestrator` → 미설정·해석 불가 시 `models.orchestrator` → main | `models.strong-worker` → 미설정·해석 불가 시 실제 strong orchestrator 상속 (`models.worker`는 쓰지 않음) | single과 동일 (hand-off, prompt, 도구, 계획, 검증, 권한) |
-| `ultra` | strong과 같음 | strong과 같음 | 아래 ultra 단계 계약 |
-| `direct` | 해당 없음 | 해당 없음 | main이 직접 편집 |
+| 모드 | orchestrator 모델 | sub-worker 모델 | advisor 모델 (`single.advisor` on일 때만, 13절) | 흐름 |
+|---|---|---|---|---|
+| `single` (기본) | `models.orchestrator` → 미설정·해석 불가 시 main | `models.worker` → 미설정 시 orchestrator 상속 | `models.advisor` → 미설정·해석 불가 시 orchestrator 상속 (`models.strong-advisor`는 쓰지 않음) | single workflow (§1~13) |
+| `strong` | `models.strong-orchestrator` → 미설정·해석 불가 시 `models.orchestrator` → main | `models.strong-worker` → 미설정·해석 불가 시 실제 strong orchestrator 상속 (`models.worker`는 쓰지 않음) | `models.strong-advisor` → 미설정·해석 불가 시 `models.advisor` → 실제 strong orchestrator 상속 | single과 동일 (hand-off, prompt, 도구, 계획, 검증, 권한) |
+| `ultra`, `mdsd` | strong과 같음 | strong과 같음 | strong과 같음 | 아래 ultra 단계 계약 / docs/mdsd.md |
+| `direct` | 해당 없음 | 해당 없음 | 해당 없음 | main이 직접 편집 |
 
-상속되는 필드: 상속 시 `model`과 `thinking`(계층에 thinking이 없으면 상위의 현재 수준, `"main"`이면 main의 현재 수준), main 모델을 상속할 때의 context window. `extendedContext`는 계층마다 자기 값(없으면 `config.extendedContext`)을 쓴다. phase thinking policy에서 상속한 sub-worker의 한 단계 낮춤, specialist(game-asset/video)의 route, `models.advisor`(미설정 시 그 모드의 orchestrator 상속) 규칙은 single과 같다. `strongOrchestrator`/`strongWorker` camelCase도 받지만 두 표기를 함께 쓰면 config 오류다.
+상속되는 필드: 상속 시 `model`과 `thinking`(계층에 thinking이 없으면 상위의 현재 수준, `"main"`이면 main의 현재 수준), main 모델을 상속할 때의 context window. `extendedContext`는 계층마다 자기 값(없으면 `config.extendedContext`)을 쓴다. phase thinking policy에서 상속한 sub-worker의 한 단계 낮춤, specialist(game-asset/video)의 route 규칙은 single과 같다. `models.strong-advisor`는 `models.advisor`와 같은 모양·예약값(`{ "model": "main" }`, `"thinking": "main"`)·해석 규칙을 쓰고, 켜고 끄는 것은 여전히 `single.advisor`뿐이다(계층을 설정해도 advisor가 켜지지 않는다). strong-worker와 달리 미설정·해석 불가 시 `models.advisor`로 fallback한다: strong 계층이 생기기 전 strong 모드의 advisor는 `models.advisor`를 썼으므로 기존 설정의 동작을 그대로 둔다. 각 후보는 원래 orchestrator route를 기준으로 따로 해석하므로, thinking이 없는 `strong-advisor`는 `models.advisor`가 아니라 strong orchestrator의 단계를 상속하고, 해석할 수 없는 후보의 thinking·extendedContext는 다음 후보로 넘어가지 않는다. 해석 불가 시 결과와 run.json에 `Warning: models.strong-advisor … falling back to models.advisor …` 경고가 남는다. `strongOrchestrator`/`strongWorker`/`strongAdvisor` camelCase도 받지만 두 표기를 함께 쓰면 config 오류다.
 
 ```json
 {
@@ -716,7 +716,7 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
 }
 ```
 
-`strong-worker`를 빼면 strong/ultra의 sub-worker는 `strongest-model`을 상속한다. 결과에는 `Mode: strong (orchestrator: models.strong-orchestrator; sub-workers: ...)` 줄, `details.mode`/`details.modelTier`, run.json `assignment.mode`/`assignment.tier`가 남는다. 같은 worker를 single↔strong 사이에 재사용하면 모델이 바뀌고 결과에 `Note: W1 switched from single to strong mode ...`가 붙는다. ultra 경계를 넘으면(도구 집합이 세션 생성 때 고정되므로) 기존 worker를 은퇴시키고 새 worker가 그 transcript로 handover를 받는다.
+`strong-worker`를 빼면 strong/ultra의 sub-worker는 `strongest-model`을 상속한다. 결과에는 `Mode: strong (orchestrator: models.strong-orchestrator; sub-workers: ...; advisor: ...)` 줄(advisor 부분은 `single.advisor`가 켜졌을 때만), `details.mode`/`details.modelTier`, run.json `assignment.mode`/`assignment.tier`(advisor가 계층에서 왔으면 `assignment.advisor.tier`도)가 남는다. 같은 worker를 single↔strong 사이에 재사용하면 모델이 바뀌고 결과에 `Note: W1 switched from single to strong mode ...`가 붙는다. ultra 경계를 넘으면(도구 집합이 세션 생성 때 고정되므로) 기존 worker를 은퇴시키고 새 worker가 그 transcript로 handover를 받는다.
 
 ### 14.2 ultra 단계 계약
 

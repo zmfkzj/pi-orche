@@ -15,7 +15,7 @@ import { OrcheController } from "../../src/extension/controller.js";
 import { formatModelTiers } from "../../src/extension/main-model.js";
 import { ADVISOR_INSTRUCTIONS, ADVISOR_TOOL_NAMES, advisorPrompt, advisorToolGuard, adviceMessage } from "../../src/single/advisor.js";
 import { SPAWN_TOOL } from "../../src/orchestrator/spawn.js";
-import { parseRouteConfig } from "../../src/orchestration/routing.js";
+import { advisorTiers, parseRouteConfig } from "../../src/orchestration/routing.js";
 import { createHarness, tool, type Harness } from "./harness.js";
 import { deferred } from "../helpers/faux.js";
 
@@ -132,6 +132,123 @@ describe("advisor: off", () => {
     direct.workerFaux.setResponses([plan(), reported()]);
     expect((await direct.execute({ mainMode: "direct" })).details.advisor).toBeUndefined();
     expect(direct.advisorFaux.getPendingResponseCount()).toBe(1);
+  });
+});
+
+describe("advisor: models.strong-advisor (strong, ultra and mdsd modes)", () => {
+  const both = { single: { advisor: true }, models: { advisor: { model: "tier-advisor/a1", thinking: "low" }, "strong-advisor": { model: "strong-advisor/s1", thinking: "minimal" } } } as const;
+  /** The fixture plus a separate strong-advisor model. */
+  async function strongFixture(options: Parameters<typeof fixture>[0]) {
+    const base = await fixture(options);
+    const strongFaux = tierProvider("strong-advisor", "s1");
+    base.h.runtime.registerNativeProvider(strongFaux.provider);
+    return { ...base, strongFaux };
+  }
+  /** One provider serves the worker and an inheriting advisor: answer by who asks (the advisor's system prompt). */
+  const shared = (): FauxResponseStep[] => {
+    const steps: FauxResponseStep[] = [plan(), reported("Done", applied), reported("Done", applied)];
+    return Array.from({ length: 5 }, () => (context => systemOf(context).includes("read-only advisor") ? advice() : steps.shift()!) as FauxResponseStep);
+  };
+  const workerSteps = () => [plan(), reported("Done", applied), reported("Done", applied)];
+
+  it("parses like the other strong tiers: kebab-case or camelCase (not both), \"main\", thinking \"main\", route fields checked", () => {
+    expect(parseRouteConfig({ routes: {}, models: { "strong-advisor": { model: "p/s", thinking: "max" } } }).models).toEqual({ "strong-advisor": { model: "p/s", thinking: "max" } });
+    expect(parseRouteConfig({ routes: {}, models: { strongAdvisor: { model: "main" } } }).models).toEqual({ "strong-advisor": { model: "main" } });
+    expect(parseRouteConfig({ routes: {}, models: { "strong-advisor": { model: "p/s", thinking: "main" } } }).models).toEqual({ "strong-advisor": { model: "p/s", thinking: "main" } });
+    expect(() => parseRouteConfig({ routes: {}, models: { "strong-advisor": { model: "p/a" }, strongAdvisor: { model: "p/b" } } })).toThrow('"strong-advisor" and "strongAdvisor" name the same tier');
+    expect(() => parseRouteConfig({ routes: {}, models: { "strong-advisor": { model: "p/s", effort: "high" } } })).toThrow("config.models.strong-advisor: unknown route field");
+    expect(() => parseRouteConfig({ routes: {}, models: { "strong-advisor": { model: "p/s", thinking: "huge" } } })).toThrow("config.models.strong-advisor.thinking");
+    expect(() => parseRouteConfig({ routes: {}, models: { "strong-advisor": { model: "main", extendedContext: true } } })).toThrow('config.models.strong-advisor.extendedContext: not with model "main"');
+    // An old config without the tier loads unchanged.
+    expect(parseRouteConfig({ routes: {}, models: { advisor: { model: "p/a" } } }).models).toEqual({ advisor: { model: "p/a" } });
+  });
+  it("/orche models: the strong-advisor row, its fallback to models.advisor, and main's thinking reach on the strong tiers", () => {
+    const view = { main: "p/main", thinking: "high", mode: "strong", advisor: true, atStart: {} };
+    expect(formatModelTiers({ ...view, tiers: { "strong-advisor": { model: "p/sa", thinking: "max" } } })).toContain("- strong-advisor (strong, ultra and mdsd modes, in place of the advisor; single.advisor on): p/sa max — config models.strong-advisor");
+    expect(formatModelTiers({ ...view, tiers: { advisor: { model: "p/a", thinking: "low" } } })).toContain("- strong-advisor (strong, ultra and mdsd modes, in place of the advisor; single.advisor on): unset: falls back to models.advisor (p/a low)");
+    expect(formatModelTiers({ ...view, advisor: false, tiers: { "strong-orchestrator": { model: "p/so" } } })).toContain("- strong-advisor (strong, ultra and mdsd modes, in place of the advisor; single.advisor off): unset: inherited from the strong orchestrator (p/so)");
+    // Strong modes: the strong advisor's own level keeps main's thinking from reaching it although models.advisor has none.
+    const tiers = { advisor: { model: "p/a" }, "strong-advisor": { model: "p/sa", thinking: "max" } } as const;
+    expect(formatModelTiers({ ...view, tiers })).toContain("reaches at each hand-off: orchestrator, worker (through the orchestrator);");
+    expect(formatModelTiers({ ...view, mode: "single", tiers })).toContain("reaches at each hand-off: orchestrator, worker (through the orchestrator), advisor (through the orchestrator);");
+    expect(formatModelTiers({ ...view, tiers })).toContain("models.advisor only as that of strong-advisor");
+  });
+  it("strong mode runs the advisor on models.strong-advisor (model, thinking, Mode line, run.json); single keeps models.advisor", async () => {
+    const strong = await strongFixture({ ...both, records: true });
+    strong.strongFaux.setResponses([advice()]);
+    strong.advisorFaux.setResponses([advice()]);
+    strong.workerFaux.setResponses(workerSteps());
+    const result = await strong.execute({ mainMode: "strong" });
+    expect(strong.strongFaux.getPendingResponseCount()).toBe(0);
+    expect(strong.advisorFaux.getPendingResponseCount()).toBe(1);
+    expect(result.details.advisor).toMatchObject({ status: "processed", model: "strong-advisor/s1", thinking: "minimal", modelSource: "config", thinkingSource: "config", requests: 1 });
+    expect(result.text).toContain("; advisor: models.strong-advisor)");
+    const run = JSON.parse(await readFile(join(result.details.record!, "run.json"), "utf8"));
+    expect(run.assignment.advisor).toEqual({ model: "strong-advisor/s1", thinking: "minimal", modelSource: "config", thinkingSource: "config", tier: "strong-advisor" });
+    for (const mode of ["ultra", "mdsd"] as const) expect(advisorTiers(both.models, mode).map(item => item.key)).toEqual(["strong-advisor", "advisor"]);
+
+    const single = await strongFixture(both);
+    single.strongFaux.setResponses([advice()]);
+    single.advisorFaux.setResponses([advice()]);
+    single.workerFaux.setResponses(workerSteps());
+    const plain = await single.execute();
+    expect(single.strongFaux.getPendingResponseCount()).toBe(1);
+    expect(plain.details.advisor).toMatchObject({ status: "processed", model: "tier-advisor/a1", thinking: "low" });
+    expect(plain.text).not.toContain("Mode:");
+    expect(advisorTiers(both.models, "single").map(item => item.key)).toEqual(["advisor"]);
+  });
+  it("strong-advisor unset: models.advisor (existing configs keep their advisor in strong mode)", async () => {
+    const { execute, workerFaux, advisorFaux } = await fixture(on);
+    advisorFaux.setResponses([advice()]);
+    workerFaux.setResponses(workerSteps());
+    const result = await execute({ mainMode: "strong" });
+    expect(result.details.advisor).toMatchObject({ status: "processed", model: "tier-advisor/a1", thinking: "low", modelSource: "config" });
+    expect(result.text).toContain("; advisor: models.advisor)");
+  });
+  it("an unresolvable strong-advisor falls back to models.advisor with a warning; both unresolvable: the orchestrator's model", async () => {
+    const one = await fixture({ single: { advisor: true }, models: { advisor: { model: "tier-advisor/a1", thinking: "low" }, "strong-advisor": { model: "nowhere/s", thinking: "max", extendedContext: true } } });
+    one.advisorFaux.setResponses([advice()]);
+    one.workerFaux.setResponses(workerSteps());
+    const fallback = await one.execute({ mainMode: "strong" });
+    const warning = "Warning: models.strong-advisor nowhere/s is unresolvable in orche's runtime; falling back to models.advisor tier-advisor/a1.";
+    expect(fallback.details.warnings).toEqual([warning]);
+    expect(fallback.text).toContain(warning);
+    // The skipped tier's thinking does not leak into its fallback.
+    expect(fallback.details.advisor).toMatchObject({ model: "tier-advisor/a1", thinking: "low", modelSource: "config", thinkingSource: "config" });
+
+    const two = await fixture({ single: { advisor: true }, models: { advisor: { model: "nowhere/a" }, "strong-advisor": { model: "nowhere/s" } } });
+    two.workerFaux.setResponses(shared());
+    const inherited = await two.execute({ mainMode: "strong" });
+    expect(inherited.details.warnings).toEqual([
+      "Warning: models.strong-advisor nowhere/s is unresolvable in orche's runtime; falling back to models.advisor nowhere/a.",
+      "Warning: models.advisor nowhere/a is unresolvable in orche's runtime; the advisor inherits the orchestrator's model instead.",
+    ]);
+    expect(inherited.details.advisor).toMatchObject({ model: two.main, thinking: "high", modelSource: "orchestrator", thinkingSource: "orchestrator" });
+    expect(inherited.text).toContain("; advisor: the orchestrator's model)");
+  });
+  it("a strong-advisor without thinking inherits the strong orchestrator's level, not models.advisor's; \"main\" and thinking \"main\" name main's", async () => {
+    const own = await strongFixture({ single: { advisor: true }, models: { advisor: { model: "tier-advisor/a1", thinking: "low" }, "strong-advisor": { model: "strong-advisor/s1" } } });
+    own.strongFaux.setResponses([advice()]);
+    own.workerFaux.setResponses(workerSteps());
+    expect((await own.execute({ mainMode: "strong" })).details.advisor).toMatchObject({ model: "strong-advisor/s1", thinking: "high", modelSource: "config", thinkingSource: "orchestrator" });
+
+    const main = await fixture({ single: { advisor: true }, models: { advisor: { model: "tier-advisor/a1", thinking: "low" }, strongAdvisor: { model: "main" } } });
+    main.workerFaux.setResponses(shared());
+    expect((await main.execute({ mainMode: "strong", thinking: "medium" })).details.advisor).toMatchObject({ model: main.main, thinking: "medium", modelSource: "config:main", thinkingSource: "config:main" });
+
+    const thinkingMain = await strongFixture({ single: { advisor: true }, models: { "strong-advisor": { model: "strong-advisor/s1", thinking: "main" } } });
+    thinkingMain.strongFaux.setResponses([advice()]);
+    thinkingMain.workerFaux.setResponses(workerSteps());
+    expect((await thinkingMain.execute({ mainMode: "strong", thinking: "medium" })).details.advisor).toMatchObject({ model: "strong-advisor/s1", thinking: "medium", modelSource: "config", thinkingSource: "config:main" });
+  });
+  it("single.advisor off: a configured strong-advisor starts nothing", async () => {
+    const off = await strongFixture({ models: both.models });
+    off.strongFaux.setResponses([advice()]);
+    off.workerFaux.setResponses([plan(), reported()]);
+    const result = await off.execute({ mainMode: "strong" });
+    expect(result.details.advisor).toBeUndefined();
+    expect(off.strongFaux.getPendingResponseCount()).toBe(1);
+    expect(result.text).not.toContain("advisor:");
   });
 });
 

@@ -64,7 +64,7 @@ describe("strong/ultra: config, commands and texts", () => {
     const config = parseRouteConfig({ routes: {}, models: { "strong-orchestrator": { model: "a/s", thinking: "xhigh" }, strongWorker: { model: "main" } } });
     expect(config.models).toEqual({ "strong-orchestrator": { model: "a/s", thinking: "xhigh" }, "strong-worker": { model: "main" } });
     expect(() => parseRouteConfig({ routes: {}, models: { "strong-worker": { model: "a/b" }, strongWorker: { model: "a/c" } } })).toThrow('"strong-worker" and "strongWorker" name the same tier');
-    expect(() => parseRouteConfig({ routes: {}, models: { strong: { model: "a/b" } } })).toThrow("unknown tier (expected main, orchestrator, worker, advisor, strong-orchestrator, strong-worker)");
+    expect(() => parseRouteConfig({ routes: {}, models: { strong: { model: "a/b" } } })).toThrow("unknown tier (expected main, orchestrator, worker, advisor, strong-orchestrator, strong-worker, strong-advisor)");
     expect(() => parseRouteConfig({ routes: {}, models: { "strong-orchestrator": "a/b" } })).toThrow("config.models.strong-orchestrator: expected route object");
   });
 

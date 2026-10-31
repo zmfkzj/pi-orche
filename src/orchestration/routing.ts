@@ -61,10 +61,10 @@ export const LEGACY_WORKERS_KEYS: readonly string[] = ["maxWorkers", "answerAngl
 export function legacyConfigWarning(keys: readonly string[]): string {
   return `config.${keys.length === 1 ? keys[0] : `{${keys.join(", ")}}`} ${keys.length === 1 ? "was" : "were"} removed with the multi-worker coordinator and ${keys.length === 1 ? "is" : "are"} ignored${keys.includes("advisors") ? ' (the plan advisor of worker runs is now "single": { "advisor": true } with models.advisor)' : ""}${keys.includes("workers.maxWorkers") ? ' (the cap on sub-workers an orchestrator runs at the same time is now "single": { "maxSubWorkers": 2-8 }, default 4; workers.maxWorkers is not carried over)' : ""}`;
 }
-export const MODEL_TIERS = ["main", "orchestrator", "worker", "advisor", "strong-orchestrator", "strong-worker"] as const;
+export const MODEL_TIERS = ["main", "orchestrator", "worker", "advisor", "strong-orchestrator", "strong-worker", "strong-advisor"] as const;
 export type ModelTier = typeof MODEL_TIERS[number];
 /** camelCase spellings accepted for the strong tiers (one spelling per tier; both at once is a config error). */
-export const MODEL_TIER_ALIASES: Readonly<Record<string, ModelTier>> = { strongOrchestrator: "strong-orchestrator", strongWorker: "strong-worker" };
+export const MODEL_TIER_ALIASES: Readonly<Record<string, ModelTier>> = { strongOrchestrator: "strong-orchestrator", strongWorker: "strong-worker", strongAdvisor: "strong-advisor" };
 /** A tier of `orchestrator`, `worker`, `advisor` or a strong tier: a route whose model and whose thinking may each be INHERIT_MAIN. */
 export interface TierSettings { readonly model: string; readonly thinking?: ThinkingLevel | typeof INHERIT_MAIN; readonly extendedContext?: boolean }
 /** `main` is a plain route (the Pi session's own model); the other tiers may name main's model or thinking. */
@@ -74,6 +74,8 @@ export interface ModelTiers {
   readonly "strong-orchestrator"?: TierSettings;
   /** strong and ultra modes: the sub-workers' model (unset: the effective strong orchestrator; `worker` never applies there). */
   readonly "strong-worker"?: TierSettings;
+  /** strong, ultra and mdsd modes: the plan advisor's model (unset or unresolvable: `advisor`, then the effective strong orchestrator). */
+  readonly "strong-advisor"?: TierSettings;
 }
 /** One configured tier the orchestrator of a mode may run on, in order of preference. */
 export interface TierCandidate { readonly key: ModelTier; readonly tier: TierSettings }
@@ -89,6 +91,15 @@ export function modeTiers(tiers: ModelTiers | undefined, mode: MainMode | undefi
   const workerKey = strong ? "strong-worker" as const : "worker" as const;
   const worker = tiers?.[workerKey];
   return { orchestrators: keys.flatMap(key => tiers?.[key] ? [{ key, tier: tiers[key]! }] : []), ...(worker ? { worker: { key: workerKey, tier: worker } } : {}), workerKey };
+}
+/**
+ * The plan advisor's tiers of a delegating mode (docs/orchestrator.md 13), in order of preference: single `models.advisor`;
+ * strong, ultra and mdsd `models.strong-advisor`, then `models.advisor` (the backward-compatible fallback of an unset or
+ * unresolvable strong advisor). None resolvable: the advisor inherits the orchestrator that was picked.
+ */
+export function advisorTiers(tiers: ModelTiers | undefined, mode: MainMode | undefined): TierCandidate[] {
+  const keys: readonly ("advisor" | "strong-advisor")[] = usesStrongTiers(mode) ? ["strong-advisor", "advisor"] : ["advisor"];
+  return keys.flatMap(key => tiers?.[key] ? [{ key, tier: tiers[key]! }] : []);
 }
 /**
  * `{ "model": "main" }` in `models.orchestrator` or `models.worker`: run on main's current model and, unless the tier sets
@@ -132,7 +143,7 @@ const MAX_VERIFY_COMMANDS = 8;
 /** The former MAX_WORKERS_LIMIT bound of `workers.explorerRoles`. */
 const MAX_EXPLORER_ROLES = 8;
 /** `"main"` outside the inheriting tiers (routes, default, models.main): nothing to inherit from there. */
-const INHERITING_TIERS = "models.orchestrator, models.worker, models.advisor, models.strong-orchestrator and models.strong-worker";
+const INHERITING_TIERS = "models.orchestrator, models.worker, models.advisor, models.strong-orchestrator, models.strong-worker and models.strong-advisor";
 const thinkingMainError = (location: string) => new RouteConfigError(`${location}.thinking: "main" (inherit main's thinking) is for ${INHERITING_TIERS}; expected ${thinkingLevels.join(", ")}`);
 function parseThinking(value: unknown, location: string): ThinkingLevel | undefined {
   if (value === INHERIT_MAIN) throw thinkingMainError(location);
@@ -218,8 +229,8 @@ function parseImages(value: unknown): ImageSettings {
 }
 
 /**
- * `models`: `main`, `orchestrator`, `worker`, `advisor`, `strong-orchestrator` and `strong-worker` (or `strongOrchestrator`,
- * `strongWorker`), each `{model, thinking?, extendedContext?}` validated like a route. Parsed keys are the kebab-case names.
+ * `models`: `main`, `orchestrator`, `worker`, `advisor`, `strong-orchestrator`, `strong-worker` and `strong-advisor` (or
+ * `strongOrchestrator`, `strongWorker`, `strongAdvisor`), each `{model, thinking?, extendedContext?}` validated like a route. Parsed keys are the kebab-case names.
  */
 function parseModelTiers(value: unknown): ModelTiers {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.models: expected object");
