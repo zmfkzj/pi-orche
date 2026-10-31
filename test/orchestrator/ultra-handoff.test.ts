@@ -413,6 +413,24 @@ describe("ultra hand-off: what is recorded", () => {
     ]);
   });
 
+  it("keeps the mention and its line reference in the excerpt when an absolute path is longer than the excerpt (any temp dir)", async () => {
+    const run = await orchestrator();
+    const deep = ["src", "a-long-package-directory-name-for-the-excerpt-check", "another-long-subpackage-directory-name", "and-a-third-level-below-it", "with-one-more-level-for-good-measure", "deep_module.py"].join("/");
+    await mkdir(dirname(join(run.cwd, deep)), { recursive: true });
+    await writeFile(join(run.cwd, deep), "x = 1\n");
+    const absolute = join(run.cwd, deep);
+    expect(absolute.length).toBeGreaterThan(200);
+    await run.spawn("exploration", [w("basis", "implement", "Acceptance tests.", ["test/"]), w("cause", "answer", `Hypotheses; start at ${SETS}.`)], {
+      basis: () => ({ status: "done", summary: "Basis ready." }),
+      cause: () => ({ status: "done", summary: `The leak starts in ${absolute}:7 where the factor is read.` }),
+    });
+    const finding = run.ultra.state.handoff!.findings.find(item => item.path === deep)!;
+    expect(finding).toMatchObject({ path: deep, lines: "7", analysts: ["W1.2"] });
+    expect(finding.excerpt).toContain("with-one-more-level-for-good-measure/deep_module.py:7 where");
+    expect(finding.excerpt.startsWith("…")).toBe(true);
+    expect(finding.excerpt.length).toBeLessThanOrEqual(200);
+  });
+
   it("read-only (answer) ultra: naming in an answer candidate's request suffices, files mean nothing, and excluded works as in a write run", async () => {
     const run = await orchestrator({ readOnly: true });
     await run.spawn("exploration", [w("sources", "answer", "Find the sources of the ISA factor selection."), w("cause", "answer", "Hypotheses for the ISA factor bug.")], { cause: () => toxReport });

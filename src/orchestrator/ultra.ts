@@ -224,11 +224,12 @@ function pathMentions(text: string, cwd: string): PathMention[] {
   return mentions;
 }
 
-/** The text around a mention: its line from at most 80 characters before it, whitespace collapsed, at most 200 characters. */
+/** The text around a mention: its line from at most 80 characters before it, whitespace collapsed, at most 200 characters. A long
+ * absolute path moves the start forward so the mention's end and its line reference (24 characters after it) always stay in the excerpt. */
 function excerptAround(text: string, at: number, end: number): string {
   const lineStart = text.lastIndexOf("\n", at - 1) + 1;
   const next = text.indexOf("\n", end);
-  const from = Math.max(lineStart, at - 80);
+  const from = Math.max(lineStart, at - 80, end + 24 - 198);
   const body = text.slice(from, Math.min(next < 0 ? text.length : next, from + 400)).replace(/\s+/g, " ").trim();
   return clipText(`${from > lineStart ? "…" : ""}${body}`, 200);
 }
