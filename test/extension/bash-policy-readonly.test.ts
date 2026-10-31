@@ -52,6 +52,16 @@ describe("read-only commands that must be allowed", () => {
     "[ -f foo ]",
     // `file --help` only prints usage (it is the glob form that is rejected, see below)
     "file --help",
+    // date -I[FMT] prints ISO 8601; its attached format (seconds, ns, s) is not -s (set)
+    "date -Iseconds",
+    "date -u -Is",
+    "date -Ins",
+    // git's read-only global flag in front of a read-only subcommand
+    "git --no-optional-locks status --short",
+    "git --no-optional-locks -C x diff",
+    // command -v / -V only looks a name up, like which/type
+    "command -v node",
+    "command -V git npm",
   ])("allows %s", command => allowed(command));
 });
 
@@ -97,6 +107,17 @@ describe("mutation and execution must stay blocked", () => {
     "test -n \"$(id)\"",
     "test ! -n \"$A\"",
     "CI=* npm test",
+    // neighbours of the date -I, git --no-optional-locks and command -v allowances
+    "date -sI",
+    "date -Iseconds -s2020",
+    "date -Is 010100002020",
+    "git --no-optional-locks commit -m x",
+    "git --no-optional-locks -c core.pager=sh diff",
+    "git --no-optional-locks",
+    "command rm x",
+    "command -p ls",
+    "command -v",
+    "command -v -p ls",
   ])("blocks %s", command => blocked(command));
 
   it("keeps the verdict category: mutation for explicit writes, unsupported for the rest", () => {

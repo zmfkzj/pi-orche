@@ -307,7 +307,7 @@ function checkGit(args: readonly string[]): Issue | undefined {
     const a = args[i]!;
     if (args.length === 1 && ["--version", "--help"].includes(a)) return;
     if (a === "-C" && args[i + 1]) { i += 2; continue; }
-    if (["--no-pager", "-P"].includes(a) || /^--(git-dir|work-tree)=.+/.test(a)) { i++; continue; }
+    if (["--no-pager", "-P", "--no-optional-locks"].includes(a) || /^--(git-dir|work-tree)=.+/.test(a)) { i++; continue; }
     return unsupported(`git option ${a}`, { kind: "leading-option", tool: "git", option: a });
   }
   const sub = args[i], rest = args.slice(i + 1), opts = options(rest, "git");
@@ -415,6 +415,8 @@ function checkSegment(tokens: readonly Word[]): Issue | undefined {
     if (opts.some(a => /^-{1,2}(exec|toolexec|vettool)(=|$)/.test(a))) return unsupported("go execution injection option");
     return ["test", "vet", "list"].includes(args[0] ?? "") ? undefined : unsupported(`go ${args[0] ?? ""}`);
   }
+  // `command -v|-V NAME...` only looks names up, like which/type; any other use runs a command.
+  if (command === "command" && ["-v", "-V"].includes(args[0] ?? "") && args.length > 1 && args.slice(1).every(a => !a.startsWith("-"))) return;
   if (!INSPECTION.has(command)) return new Set(["rm", "mv", "cp", "touch", "mkdir", "tee", "chmod", "chown", "truncate"]).has(command) ? mutation(`command ${command}`) : unsupported(`command ${command}`);
   if (command === "file" && opts.some(a => long(a, ["--compile"]) || short(a, "C", "mfePF"))) return mutation("file magic database compile");
   if (command === "printf" && opts.some(a => short(a, "v"))) return mutation("printf -v shell variable assignment");
@@ -432,7 +434,8 @@ function checkSegment(tokens: readonly Word[]): Issue | undefined {
   if (command === "fd" && opts.some(a => long(a, ["--exec", "--exec-batch"]) || short(a, "xX"))) return unsupported("fd --exec");
   if (command === "rg" && opts.some(a => long(a, ["--pre", "--hostname-bin"]))) return unsupported("rg --pre / --hostname-bin execution hook");
   if (command === "date") {
-    if (opts.some(a => long(a, ["--set"]) || short(a, "s", "dfr"))) return mutation("date --set");
+    // -I takes an attached format (-Iseconds), so letters after it are not -s.
+    if (opts.some(a => long(a, ["--set"]) || short(a, "s", "dfrI"))) return mutation("date --set");
     // GNU date also sets the clock with a numeric operand, including after --.
     let literal = false;
     for (let k = 0; k < args.length; k++) {
