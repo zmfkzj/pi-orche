@@ -54,6 +54,12 @@ export interface SpecialistRun<S extends TSchema> {
    * waitExtendable as an orche_task assignment, fed by THIS session's own events only. Absent: the fixed timer (the advisor).
    */
   deadline?: SpecialistDeadline;
+  /**
+   * Completion wait (`--orche-completion-wait unbounded`, src/orchestration/completion-wait.ts): no wall-clock cap at all. The fixed
+   * `timeoutMs` timer is not armed, and a `deadline` only observes (no expiry, extension or stall stop). The turn cap, a budget, a
+   * model error and `signal` still end the call.
+   */
+  unbounded?: boolean;
   /** Cancellation of the caller (an orche_spawn sub-worker: its orchestrator's assignment and tool call); wins over any extension. */
   signal: AbortSignal;
   /** Persist the transcript here (the assignment record's `sessions/`); in memory without it. */
@@ -108,6 +114,8 @@ export interface SpecialistDeadlineStats {
   lastObservation?: WaitObservation;
   /** Set when the deadline stopped the call: `idle` (no activity at an expiry), `budget` (all extensions used) or `stalled`. */
   notExtended?: Pick<NotExtended, "reason" | "n" | "max" | "windowMs" | "checks" | "everyMs" | "message">;
+  /** Completion wait: the call had no deadline (`baseMs`/`hardLimitMs` are the limits it would have had without the flag, not applied). */
+  unbounded?: true;
 }
 
 export interface SpecialistStats {
@@ -165,10 +173,10 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
   const controller = new AbortController();
   const onAbort = () => controller.abort(run.signal.reason ?? new Error("cancelled"));
   run.signal.addEventListener("abort", onAbort, { once: true });
-  const timer = run.deadline ? undefined : setTimeout(() => controller.abort(new Error(`timed out after ${Math.round(run.timeoutMs / 1000)}s`)), Math.max(0, run.timeoutMs));
+  const timer = run.deadline || run.unbounded ? undefined : setTimeout(() => controller.abort(new Error(`timed out after ${Math.round(run.timeoutMs / 1000)}s`)), Math.max(0, run.timeoutMs));
   // The activity-aware deadline: this session's own liveness only (another sub-worker's activity never extends it).
   const tracker = run.deadline ? new LivenessTracker({ id: run.actor, role: "specialist", ...(run.deadline.toolTimeoutsMs ? { toolTimeoutsMs: run.deadline.toolTimeoutsMs } : {}) }) : undefined;
-  const watchdog = run.deadline && tracker ? startWatchdog(run.deadline, tracker, startedAt, run.signal, stats, reason => controller.abort(new Error(reason))) : undefined;
+  const watchdog = run.deadline && tracker ? startWatchdog(run.deadline, tracker, startedAt, run.signal, stats, reason => controller.abort(new Error(reason)), !!run.unbounded) : undefined;
   const captured: { value?: Static<S> } = {};
   let session: Awaited<ReturnType<typeof createSession>> | undefined;
   let unsubscribe: (() => void) | undefined;
@@ -284,10 +292,10 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
  * `expire(reason)` when it is not (idle at an expiry, budget used up, or stalled during an extension). The caller's `signal` ends
  * the wait at once (the call is cancelled by it anyway). `stop()` ends the wait and its observer and resolves once both are gone.
  */
-function startWatchdog(settings: SpecialistDeadline, tracker: LivenessTracker, startedAt: number, signal: AbortSignal, stats: SpecialistStats, expire: (reason: string) => void): { stop(): Promise<void> } {
+function startWatchdog(settings: SpecialistDeadline, tracker: LivenessTracker, startedAt: number, signal: AbortSignal, stats: SpecialistStats, expire: (reason: string) => void, unbounded = false): { stop(): Promise<void> } {
   const { limits } = settings;
   const deadline = ExtendableDeadline.fromLimits({ ...limits, overallMs: limits.assignmentMs }, { startedAt });
-  const record: SpecialistDeadlineStats = { baseMs: deadline.baseOverallMs, hardLimitMs: deadline.hardLimitMs, maxExtensions: deadline.maxExtensions, extensions: [], observations: 0 };
+  const record: SpecialistDeadlineStats = { baseMs: deadline.baseOverallMs, hardLimitMs: deadline.hardLimitMs, maxExtensions: deadline.maxExtensions, extensions: [], observations: 0, ...(unbounded ? { unbounded: true as const } : {}) };
   stats.deadline = record;
   let finish: () => void = () => undefined;
   const finished = new Promise<void>(resolve => { finish = resolve; });
@@ -297,7 +305,7 @@ function startWatchdog(settings: SpecialistDeadline, tracker: LivenessTracker, s
     void finished.then(() => { clearTimeout(timer); resolve({ type: "done" }); });
   });
   const running = waitExtendable<Wait>({
-    deadline, wait, signal, stage: tracker.id, scope: "assignment",
+    deadline, wait, signal, stage: tracker.id, scope: "assignment", unbounded,
     liveness: (now, windowMs) => tracker.session(now, windowMs),
     observeEveryMs: limits.observeMs,
     onExtended: extension => { record.extensions.push(extension); try { settings.onExtended?.(extension); } catch { /* an observer cannot alter the deadline */ } },

@@ -24,6 +24,7 @@ import { formatSplitSummary, readSplitLog, summarizeSplits } from "../orchestrat
 import { applyMainModel, formatModelTiers, inheritedThinking, type ModelTiersView } from "./main-model.js";
 import { LONG_RESPONSE_GUIDANCE_TYPE, LongResponseWatch, type LongResponseOptions } from "./long-response.js";
 import { defaultRunLimits, extensionBudgetMs, extensionLengthMs } from "../orchestration/limits.js";
+import { COMPLETION_WAIT_FLAG, COMPLETION_WAIT_UNBOUNDED, parseCompletionWait } from "../orchestration/completion-wait.js";
 import { formatDuration } from "../agent/liveness.js";
 import { LEDGER_ENTRY_TYPE, LEDGER_SUMMARY_TYPE, latestLedgers, type TaskLedger } from "../single/ledger.js";
 import { completeOrcheArguments } from "./completions.js";
@@ -213,6 +214,9 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     const dependencies = createOrcheDependencyProvider({ ...(options.agentDir ? { agentDir: options.agentDir } : {}), ...options.dependencies });
     registerDependencyProvider(pi.events, dependencies);
     const controller = new OrcheController(options);
+    // Completion wait (src/orchestration/completion-wait.ts): a per-invocation CLI flag, never a config key, so only the Pi process
+    // started with `--orche-completion-wait unbounded` (e.g. one research turn) waits for its workers' results without deadlines.
+    pi.registerFlag(COMPLETION_WAIT_FLAG, { type: "string", description: `"${COMPLETION_WAIT_UNBOUNDED}": orche_task workers, their sub-workers and advisor run without wall-clock or inactivity deadlines in this process (results, failures and cancellation still end them)` });
     let workers: WorkerPool | undefined;
     /** Task ledgers of this session's branch (restored at session start): a fresh pool picks them up, so a task outlives its worker. */
     let restoredLedgers: TaskLedger[] = [];
@@ -243,6 +247,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         workers = new WorkerPool({
           controller, ...(options.agentDir ? { agentDir: options.agentDir } : {}), ...(options.workerIdleTtlMs !== undefined ? { idleTtlMs: options.workerIdleTtlMs } : {}),
           skills: knownSkills,
+          completionWait: () => parseCompletionWait(pi.getFlag(COMPLETION_WAIT_FLAG)),
           // One small entry per ledger event, not part of the model context: it follows the session branch and survives reloads.
           onLedgerEvent: event => pi.appendEntry(LEDGER_ENTRY_TYPE, event),
           // Workers that go away are remembered in the session, so naming one later continues with a new worker briefed from it.

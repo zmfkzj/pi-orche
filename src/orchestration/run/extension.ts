@@ -1,5 +1,6 @@
 import { formatDuration, type Liveness, type SessionLiveness } from "../../agent/liveness.js";
 import { defaultRunLimits, describeExtensionSchedule, extensionBudgetMs, extensionLengthMs, type RunLimits } from "../limits.js";
+import { UNBOUNDED_WAIT_SEGMENT_MS } from "../completion-wait.js";
 
 /**
  * Activity-aware deadlines, shared by orche_run (one {@link ExtendableDeadline} per run) and orche_task (one per assignment).
@@ -425,6 +426,12 @@ export interface ExtendableWaitOptions<R extends { type: string }> {
    * runs on an extension (the base window keeps its old behaviour). Default {@link STALL_CHECKS}; 0 never ends it early.
    */
   stallChecks?: number;
+  /**
+   * Completion wait (`--orche-completion-wait unbounded`, src/orchestration/completion-wait.ts): no deadline at all. The wait is
+   * re-armed every {@link UNBOUNDED_WAIT_SEGMENT_MS} (a passing segment is neither a result nor a stop), nothing is extended or
+   * refused, and the observer reports without ever ending the wait (no stall). Only a result or the `signal` ends it.
+   */
+  unbounded?: boolean;
 }
 
 /** A result of the wait, or `timeout` (with the reason it was not extended), or `aborted` (the signal fired). */
@@ -477,6 +484,19 @@ export async function waitExtendable<R extends { type: string }>(options: Extend
     return { sample, ...describeProgress(sample, lastEvidence, now) };
   };
   const observer = startObserver(options, progressNow, sample => { if (sample) lastEvidence = sample.evidence; });
+  if (options.unbounded) {
+    try {
+      for (;;) {
+        if (signal?.aborted) return { type: "aborted" };
+        const waited = await raceAbort<R>(options.wait(UNBOUNDED_WAIT_SEGMENT_MS), signal);
+        if (waited === ABORTED || signal?.aborted) return { type: "aborted" };
+        // A passing segment is not a result: re-arm. Everything else (a result, a failure outcome) goes back to the caller.
+        if (waited.type !== "timeout") return waited as Exclude<R, { type: "timeout" }>;
+      }
+    } finally {
+      observer?.stop();
+    }
+  }
   try {
     for (;;) {
       if (signal?.aborted) return { type: "aborted" };
@@ -506,7 +526,8 @@ function startObserver<R extends { type: string }>(
   const every = options.observeEveryMs;
   if (typeof every !== "number" || !Number.isFinite(every) || every <= 0) return undefined;
   const { deadline } = options;
-  const stallChecks = typeof options.stallChecks === "number" && Number.isSafeInteger(options.stallChecks) && options.stallChecks >= 0 ? options.stallChecks : STALL_CHECKS;
+  // An unbounded wait never stalls: the observer only reports.
+  const stallChecks = options.unbounded ? 0 : typeof options.stallChecks === "number" && Number.isSafeInteger(options.stallChecks) && options.stallChecks >= 0 ? options.stallChecks : STALL_CHECKS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
   let n = 0;

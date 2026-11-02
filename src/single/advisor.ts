@@ -172,6 +172,8 @@ export interface AdvisorOptions {
   /** The worker's assignment as handed off (request plus context). */
   request: string;
   timeoutMs: number;
+  /** Completion wait (`--orche-completion-wait unbounded`): no wall-clock cap on the advisor session (`timeoutMs` is not armed; its turn cap and cancellation stay). */
+  unbounded?: boolean;
   /** The assignment's signal: cancellation stops the advisor. */
   signal: AbortSignal;
   sessionFile?: string;
@@ -296,7 +298,7 @@ export class AssignmentAdvisor {
         actor: this.id, route: this.options.route, runtime: this.options.runtime, cwd: this.options.cwd,
         instructions: ADVISOR_INSTRUCTIONS, prompt: advisorPrompt({ worker: this.options.worker, ...(this.options.role ? { role: this.options.role } : {}), request: this.options.request, ...(plan ? { plan } : {}), trigger: this.trig! }),
         tools: ADVISOR_TOOL_NAMES, report: adviceReport, toolGuard: advisorToolGuard,
-        maxTurns: this.options.maxTurns ?? ADVISOR_MAX_TURNS, timeoutMs: this.options.timeoutMs,
+        maxTurns: this.options.maxTurns ?? ADVISOR_MAX_TURNS, timeoutMs: this.options.timeoutMs, ...(this.options.unbounded ? { unbounded: true } : {}),
         signal: AbortSignal.any([this.options.signal, this.abort.signal]), nudges: 1,
         ...(this.options.sessionFile ? { sessionFile: this.options.sessionFile } : {}),
         ...(this.options.inheritedContextWindow ? { inheritedContextWindow: this.options.inheritedContextWindow } : {}),

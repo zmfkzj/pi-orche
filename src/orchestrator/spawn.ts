@@ -255,6 +255,8 @@ export interface SubWorkerDeadline {
   lastObservation?: WaitObservation;
   /** Why the deadline stopped the sub-worker (its status is then `failed`): idle at an expiry, budget used up, or stalled. */
   notExtended?: { reason: NotExtendedReason; message: string };
+  /** Completion wait (`--orche-completion-wait unbounded`): the sub-worker ran without a deadline (base and ceiling were not applied). */
+  unbounded?: true;
 }
 
 /** The outcome's deadline part from a specialist call's deadline stats. */
@@ -264,6 +266,7 @@ export function subWorkerDeadline(stats: SpecialistDeadlineStats): SubWorkerDead
     extendedMs: stats.extensions.reduce((sum, extension) => sum + extension.extensionMs, 0), observations: stats.observations,
     ...(stats.lastObservation ? { lastObservation: { ...stats.lastObservation, reasons: [...stats.lastObservation.reasons] } } : {}),
     ...(stats.notExtended ? { notExtended: { reason: stats.notExtended.reason, message: stats.notExtended.message ?? stats.notExtended.reason } } : {}),
+    ...(stats.unbounded ? { unbounded: true as const } : {}),
   };
 }
 
@@ -272,6 +275,7 @@ export type SubWorkerDeadlineEvent = { type: "extended"; extension: DeadlineExte
 
 /** `ext 2/10 (+30m in total) · stopped: not extended: no activity in the last 2m`: the deadline line of a sub-worker in the orche_spawn result. */
 export function formatSubWorkerDeadline(deadline: SubWorkerDeadline): string | undefined {
+  if (deadline.unbounded) return "Deadline: none (completion wait)";
   if (!deadline.extensions.length && !deadline.notExtended) return undefined;
   const used = `${deadline.extensions.length}/${deadline.maxExtensions} extension${deadline.maxExtensions === 1 ? "" : "s"}${deadline.extensions.length ? ` (+${formatDuration(deadline.extendedMs)}: ${deadline.extensions.map(extension => `+${formatDuration(extension.extensionMs)}`).join(", ")})` : ""}`;
   return `Deadline: base ${formatDuration(deadline.baseMs)}, ${used}${deadline.notExtended ? `; stopped: ${deadline.notExtended.message}` : ""}`;

@@ -44,6 +44,8 @@ export async function createHarness(options: {
   mainSteps: FauxResponseStep[];
   orcheSteps: FauxResponseStep[];
   extension?: OrcheExtensionOptions;
+  /** CLI flag values of extensions (`pi --name value`), applied the way Pi applies them after loading (`runtime.flagValues`). */
+  flags?: Record<string, string | boolean>;
   writeUserConfig?: boolean;
   /** `mainMode` in the user config (default single delegates; unset omits the key). */
   /** Resolve the main provider in the worker runtime; default tests keep separate scripts/routes. */
@@ -104,6 +106,7 @@ export async function createHarness(options: {
     extensionFactories: [orcheFactory(options, agentDir, main.runtime, orche.runtime), ...(options.extraExtensions ?? [])],
   });
   await resourceLoader.reload();
+  for (const [name, value] of Object.entries(options.flags ?? {})) resourceLoader.getExtensions().runtime.flagValues.set(name, value);
   const model = main.runtime.getModel(main.faux.provider.id, main.faux.getModel().id)!;
   const { session } = await createAgentSession({
     cwd, agentDir, modelRuntime: main.runtime, model, thinkingLevel: "off",

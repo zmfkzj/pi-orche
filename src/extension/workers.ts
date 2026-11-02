@@ -16,6 +16,7 @@ import { checkWriteRealPath, formatWriteRoots, WRITE_TOOLS, WRITING_KINDS, type 
 import { ensureScratchDir, removeScratchDir } from "../orchestration/scratch.js";
 import { checkBashWrites } from "../orchestration/bash-writes.js";
 import { resolveRunLimits } from "../orchestration/limits.js";
+import { COMPLETION_WAIT_LINE, type CompletionWait } from "../orchestration/completion-wait.js";
 import { taskWorkerInstructions } from "../orchestration/prompts.js";
 import { orchestrationResultSchemas, requirementDefinitions, requirementIds, requiredChecklistError, type Ambiguity, type ChecklistItem } from "../orchestration/result-schemas.js";
 import { createTaskPlanTool, renderTaskPlan, type TaskPlan } from "../tools/task-plan.js";
@@ -189,6 +190,8 @@ export interface TaskDetails {
   record?: string;
   /** Present when the assignment's deadline was extended because the worker was still active (see src/orchestration/run/extension.ts): every extension granted, in order. */
   extensions?: DeadlineExtension[];
+  /** Present when the Pi process runs with `--orche-completion-wait unbounded` (src/orchestration/completion-wait.ts): the assignment had no deadline. */
+  completionWait?: "unbounded";
   /** Newly cleared original results/reasoning at this assignment's start. */
   contextCleared?: ContextClearedStats;
   /** Present when the assignment timed out with extensions enabled: why the expired deadline was not extended (`idle`: no activity in the activity window; `budget`: all extensions used; `stalled`: consecutive observations during an extension found no activity). */
@@ -463,6 +466,11 @@ export interface WorkerPoolOptions {
    * in its prompt (src/pi/worker-skills.ts) and reads a SKILL.md only when relevant; a living worker keeps the list it started with.
    */
   skills?: () => readonly Skill[];
+  /**
+   * Completion wait of this Pi process (src/orchestration/completion-wait.ts; the extension wires `--orche-completion-wait`). Read
+   * per assignment; absent or `deadline`: the finite deadlines. A throw (an invalid flag value) fails the assignment before it starts.
+   */
+  completionWait?: () => CompletionWait;
 }
 
 // ---- git grant: validation, the line every assignment prompt carries, and the read-only commit/push report ----
@@ -1008,6 +1016,14 @@ export class WorkerPool {
    * running an assignment had model output, a tool event, tool output or a progressing bash heartbeat within `windowMs`, or has a
    * request / non-bash tool in flight within its bound. Idle workers are listed but never active. Read-only.
    */
+  /** This process's completion wait (may throw on an invalid flag value). */
+  private completionWaitMode(): CompletionWait {
+    return this.options.completionWait?.() ?? "deadline";
+  }
+  /** Whether this process waits for results without deadlines; an invalid flag value counts as not (it fails each assignment instead). */
+  private unbounded(): boolean {
+    try { return this.completionWaitMode() === "unbounded"; } catch { return false; }
+  }
   liveness(now: number = Date.now(), windowMs: number = DEFAULT_LIVENESS_WINDOW_MS): Liveness {
     return this.manager ? this.manager.liveness(now, windowMs, [...this.workers.keys()]) : mergeLiveness();
   }
@@ -1045,6 +1061,8 @@ export class WorkerPool {
     clearTimeout(worker.timer);
     worker.lastUsed = Date.now();
     if (this.disposed || !this.workers.has(worker.id)) return;
+    // Completion wait: no idle expiry (a research turn may come back to the same worker after a long step of its own).
+    if (this.unbounded()) return;
     worker.timer = setTimeout(() => {
       if (this.manager?.get(worker.id).status === "idle") void this.retire(worker.id, `idle expiry after ${Math.round((this.options.idleTtlMs ?? 30 * 60_000) / 60_000)} min without an assignment`).catch(() => undefined);
     }, this.options.idleTtlMs ?? 30 * 60_000);
@@ -1258,11 +1276,13 @@ export class WorkerPool {
     const limits = resolveRunLimits(config.routes.limits);
     // The deadline the UI shows next to the elapsed time: the assignment's own, from the same limits. Replaced by the live ExtendableDeadline's state
     // once the worker has its assignment (see below), and after each extension.
-    let deadlineInfo: DeadlineInfo = initialDeadline(limits.assignmentMs, limits, started);
+    // Completion wait (`--orche-completion-wait unbounded`, this Pi process only): no deadline below, so none is shown either.
+    const unbounded = this.completionWaitMode() === "unbounded";
+    let deadlineInfo: DeadlineInfo | undefined = unbounded ? undefined : initialDeadline(limits.assignmentMs, limits, started);
     const timingNow = (): RunTiming => ({ startedAt: started, deadline: deadlineInfo });
     args.onTiming?.(timingNow(), warning ? [warning] : []);
     const startup = new AbortController();
-    startupTimer = setTimeout(() => startup.abort(new Error(`Worker startup timed out after ${limits.assignmentMs}ms`)), Math.max(0, limits.assignmentMs - (Date.now() - started)));
+    if (!unbounded) startupTimer = setTimeout(() => startup.abort(new Error(`Worker startup timed out after ${limits.assignmentMs}ms`)), Math.max(0, limits.assignmentMs - (Date.now() - started)));
     const startupSignal = AbortSignal.any([signal, startup.signal]);
     const isolatedRuntime = await this.options.controller.modelRuntime(startupSignal);
     if (this.disposed) throw new Error("Worker pool is disposed");
@@ -1877,7 +1897,7 @@ export class WorkerPool {
         worker: meta.id, role: args.role, status, ...(meta.model ? { model: meta.model, modelSource, thinkingSource } : {}), ...workflowDetails(), durationMs: finishedAt - started, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...report, roster: this.roster(),
         ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(),
         ...(record ? { record: record.dir } : {}),
-        ...contextDetails(), ...ledgerDetails(), ...outcomeDetails(), ...observationDetails(),
+        ...contextDetails(), ...ledgerDetails(), ...outcomeDetails(), ...observationDetails(), ...(unbounded ? { completionWait: "unbounded" as const } : {}),
       };
     };
     /** The final `run.json` of this assignment, with this worker's entry (the lifetime totals of its one session). */
@@ -1982,7 +2002,7 @@ export class WorkerPool {
             specialistRoute: role => resolveSpecialistRoute(config.routes, role, (provider, id) => !!runtime.getModel(provider, id)),
             imageTool: () => config.routes.images ? createGenerateImageTool({ cwd: args.cwd, runtime, images: config.routes.images }) : undefined,
             prompt: (planned, imagesAvailable) => subWorkerPrompt(planned, meta.id, config.routes.verifyCommands ?? [], imagesAvailable, !!ultraRun),
-            timeoutMs: limits.assignmentMs, maxTurns: Math.max(50, Math.round((limits.assignmentRequests ?? 200) * 1.5)),
+            timeoutMs: limits.assignmentMs, maxTurns: Math.max(50, Math.round((limits.assignmentRequests ?? 200) * 1.5)), ...(unbounded ? { unbounded: true } : {}),
             // Every sub-worker gets the same activity-aware deadline as this assignment (the resolved limits: base, linear or fixed
             // extensions, activity window, observation), from its own start and judged by its own session; this assignment still bounds it.
             deadline: { limits, ...(config.routes.images ? { toolTimeoutsMs: { generate_image: config.routes.images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } } : {}) },
@@ -2030,7 +2050,7 @@ export class WorkerPool {
         advisor = new AssignmentAdvisor({
           worker: meta.id, role: args.role, cwd: args.cwd, runtime, route: advisorRoute.route, modelSource: advisorRoute.source, thinkingSource: advisorRoute.thinkingSource,
           // At most half the assignment's base cap: a report held for the advisor leaves the worker time to process its notes.
-          request: meta.request ?? handoffRequest, timeoutMs: Math.min(ADVISOR_TIMEOUT_MS, Math.max(1000, Math.floor(limits.assignmentMs / 2))), signal,
+          request: meta.request ?? handoffRequest, timeoutMs: Math.min(ADVISOR_TIMEOUT_MS, Math.max(1000, Math.floor(limits.assignmentMs / 2))), signal, ...(unbounded ? { unbounded: true } : {}),
           ...(advisorFile ? { sessionFile: advisorFile } : {}), ...(advisorWindow ? { inheritedContextWindow: advisorWindow } : {}),
           deliver: (text, content) => manager.steer(meta.id, text, { source: "advisor", content }),
           onEvent: event => record?.appendEvent(event),
@@ -2053,10 +2073,14 @@ export class WorkerPool {
       const manager = this.manager;
       const waitRound = async (stage: string) => {
         const current = deadline;
-        deadlineInfo = deadlineInfoOf(current);
+        if (!unbounded) deadlineInfo = deadlineInfoOf(current);
         const waited = await waitExtendable({
-          deadline: current, signal, stage, scope: "assignment",
-          wait: ms => manager.wait(meta.id, ms),
+          deadline: current, signal, stage, scope: "assignment", unbounded,
+          // Unbounded: a segment that passes because the pool shut down (a closed manager answers `timeout` at once) ends the wait.
+          wait: unbounded ? async (ms: number): Promise<Awaited<ReturnType<typeof manager.wait>> | { type: "closed" }> => {
+            const waited = await manager.wait(meta.id, ms);
+            return waited.type === "timeout" && this.disposed ? { type: "closed" } : waited;
+          } : ms => manager.wait(meta.id, ms),
           liveness: assignmentLiveness,
           // Observation at a fixed period, independent of how long the current extension is: liveness and recorded progress.
           observeEveryMs: limits.observeMs, progress: progressSample,
@@ -2071,7 +2095,7 @@ export class WorkerPool {
             extensions.push({ ...extension, reasons: [...extension.reasons] });
             record?.appendEvent(extensionEvent(extension));
             record?.update({ extensions: extensions.map(granted => ({ ...granted, reasons: [...granted.reasons] })) });
-            deadlineInfo = deadlineInfoOf(current);
+            if (!unbounded) deadlineInfo = deadlineInfoOf(current);
             progress();
           },
         });
@@ -2091,6 +2115,7 @@ export class WorkerPool {
           const headline = withNotExtended(`Worker ${meta.id} timed out after ${ranMs}ms`, why);
           throw new WorkerFailure(history.length ? `${headline}\n${history.join("\n")}` : headline, "failed", "timeout");
         }
+        if (waited.type === "closed") { await stopPromise; throw new WorkerFailure(`Worker ${meta.id} interrupted: the pi session shut down`, "cancelled", "cancelled"); }
         if (waited.type !== "outcome") throw new WorkerFailure(`Worker ${meta.id} returned no result`, "failed", "no_result");
         const { outcome: reported } = waited;
         lastOutcome = reported;
@@ -2146,12 +2171,12 @@ export class WorkerPool {
       const details: TaskDetails = {
         worker: meta.id, role: args.role, status: typeof data.status === "string" ? data.status : outcome.status, ...(meta.model ? { model: meta.model, modelSource, thinkingSource } : {}), ...workflowDetails(), ...(orchestrating && splitOf(data) ? { split: splitOf(data)! } : {}), ...(checklist ? { checklist } : {}), ...(Array.isArray(data.ambiguities) && data.ambiguities.length ? { ambiguities: data.ambiguities as Ambiguity[] } : {}), durationMs, startedAt: started, finishedAt, deadline: deadlineInfo, requests, ...changeReport, roster,
         ...(retired.length ? { retired } : {}), ...(concurrent ? { concurrentSessions: concurrent.activity } : {}), ...(gitReport ? { git: gitReport } : {}), ...extensionDetails(), ...(record ? { record: record.dir } : {}),
-        ...contextDetails(), ...ledgerDetails(), ...outcomeDetails(), ...observationDetails(),
+        ...contextDetails(), ...ledgerDetails(), ...outcomeDetails(), ...observationDetails(), ...(unbounded ? { completionWait: "unbounded" as const } : {}),
       };
       finishRecord("done", details, { summary: meta.summary });
       const planNotes = singleWorkflow && !meta.plan ? ["Note: no Task DAG recorded in this assignment."] : [];
       const text = [...(warning ? [warning, ""] : []), `orche task ${meta.id} (${args.role}, ${Math.round(durationMs / 1000)}s, ${requests} requests; ${describeSource(config.source)})`, ...modelWarnings, modelLineOf(details), ...modeLines(), ...contextLine(),
-        ...taskLines(), "", meta.summary, ...roleData, ...checklistLines, ...outcomeLines(), ...policyLines(), ...splitLines(splitOf(data)), "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), `Workers: ${roster}`, ...retirementLines,
+        ...taskLines(), "", meta.summary, ...roleData, ...checklistLines, ...outcomeLines(), ...policyLines(), ...splitLines(splitOf(data)), "", ...(audit ? formatTaskChanges(changeReport, { concurrentWarning: !!warning, grant: !!grant }) : ["Workspace audit unavailable (not a git work tree)"]), ...gitLines, ...deadline.summary(), ...(unbounded ? [COMPLETION_WAIT_LINE] : []), `Workers: ${roster}`, ...retirementLines,
         ...planNotes, ...(!WRITING_KINDS.has(args.role) && args.files !== undefined ? ["Note: files ignored for read-only role."] : []), ...(note ? [`Note: follow up with the same worker — ${note}`] : [])].join("\n");
       return { text: withRecordLine(text, record?.dir), details };
     } catch (error) {
