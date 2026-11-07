@@ -9,8 +9,9 @@ import {
   SettingsManager,
   type AgentSession,
   estimateTokens,
-  DEFAULT_COMPACTION_SETTINGS,
+  type SessionBeforeCompactEvent,
   type SessionCompactEvent,
+  type SessionCompactFailedEvent,
   type Extension,
   type ExtensionFactory,
   type LoadExtensionsResult,
@@ -35,6 +36,8 @@ import { atEffectiveBaseline, thinkingStateOf } from "./thinking-state.js";
 import { BOOKKEEPING_TOOLS, evidenceLedgerOf, recordToolCall, refText } from "./tool-evidence.js";
 import { unknownToolHandler } from "./unknown-tool.js";
 import { WORKER_SKILLS_NOTE, workerSkills } from "./worker-skills.js";
+import { MAX_EARLY_COMPACTIONS, piCompactionSettings, stableCompaction, type ResolvedCompaction } from "./compaction-policy.js";
+import { checkReference, type EssentialsResult, type ReferenceStatus } from "./compaction-state.js";
 export interface SessionOptions {
   route: { role: string; model: string; thinking?: ThinkingLevel; extendedContext?: boolean };
   cwd: string;
@@ -79,8 +82,11 @@ export interface SessionOptions {
   bashHeartbeat?: { intervalMs?: number };
   /** Opt-in request-only projection; the owner records each assignment boundary before prompting. */
   contextProjection?: ReturnType<typeof createAssignmentProjector>;
-  /** Opt-in only for single-workflow task workers. Essentials are restored verbatim after every successful compaction. */
-  taskCompaction?: { essentials: () => string; onCompact?: (stats: CompactionStats) => void };
+  /**
+   * Opt-in for single-workflow task workers (and, with `workerCompaction.subWorkers`, orche_spawn sub-workers). Essentials are
+   * restored verbatim after every successful compaction; see {@link TaskCompaction}.
+   */
+  taskCompaction?: TaskCompaction;
   /** Effective main window, including extended context, when inheriting its model. */
   inheritedContextWindow?: number;
   /**
@@ -104,31 +110,175 @@ export interface SessionOptions {
 }
 /** `toolCallId`: the call's id, for owners that pair the guard with the call's end (the ultra integrity probes in src/orchestrator/ultra.ts). */
 export type ToolGuard = (toolName: string, input: Record<string, unknown>, toolCallId?: string) => string | undefined | Promise<string | undefined>;
-export interface CompactionStats { tokensBefore: number; tokensAfter: number }
+/** One successful compaction: Pi's estimate before/after (`tokensAfter` includes the restored essentials) and what orche knows about it. */
+export interface CompactionStats {
+  tokensBefore: number;
+  tokensAfter: number;
+  reason?: "manual" | "threshold" | "overflow";
+  policy?: ResolvedCompaction["policy"];
+  triggerTokens?: number;
+  early?: boolean;
+  essentialsChars?: number;
+  essentialsSections?: string[];
+  essentialsMissing?: string[];
+  /** `valid` | `unavailable` | `invalid`: the transcript reference checked before the compaction (extended essentials only). */
+  reference?: ReferenceStatus["status"];
+  /** Usage of the summary request(s) as the provider reported it (Pi stores it on the compaction entry). */
+  summaryUsage?: { input: number; output: number };
+  /** The essentials callback failed after the compaction; the text checked before it was restored instead (or none). */
+  essentialsError?: string;
+}
+/** A compaction that did not happen: refused by orche's preflight (`cause`), cancelled by another handler or aborted, or failed. */
+export type CompactionEvent =
+  | { type: "compaction_cancelled"; reason: string; cause: "reference_invalid" | "essentials_invalid" | "loop_guard" | "early_limit" | "aborted"; fallback?: "stable"; tokensBefore?: number; triggerTokens?: number; detail?: string }
+  | { type: "compaction_failed"; reason: string; errorMessage?: string; willRetry: boolean };
+export interface EssentialsContext {
+  session: AgentSession;
+  /** The transcript reference checked before this compaction (only with `retrieval`). */
+  reference?: ReferenceStatus;
+  reason?: string;
+}
+export interface TaskCompaction {
+  essentials: (context: EssentialsContext) => string | EssentialsResult;
+  onCompact?: (stats: CompactionStats) => void;
+  /** Refusals, cancellations and failures (telemetry). */
+  onEvent?: (event: CompactionEvent) => void;
+  /** The session's compaction policy for its model (default: the stable 50% policy; src/pi/compaction-policy.ts). */
+  policy?: (model: { contextWindow: number; provider: string; id: string }) => ResolvedCompaction;
+  /** The essentials point to the original transcript: check it before context is discarded (extended essentials). */
+  retrieval?: boolean;
+}
+/** The stable settings (kept for callers and tests): compact above 50% of the window. */
 export function taskCompactionSettings(contextWindow: number) {
-  const reserveTokens = Math.floor(contextWindow * 0.5);
-  return { enabled: true, reserveTokens, keepRecentTokens: Math.min(DEFAULT_COMPACTION_SETTINGS.keepRecentTokens, contextWindow - reserveTokens) };
+  return piCompactionSettings(stableCompaction(contextWindow));
 }
 
 export const COMPACTION_ASSIGNMENT_LABEL = "Assignment in progress at compaction time (superseded by any later Assignment message)";
 
+/** Per-session compaction state of orche's hooks: the policy in force, the preflight of the compaction in progress, the guard. */
+interface CompactionState {
+  resolved?: ResolvedCompaction;
+  /** Set when an early compaction was refused: the stable policy applies until the next assignment boundary. */
+  fallback?: string;
+  early: number;
+  last?: { tokensAfter: number };
+  preflight?: { reference?: ReferenceStatus; preview?: EssentialsResult; essentialsError?: string };
+  /** orche's own cancellation, so the failure event Pi emits for it is not counted twice. */
+  cancelling?: boolean;
+  /** The last entry before the current assignment (its entries follow it). */
+  startEntry?: string;
+}
+const compactionStates = new WeakMap<AgentSession, CompactionState>();
+const compactionStateOf = (session: AgentSession): CompactionState => {
+  let state = compactionStates.get(session);
+  if (!state) compactionStates.set(session, state = { early: 0 });
+  return state;
+};
+const normalizeEssentials = (value: string | EssentialsResult | undefined): EssentialsResult | undefined =>
+  value === undefined ? undefined : typeof value === "string" ? { text: value, sections: value.trim() ? ["essentials"] : [], missing: [] } : value;
+
+/** Resolve and apply the compaction settings of a task session; starts a new guard epoch (an assignment boundary). */
+export function applyTaskCompaction(session: AgentSession, taskCompaction: TaskCompaction | undefined): ResolvedCompaction | undefined {
+  const state = compactionStateOf(session);
+  state.fallback = undefined;
+  state.early = 0;
+  state.last = undefined;
+  state.preflight = undefined;
+  state.startEntry = session.sessionManager.getLeafId() ?? undefined;
+  if (!taskCompaction || !session.model) {
+    state.resolved = undefined;
+    session.settingsManager.applyOverrides({ compaction: { enabled: false } });
+    return undefined;
+  }
+  state.resolved = resolvedFor(taskCompaction, session.model);
+  session.settingsManager.applyOverrides({ compaction: piCompactionSettings(state.resolved) });
+  return state.resolved;
+}
+const resolvedFor = (taskCompaction: TaskCompaction, model: { contextWindow: number; provider: string; id: string }): ResolvedCompaction =>
+  taskCompaction.policy?.(model) ?? stableCompaction(model.contextWindow);
+
 function createCompactionExtension(options: SessionOptions, getSession: () => AgentSession): Extension {
   const path = "<orche:task-compaction>";
+  /**
+   * Preflight, before Pi discards anything: check the transcript reference (retrieval) and build the essentials once. An EARLY
+   * compaction (absolute policy below the stable trigger) is refused when its reference is not valid, its essentials cannot be
+   * built or miss a required section, the previous compaction left too little room (loop guard), or the assignment's early
+   * compactions are used up; the session then falls back to the stable policy for the rest of the assignment. A stable threshold,
+   * overflow or manual compaction is never refused here (the context must shrink); its essentials say whether the reference holds.
+   */
+  const before = (event: SessionBeforeCompactEvent) => {
+    const taskCompaction = options.taskCompaction;
+    if (!taskCompaction) return undefined;
+    const session = getSession();
+    const state = compactionStateOf(session);
+    const entries = event.branchEntries;
+    const kept = entries.findIndex(entry => entry.id === event.preparation.firstKeptEntryId);
+    const discarded = (kept > 0 ? entries[kept - 1] : entries.at(-1))?.id;
+    const reference = taskCompaction.retrieval ? checkReference({ persisted: session.sessionManager.isPersisted(), ...(session.sessionFile ? { file: session.sessionFile } : {}), ...(discarded ? { discardedEntryId: discarded } : {}), ...(state.startEntry ? { startEntry: state.startEntry } : {}) }) : undefined;
+    let preview: EssentialsResult | undefined, essentialsError: string | undefined;
+    try { preview = normalizeEssentials(taskCompaction.essentials({ session, ...(reference ? { reference } : {}), reason: event.reason })); } catch (error) { essentialsError = error instanceof Error ? error.message : String(error); }
+    state.preflight = { ...(reference ? { reference } : {}), ...(preview ? { preview } : {}), ...(essentialsError ? { essentialsError } : {}) };
+    const resolved = state.resolved;
+    if (!resolved?.early || state.fallback || event.reason !== "threshold") return undefined;
+    const margin = Math.max(2048, Math.floor(resolved.triggerTokens * 0.15));
+    const tokensBefore = event.preparation.tokensBefore;
+    const cause = reference && reference.status !== "valid" ? "reference_invalid" as const
+      : !preview || preview.missing.length || essentialsError ? "essentials_invalid" as const
+      : state.last && (tokensBefore - state.last.tokensAfter < margin || state.last.tokensAfter > resolved.triggerTokens - margin) ? "loop_guard" as const
+      : state.early >= MAX_EARLY_COMPACTIONS ? "early_limit" as const
+      : undefined;
+    if (!cause) { state.early++; return undefined; }
+    state.fallback = cause;
+    state.cancelling = true;
+    state.preflight = undefined;
+    if (session.model) session.settingsManager.applyOverrides({ compaction: piCompactionSettings(stableCompaction(session.model.contextWindow)) });
+    const detail = cause === "reference_invalid" && reference && reference.status !== "valid" ? reference.reason : cause === "essentials_invalid" ? essentialsError ?? `missing: ${preview?.missing.join(", ") ?? "essentials"}` : cause === "loop_guard" ? `previous compaction left ${state.last?.tokensAfter} tokens; trigger ${resolved.triggerTokens}` : undefined;
+    try { taskCompaction.onEvent?.({ type: "compaction_cancelled", reason: event.reason, cause, fallback: "stable", tokensBefore, triggerTokens: resolved.triggerTokens, ...(detail ? { detail } : {}) }); } catch { /* telemetry cannot change the decision */ }
+    return { cancel: true };
+  };
   const handler = (event: SessionCompactEvent) => {
     // Successful compaction has already rebuilt the canonical transcript. Never use old indices again.
     options.contextProjection?.reset();
     const session = getSession();
-    const essentials = options.taskCompaction?.essentials();
-    if (essentials) {
+    const taskCompaction = options.taskCompaction;
+    const state = compactionStateOf(session);
+    const pre = state.preflight;
+    state.preflight = undefined;
+    let result: EssentialsResult | undefined, essentialsError: string | undefined;
+    try { result = normalizeEssentials(taskCompaction?.essentials({ session, ...(pre?.reference ? { reference: pre.reference } : {}), reason: event.reason })); }
+    catch (error) { essentialsError = error instanceof Error ? error.message : String(error); result = pre?.preview; }
+    if (result?.text) {
       // The compact hook is a finalized boundary (also between turns), so append synchronously:
       // sendCustomMessage would queue while streaming and could miss the very next request.
-      session.sessionManager.appendCustomMessageEntry("orche:task-essentials", `${COMPACTION_ASSIGNMENT_LABEL}:\n${essentials}`, false);
+      session.sessionManager.appendCustomMessageEntry("orche:task-essentials", `${COMPACTION_ASSIGNMENT_LABEL}:\n${result.text}`, false);
       session.refreshContext();
     }
-    options.taskCompaction?.onCompact?.({ tokensBefore: event.compactionEntry.tokensBefore, tokensAfter: session.messages.reduce((sum, message) => sum + estimateTokens(message), 0) });
+    const tokensAfter = session.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+    state.last = { tokensAfter };
+    const usage = event.compactionEntry.usage;
+    const resolved = state.fallback || !state.resolved ? undefined : state.resolved;
+    taskCompaction?.onCompact?.({
+      tokensBefore: event.compactionEntry.tokensBefore, tokensAfter, reason: event.reason,
+      ...(resolved ? { policy: resolved.policy, triggerTokens: resolved.triggerTokens, early: resolved.early } : state.fallback ? { policy: "window-ratio" as const } : {}),
+      ...(result ? { essentialsChars: result.text.length, essentialsSections: result.sections, essentialsMissing: result.missing } : {}),
+      ...(pre?.reference ? { reference: pre.reference.status } : {}),
+      ...(usage ? { summaryUsage: { input: usage.input ?? 0, output: usage.output ?? 0 } } : {}),
+      ...(essentialsError ? { essentialsError } : {}),
+    });
+  };
+  const failed = (event: SessionCompactFailedEvent) => {
+    const session = getSession();
+    const state = compactionStateOf(session);
+    state.preflight = undefined;
+    if (state.cancelling) { state.cancelling = false; return; }
+    try {
+      options.taskCompaction?.onEvent?.(event.aborted
+        ? { type: "compaction_cancelled", reason: event.reason, cause: "aborted", ...(event.errorMessage ? { detail: event.errorMessage } : {}) }
+        : { type: "compaction_failed", reason: event.reason, ...(event.errorMessage ? { errorMessage: event.errorMessage } : {}), willRetry: event.willRetry });
+    } catch { /* telemetry only */ }
   };
   return { path, resolvedPath: path, hidden: true, sourceInfo: createSyntheticSourceInfo(path, { source: "orche" }),
-    handlers: new Map([["session_compact", [handler as never]]]), tools: new Map(), messageRenderers: new Map(), entryRenderers: new Map(), commands: new Map(), flags: new Map(), shortcuts: new Map() };
+    handlers: new Map([["session_before_compact", [before as never]], ["session_compact", [handler as never]], ["session_compact_failed", [failed as never]]]), tools: new Map(), messageRenderers: new Map(), entryRenderers: new Map(), commands: new Map(), flags: new Map(), shortcuts: new Map() };
 }
 /**
  * Worker-session hygiene that every orche session gets: output-limit recovery (length-recovery.ts), a suggestion on Pi's bare
@@ -211,7 +361,7 @@ export async function enableTaskWorkflow(session: AgentSession, taskCompaction: 
   state.tools.set(planTool.name, { definition: planTool, sourceInfo: createSyntheticSourceInfo("<orche:task-workflow>", { source: "orche" }) });
   await session.reload();
   session.setActiveToolsByName([...session.getActiveToolNames(), planTool.name]);
-  if (session.model) session.settingsManager.applyOverrides({ compaction: taskCompactionSettings(session.model.contextWindow) });
+  applyTaskCompaction(session, taskCompaction);
 }
 
 /** Toggle a previously installed workflow at role/mode boundaries; specialists retain ordinary behaviour. */
@@ -221,7 +371,7 @@ export function configureTaskWorkflow(session: AgentSession, taskCompaction: Ses
   state.options.taskCompaction = taskCompaction;
   const names = session.getActiveToolNames().filter(name => name !== "task_plan");
   session.setActiveToolsByName(taskCompaction ? [...names, "task_plan"] : names);
-  session.settingsManager.applyOverrides({ compaction: taskCompaction && session.model ? taskCompactionSettings(session.model.contextWindow) : { enabled: false } });
+  applyTaskCompaction(session, taskCompaction);
 }
 
 /**
@@ -311,7 +461,7 @@ export async function createSession(
     resourceLoader: loader,
     sessionManager,
     settingsManager: SettingsManager.inMemory({
-      compaction: options.taskCompaction ? taskCompactionSettings(model.contextWindow) : { enabled: false },
+      compaction: options.taskCompaction ? piCompactionSettings(resolvedFor(options.taskCompaction, model)) : { enabled: false },
       retry: {
         enabled: true,
         maxRetries: 1,
@@ -323,6 +473,7 @@ export async function createSession(
   });
   createdSession = session;
   taskSessions.set(session, { options, tools: compactionExtension.tools });
+  if (options.taskCompaction) applyTaskCompaction(session, options.taskCompaction);
   if (factoryExtensions) await bindFactoryExtensions(session);
   if (sessionManager.isPersisted()) markDisposal(session, sessionManager);
   return session;

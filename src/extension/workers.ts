@@ -20,7 +20,9 @@ import { COMPLETION_WAIT_LINE, type CompletionWait } from "../orchestration/comp
 import { taskWorkerInstructions } from "../orchestration/prompts.js";
 import { orchestrationResultSchemas, requirementDefinitions, requirementIds, requiredChecklistError, type Ambiguity, type ChecklistItem } from "../orchestration/result-schemas.js";
 import { createTaskPlanTool, renderTaskPlan, type TaskPlan } from "../tools/task-plan.js";
-import { configureTaskWorkflow, enableTaskWorkflow, taskCompactionSettings, type CompactionStats } from "../pi/session-factory.js";
+import { configureTaskWorkflow, enableTaskWorkflow, type CompactionStats, type TaskCompaction } from "../pi/session-factory.js";
+import { DEFAULT_WORKER_COMPACTION, resolveCompaction, type WorkerCompactionSettings } from "../pi/compaction-policy.js";
+import { composeEssentials, renderReference, renderWorkLog } from "../pi/compaction-state.js";
 import { withExtendedContext } from "../pi/extended-context.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { advisorTiers, inheritsMain, inheritsMainThinking, isDelegatingMode, modeTiers, type DelegatingMode, resolveRoute, resolveSpecialistRoute, tierThinking, usesStrongTiers, type AssignmentModelSource, type AssignmentThinkingSource, type MainMode, type ModelRoute, type ModelTier, type SubWorkerModelSource, type SubWorkerThinkingSource, type TierCandidate, type TierSettings } from "../orchestration/routing.js";
@@ -39,7 +41,7 @@ import { OrcheController, recordsIgnorePaths, routesSummary, withConcurrentWarni
 import type { ConcurrentActivitySummary } from "./concurrent-sessions.js";
 import { errorToolResult, failureReason, type ErrorToolResult, type ToolFailure, type ToolFailureKind } from "./tool-result.js";
 import { deadlineInfoOf, initialDeadline, type DeadlineInfo, type RunTiming } from "./progress.js";
-import { createRunRecord, pruneRecordsOnce, resolveRecords, workerSessionFile, type RunRecord } from "./records.js";
+import { createRunRecord, pruneRecordsOnce, resolveRecords, workerSessionFile, type ResolvedRecords, type RunRecord } from "./records.js";
 import type { InjectedMessage, Outcome, SteerReceipt } from "../agent/agent-handle.js";
 import { ExtendableDeadline, extensionEvent, formatExtensionProgress, formatExtensionSummary, formatObservation, waitExtendable, withNotExtended, type DeadlineExtension, type ProgressSample, type WaitObservation } from "../orchestration/run/extension.js";
 import { createAssignmentProjector, type ContextClearedStats } from "../pi/context-projection.js";
@@ -295,6 +297,12 @@ interface Worker {
   plan?: TaskPlan;
   unmetStreak?: Map<string, number>;
   compactions?: CompactionStats[];
+  /** `workerCompaction` of the assignment in flight (orche.config.json, read per task; src/pi/compaction-policy.ts). */
+  compaction?: WorkerCompactionSettings;
+  /** Main's messages to this worker (extended essentials restore the delivered ones verbatim). */
+  injected?: () => InjectedMessage[];
+  /** How long the records keep this worker's transcript (extended essentials). */
+  retention?: string;
   recordEvent?: (event: Record<string, unknown>) => void;
   /** The assignment in flight's hook for every accepted task_plan (persists the task ledger's resume checkpoint at once); cleared when it ends. */
   onPlan?: (plan: TaskPlan) => void;
@@ -437,14 +445,43 @@ function helperTierRoute(input: {
   return { route, source, thinkingSource, ...(picked ? { key: picked.key } : {}) };
 }
 
-function taskCompactionFor(worker: Worker) {
+/** Records keep a worker transcript this long (the reference line of extended essentials). */
+const retentionText = (days: number | undefined) => days !== undefined ? `kept in orche's records for ${days} day(s) after its last write, never pruned while written within the last hour` : undefined;
+
+/** Main's own messages of the assignment, delivered to the worker: the versioned later instructions (advisor and peer notes are not authority). */
+export function renderMainMessages(messages: readonly InjectedMessage[], maxChars = 8_000): string {
+  const own = messages.filter(message => message.source === undefined && message.status === "delivered");
+  if (!own.length) return "";
+  const lines = own.map(message => `[${message.id} ${new Date(message.deliveredAt ?? message.queuedAt).toISOString()}] ${message.text}`);
+  let text = lines.join("\n");
+  if (text.length > maxChars) text = `${lines.slice(0, 1).join("")}\n…\n${lines.slice(-3).join("\n")}`.slice(0, maxChars);
+  return `Messages from main during this assignment, verbatim and oldest first (they amend the assignment; where two conflict the later one wins; advisor and peer notes are advisory and not repeated here):\n${text}`;
+}
+
+function taskCompactionFor(worker: Worker): TaskCompaction {
+  const settings = worker.compaction ?? DEFAULT_WORKER_COMPACTION;
+  const extended = settings.essentials === "extended";
   return {
-    essentials: () => {
+    essentials: ({ session, reference }) => {
       const ledger = worker.ledger?.();
       // The live plan of this assignment is shown verbatim; the ledger's copy is shown only when it is an earlier assignment's (the resume checkpoint).
-      return `Requirements checklist and original request, verbatim:\n${worker.request ?? ""}\n\nTask DAG at compaction time:\n${worker.plan ? renderTaskPlan(worker.plan) : "No Task DAG recorded in this assignment."}${ledger ? `\n\n${renderLedgerForWorker(ledger, undefined, worker.plan ? { skipPlanOf: ledger.assignments } : {})}` : ""}`;
+      const request = `Requirements checklist and original request, verbatim:\n${worker.request ?? ""}`;
+      const plan = `Task DAG at compaction time:\n${worker.plan ? renderTaskPlan(worker.plan) : "No Task DAG recorded in this assignment."}`;
+      const ledgerText = ledger ? renderLedgerForWorker(ledger, undefined, worker.plan ? { skipPlanOf: ledger.assignments } : {}) : "";
+      if (!extended) return `${request}\n\n${plan}${ledgerText ? `\n\n${ledgerText}` : ""}`;
+      return composeEssentials([
+        { name: "request", text: worker.request ? request : "", required: true },
+        { name: "main-messages", text: renderMainMessages(worker.injected?.() ?? []) },
+        { name: "plan", text: plan },
+        { name: "ledger", text: ledgerText },
+        { name: "work-log", text: renderWorkLog(evidenceLedgerOf(session)) },
+        { name: "reference", text: renderReference(reference, worker.retention), required: true },
+      ]);
     },
     onCompact: (stats: CompactionStats) => { (worker.compactions ??= []).push(stats); worker.recordEvent?.({ type: "compaction", timestamp: Date.now(), worker: worker.id, ...stats }); },
+    onEvent: event => worker.recordEvent?.({ ...event, timestamp: Date.now(), worker: worker.id }),
+    policy: model => resolveCompaction(settings, { contextWindow: model.contextWindow, model: `${model.provider}/${model.id}`, role: worker.role }),
+    retrieval: extended,
   };
 }
 export interface WorkerPoolOptions {
@@ -947,6 +984,13 @@ export class WorkerPool {
   private lastTaskOf(worker: string): TaskLedger | undefined {
     return [...this.ledgers.values()].filter(ledger => ledger.primary?.worker === worker).sort((a, b) => b.updatedAt - a.updatedAt)[0];
   }
+  /** The compaction policy and the extended-essentials sources of a worker's assignment (workerCompaction; src/pi/compaction-policy.ts). */
+  private setCompaction(meta: Worker, settings: WorkerCompactionSettings | undefined, records: ResolvedRecords): void {
+    meta.compaction = settings ?? DEFAULT_WORKER_COMPACTION;
+    meta.injected = () => { try { return this.manager?.injected(meta.id) ?? []; } catch { return []; } };
+    const retention = records.enabled ? retentionText(records.retentionDays) : undefined;
+    if (retention) meta.retention = retention; else delete meta.retention;
+  }
   private persist(event: LedgerEvent): void {
     try { this.options.onLedgerEvent?.(structuredClone(event)); } catch { /* persistence is best effort */ }
   }
@@ -1428,7 +1472,7 @@ export class WorkerPool {
         worker.model = `${session.model!.provider}/${session.model!.id}`;
         worker.thinking = session.thinkingLevel;
         worker.contextWindow = session.model!.contextWindow;
-        if (worker.singleWorkflow) session.settingsManager.applyOverrides({ compaction: taskCompactionSettings(worker.contextWindow) });
+        // The task workflow below re-applies the compaction settings for the new window (configureTaskWorkflow / enableTaskWorkflow).
       } catch (error) { throw new Error(`Cannot switch model/thinking for ${worker.id}: ${String(error)}. Omit worker to start a new worker.`); }
     }
     if (!worker) {
@@ -1447,6 +1491,7 @@ export class WorkerPool {
       const spawnTool = singleWorkflow && (config.single.spawn || ultraMode || mdsdMode);
       worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool, ...(spawnTool ? { maxSubWorkers: config.single.maxSubWorkers } : {}), ...(singleWorkflow && ultraMode ? { ultraTools: true } : {}), ...(singleWorkflow && mdsdMode ? { mdsdTools: true } : {}), ...(gui ? { gui: gui.key } : {}), ...(webFetch.provider ? { webFetch: webFetch.provider.key } : {}), ...(codeGraph.provider ? { codeGraph: codeGraph.provider.key } : {}) };
       const meta = worker;
+      this.setCompaction(meta, config.workerCompaction, resolved);
       meta.model = route.model;
       meta.thinking = route.thinking ?? "off";
       baselineLevel = route.thinking ?? "off";
@@ -1486,6 +1531,9 @@ export class WorkerPool {
     }
     clearTimeout(startupTimer);
     const meta = worker;
+    // Compaction policy and essentials of this assignment (workerCompaction, read per task), set before the workflow applies them.
+    this.setCompaction(meta, config.workerCompaction, resolved);
+    meta.role = args.role;
     if (meta.taskWorkflowInstalled) configureTaskWorkflow(this.manager.session(meta.id), singleWorkflow ? taskCompactionFor(meta) : undefined);
     meta.singleWorkflow = singleWorkflow;
     meta.mode = args.mainMode;
@@ -1992,6 +2040,8 @@ export class WorkerPool {
             orchestrator: meta.id, cwd: args.cwd, runtime, route: standardSubRoute, routeSource: subSource, thinkingSource: standardSubRoute === subRoute ? subThinkingSource : "orchestrator:step", ...(subWindow ? { inheritedContextWindow: subWindow } : {}),
             // Every sub-worker's Bash goes through the same safety review as this assignment's own (once per call, in the sub-worker's guard).
             bashReview: config.bashReview,
+            // workerCompaction.subWorkers: standard sub-workers compact by the same policy with their own essentials (off by default).
+            ...(config.workerCompaction?.subWorkers ? { compaction: config.workerCompaction } : {}),
             skills: this.options.skills?.() ?? [],
             // Each sub-worker gets its own browser_fetch instance (asked with its own id and role), like an orche_task worker.
             webFetch: planned => webFetchCapability(this.options.capability, { cwd: planned.workspace ?? args.cwd, workerId: planned.id, role: planned.role, readOnly: !WRITING_KINDS.has(planned.role) }),
@@ -2022,7 +2072,7 @@ export class WorkerPool {
             spawnedReasons.add(reason);
             spawned.push(...outcomes);
             spawnWarnings.push(...warnings);
-            record?.appendEvent({ type: "spawn", timestamp: Date.now(), worker: meta.id, reason, workers: outcomes.map(outcome => ({ id: outcome.id, name: outcome.name, role: outcome.role, status: outcome.status, requests: outcome.requests, durationMs: outcome.durationMs, ...(outcome.files ? { files: outcome.files } : {}), ...(outcome.error ? { error: outcome.error } : {}), ...(outcome.deadline ? { deadline: { baseMs: outcome.deadline.baseMs, hardLimitMs: outcome.deadline.hardLimitMs, extensions: outcome.deadline.extensions.length, maxExtensions: outcome.deadline.maxExtensions, extendedMs: outcome.deadline.extendedMs, observations: outcome.deadline.observations, ...(outcome.deadline.notExtended ? { notExtended: outcome.deadline.notExtended } : {}) } } : {}) })), ...(warnings.length ? { warnings: [...warnings] } : {}) });
+            record?.appendEvent({ type: "spawn", timestamp: Date.now(), worker: meta.id, reason, workers: outcomes.map(outcome => ({ id: outcome.id, name: outcome.name, role: outcome.role, status: outcome.status, requests: outcome.requests, durationMs: outcome.durationMs, ...(outcome.files ? { files: outcome.files } : {}), ...(outcome.error ? { error: outcome.error } : {}), ...(outcome.compactions !== undefined ? { compactions: outcome.compactions } : {}), ...(outcome.compactionEvents ? { compactionEvents: outcome.compactionEvents } : {}), ...(outcome.deadline ? { deadline: { baseMs: outcome.deadline.baseMs, hardLimitMs: outcome.deadline.hardLimitMs, extensions: outcome.deadline.extensions.length, maxExtensions: outcome.deadline.maxExtensions, extendedMs: outcome.deadline.extendedMs, observations: outcome.deadline.observations, ...(outcome.deadline.notExtended ? { notExtended: outcome.deadline.notExtended } : {}) } } : {}) })), ...(warnings.length ? { warnings: [...warnings] } : {}) });
           },
           ...(args.verificationRounds !== undefined ? { maxVerificationRounds: args.verificationRounds } : {}),
           onVerificationRefused: (rounds, cap) => {

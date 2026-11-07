@@ -1,4 +1,5 @@
 import { access, readFile } from "node:fs/promises";
+import { parseWorkerCompaction, type WorkerCompactionSettings } from "../pi/compaction-policy.js";
 import { homedir } from "node:os";
 import { isAbsolute, join, normalize, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -44,6 +45,8 @@ export interface DiscoveredConfig {
   bashReview: BashReviewSettings;
   /** `mdsd` of the selected file (the MDSD search policy's bounds, src/orchestrator/mdsd-config.ts); absent: DEFAULT_MDSD. */
   mdsd?: MdsdSettings;
+  /** `workerCompaction` of the selected file (src/pi/compaction-policy.ts, docs/compaction.md); absent: DEFAULT_WORKER_COMPACTION (stable 50%, basic essentials, sub-workers off). */
+  workerCompaction?: WorkerCompactionSettings;
   /** Settings of the selected file that were ignored (removed `single` keys); absent without a file. */
   warnings?: string[];
   source: ConfigSource;
@@ -371,10 +374,10 @@ export function parseBashReviewConfig(value: unknown): BashReviewSettings {
 
 /**
  * Load one orche config file: the route settings (validated by `parseRouteConfig`) plus the extension-only
- * `concurrentSessions`, `records`, `taskContext`, `contextWarning`, `single`, `thinkingPolicy`, `writeRoots`, `bashReview` and `mdsd` settings, validated here and removed before the route parser sees the file.
+ * `concurrentSessions`, `records`, `taskContext`, `contextWarning`, `single`, `thinkingPolicy`, `writeRoots`, `bashReview`, `mdsd` and `workerCompaction` settings, validated here and removed before the route parser sees the file.
  * `warnings` lists settings that were ignored (removed `single` keys, keys of the removed coordinator); the file still loads.
  */
-export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings; thinkingPolicy: ThinkingPolicySettings; outputCap: OutputCapSettings; writeRoots: string[]; bashReview: BashReviewSettings; mdsd?: MdsdSettings; warnings: string[] }> {
+export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings; thinkingPolicy: ThinkingPolicySettings; outputCap: OutputCapSettings; writeRoots: string[]; bashReview: BashReviewSettings; mdsd?: MdsdSettings; workerCompaction?: WorkerCompactionSettings; warnings: string[] }> {
   let value: unknown;
   try { value = JSON.parse(await readFile(path, "utf8")); }
   catch (error) { throw new RouteConfigError(`Cannot load route config ${path}: ${error instanceof Error ? error.message : String(error)}`); }
@@ -389,9 +392,10 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
   let writeRoots: string[] = [];
   let bashReview: BashReviewSettings = { ...DEFAULT_BASH_REVIEW };
   let mdsd: MdsdSettings | undefined;
+  let workerCompaction: WorkerCompactionSettings | undefined;
   const warnings: string[] = [];
   if (value && typeof value === "object" && !Array.isArray(value)) {
-    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, single: singleValue, thinkingPolicy: thinkingPolicyValue, outputCap: outputCapValue, writeRoots: writeRootsValue, bashReview: bashReviewValue, mdsd: mdsdValue, ...rest } = value as Record<string, unknown>;
+    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, single: singleValue, thinkingPolicy: thinkingPolicyValue, outputCap: outputCapValue, writeRoots: writeRootsValue, bashReview: bashReviewValue, mdsd: mdsdValue, workerCompaction: workerCompactionValue, ...rest } = value as Record<string, unknown>;
     if (Object.hasOwn(value, "concurrentSessions")) concurrent = parseConcurrentSessionsConfig(concurrentSessions);
     if (Object.hasOwn(value, "records")) records = parseRecordsConfig(recordsValue);
     if (Object.hasOwn(value, "taskContext")) taskContext = parseTaskContextConfig(taskContextValue);
@@ -402,9 +406,12 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
     if (Object.hasOwn(value, "writeRoots")) writeRoots = parseWriteRootsConfig(writeRootsValue);
     if (Object.hasOwn(value, "bashReview")) bashReview = parseBashReviewConfig(bashReviewValue);
     if (Object.hasOwn(value, "mdsd")) mdsd = parseMdsdConfig(mdsdValue);
+    if (Object.hasOwn(value, "workerCompaction")) {
+      try { workerCompaction = parseWorkerCompaction(workerCompactionValue); } catch (error) { throw new RouteConfigError(error instanceof Error ? error.message : String(error)); }
+    }
     routeValue = rest;
   }
-  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single, thinkingPolicy, outputCap, writeRoots, bashReview, ...(mdsd ? { mdsd } : {}), warnings: warnings.map(warning => `${warning} (${path})`) };
+  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single, thinkingPolicy, outputCap, writeRoots, bashReview, ...(mdsd ? { mdsd } : {}), ...(workerCompaction ? { workerCompaction } : {}), warnings: warnings.map(warning => `${warning} (${path})`) };
 }
 export class NoRouteError extends Error {
   override readonly name = "NoRouteError";

@@ -70,6 +70,8 @@ export interface SpecialistRun<S extends TSchema> {
   lengthRecovery?: LengthRecoveryOptions;
   /** Skills (metadata) the session lists in its prompt; see SessionOptions.skills. */
   skills?: SessionOptions["skills"];
+  /** Compaction with restored essentials (orche_spawn sub-workers with `workerCompaction.subWorkers`); absent: compaction stays off. */
+  taskCompaction?: SessionOptions["taskCompaction"];
   /** Every tool the specialist starts (progress lines). */
   onTool?: (name: string) => void;
   /** Once the session exists: the `provider/id` and thinking level it really runs on (after Pi resolved the route and clamped the level). */
@@ -201,6 +203,7 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
       ...(run.lengthRecovery ? { lengthRecovery: run.lengthRecovery } : {}),
       ...(run.skills?.length ? { skills: run.skills } : {}),
       ...(run.extensionFactories?.length ? { extensionFactories: run.extensionFactories } : {}),
+      ...(run.taskCompaction ? { taskCompaction: run.taskCompaction } : {}),
     }).then(created => {
       if (controller.signal.aborted) { created.dispose(); throw controller.signal.reason; }
       return created;

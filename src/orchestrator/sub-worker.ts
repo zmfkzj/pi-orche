@@ -20,6 +20,10 @@ import { WORKER_TOOL_NAMES } from "../tools/index.js";
 import { mergeCapabilities, type WorkerCapabilityProvider } from "../extension/capabilities.js";
 import { runSpecialistSession, SpecialistError, type SpecialistDeadline, type SpecialistReport, type SpecialistStats } from "../specialists/session.js";
 import { guardBashReview, runtimeAccess, type BashReviewSettings } from "../extension/bash-review.js";
+import { resolveCompaction, type WorkerCompactionSettings } from "../pi/compaction-policy.js";
+import { composeEssentials, renderReference, renderWorkLog } from "../pi/compaction-state.js";
+import { evidenceLedgerOf } from "../pi/tool-evidence.js";
+import type { TaskCompaction } from "../pi/session-factory.js";
 import { DEPTH_LIMIT_MESSAGE, SPAWN_TOOL, subWorkerDeadline, type PlannedWorker, type RunSubWorker, type SubWorkerOutcome, type SubWorkerRole } from "./spawn.js";
 
 export const SUB_WORKER_INSTRUCTIONS = "You are a sub-worker of an orchestrator in a coding agent. Work only on your one assignment; you cannot see the orchestrator's conversation and you cannot spawn workers. Use the available tools to establish evidence. Never edit outside your owned files. Never commit or push. Reply in the language of the request. Complete the assignment with report_result, called alone.";
@@ -73,6 +77,12 @@ export interface SubWorkerEnvironment {
    * as an orche_task worker gets it; `unavailable` is told to the sub-worker. Absent: none.
    */
   webFetch?(worker: PlannedWorker): { provider?: WorkerCapabilityProvider; unavailable?: string };
+  /**
+   * `workerCompaction` of the orchestrator's assignment: with `subWorkers` on, a standard sub-worker (not game-asset/video) compacts
+   * by its policy (role `sub-worker`) and gets back its own assignment verbatim (and, with extended essentials, its own work log and
+   * the checked reference to its own transcript); never another worker's state. Absent or off: compaction stays off, as before.
+   */
+  compaction?: WorkerCompactionSettings;
   /** The codegraph capability of one sub-worker (pi-codegraph's MCP tools in its session), asked like `webFetch`. Absent: none. */
   codeGraph?(worker: PlannedWorker): { provider?: WorkerCapabilityProvider; unavailable?: string };
 }
@@ -133,6 +143,24 @@ export function subWorkerGuard(worker: PlannedWorker, siblings: readonly Planned
   };
 }
 
+/** The compaction of one standard sub-worker: its own verbatim assignment (plus work log and transcript reference when extended). */
+export function subWorkerCompaction(settings: WorkerCompactionSettings, prompt: string, counters: { compactions: number; cancelled: number; failed: number }, onEvent?: (event: Record<string, unknown>) => void): TaskCompaction {
+  const extended = settings.essentials === "extended";
+  return {
+    essentials: ({ session, reference }) => composeEssentials([
+      { name: "request", text: `Your sub-worker assignment, verbatim (the only instructions you have; nothing from other workers):\n${prompt}`, required: true },
+      ...(extended ? [
+        { name: "work-log", text: renderWorkLog(evidenceLedgerOf(session)) },
+        { name: "reference", text: renderReference(reference), required: true },
+      ] : []),
+    ]),
+    onCompact: stats => { counters.compactions++; onEvent?.({ type: "compaction", ...stats }); },
+    onEvent: event => { if (event.type === "compaction_failed") counters.failed++; else counters.cancelled++; onEvent?.({ ...event }); },
+    policy: model => resolveCompaction(settings, { contextWindow: model.contextWindow, model: `${model.provider}/${model.id}`, role: "sub-worker" }),
+    retrieval: extended,
+  };
+}
+
 export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
   return async (worker, siblings, signal, onTool, onModel, onDeadline) => {
     const specialist = worker.role === "game-asset" || worker.role === "video";
@@ -148,12 +176,16 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
     const cwd = worker.workspace ?? env.cwd;
     const sessionFile = env.sessionFile?.(worker.id);
     const ownThinking = specialist || (!!cellRoute && worker.route?.thinking !== undefined);
+    const prompt = env.prompt(worker, !!image);
+    const counters = { compactions: 0, cancelled: 0, failed: 0 };
+    const compaction = !specialist && env.compaction?.subWorkers ? subWorkerCompaction(env.compaction, prompt, counters) : undefined;
+    const compactionFields = () => compaction ? { compactions: counters.compactions, ...(counters.cancelled || counters.failed ? { compactionEvents: { cancelled: counters.cancelled, failed: counters.failed } } : {}) } : {};
     const base = { id: worker.id, name: worker.name, role: worker.role, reason: worker.reason, ...(worker.files ? { files: [...worker.files] } : {}), ...(worker.workspace ? { workspace: worker.workspace } : {}), changes: [] as string[], modelSource: specialist || cellRoute ? "route" as const : env.routeSource, thinkingSource: ownThinking ? "route" as const : verifyRoute ? env.verifyThinkingSource ?? env.thinkingSource : env.thinkingSource };
     let started = false;
     const fromStats = (stats: SpecialistStats) => ({ model: stats.model, ...(stats.thinking ? { thinking: stats.thinking } : {}), ...(started ? {} : { notStarted: true as const }), requests: stats.requests, models: { ...stats.models }, startedAt: stats.startedAt, durationMs: stats.durationMs, costUSD: stats.usage.cost, ...(stats.requests ? { usage: { input: stats.usage.input, output: stats.usage.output, cacheRead: stats.usage.cacheRead, cacheWrite: stats.usage.cacheWrite } } : {}), ...(stats.budget ? { budget: { ...stats.budget } } : {}), ...(stats.sessionFile ? { sessionFile: stats.sessionFile } : {}), ...(stats.deadline ? { deadline: subWorkerDeadline(stats.deadline) } : {}) });
     try {
       const { value, stats } = await runSpecialistSession({
-        actor: worker.id, route, runtime: env.runtime, cwd, prompt: env.prompt(worker, !!image),
+        actor: worker.id, route, runtime: env.runtime, cwd, prompt,
         instructions: [SUB_WORKER_INSTRUCTIONS, ...capabilities.instructions, ...(webFetch.unavailable ? [webFetch.unavailable] : []), ...(codeGraph.unavailable ? [codeGraph.unavailable] : [])].join("\n"),
         tools: [...WORKER_TOOL_NAMES, ...(image ? [image.name] : []), ...capabilities.tools], ...(image ? { customTools: [image] } : {}), report: reportFor(worker.role, worker.check),
         ...(capabilities.extensionFactories.length ? { extensionFactories: capabilities.extensionFactories } : {}),
@@ -167,15 +199,16 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
         ...(sessionFile ? { sessionFile } : {}), ...(!specialist && !cellRoute && env.inheritedContextWindow ? { inheritedContextWindow: env.inheritedContextWindow } : {}),
         ...(env.skills?.length ? { skills: env.skills } : {}),
         ...(!specialist && env.lengthLadder ? { lengthRecovery: { ladder: env.lengthLadder } } : {}),
+        ...(compaction ? { taskCompaction: compaction } : {}),
       });
       const report = value as Report;
-      return { ...base, status: statusOf(worker.role, report.data), summary: report.summary, ...(report.data !== undefined ? { data: report.data } : {}), ...fromStats(stats) } satisfies SubWorkerOutcome;
+      return { ...base, status: statusOf(worker.role, report.data), summary: report.summary, ...(report.data !== undefined ? { data: report.data } : {}), ...fromStats(stats), ...compactionFields() } satisfies SubWorkerOutcome;
     } catch (error) {
       const stats = error instanceof SpecialistError ? error.stats : undefined;
       const cancelled = error instanceof SpecialistError ? error.cancelled : signal.aborted;
       return {
         ...base, status: cancelled ? "cancelled" : "failed", summary: "", error: error instanceof Error ? error.message : String(error),
-        ...(stats ? fromStats(stats) : { model: route.model, ...(route.thinking ? { thinking: route.thinking } : {}), ...(started ? {} : { notStarted: true as const }), requests: 0, models: {}, startedAt: Date.now(), durationMs: 0, costUSD: 0 }),
+        ...(stats ? fromStats(stats) : { model: route.model, ...(route.thinking ? { thinking: route.thinking } : {}), ...(started ? {} : { notStarted: true as const }), requests: 0, models: {}, startedAt: Date.now(), durationMs: 0, costUSD: 0 }), ...compactionFields(),
       } satisfies SubWorkerOutcome;
     } finally {
       try { env.onSessionEnd?.(worker.id); } catch { /* an observer cannot alter the outcome */ }

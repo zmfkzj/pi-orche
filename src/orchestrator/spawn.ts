@@ -237,6 +237,9 @@ export interface SubWorkerOutcome {
   workspace?: string;
   /** Ultra candidate: it changed protected verification-basis files in its copy, so it cannot be adopted. */
   tampered?: string[];
+  /** Compactions of the sub-worker's session (`workerCompaction.subWorkers`), and the ones orche refused or that failed. */
+  compactions?: number;
+  compactionEvents?: { cancelled: number; failed: number };
 }
 
 /**
