@@ -7,6 +7,7 @@
 import { Type, type Static } from "typebox";
 import { getAgentDir, type AgentToolResult, type ModelRegistry, type ModelRuntime, type Skill } from "@earendil-works/pi-coding-agent";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { AgentManager, type WorkerAdoptOptions } from "../agent/agent-manager.js";
@@ -178,6 +179,12 @@ export interface TaskDetails {
   changes: WorkspaceChange[];
   /** Workspace changes observed during the task that are not attributed to this worker (they may come from other sessions or processes). */
   otherChanges: OtherChange[];
+  /**
+   * Paths this worker's successful edit/write calls wrote that the git audit cannot show (git-ignored, or otherwise outside the
+   * snapshot), so they are in neither list above. Observed writes, not audited changes: their content was not diffed or validated,
+   * and files written by bash or other tools are not tracked here. Absent when there are none.
+   */
+  unaudited?: string[];
   /** Present when a submodule HEAD (gitlink) changed during the task. */
   submodules?: SubmoduleMove[];
   /** Present when HEAD of the task cwd's repository moved during the task, with or without a git grant. */
@@ -247,7 +254,7 @@ export interface TaskDetails {
 /** One sub-worker in a task result: what it was for, how it ended and what it cost (the full report went to the orchestrator). */
 export type SpawnedWorker = Omit<SubWorkerOutcome, "data" | "summary"> & { summary: string };
 /** The workspace/git part of a task's details. */
-type ChangeReport = Pick<TaskDetails, "changes" | "otherChanges" | "submodules" | "headMoved">;
+type ChangeReport = Pick<TaskDetails, "changes" | "otherChanges" | "unaudited" | "submodules" | "headMoved">;
 
 import { codeGraphCapability, mergeCapabilities, webFetchCapability, type WorkerCapabilityAnswer, type WorkerCapabilityProvider, type WorkerCapabilityRequest } from "./capabilities.js";
 export { CODEGRAPH_CAPABILITY, codeGraphCapability, mergeCapabilities, WEB_FETCH_CAPABILITY, webFetchCapability, WORKER_CAPABILITY_CHANNEL, type WorkerCapabilityAnswer, type WorkerCapabilityProvider, type WorkerCapabilityRequest } from "./capabilities.js";
@@ -764,20 +771,25 @@ function submoduleLines(moves: readonly SubmoduleMove[]): string[] {
     : !move.from ? [`Submodule ${move.path}: added (HEAD ${short(move.to)})`]
     : moveLines(`Submodule ${move.path}: HEAD`, move));
 }
-const listPaths = (changes: readonly WorkspaceChange[]) =>
-  `${changes.slice(0, MAX_LISTED_FILES).map(change => change.path).join(", ")}${changes.length > MAX_LISTED_FILES ? `, … ${changes.length - MAX_LISTED_FILES} more` : ""}`;
+const listNames = (paths: readonly string[]) =>
+  `${paths.slice(0, MAX_LISTED_FILES).join(", ")}${paths.length > MAX_LISTED_FILES ? `, … ${paths.length - MAX_LISTED_FILES} more` : ""}`;
+const listPaths = (changes: readonly WorkspaceChange[]) => listNames(changes.map(change => change.path));
+/** What the `unaudited` paths are (TaskDetails.unaudited): writes the worker's own tools made where the git audit cannot see. */
+const UNAUDITED_NOTE = "git-ignored or otherwise outside the git audit, written by this worker's edit/write calls; observed writes, not diffed or validated: check the files themselves";
 
 /**
  * The change section of a task result. "No files changed" appears only when there is nothing to report at all: no
- * file change (the worker's or anyone's), no gitlink change and no HEAD movement. With a git grant the `Git:` lines
- * already describe the commits of the task cwd's repository, so its HEAD movement is not repeated here.
+ * file change (the worker's or anyone's), no write of the worker outside the git audit (`unaudited`: git-ignored paths), no
+ * gitlink change and no HEAD movement. With a git grant the `Git:` lines already describe the commits of the task cwd's
+ * repository, so its HEAD movement is not repeated here.
  */
-export function formatTaskChanges(report: Pick<TaskDetails, "changes" | "otherChanges" | "submodules" | "headMoved">, options: { concurrentWarning?: boolean; grant?: boolean } = {}): string[] {
-  const { changes, otherChanges, submodules = [], headMoved } = report;
-  if (!changes.length && !otherChanges.length && !submodules.length && !headMoved) return ["No files changed"];
+export function formatTaskChanges(report: Pick<TaskDetails, "changes" | "otherChanges" | "unaudited" | "submodules" | "headMoved">, options: { concurrentWarning?: boolean; grant?: boolean } = {}): string[] {
+  const { changes, otherChanges, unaudited = [], submodules = [], headMoved } = report;
+  if (!changes.length && !otherChanges.length && !unaudited.length && !submodules.length && !headMoved) return ["No files changed"];
   return [
     changes.length ? `Changed files: ${listPaths(changes)}${options.concurrentWarning ? CONCURRENT_NOTE : ""}`
-      : `Changed files: none${otherChanges.length ? " attributed to this worker" : ""}`,
+      : `Changed files: none${otherChanges.length ? " attributed to this worker" : ""}${unaudited.length ? " in the git audit" : ""}`,
+    ...(unaudited.length ? [`Written outside the git audit (${UNAUDITED_NOTE}): ${listNames(unaudited)}`] : []),
     ...(otherChanges.length ? [`Other workspace changes observed during the task (${OTHER_CHANGES_NOTE}): ${listPaths(otherChanges)}`] : []),
     ...(headMoved && !options.grant ? moveLines("HEAD", headMoved, NO_GRANT_NOTE) : []),
     ...submoduleLines(submodules),
@@ -1903,7 +1915,11 @@ export class WorkerPool {
       const gitReport = grant && gitBaseline ? await reportGit(args.cwd, grant, gitBaseline) : undefined;
       const headMoved = audit ? await headMovement(args.cwd, gitBaseline) : undefined;
       const submodules = await submoduleMoves(args.cwd, gitlinks);
-      return { changeReport: { changes, otherChanges, ...(submodules.length ? { submodules } : {}), ...(headMoved ? { headMoved } : {}) }, ...(gitReport ? { gitReport } : {}) };
+      // The worker's own edit/write paths that the audit cannot show (git-ignored, e.g. a research workspace): listed as observed
+      // writes so that "No files changed" never hides them. Not audited changes: a path deleted since is left out, content is not checked.
+      const audited = new Set([...changes, ...otherChanges].map(change => change.path));
+      const unaudited = !readOnly && activity ? activity.writtenList().filter(path => !audited.has(path) && existsSync(resolve(args.cwd, path))) : [];
+      return { changeReport: { changes, otherChanges, ...(unaudited.length ? { unaudited } : {}), ...(submodules.length ? { submodules } : {}), ...(headMoved ? { headMoved } : {}) }, ...(gitReport ? { gitReport } : {}) };
     };
     /** TaskDetails of an assignment that did not complete. What the audit cannot read is left out: the failure matters more. */
     /** The last outcome the worker's assignment produced (its injected messages and output-limit stops), also for a failure. */
@@ -1961,7 +1977,7 @@ export class WorkerPool {
         ...(extra.failure ? { failure: extra.failure } : {}),
         ...(status === "cancelled" && this.options.controller.cancelledByUser ? { cancelledByUser: true } : {}),
         outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs, model: details.model, thinking: details.thinking, ...(details.models ? { models: { ...details.models } } : {}), modelSource, thinkingSource, checklist: details.checklist, plan: details.plan, compactions: details.compactions, warnings: details.warnings, ...(details.split ? { split: details.split } : {}), ...(details.thinkingPolicy ? { thinkingPolicy: details.thinkingPolicy } : {}), ...(details.mode ? { mode: details.mode } : {}), ...(details.ultra ? { ultra: details.ultra } : {}), ...(details.mdsd ? { mdsd: details.mdsd } : {}) },
-        workspace: { changes: details.changes, otherChanges: details.otherChanges, ...(details.submodules ? { submodules: details.submodules } : {}), ...(details.headMoved ? { headMoved: details.headMoved } : {}) },
+        workspace: { changes: details.changes, otherChanges: details.otherChanges, ...(details.unaudited ? { unaudited: details.unaudited } : {}), ...(details.submodules ? { submodules: details.submodules } : {}), ...(details.headMoved ? { headMoved: details.headMoved } : {}) },
         ...(details.git ? { git: details.git } : {}),
         ...(retired.length ? { retired } : {}),
         ...(details.extensions ? { extensions: details.extensions } : {}), ...(details.notExtended ? { notExtended: details.notExtended } : {}),

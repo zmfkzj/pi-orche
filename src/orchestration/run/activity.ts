@@ -194,6 +194,11 @@ export class WorkspaceActivity {
 
   /** Written by a successful edit/write call of this run: always the run's. */
   isWritten(path: string, scope: ActivityScope = "run"): boolean { return this.writtenPaths[scope].has(path); }
+  /**
+   * Every path a successful edit/write call of this run wrote (sorted, repo-relative). It says a tool wrote there, not that the file
+   * still differs from the baseline or holds valid content: a bash-written file never appears here (its path is unknown).
+   */
+  writtenList(scope: ActivityScope = "run"): string[] { return [...this.writtenPaths[scope]].sort(); }
   /** Changed in at least one active window (a write-capable tool was executing). */
   touchedActive(path: string, scope: ActivityScope = "run"): boolean { return this.activeTouched[scope].has(path); }
   /**

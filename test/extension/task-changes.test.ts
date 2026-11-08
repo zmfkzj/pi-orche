@@ -1,14 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { writeFileSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type FauxResponseStep, type ToolCall } from "@earendil-works/pi-ai";
-import { formatTaskChanges, WorkerPool, type TaskParameters } from "../../src/extension/workers.js";
+import { fauxAssistantMessage as reply, type FauxResponseStep, type ToolCall } from "@earendil-works/pi-ai";
+import { formatTaskChanges, TaskFailedError, WorkerPool, type TaskParameters } from "../../src/extension/workers.js";
 import { WorkspaceAudit } from "../../src/orchestration/workspace.js";
 import { OrcheController, type OrcheControllerOptions, type OrcheRunArgs } from "../../src/extension/controller.js";
 import { createHarness, tool, type Harness } from "./harness.js";
+import { deferred } from "../helpers/faux.js";
 
 /**
  * orche_task "Changed files": who changed what. Real temporary git repositories with a submodule (`sub`, holding
@@ -37,9 +38,9 @@ const result = (role = "implement", summary = "Done", data?: ToolCall["arguments
 const readOnlyResult = (role: "explore" | "answer" | "verify") =>
   role === "answer" ? result(role, "Answer", { evidence: ["x"] }) : role === "verify" ? result(role, "Checked", { passed: true }) : result(role, "Found");
 
-async function fixture(steps: (cwd: () => string) => FauxResponseStep[], options: { submodule?: boolean; idleTtlMs?: number; controller?: Partial<OrcheControllerOptions> } = {}) {
+async function fixture(steps: (cwd: () => string) => FauxResponseStep[], options: { submodule?: boolean; idleTtlMs?: number; controller?: Partial<OrcheControllerOptions>; records?: boolean } = {}) {
   let cwd = "";
-  const h = await createHarness({ mainSteps: [], orcheSteps: steps(() => cwd) });
+  const h = await createHarness({ mainSteps: [], orcheSteps: steps(() => cwd), ...(options.records ? { records: true } : {}) });
   open.push(h);
   cwd = h.cwd;
   git(h.cwd, "init", "-q", "-b", "main");
@@ -57,7 +58,7 @@ async function fixture(steps: (cwd: () => string) => FauxResponseStep[], options
   const controller = new OrcheController({ agentDir: h.agentDir, createRuntime: async () => h.runtime, ...options.controller });
   const pool = new WorkerPool({ controller, agentDir: h.agentDir, idleTtlMs: options.idleTtlMs });
   pools.add(pool);
-  const execute = (args: Partial<TaskParameters & Pick<OrcheRunArgs, "onProgress" | "cwd">> = {}) => pool.execute({ role: "implement", request: "Make the change", cwd: h.cwd, projectTrusted: false, ...args });
+  const execute = (args: Partial<TaskParameters & Pick<OrcheRunArgs, "onProgress" | "cwd" | "signal">> = {}) => pool.execute({ role: "implement", request: "Make the change", cwd: h.cwd, projectTrusted: false, ...args });
   return { h, pool, execute };
 }
 /** A scripted step that first writes `files` (another process, no worker tool running), then answers with `next`. */
@@ -203,6 +204,81 @@ describe("orche_task changes: attribution", () => {
   });
 });
 
+/**
+ * Writes under a git-ignored directory (a research workspace such as `.local-data/`) are invisible to the snapshot audit. The worker's
+ * own successful edit/write calls there are reported as observed writes (`unaudited`), kept apart from the audited changes, so that
+ * "No files changed" never hides them; a refused write or a file removed again is no such write, and nothing written still says so.
+ */
+describe("orche_task changes: writes in git-ignored paths (observed, not audited)", () => {
+  const ignore = (cwd: string) => writeFile(join(cwd, ".gitignore"), ".local-data/\n");
+  const UNAUDITED = "Written outside the git audit (git-ignored or otherwise outside the git audit, written by this worker's edit/write calls; observed writes, not diffed or validated: check the files themselves): ";
+
+  it("ignored-only writes are listed as observed writes, never 'No files changed' (text, details and run.json)", async () => {
+    const { h, execute } = await fixture(() => [
+      tool("write", { path: ".local-data/it-1/protocol.md", content: "# protocol\n" }),
+      tool("write", { path: ".local-data/it-1/experiment.json", content: "{}\n" }),
+      result(),
+    ], { records: true });
+    await ignore(h.cwd);
+    const outcome = await execute({ files: [".local-data/it-1/"] });
+    expect(outcome.details.changes).toEqual([]);
+    expect(outcome.details.otherChanges).toEqual([]);
+    expect(outcome.details.unaudited).toEqual([".local-data/it-1/experiment.json", ".local-data/it-1/protocol.md"]);
+    const lines = outcome.text.split("\n");
+    expect(lines).toContain("Changed files: none in the git audit");
+    expect(lines).toContain(`${UNAUDITED}.local-data/it-1/experiment.json, .local-data/it-1/protocol.md`);
+    expect(outcome.text).not.toContain("No files changed");
+    const run = JSON.parse(await readFile(join(outcome.details.record!, "run.json"), "utf8"));
+    expect(run.workspace).toEqual({ changes: [], otherChanges: [], unaudited: [".local-data/it-1/experiment.json", ".local-data/it-1/protocol.md"] });
+  });
+
+  it("mixed: an audited change and an ignored write are reported apart", async () => {
+    const { h, execute } = await fixture(() => [tool("write", { path: "allowed.txt", content: "mine\n" }), tool("write", { path: ".local-data/notes.md", content: "n\n" }), result()]);
+    await ignore(h.cwd);
+    const outcome = await execute({ files: ["allowed.txt", ".local-data/"] });
+    expect(outcome.details.changes).toEqual([{ path: "allowed.txt", status: "added" }]);
+    expect(outcome.details.unaudited).toEqual([".local-data/notes.md"]);
+    const lines = outcome.text.split("\n");
+    expect(lines).toContain("Changed files: allowed.txt");
+    expect(lines).toContain(`${UNAUDITED}.local-data/notes.md`);
+  });
+
+  it("a refused write (outside the worker's files) is no observed write: with nothing written the result still says 'No files changed'", async () => {
+    const { h, execute } = await fixture(() => [tool("write", { path: ".local-data/other/x.md", content: "x\n" }), result()]);
+    await ignore(h.cwd);
+    const outcome = await execute({ files: [".local-data/mine/"] });
+    expect(existsSync(join(h.cwd, ".local-data/other/x.md"))).toBe(false);
+    expect(outcome.details).not.toHaveProperty("unaudited");
+    expect(outcome.text).toContain("No files changed");
+  });
+
+  it("an ignored file written and removed again is not listed: only files that exist at the end", async () => {
+    const { h, execute } = await fixture(() => [tool("write", { path: ".local-data/tmp.md", content: "t\n" }), tool("bash", { command: "rm .local-data/tmp.md" }), result()]);
+    await ignore(h.cwd);
+    const outcome = await execute({ files: [".local-data/"] });
+    expect(existsSync(join(h.cwd, ".local-data/tmp.md"))).toBe(false);
+    expect(outcome.details).not.toHaveProperty("unaudited");
+    expect(outcome.text).toContain("No files changed");
+  });
+
+  it("a cancelled assignment keeps its observed ignored writes in the failure details", async () => {
+    const wrote = deferred();
+    const { h, execute } = await fixture(() => [
+      tool("write", { path: ".local-data/partial.md", content: "p\n" }),
+      async (_context, options) => { wrote.resolve(); await new Promise<void>(resolve => options?.signal?.addEventListener("abort", () => resolve(), { once: true })); return reply("aborted", { stopReason: "aborted" }); },
+    ]);
+    await ignore(h.cwd);
+    const abort = new AbortController();
+    const run = execute({ files: [".local-data/"], signal: abort.signal });
+    await wrote.promise;
+    abort.abort(new Error("cancelled by user"));
+    const error = await run.catch(caught => caught);
+    expect(error).toBeInstanceOf(TaskFailedError);
+    expect((error as TaskFailedError).details.status).toBe("cancelled");
+    expect((error as TaskFailedError).details.unaudited).toEqual([".local-data/partial.md"]);
+  });
+});
+
 describe("orche_task changes: commits and submodule HEADs", () => {
   it("(iv) a commit without a git grant shows the HEAD movement instead of 'No files changed'", async () => {
     const { h, execute } = await fixture(() => [
@@ -322,6 +398,7 @@ describe("formatTaskChanges", () => {
       { changes: [], otherChanges: [{ ...added("a"), reason: "r" }] },
       { changes: [], otherChanges: [], submodules: [{ path: "sub", from: "a".repeat(40), to: "b".repeat(40), commitCount: 0, commits: [] }] },
       { changes: [], otherChanges: [], headMoved: { from: "a".repeat(40), to: "b".repeat(40), commitCount: 1, commits: ["bbbbbbb x"] } },
+      { changes: [], otherChanges: [], unaudited: [".local-data/x.md"] },
     ]) expect(formatTaskChanges(report).join("\n")).not.toContain("No files changed");
   });
 
@@ -337,5 +414,13 @@ describe("formatTaskChanges", () => {
     expect(lines).toContain("HEAD moved aaaaaaa..bbbbbbb (no new commits; reset or checkout?); commits were not authorized for this assignment, so they may come from another session or process");
     expect(lines).toContain("Submodule gone: removed (was ccccccc)");
     expect(lines).toContain("Submodule fresh: added (HEAD ddddddd)");
+  });
+
+  it("lists observed writes outside the git audit on their own line, capped like the other lists", () => {
+    const lines = formatTaskChanges({ changes: [], otherChanges: [], unaudited: Array.from({ length: 52 }, (_, i) => `.local-data/f${i}`) });
+    expect(lines[0]).toBe("Changed files: none in the git audit");
+    expect(lines[1]!.startsWith("Written outside the git audit (git-ignored or otherwise outside the git audit, written by this worker's edit/write calls; observed writes, not diffed or validated: check the files themselves): .local-data/f0, ")).toBe(true);
+    expect(lines[1]!.endsWith(", … 2 more")).toBe(true);
+    expect(formatTaskChanges({ changes: [], otherChanges: [{ ...added("o"), reason: "r" }], unaudited: ["i"] })[0]).toBe("Changed files: none attributed to this worker in the git audit");
   });
 });
