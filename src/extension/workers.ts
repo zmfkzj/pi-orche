@@ -321,6 +321,7 @@ interface Worker {
   webFetch?: string;
   /** {@link WorkerCapabilityProvider.key} of the worker's codegraph capability; absent without one. */
   codeGraph?: string;
+  /** Context size of the latest request: input + cache reads + cache writes (providers count cache writes outside `input`). */
   latestInput: number;
   timer?: ReturnType<typeof setTimeout>;
   /** The task ledger of this worker's task (single workflow with `single.ledger`; ultra implement/answer always), read when the worker compacts. */
@@ -1882,7 +1883,7 @@ export class WorkerPool {
         const peer = this.manager!.injected(meta.id).some(message => message.id === event.id && message.source === "peer");
         requireReplan(this.manager!.session(meta.id), advisor?.messageId === event.id ? "advisor notes" : peer ? "session-bus note" : "message from main");
       }
-      if (event.type === "usage") { requests++; answered[event.model] = (answered[event.model] ?? 0) + 1; meta.latestInput = event.input + event.cacheRead; if (event.costUSD !== undefined) ownCostUSD = (ownCostUSD ?? 0) + event.costUSD; const run = mdsdRun; if (run) { run.observeOrchestrator({ input: event.input, output: event.output, cacheRead: event.cacheRead, ...(event.costUSD !== undefined ? { cost: { total: event.costUSD } } : {}) }); run.enforceOrchestrator((action, text) => this.manager?.budgetAction(meta.id, action, text, "MDSD total budget") ?? false); } }
+      if (event.type === "usage") { requests++; answered[event.model] = (answered[event.model] ?? 0) + 1; meta.latestInput = event.input + event.cacheRead + event.cacheWrite; if (event.costUSD !== undefined) ownCostUSD = (ownCostUSD ?? 0) + event.costUSD; const run = mdsdRun; if (run) { run.observeOrchestrator({ input: event.input, output: event.output, cacheRead: event.cacheRead, ...(event.costUSD !== undefined ? { cost: { total: event.costUSD } } : {}) }); run.enforceOrchestrator((action, text) => this.manager?.budgetAction(meta.id, action, text, "MDSD total budget") ?? false); } }
       if (event.type === "tool_started") { tally.tools++; if (WRITE_TOOLS.has(event.toolName)) noteEvidence(`${event.toolName} started`); }
       progress();
     });

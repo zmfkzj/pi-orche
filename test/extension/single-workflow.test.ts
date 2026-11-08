@@ -129,7 +129,7 @@ describe("single-workflow task delegation", () => {
     h.orche.faux.setResponses(Array(8).fill(scripted));
     const result = await execute({ request: request + "\n" + "x".repeat(400_000) });
     const session = pool.session("W1");
-    expect(session.messages.some(message => message.role === "assistant" && message.usage.input + message.usage.cacheRead > session.model!.contextWindow * 0.7)).toBe(true);
+    expect(session.messages.some(message => message.role === "assistant" && message.usage.input + message.usage.cacheRead + message.usage.cacheWrite > session.model!.contextWindow * 0.7)).toBe(true);
     expect(result.details.retired).toBeUndefined();
     expect(pool.list()[0]?.id).toBe("W1");
   });
@@ -258,8 +258,12 @@ describe("single task compaction with a real AgentSession", () => {
     const session = await createSession({ route: h.orche.route, cwd: h.cwd, instructions: "test", modelRuntime: h.runtime, tools: [], contextProjection: projector,
       taskCompaction: { essentials: () => `${request}\nLatest Task DAG:\n${JSON.stringify(latest)}`, onCompact: stats => compactions.push(stats) } });
     opened.push({ dispose: async () => session.dispose() });
-    h.orche.faux.setResponses([reply("Earlier findings " + "x".repeat(6000)), reply("Compacted summary"), reply("continued")]);
+    // A large earlier turn and a small recent one that alone fills keepRecentTokens: compaction summarizes the earlier turn, so the context
+    // really shrinks. (Up to Pi 1.4.0 the faux provider counted a first request's prompt twice, as input and as cache write, which made
+    // tokensBefore exceed tokensAfter even when the only turn was kept.)
+    h.orche.faux.setResponses([reply("Earlier findings " + "x".repeat(6000)), reply("noted"), reply("Compacted summary"), reply("continued")]);
     await session.prompt(request);
+    await session.prompt("Recent notes " + "y".repeat(600));
     projector.beginAssignment(session.messages, session.messages.length, { minClearTokens: 0 });
     latest = { nodes: [{ ...plan.nodes[0]!, status: "done" as never }] };
     session.settingsManager.applyOverrides({ compaction: { keepRecentTokens: 100 } });

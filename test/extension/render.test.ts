@@ -38,13 +38,15 @@ class Host {
   started = false;
   call: any;
   body: any;
+  /** The key formatter pi 1.5+ injects into the render context (`KeybindingHints`); undefined: an older host without one. */
+  keyText: ((keybinding: string) => string) | undefined;
   constructor(private readonly renderers = orcheRunRenderers, private readonly args: unknown = { request: "Fix the login redirect" }, private readonly withState = true) {}
 
   private context(): OrcheRenderContext {
     return {
       args: this.args, toolCallId: "call-1", invalidate: () => { this.invalidations++; this.update(); }, lastComponent: undefined,
       state: this.withState ? this.state : undefined, cwd: "/work", executionStarted: this.started, argsComplete: true,
-      isPartial: this.isPartial, expanded: this.expanded, showImages: false, isError: this.isError,
+      isPartial: this.isPartial, expanded: this.expanded, showImages: false, isError: this.isError, ...(this.keyText ? { keyText: this.keyText } : {}),
     } as unknown as OrcheRenderContext;
   }
   /** ToolExecutionComponent.updateDisplay */
@@ -379,6 +381,15 @@ describe("a finished call", () => {
     expect(expanded.join("\n")).not.toContain("to expand");
   });
 
+  it("names the expand key with the formatter pi injects into the render context (the user's key binding)", () => {
+    const report = Array.from({ length: 25 }, (_, index) => `report ${index + 1}`);
+    const host = new Host();
+    host.keyText = keybinding => keybinding === "app.tools.expand" ? "alt+e" : "";
+    expect(host.finish(textResult(report.join("\n"), finalDetails)).drawPlain()[12]).toBe("... (15 more lines, alt+e to expand)");
+    host.keyText = () => "";
+    expect(host.finish(textResult(report.join("\n"), finalDetails)).drawPlain()[12]).toBe("... (15 more lines, ctrl+o to expand)");
+  });
+
   it("strips escape sequences from the text before drawing it", async () => {
     const host = new Host().finish(textResult("\u001b[31mred\u001b[0m and \u001b]8;;http://x\u0007link\u001b]8;;\u0007\tend", finalDetails));
     expect(host.drawPlain()[2]).toBe("red and link   end");
@@ -458,6 +469,8 @@ describe("a background job's attached call", () => {
     expect(renderJobResultMessage(message, { expanded: true }, theme).render(80)).toHaveLength(15);
     const failed = renderJobResultMessage({ content: "[orche task result · J2 · W1 implement · failed after 1s]\nboom", details: { job: "J2", worker: "W1", role: "implement", status: "failed" } }, { expanded: false }, theme).render(80);
     expect(failed).toEqual(["<error>**✗ orche task result · J2 · W1 implement · failed**</error>", "<toolOutput>boom</toolOutput>"]);
+    const custom = renderJobResultMessage(message, { expanded: false, keyText: () => "alt+e" }, theme).render(80);
+    expect(plain(custom.at(-1)!)).toBe("... (4 more lines, alt+e to expand)");
   });
 });
 

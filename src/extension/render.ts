@@ -355,10 +355,16 @@ function callLines(name: string, args: unknown, state: OrcheRenderState, theme: 
   return lines;
 }
 
-/** `ctrl+o to expand` as the host's own hint reads it (its key binding when the host initialised them). */
-function expandHint(theme: Theme): string {
+/** The host's key formatter: pi 1.5+ passes it in the render context and the message render options (`KeybindingHints`). */
+type KeyText = (keybinding: "app.tools.expand") => string;
+
+/**
+ * `ctrl+o to expand` as the host's own hint reads it (its key binding when the host initialised them). Prefers the `keyText` pi injects: an
+ * imported `keyText` can resolve another copy of pi-coding-agent that does not see the user's key bindings; older hosts inject none.
+ */
+function expandHint(theme: Theme, injected?: KeyText): string {
   let key = "ctrl+o";
-  try { key = keyText("app.tools.expand") || key; } catch { /* key bindings not initialised: tests, non-interactive hosts */ }
+  try { key = (typeof injected === "function" ? injected("app.tools.expand") : keyText("app.tools.expand")) || key; } catch { /* key bindings not initialised: tests, non-interactive hosts */ }
   return `${theme.fg("dim", key)}${theme.fg("muted", " to expand")}`;
 }
 
@@ -387,7 +393,7 @@ const DETACH_LABEL: Record<string, string> = {
   input: "new user input", followUp: "a queued follow-up", "session-bus": "a message from another Pi session", abort: "Esc",
   command: "/orche detach", background: "wait:false", shutdown: "session shutdown", replaced: "another attach",
 };
-function detachedLines(details: Record<string, unknown>, theme: Theme, width: number): string[] {
+function detachedLines(details: Record<string, unknown>, theme: Theme, width: number, keys?: KeyText): string[] {
   const job = typeof details.job === "string" ? details.job : "the job";
   const reason = typeof details.reason === "string" ? DETACH_LABEL[details.reason] ?? details.reason : undefined;
   const text = details.attach === "pending"
@@ -395,11 +401,11 @@ function detachedLines(details: Record<string, unknown>, theme: Theme, width: nu
     : details.attach === "already-ended"
       ? `${job} had already ended; its result was delivered once before.`
       : `${job} keeps running${reason ? ` (detached by ${reason})` : ""}; its result arrives as a message unless main attaches again.`;
-  return [...wrapAll([text], width).map(line => theme.fg("toolOutput", line)), `${theme.fg("muted", "(")}${expandHint(theme)}${theme.fg("muted", " main's instructions)")}`];
+  return [...wrapAll([text], width).map(line => theme.fg("toolOutput", line)), `${theme.fg("muted", "(")}${expandHint(theme, keys)}${theme.fg("muted", " main's instructions)")}`];
 }
 
-function bodyLines(name: string, result: { content?: unknown; details?: unknown }, partial: boolean, isError: boolean, expanded: boolean, theme: Theme, width: number): string[] {
-  if (!partial && !expanded && isRecord(result.details) && (result.details.attach === "detached" || result.details.attach === "pending" || result.details.attach === "already-ended")) return detachedLines(result.details, theme, width);
+function bodyLines(name: string, result: { content?: unknown; details?: unknown }, partial: boolean, isError: boolean, expanded: boolean, theme: Theme, width: number, keys?: KeyText): string[] {
+  if (!partial && !expanded && isRecord(result.details) && (result.details.attach === "detached" || result.details.attach === "pending" || result.details.attach === "already-ended")) return detachedLines(result.details, theme, width, keys);
   const seen = isRecord(result.details) && Array.isArray(result.details.progress) ? result.details.progress.filter((line): line is string => typeof line === "string") : undefined;
   const source = partial && seen ? seen.map(clean) : clean(textOf(result)).split("\n");
   const logical = source.length === 1 && source[0] === "" ? [] : source;
@@ -418,8 +424,8 @@ function bodyLines(name: string, result: { content?: unknown; details?: unknown 
   if (hidden > 0) {
     const note = partial ? `... (${hidden} earlier lines, ` : `... (${hidden} more lines, `;
     const hint = truncate(note, width);
-    if (partial) lines.unshift(`${theme.fg("muted", hint)}${expandHint(theme)}${theme.fg("muted", ")")}`);
-    else lines.push(`${theme.fg("muted", hint)}${expandHint(theme)}${theme.fg("muted", ")")}`);
+    if (partial) lines.unshift(`${theme.fg("muted", hint)}${expandHint(theme, keys)}${theme.fg("muted", ")")}`);
+    else lines.push(`${theme.fg("muted", hint)}${expandHint(theme, keys)}${theme.fg("muted", ")")}`);
   }
   return lines;
 }
@@ -436,7 +442,9 @@ export function createOrcheRenderers(name: string): { renderCall: CallRenderer; 
     const state = stateOf(context) ?? {};
     observe(state, result.details);
     sync(state, context, !options.isPartial, stateOf(context) !== undefined);
-    return new Block(state, "result", width => bodyLines(name, result, options.isPartial, context.isError, options.expanded, theme, width));
+    // Optional at runtime: hosts before pi 1.5 pass no keyText (peer range `*`).
+    const keys = (context as { keyText?: KeyText }).keyText;
+    return new Block(state, "result", width => bodyLines(name, result, options.isPartial, context.isError, options.expanded, theme, width, keys));
   };
   return { renderCall, renderResult };
 }
@@ -449,7 +457,7 @@ export const orcheTaskRenderers = createOrcheRenderers("orche_task");
  * with the job, worker and duration), then the result text: its first {@link COLLAPSED_LINES} lines collapsed, all of it expanded.
  * Main reads the message content itself; this changes only what the TUI draws.
  */
-export function renderJobResultMessage(message: { content: unknown; details?: unknown }, options: { expanded: boolean }, theme: Theme): Component {
+export function renderJobResultMessage(message: { content: unknown; details?: unknown }, options: { expanded: boolean; keyText?: KeyText }, theme: Theme): Component {
   const details = isRecord(message.details) ? message.details : {};
   const raw = typeof message.content === "string" ? message.content : textOf({ content: message.content });
   const all = clean(raw).split("\n");
@@ -466,7 +474,7 @@ export function renderJobResultMessage(message: { content: unknown; details?: un
       const hidden = options.expanded ? 0 : Math.max(0, all.length - COLLAPSED_LINES);
       const shown = options.expanded ? all : all.slice(0, COLLAPSED_LINES);
       const lines = [theme.fg(color, theme.bold(truncate(head, max))), ...wrapAll(shown, max).map(line => theme.fg("toolOutput", line))];
-      if (hidden > 0) lines.push(`${theme.fg("muted", truncate(`... (${hidden} more lines, `, max))}${expandHint(theme)}${theme.fg("muted", ")")}`);
+      if (hidden > 0) lines.push(`${theme.fg("muted", truncate(`... (${hidden} more lines, `, max))}${expandHint(theme, options.keyText)}${theme.fg("muted", ")")}`);
       return lines;
     },
     invalidate() {},

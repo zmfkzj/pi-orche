@@ -64,6 +64,7 @@ describe("prepareArguments on orche tools", () => {
     expect(find!.isError).toBe(false);
     expect(find!.text.split("\n").filter(line => line.endsWith(".txt"))).toHaveLength(1);
     expect(bad!.isError).toBe(true);
-    expect(bad!.text).toContain("offset: must be number");
+    // Pi 1.5.0 validates tool arguments with pi-schema, whose messages read `- offset: expected number, got string` (TypeBox: `must be number`).
+    expect(bad!.text).toContain("offset: expected number, got string");
   });
 });

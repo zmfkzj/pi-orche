@@ -220,7 +220,7 @@ describe("orchestrator: single.maxSubWorkers", () => {
       report,
     ], { single: { maxSubWorkers: 2 } });
     const first = await execute();
-    expect(refused).toContain("must not have more than 2 items"); // the session schema refuses it; planSpawn is the second line
+    expect(refused).toContain("workers: expected at most 2 items"); // the session schema refuses it (Pi 1.5.0 pi-schema message); planSpawn is the second line
     expect(first.details.spawned).toBeUndefined();
     expect(maxItems(pool, "W1")).toBe(2);
     expect(assignmentOf(h, pool)).toContain("starts up to 2 sub-workers");
