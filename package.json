@@ -7,6 +7,9 @@
   "pi": {
     "extensions": ["./src/extension/index.ts"]
   },
+  "piOrche": {
+    "capabilities": ["orche_task.advisor"]
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

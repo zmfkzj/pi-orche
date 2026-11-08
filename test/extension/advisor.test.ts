@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fauxAssistantMessage as reply, fauxProvider, type FauxResponseStep } from "@earendil-works/pi-ai";
-import { TaskFailedError, WorkerPool } from "../../src/extension/workers.js";
+import { orcheTaskParameters, TaskFailedError, WorkerPool } from "../../src/extension/workers.js";
 import { OrcheController } from "../../src/extension/controller.js";
 import { formatModelTiers } from "../../src/extension/main-model.js";
 import { ADVISOR_INSTRUCTIONS, ADVISOR_TOOL_NAMES, advisorPrompt, advisorToolGuard, adviceMessage } from "../../src/single/advisor.js";
@@ -56,6 +56,16 @@ async function fixture(options: { single?: Record<string, unknown>; models?: Rec
   return { h, pool, controller, execute, workerFaux, advisorFaux, main: `${mainModel.provider}/${mainModel.id}` };
 }
 const on = { single: { advisor: true }, models: { advisor: { model: "tier-advisor/a1", thinking: "low" } } };
+
+describe("advisor: advertised capability", () => {
+  it("package.json piOrche.capabilities advertises orche_task.advisor exactly when the orche_task schema has the advisor parameter (callers such as the agent_workflow research harness gate advisor:false on it)", async () => {
+    const pkg = JSON.parse(await readFile(join(import.meta.dirname, "../../package.json"), "utf8")) as { name: string; piOrche?: { capabilities?: string[] } };
+    expect(pkg.name).toBe("pi-orche");
+    const props = (orcheTaskParameters as unknown as { properties: Record<string, { type?: string }> }).properties;
+    expect(props.advisor?.type).toBe("boolean");
+    expect(pkg.piOrche?.capabilities).toContain("orche_task.advisor");
+  });
+});
 
 describe("advisor: config and display", () => {
   it("models.advisor parses like the other tiers (\"main\" and thinking \"main\" included)", () => {
@@ -523,6 +533,47 @@ describe("advisor: on (bounded finalization: no unprocessed advice in a result)"
     expect(result.details.status).toBe("done");
     expect(result.details.advisor).toMatchObject({ status: "failed" });
     expect(result.details.advisor?.error).toMatch(/timed out/);
+  });
+  it("an advisor that keeps investigating gets one turn notice before its 40-turn cap and delivers its advice to the held report instead of failing", async () => {
+    const { execute, workerFaux, advisorFaux } = await fixture({ ...on, records: true });
+    const notice = "Turn notice: 8 responses left before this session ends without a report.";
+    const investigate: FauxResponseStep = context => textOf(context.messages).includes(notice) ? advice("Keep the trailing newline.") : tool("read", { path: "greeting.txt" });
+    advisorFaux.setResponses(Array.from({ length: 40 }, () => investigate));
+    workerFaux.setResponses([plan(), reported(), reported("Done, notes applied", applied)]);
+    const result = await execute();
+    expect(result.details.status).toBe("done");
+    expect(result.details.advisor).toMatchObject({ status: "processed", requests: 33, wrapUp: notice, advice: "Keep the trailing newline.", handling: { decision: "applied", phase: "finalization" } });
+    expect(advisorFaux.getPendingResponseCount()).toBe(7);
+    const events = (await readFile(join(result.details.record!, "events.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    expect(events.filter(event => event.type === "advisor").at(-1)).toMatchObject({ status: "processed", wrapUp: notice });
+  });
+  it("advisor: false skips the advisor for one follow-up of a reused worker only; its next assignment has the advisor again (records too)", async () => {
+    const { execute, workerFaux, advisorFaux } = await fixture({ ...on, records: true });
+    advisorFaux.setResponses([advice("First advice."), advice("Third advice.")]);
+    workerFaux.setResponses([plan(), reported(), reported("First done", applied), plan(), reported("Re-reported with the file evidence"), plan(), reported(), reported("Third done", applied)]);
+    const first = await execute();
+    expect(first.details.advisor).toMatchObject({ status: "processed", advice: "First advice." });
+    const followUp = await execute({ worker: "W1", advisor: false });
+    expect(followUp.details.status).toBe("done");
+    expect(followUp.details).not.toHaveProperty("advisor");
+    expect(followUp.text).toContain("Note: plan advisor off for this follow-up of W1 (advisor: false, set by main); its next assignment has the advisor again.");
+    expect(followUp.text).not.toContain("Advisor:");
+    const run = JSON.parse(await readFile(join(followUp.details.record!, "run.json"), "utf8"));
+    expect(run.assignment).toMatchObject({ reusedWorker: true, advisorDeclined: true });
+    expect(run.assignment).not.toHaveProperty("advisor");
+    expect(run).not.toHaveProperty("advisor");
+    const third = await execute({ worker: "W1" });
+    expect(third.details.advisor).toMatchObject({ status: "processed", advice: "Third advice." });
+    expect(advisorFaux.getPendingResponseCount()).toBe(0);
+  });
+  it("advisor: false for a new worker is ignored with a note: new work keeps its advisor", async () => {
+    const { execute, workerFaux, advisorFaux } = await fixture(on);
+    advisorFaux.setResponses([advice()]);
+    workerFaux.setResponses([plan(), reported(), reported("Done", applied)]);
+    const result = await execute({ advisor: false });
+    expect(result.details.advisor).toMatchObject({ status: "processed" });
+    expect(result.text).toContain("Note: advisor: false ignored: only a follow-up of a reused worker (worker set) may skip the plan advisor; this new worker has it.");
+    expect(advisorFaux.getPendingResponseCount()).toBe(0);
   });
   it("cancelled while the report is held: the advisor stops, the task is cancelled, nothing is pretended processed; the reused worker's next assignment gets its own advisor", async () => {
     const { pool, execute, workerFaux, advisorFaux } = await fixture(on);

@@ -50,6 +50,12 @@ export interface SpecialistRun<S extends TSchema> {
   /** Fixed time cap (ms) of the call; ignored when `deadline` is given. */
   timeoutMs: number;
   /**
+   * One notice before a cap ends the call without a report (the advisor): when only `turnsLeft` turns remain before `maxTurns`, or
+   * `atMs` after the start while the fixed `timeoutMs` timer is armed (never in completion wait or with a `deadline`), the session is
+   * steered once to report now with what it has. Nothing is sent once a report is captured or being made; the caps stay as they are.
+   */
+  wrapUp?: SpecialistWrapUp;
+  /**
    * An activity-aware deadline instead of the fixed `timeoutMs` (orche_spawn sub-workers): the same ExtendableDeadline and
    * waitExtendable as an orche_task assignment, fed by THIS session's own events only. Absent: the fixed timer (the advisor).
    */
@@ -89,6 +95,15 @@ export interface SpecialistRun<S extends TSchema> {
 export interface SpecialistBudget {
   requests: number; minutes: number; costUSD: number; outputTokens: number; wrapUpAt: number; hardStopAt: number;
   /** What the wrap-up notice asks for (after the usage figures); absent: the search worker's text (findings, scopes). */
+  notice?: string;
+}
+/** The wrap-up notice of a capped specialist call (see {@link SpecialistRun.wrapUp}). */
+export interface SpecialistWrapUp {
+  /** Remaining turns at which the notice goes out (at least 1). */
+  turnsLeft: number;
+  /** Elapsed time (ms) at which the notice goes out, when the fixed timer is armed. */
+  atMs?: number;
+  /** What the notice asks for (after the reason); default: the report with what the session has. */
   notice?: string;
 }
 /** Report responses a budget stop lets through (a report and one retry after an invalid one): part of a worker's worst case. */
@@ -136,6 +151,8 @@ export interface SpecialistStats {
   /** Present for a call with {@link SpecialistRun.budget}: when the wrap-up notice went out, what stopped the call, and whether a
    * response was in flight when it stopped (its usage is then unknown: Pi reports usage at the end of a response). */
   budget?: { wrapUp?: string; stoppedBy?: string; inFlightUnknown?: boolean };
+  /** The wrap-up notice sent before a cap ({@link SpecialistRun.wrapUp}): why it went out (turns or time left), when one did. */
+  wrapUp?: string;
 }
 export interface SpecialistOutcome<T> { value: T; stats: SpecialistStats }
 
@@ -186,6 +203,8 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
   let modelError: string | undefined;
   /** The budget's time check (MDSD search workers): cancels in flight once the time dimension reaches the stop. */
   let budgetTimer: ReturnType<typeof setInterval> | undefined;
+  /** The wrap-up notice's timer (SpecialistRun.wrapUp.atMs): cleared on every exit. */
+  let wrapTimer: ReturnType<typeof setTimeout> | undefined;
   // A model request in flight (from turn start to its assistant message end), and a response that ended aborted: for both the
   // provider's usage is unknown (marked on a budgeted call's stats when it ends by a cancellation, never counted as zero).
   let inFlight = false, cutResponse = false;
@@ -243,11 +262,30 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
       }
     };
     if (budget) budgetTimer = setInterval(enforce, 5_000);
+    // The wrap-up notice (SpecialistRun.wrapUp): one steer before the turn cap or the fixed timer ends the call without a report.
+    // Never while a report is being made or after one was captured; the caps themselves are unchanged.
+    let noticed = false;
+    const wrapUpNotice = (why: string) => {
+      const wrapUp = run.wrapUp;
+      if (!wrapUp || noticed || reporting || captured.value !== undefined || controller.signal.aborted) return;
+      noticed = true;
+      stats.wrapUp = why;
+      void active.steer(`${why} ${wrapUp.notice ?? `Stop now and call ${run.report.name} alone with what you have; partial results are fine.`} Without a report the session ends and nothing of it is used.`).catch(() => undefined);
+    };
+    const atMs = run.wrapUp?.atMs;
+    if (atMs !== undefined && timer !== undefined && atMs < run.timeoutMs) {
+      wrapTimer = setTimeout(() => wrapUpNotice(`Time notice: ${Math.round(atMs / run.timeoutMs * 100)}% of this session's time limit (${Math.round(run.timeoutMs / 1000)}s) is used.`), Math.max(0, atMs - (Date.now() - startedAt)));
+    }
     unsubscribe = session.subscribe(event => {
       tracker?.observe(event as unknown as { type: string; [key: string]: unknown });
       if (run.onEvent) { try { run.onEvent(event as unknown as { type: string; [key: string]: unknown }); } catch { /* an observer cannot alter the session */ } }
       if (event.type === "tool_execution_start") run.onTool?.(event.toolName);
-      if (event.type === "turn_end" && ++turns >= run.maxTurns && captured.value === undefined) controller.abort(new Error(`no ${run.report.name} within ${run.maxTurns} turns`));
+      if (event.type === "turn_end") {
+        turns++;
+        const left = run.maxTurns - turns;
+        if (left <= 0 && captured.value === undefined) controller.abort(new Error(`no ${run.report.name} within ${run.maxTurns} turns`));
+        else if (run.wrapUp && left > 0 && left <= Math.max(1, run.wrapUp.turnsLeft)) wrapUpNotice(`Turn notice: ${left} response${left === 1 ? "" : "s"} left before this session ends without a report.`);
+      }
       // A model request is in flight from the start of a turn until its assistant message ends (tools run after that).
       if (event.type === "turn_start" || (event.type === "message_start" && event.message.role === "assistant")) { inFlight = true; reporting = false; }
       if (event.type === "message_end" && event.message.role === "assistant") {
@@ -282,6 +320,7 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     if (budgetTimer !== undefined) clearInterval(budgetTimer);
+    if (wrapTimer !== undefined) clearTimeout(wrapTimer);
     // The deadline's timers (wait and observer) end with the call, whatever ended it.
     await watchdog?.stop();
     run.signal.removeEventListener("abort", onAbort);

@@ -39,6 +39,14 @@ import { runSpecialistSession, SpecialistError, type SpecialistReport, type Spec
 export const ADVISOR_TIMEOUT_MS = 10 * 60_000;
 /** Model responses before the advisor session fails without a report. */
 export const ADVISOR_MAX_TURNS = 40;
+/**
+ * The wrap-up notice before a cap (SpecialistRun.wrapUp): with this many responses left, or this share of the advisor's own time used
+ * (when its timer is armed: never in completion wait), the advisor is told once to report the advice it has. Measured: 37 of 268
+ * research advisors (2026-11) used all 40 turns and delivered nothing.
+ */
+export const ADVISOR_WRAP_UP_TURNS = 8;
+export const ADVISOR_WRAP_UP_SHARE = 0.8;
+const ADVISOR_WRAP_UP_NOTICE = "Stop reviewing now and call report_result alone with the advice you have so far, most important points first (partial advice is fine).";
 /** Longest advice that is passed on (characters). */
 export const ADVICE_MAX_CHARS = 6000;
 /** Report refusals that ask the worker to process the advice before its result is accepted (the bounded finalization). */
@@ -94,6 +102,8 @@ export interface AdvisorDetails {
   /** Why the advice stayed unprocessed (status `unprocessed`). */
   unprocessed?: string;
   error?: string;
+  /** The wrap-up notice the advisor got before its turn or time cap (turns or time left), when one went out. */
+  wrapUp?: string;
   sessionFile?: string;
 }
 
@@ -299,6 +309,8 @@ export class AssignmentAdvisor {
         instructions: ADVISOR_INSTRUCTIONS, prompt: advisorPrompt({ worker: this.options.worker, ...(this.options.role ? { role: this.options.role } : {}), request: this.options.request, ...(plan ? { plan } : {}), trigger: this.trig! }),
         tools: ADVISOR_TOOL_NAMES, report: adviceReport, toolGuard: advisorToolGuard,
         maxTurns: this.options.maxTurns ?? ADVISOR_MAX_TURNS, timeoutMs: this.options.timeoutMs, ...(this.options.unbounded ? { unbounded: true } : {}),
+        // One notice before a cap: an advisor that runs out of turns (or time) otherwise ends with no advice at all.
+        wrapUp: { turnsLeft: Math.min(ADVISOR_WRAP_UP_TURNS, Math.max(1, Math.floor((this.options.maxTurns ?? ADVISOR_MAX_TURNS) / 4))), ...(this.options.unbounded ? {} : { atMs: Math.floor(this.options.timeoutMs * ADVISOR_WRAP_UP_SHARE) }), notice: ADVISOR_WRAP_UP_NOTICE },
         signal: AbortSignal.any([this.options.signal, this.abort.signal]), nudges: 1,
         ...(this.options.sessionFile ? { sessionFile: this.options.sessionFile } : {}),
         ...(this.options.inheritedContextWindow ? { inheritedContextWindow: this.options.inheritedContextWindow } : {}),
@@ -338,7 +350,7 @@ export class AssignmentAdvisor {
         : `the assignment ended (failure, timeout or cancellation) before ${this.options.worker} applied or rejected them`
       : undefined;
     const details = this.details(unprocessed);
-    this.options.onEvent?.({ type: "advisor", timestamp: Date.now(), advisor: this.id, worker: this.options.worker, status: details.status, requests: details.requests, prompts: this.prompts, ...(details.handling ? { decision: details.handling.decision } : {}), ...(details.message ? { message: details.message } : {}), ...(details.unprocessed ? { reason: details.unprocessed } : {}), ...(details.error ? { error: details.error } : {}) });
+    this.options.onEvent?.({ type: "advisor", timestamp: Date.now(), advisor: this.id, worker: this.options.worker, status: details.status, requests: details.requests, prompts: this.prompts, ...(details.handling ? { decision: details.handling.decision } : {}), ...(details.message ? { message: details.message } : {}), ...(details.unprocessed ? { reason: details.unprocessed } : {}), ...(details.error ? { error: details.error } : {}), ...(details.wrapUp ? { wrapUp: details.wrapUp } : {}) });
     return details;
   }
   private details(unprocessed: string | undefined): AdvisorDetails {
@@ -358,6 +370,7 @@ export class AssignmentAdvisor {
       ...(this.handling ? { handling: { ...this.handling } } : {}), finalizationPrompts: this.prompts,
       ...(status === "unprocessed" && unprocessed ? { unprocessed } : {}),
       ...(this.error && !this.advice ? { error: this.error } : {}),
+      ...(stats?.wrapUp ? { wrapUp: stats.wrapUp } : {}),
       ...(stats?.sessionFile ? { sessionFile: stats.sessionFile } : {}),
     };
   }

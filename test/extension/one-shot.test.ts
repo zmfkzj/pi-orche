@@ -156,6 +156,21 @@ describe("one-shot request mode: the request's assignments run in it; only a pro
     expect(replayed.map(ledger => [ledger.taskId, ledger.requestMode])).toEqual([["T1", "strong"], ["T2", undefined]]);
   });
 
+  it("a one-shot /orche single request overrides a task's strong pin on its worker; the next /orche strong request continues the task on the strong tiers again", async () => {
+    // Research harness (agent_workflow 2026-11-08): a mechanical design repair is sent as `/orche single <prompt>` in the session whose
+    // design turn ran `/orche strong`; its follow-ups to the design's task/worker must not keep the strong tiers, and the analysis
+    // turn after it (another `/orche strong` request) must be strong again.
+    const { execute, strong, general } = await pool({ single: { ledger: true } });
+    strong.setResponses([answered("design"), answered("analysis")]);
+    general.setResponses([answered("mechanical fix")]);
+    await execute({ mainMode: "strong", oneShot: { session: "single" } });
+    const fix = await execute({ worker: "W1", task: "T1", mainMode: "single", oneShot: { session: "single" } });
+    expect(fix.details).toMatchObject({ worker: "W1", task: "T1", model: "tier-orch/o1", requestMode: { mode: "single", source: "one-shot" } });
+    const analysis = await execute({ worker: "W1", task: "T1", mainMode: "strong", oneShot: { session: "single" } });
+    expect(analysis.details).toMatchObject({ worker: "W1", task: "T1", model: "strong-orch/s1", requestMode: { mode: "strong", source: "one-shot" } });
+    expect(strong.getPendingResponseCount() + general.getPendingResponseCount()).toBe(0);
+  });
+
   it("without task ledgers a gone worker's successor (handover, also after a restart) runs in the session's mode; the job start only records the mode", async () => {
     const { workers, execute, strong, general, gone } = await pool();
     strong.setResponses([answered("first")]);
