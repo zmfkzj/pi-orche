@@ -231,7 +231,7 @@ describe("the policy on task_plan boundaries", () => {
   it("the report phase of a runtime report prompt: B before the request in every mode (the fixed policy: a recovery step-down is cleared)", () => {
     const s = start();
     onTaskPlan(s, plan(node("a", "running")));
-    expect(beginReportPhase(s, "forced report (request budget)")).toBe("high");
+    expect(beginReportPhase(s, "forced report (MDSD total budget)")).toBe("high");
     onTaskPlan(s, plan(node("a", "running", { note: "x" })));
     expect(s.thinkingLevel).toBe("high");
     const fixed = start(PI_DEFAULT, "high", FIXED_THINKING_POLICY);

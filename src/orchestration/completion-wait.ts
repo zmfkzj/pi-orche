@@ -9,9 +9,10 @@
  * - no startup cap on creating a worker session;
  * - no wall-clock cap on the advisor session (its turn cap stays);
  * - no idle-expiry retirement of a worker between assignments (workers live until the session ends or /orche stop).
- * What still ends the work: a result, a real failure (model or tool error, a turn or request budget, a process exit), cancellation
- * (Esc, /orche stop, the caller's abort signal, session shutdown). Limits that are not wall-clock or inactivity based (request and
- * turn budgets, output-limit recovery) are unchanged.
+ * What still ends the work: a result, a real failure (model or tool error, the advisor's turn cap, an MDSD cost budget, a process
+ * exit), cancellation (Esc, /orche stop, the caller's abort signal, session shutdown). Limits that are not wall-clock or inactivity
+ * based (the advisor's turn cap, MDSD cost and token budgets, output-limit recovery) are unchanged; request counts are only progress
+ * checkpoints and never end anything.
  *
  * Without the flag (every other session) nothing changes: the finite, activity-aware deadlines of limits.ts apply.
  *

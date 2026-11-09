@@ -59,7 +59,7 @@ A level change applies from the **next** request. Pi reads the session's level p
 | the parts of a node that ran at B and was split | B |
 | no node running and the next one needs B, or nothing left (integration, report) | B |
 | a rejected `task_plan` call, or a message from main (`orche_task_message`) | B until the next accepted plan |
-| the report phase: from the first `report_result` call (one written below B is sent back), or a report prompt of the runtime (request budget, exhausted output-limit recovery, missing-result nudge) | B for every further request of the assignment, whatever the plan says |
+| the report phase: from the first `report_result` call (one written below B is sent back), or a report prompt of the runtime (an external budget stop such as MDSD's cost total, exhausted output-limit recovery, missing-result nudge) | B for every further request of the assignment, whatever the plan says |
 | the assignment ends (success, failure, cancel, timeout) | back to B; the next assignment starts again from its own B |
 
 `escalation: false` drops the hard/rework rows (the plain S/B split, arm b below).

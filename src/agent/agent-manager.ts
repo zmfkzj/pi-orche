@@ -36,7 +36,8 @@ import { lengthRecoveryOf, resetLengthRecovery } from "../pi/length-recovery.js"
 import { beginReportPhase } from "../pi/thinking-policy.js";
 import { noteRequestLevel } from "../pi/thinking-state.js";
 import { DEFAULT_LIVENESS_WINDOW_MS, LivenessTracker, isIdleHeartbeat, mergeLiveness, type Liveness, type SessionLiveness } from "./liveness.js";
-/** Requests a forced final report may take after a budget stop before the assignment fails. */
+import { requestCheckpointNotice } from "../orchestration/limits.js";
+/** Requests a forced final report may take after an external budget's stop ({@link AgentManager.budgetAction}) before the assignment fails. */
 export const BUDGET_GRACE_REQUESTS = 5;
 /** Reports sent back to be rewritten (at the assignment's thinking level) before the assignment fails closed. */
 export const MAX_REPORT_REWRITES = 2;
@@ -61,12 +62,13 @@ interface Worker {
   rejections: number;
   /** Set once the rejections exceed the retry cap; the assignment then fails. */
   resultFailure?: string;
-  /** Model requests of the current assignment, for the soft request budget. */
+  /** Model requests of the current assignment, for the request checkpoints (limits.assignmentRequests). */
   requests: number;
-  requestBudget: number;
-  /** Budget ladder: none → noticed (wrap-up notice sent) → stopping (turn aborted) → final (forced report prompt). */
-  budget: "none" | "noticed" | "stopping" | "final";
-  /** A stop by an external budget ({@link AgentManager.budgetAction}: MDSD's total): its forced-report prompt, what it was, and the request count at the stop. */
+  /** Requests of the current assignment at which its one progress checkpoint notice goes out (0: none); it never stops anything. */
+  requestCheckpoint: number;
+  /** External budget stop ({@link AgentManager.budgetAction}: MDSD's cost total): none → stopping (turn aborted) → final (forced report prompt). */
+  budget: "none" | "stopping" | "final";
+  /** A stop by an external budget: its forced-report prompt, what it was, and the request count at the stop. */
   externalStop?: { text: string; reason: string; at: number };
   /** The last response of the running assignment called report_result (an external stop lets it land). */
   lastReporting?: boolean;
@@ -123,7 +125,7 @@ export class AgentManager {
   private readonly resultNudges: number;
   private readonly resultSchemas: Readonly<Record<string, ResultDataSchema>>;
   private readonly resultSchemaRetries: number;
-  private requestBudget: number;
+  private requestCheckpoint: number;
   private readonly stopTimeoutMs: number;
   private readonly records: SessionRecords | undefined;
   private readonly closed = new AbortController();
@@ -149,20 +151,20 @@ export class AgentManager {
     this.resultSchemaRetries = options.resultSchemaRetries ?? 3;
     if (!Number.isSafeInteger(this.resultSchemaRetries) || this.resultSchemaRetries < 0)
       throw new Error("resultSchemaRetries must be a nonnegative safe integer");
-    this.requestBudget = options.requestBudget ?? 0;
-    if (!Number.isSafeInteger(this.requestBudget) || this.requestBudget < 0)
-      throw new Error("requestBudget must be a nonnegative safe integer");
+    this.requestCheckpoint = options.requestCheckpoint ?? 0;
+    if (!Number.isSafeInteger(this.requestCheckpoint) || this.requestCheckpoint < 0)
+      throw new Error("requestCheckpoint must be a nonnegative safe integer");
     this.stopTimeoutMs = options.stopTimeoutMs ?? WORKER_STOP_TIMEOUT_MS;
     if (!Number.isFinite(this.stopTimeoutMs) || this.stopTimeoutMs < 0)
       throw new Error("stopTimeoutMs must be finite and nonnegative");
     this.records = options.records;
     this.modelRuntime = modelRuntime ? Promise.resolve(modelRuntime) : undefined;
   }
-  /** Refresh the next assignment's quota when session limits are reloaded. */
-  setRequestBudget(budget: number): void {
-    if (!Number.isSafeInteger(budget) || budget < 0)
-      throw new Error("requestBudget must be a nonnegative safe integer");
-    this.requestBudget = budget;
+  /** Refresh the next assignment's request checkpoint interval when session limits are reloaded. */
+  setRequestCheckpoint(every: number): void {
+    if (!Number.isSafeInteger(every) || every < 0)
+      throw new Error("requestCheckpoint must be a nonnegative safe integer");
+    this.requestCheckpoint = every;
   }
   async spawn(options: SpawnOptions): Promise<AgentHandle> {
     let owner: AgentManager = this;
@@ -341,7 +343,7 @@ export class AgentManager {
       nudges: 0,
       rejections: 0,
       requests: 0,
-      requestBudget: this.requestBudget,
+      requestCheckpoint: this.requestCheckpoint,
       budget: "none",
       injected: [],
       lengthReportPrompted: false,
@@ -409,7 +411,7 @@ export class AgentManager {
         const assignment = worker.runAssignment;
         if (assignment) {
           const u = event.message.usage;
-          // The request ended by our own budget stop is not a model failure and not a further request.
+          // The request ended by an external budget's own stop is not a model failure and not a further request.
           const ownAbort = worker.budget === "stopping" || (worker.budget === "final" && worker.resultFailure !== undefined);
           const budgetAborted = ownAbort && (event.message.stopReason === "error" || event.message.stopReason === "aborted");
           worker.failure =
@@ -418,7 +420,7 @@ export class AgentManager {
               : undefined;
           const reporting = event.message.content.some(part => part.type === "toolCall" && part.name === "report_result");
           worker.lastReporting = reporting;
-          if (!budgetAborted) owner.trackBudget(worker, assignment, reporting);
+          if (!budgetAborted) owner.trackRequests(worker, assignment, reporting);
           owner.emit({
             type: "usage", timestamp: Date.now(), agentId: options.id, assignmentId: assignment.id,
             model: `${event.message.provider}/${event.message.model}`,
@@ -455,10 +457,10 @@ export class AgentManager {
         const length = lengthRecoveryOf(session);
         // Every report prompt of the runtime runs at the assignment's thinking level: the report phase starts before its request.
         const reportPhase = (reason: string) => { try { beginReportPhase(session, reason); } catch { /* the level stays; a report below it is sent back */ } };
-        if (reportable && worker.budget === "stopping") {
+        if (reportable && worker.budget === "stopping" && worker.externalStop) {
           worker.budget = "final";
-          reportPhase("forced report (request budget)");
-          owner.runAssignment(worker, assignment, worker.externalStop?.text ?? `Your request budget for assignment ${assignment.kind} is exhausted and your turn was stopped. Call report_result alone now with what you have: partial findings are fine; for implement/fix use data.status "blocked" with the reason if the work is unfinished.`);
+          reportPhase(`forced report (${worker.externalStop.reason})`);
+          owner.runAssignment(worker, assignment, worker.externalStop.text);
         } else if (reportable && length.exhausted && !worker.lengthReportPrompted) {
           // Output-limit recovery is used up (src/pi/length-recovery.ts): one forced report instead of the generic nudge.
           worker.lengthReportPrompted = true;
@@ -503,7 +505,7 @@ export class AgentManager {
     w.rejections = 0;
     w.resultFailure = undefined;
     w.requests = 0;
-    w.requestBudget = this.requestBudget;
+    w.requestCheckpoint = this.requestCheckpoint;
     w.budget = "none";
     w.externalStop = undefined;
     w.lastReporting = false;
@@ -559,13 +561,12 @@ export class AgentManager {
     });
   }
   /**
-   * Soft request budget (after OMP's task budgets): a wrap-up notice at the budget, a stopped
-   * turn plus one forced report prompt at 1.5x, and a failed assignment if that prompt still
-   * runs on for {@link BUDGET_GRACE_REQUESTS} more requests without a RESULT.
+   * The request checkpoint (limits.assignmentRequests): at `requestCheckpoint` requests of the assignment one progress notice that
+   * tells the worker to keep going (Pi `notice`: no extra turn). It never stops a turn, forces a report or fails the assignment;
+   * only an external budget's stop ({@link budgetAction}) has a grace: its forced report gets {@link BUDGET_GRACE_REQUESTS} more.
    */
-  private trackBudget(w: Worker, assignment: Assignment, reporting: boolean): void {
+  private trackRequests(w: Worker, assignment: Assignment, reporting: boolean): void {
     w.snapshot.requestCount = ++w.requests;
-    // After an external budget's stop only its grace applies (the forced report gets BUDGET_GRACE_REQUESTS more requests).
     if (w.externalStop) {
       if (w.budget === "final" && w.requests >= w.externalStop.at + BUDGET_GRACE_REQUESTS && !w.result && !w.resultFailure && !reporting) {
         w.resultFailure = `${w.externalStop.reason} exhausted: no RESULT within ${BUDGET_GRACE_REQUESTS} requests of the forced report (${w.requests} requests)`;
@@ -573,33 +574,16 @@ export class AgentManager {
       }
       return;
     }
-    if (!w.requestBudget) return;
-    const budget = w.requestBudget;
-    const stopAt = Math.ceil(budget * 1.5);
-    const emit = (action: "notice" | "stop" | "abort") => this.emit({
-      type: "request_budget", timestamp: Date.now(), agentId: w.snapshot.id,
-      assignmentId: assignment.id, requests: w.requests, budget, action,
-    });
-    if (w.budget === "none" && w.requests >= budget) {
-      w.budget = "noticed";
-      emit("notice");
-      void w.adapter.notice(`You have used ${w.requests} model requests on this assignment (soft budget ${budget}). Wrap up now: finish the current step and call report_result alone. At ${stopAt} requests your turn is stopped and you must report what you have.`).catch(() => undefined);
-    } else if (w.budget === "noticed" && w.requests >= stopAt && !w.result && !reporting) {
-      // A request that already calls report_result is allowed to land instead of being aborted.
-      w.budget = "stopping";
-      emit("stop");
-      void w.adapter.abort().catch(() => undefined);
-    } else if (w.budget === "final" && w.requests >= stopAt + BUDGET_GRACE_REQUESTS && !w.result && !w.resultFailure && !reporting) {
-      w.resultFailure = `Request budget exhausted after ${w.requests} requests without a RESULT`;
-      emit("abort");
-      void w.adapter.abort().catch(() => undefined);
-    }
+    // Once per assignment (the count rises by one per response); a response that reports, or a reported assignment, needs none.
+    if (!w.requestCheckpoint || w.requests !== w.requestCheckpoint || w.result || reporting) return;
+    this.emit({ type: "request_checkpoint", timestamp: Date.now(), agentId: w.snapshot.id, assignmentId: assignment.id, requests: w.requests });
+    void w.adapter.notice(requestCheckpointNotice(w.requests)).catch(() => undefined);
   }
   /**
-   * An external budget of the assignment `agentId` runs (the MDSD total, src/orchestrator/mdsd.ts), on the request budget's ladder:
-   * "notice" sends `text` as a wrap-up notice; "stop" stops the turn and prompts one forced report with `text`, which then has
-   * {@link BUDGET_GRACE_REQUESTS} more requests before the assignment fails. A response that calls report_result is let land
-   * (the stop is not applied; the caller tries again after the next response). Returns whether it acted.
+   * An external budget of the assignment `agentId` runs (the MDSD cost total, src/orchestrator/mdsd.ts): "notice" sends `text` as a
+   * notice; "stop" stops the turn and prompts one forced report with `text`, which then has {@link BUDGET_GRACE_REQUESTS} more
+   * requests before the assignment fails. A response that calls report_result is let land (the stop is not applied; the caller
+   * tries again after the next response). Returns whether it acted. Request counts never stop through here.
    */
   budgetAction(agentId: string, action: "notice" | "stop", text: string, reason = "budget"): boolean {
     const w = this.workers.get(agentId);
@@ -627,7 +611,7 @@ export class AgentManager {
     const assignment = w.snapshot.currentAssignment;
     if (w.snapshot.status !== "running" || !assignment) return reject(`${agentId} is not running an assignment; send a new orche_task to it instead`);
     if (w.result || w.resultFailure) return reject(`${agentId} has already reported its result for this assignment; send the message as a follow-up orche_task instead`);
-    if (w.budget === "stopping" || w.budget === "final") return reject(`${agentId} is being stopped (request budget); send the message as a follow-up orche_task instead`);
+    if (w.budget === "stopping" || w.budget === "final") return reject(`${agentId} is being stopped (${w.externalStop?.reason ?? "budget"}); send the message as a follow-up orche_task instead`);
     if (!text.trim()) return reject("empty message");
     const id = `M${++this.messageSerial}`;
     const message: InjectedMessage = { id, text, queuedAt: Date.now(), status: "queued", ...(options.source ? { source: options.source } : {}), ...(options.from ? { from: options.from } : {}) };

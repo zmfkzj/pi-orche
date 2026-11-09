@@ -30,7 +30,7 @@ const read = (): AssistantMessage => reply([call("read", { path: "notes.txt" })]
 const report = (): AssistantMessage => reply([call("report_result", { kind: "answer", summary: "notes.txt says ok", data: { evidence: ["notes.txt:1"] } })], { stopReason: "toolUse" });
 
 interface Seen { reasoning: string; last: string }
-async function run(settings: ThinkingPolicySettings, script: (request: number, seen: Seen[]) => AssistantMessage, options: { requestBudget?: number; ladder?: "redecompose" | "step-down"; revise?: () => string | undefined } = {}) {
+async function run(settings: ThinkingPolicySettings, script: (request: number, seen: Seen[]) => AssistantMessage, options: { requestCheckpoint?: number; stopAt?: number; ladder?: "redecompose" | "step-down"; revise?: () => string | undefined } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "orche-report-effort-"));
   await writeFile(join(dir, "notes.txt"), "ok\n");
   const faux = fauxProvider({ provider: `report-${Math.random().toString(36).slice(2, 8)}`, models: [{ id: "m", reasoning: true, contextWindow: 1_000_000, maxTokens: 128_000 }] });
@@ -42,9 +42,11 @@ async function run(settings: ThinkingPolicySettings, script: (request: number, s
   faux.setResponses(Array.from({ length: 40 }, () => ((context, opts, state, model) => { const message = factory(context, opts, state, model); seen.at(-1)!.reasoning = opts?.reasoning ?? "off"; return message; }) as FauxResponseFactory));
   const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
   runtime.registerNativeProvider(faux.provider);
-  const manager = new AgentManager(runtime, { resultSchemas: orchestrationResultSchemas, ...(options.requestBudget ? { requestBudget: options.requestBudget } : {}) });
+  const manager = new AgentManager(runtime, { resultSchemas: orchestrationResultSchemas, ...(options.requestCheckpoint ? { requestCheckpoint: options.requestCheckpoint } : {}) });
   const events: ManagerEvent[] = [];
-  manager.subscribe(event => { events.push(event); });
+  // `stopAt`: an external budget stop (MDSD's cost total, as workers.ts applies it on the usage event) after that many responses.
+  let responses = 0;
+  manager.subscribe(event => { events.push(event); if (event.type === "usage" && ++responses === options.stopAt) manager.budgetAction("W1", "stop", "COST STOP: the MDSD total budget is used up. Call report_result alone now.", "MDSD total budget"); });
   cleanup.push(async () => { await manager.disposeWithin(2_000).catch(() => undefined); await rm(dir, { recursive: true, force: true }); });
   const tool = createTaskPlanTool(value => onTaskPlan(manager.session("W1"), value));
   await manager.spawn({ id: "W1", role: "analyst", cwd: dir, route: { role: "analyst", model: `${faux.provider.id}/m`, thinking: "high" }, instructions: "worker", peerMessaging: false,
@@ -58,12 +60,12 @@ async function run(settings: ThinkingPolicySettings, script: (request: number, s
 }
 
 describe("forced reports of the runtime run at B", () => {
-  it("request budget: the stopped turn's forced report prompt is answered at B, after steps at S", async () => {
-    // Budget 2 → stop at 3 requests: plan (B), read (S), read (S, stopped), forced report (B).
-    const { outcome, efforts, events, seen } = await run(PHASE_THINKING_POLICY, request => [plan(node("a", "running")), read(), read()][request - 1] ?? report(), { requestBudget: 2 });
+  it("external budget stop: the stopped turn's forced report prompt is answered at B, after steps at S", async () => {
+    // Stop after 3 responses: plan (B), read (S), read (S, stopped), forced report (B).
+    const { outcome, efforts, events, seen } = await run(PHASE_THINKING_POLICY, request => [plan(node("a", "running")), read(), read()][request - 1] ?? report(), { stopAt: 3 });
     expect(efforts).toEqual(["high", "medium", "medium", "high"]);
-    expect(seen.at(-1)!.last).toMatch(/request budget .* is exhausted/);
-    expect(events.filter(event => event.type === "request_budget").map(event => event.type === "request_budget" && event.action)).toEqual(["notice", "stop"]);
+    expect(seen.at(-1)!.last).toContain("COST STOP");
+    expect(events.filter(event => event.type === "request_checkpoint")).toEqual([]);
     expect(outcome).toMatchObject({ status: "completed" });
     expect(events.some(event => event.type === "result_rewrite")).toBe(false);
   });
@@ -90,8 +92,9 @@ describe("forced reports of the runtime run at B", () => {
 });
 
 describe("a report below B is never accepted", () => {
-  it("a spontaneous report at S during the budget notice is rewritten at B (not a result retry)", async () => {
-    const { outcome, efforts, events } = await run(PHASE_THINKING_POLICY, request => [plan(node("a", "running")), read(), report()][request - 1] ?? report(), { requestBudget: 2 });
+  it("a spontaneous report at S after the request checkpoint is rewritten at B (not a result retry)", async () => {
+    const { outcome, efforts, events } = await run(PHASE_THINKING_POLICY, request => [plan(node("a", "running")), read(), report()][request - 1] ?? report(), { requestCheckpoint: 2 });
+    expect(events.filter(event => event.type === "request_checkpoint").map(event => event.type === "request_checkpoint" && event.requests)).toEqual([2]);
     expect(efforts).toEqual(["high", "medium", "medium", "high"]);
     expect(events.filter(event => event.type === "result_rewrite")).toHaveLength(1);
     expect(events.filter(event => event.type === "result_rejected")).toEqual([]);

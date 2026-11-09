@@ -113,21 +113,20 @@ it("cancellation with never-settling SDK abort force-disposes the worker and rel
   expect((await execute()).details.worker).toBe("W2");
 });
 
-it.each([[0, 1], [1, 0]])("reloads assignmentRequests from %i to %i for a reused worker", async (first, second) => {
+it.each([[0, 1], [1, 0]])("reloads assignmentRequests from %i to %i for a reused worker (a checkpoint, never a stop)", async (first, second) => {
   const read = () => tool("read", { path: "greeting.txt" });
   const { execute, limits } = await fixture([read(), read(), result(), read(), read(), result()]);
-  const events: { budget: number; action: string }[] = [];
+  const events: { requests: number }[] = [];
   const spawn = AgentManager.prototype.spawn;
   vi.spyOn(AgentManager.prototype, "spawn").mockImplementation(async function (this: AgentManager, options) {
-    this.subscribe(event => { if (event.type === "request_budget") events.push(event); });
+    this.subscribe(event => { if (event.type === "request_checkpoint") events.push(event); });
     return spawn.call(this, options);
   });
   await limits(first);
   expect((await execute()).details.status).toBe("completed");
-  expect(events.some(event => event.action === "stop")).toBe(first === 1);
+  expect(events.map(event => event.requests)).toEqual(first === 1 ? [1] : []);
   events.length = 0;
   await limits(second);
   expect((await execute({ worker: "W1" })).details.status).toBe("completed");
-  expect(events.some(event => event.action === "stop")).toBe(second === 1);
-  if (second === 1) expect(events.every(event => event.budget === 1)).toBe(true);
+  expect(events.map(event => event.requests)).toEqual(second === 1 ? [1] : []);
 });

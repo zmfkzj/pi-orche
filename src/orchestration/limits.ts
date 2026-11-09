@@ -18,7 +18,10 @@ export interface RunLimits {
   decisionMs: number;
   maxFixRounds: number;
   decisionRepairs: number;
-  /** Soft model-request budget per worker assignment (0 disables). */
+  /**
+   * Request checkpoint per worker assignment (0 disables): at this many model requests the worker gets one progress notice and
+   * keeps working ({@link requestCheckpointNotice}). Never a cap: crossing it stops, reports or fails nothing.
+   */
   assignmentRequests: number;
   /** Length of the FIRST extension of an expired deadline when the run is still active (default 10 minutes). */
   extensionMs: number;
@@ -55,6 +58,14 @@ export class RunLimitsError extends Error {
   override readonly name = "RunLimitsError";
 }
 
+/**
+ * The one progress notice at a request checkpoint (`assignmentRequests`, an MDSD allocation or total): a check, never a stop. It
+ * tells the worker to keep going, so that crossing a request count never turns into a wrap-up, a blocked report or a continuation.
+ */
+export function requestCheckpointNotice(requests: number, scope = "this assignment", report = "report_result"): string {
+  return `Progress checkpoint: ${requests} model requests on ${scope} so far. This is not a limit and nothing is stopped: keep working until the task is complete. Do not wrap up early, cut scope, or report blocked because of the request count; call ${report} when the work is done (or blocked for a reason other than requests; notices about time, cost or tokens still apply). Use the checkpoint to check your progress: if you keep repeating the same step without new results, change your approach.`;
+}
+
 /** Validate explicit values without filling defaults (which would hide derived caps). */
 export function parseRunLimits(value: unknown, location = "limits"): Partial<RunLimits> {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -69,7 +80,7 @@ export function parseRunLimits(value: unknown, location = "limits"): Partial<Run
     if (key === "decisionRepairs" && number > 2)
       throw new RunLimitsError(`${location}.${key}: expected an integer 0-2`);
     if (key === "assignmentRequests" && !Number.isSafeInteger(number))
-      throw new RunLimitsError(`${location}.${key}: expected a non-negative safe integer (0 disables)`);
+      throw new RunLimitsError(`${location}.${key}: expected a non-negative safe integer (0 disables the request checkpoint)`);
     if (key === "maxExtensions" && !Number.isSafeInteger(number))
       throw new RunLimitsError(`${location}.${key}: expected a non-negative integer (0 disables extensions)`);
     limits[key as keyof RunLimits] = number;

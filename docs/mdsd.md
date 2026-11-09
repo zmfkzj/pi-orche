@@ -21,15 +21,15 @@ Defaults of the bounds:
 | Setting | Default |
 |---|---|
 | `maxRounds` | 3 search rounds |
-| `explorer` (each sub-worker) | 40 requests, 25 min, $6, 120k output tokens |
-| `explorerMax` (most a strategy may set) | 120 requests, 60 min, $25, 400k output tokens |
-| `total` (the whole assignment) | $80, 600 requests |
-| `reserve` | search rounds may admit up to 70% of `total` |
+| `explorer` (each sub-worker) | 25 min, $6, 120k output tokens; a progress checkpoint at 40 requests |
+| `explorerMax` (most a strategy may set) | 60 min, $25, 400k output tokens; a checkpoint at up to 120 requests |
+| `total` (the whole assignment) | $80; a progress checkpoint at 600 requests (all stages) |
+| `reserve` | search rounds may admit up to 70% of `total.costUSD` |
 | `final` | other stages may admit up to 90%; the last 10% is the final-report allowance |
-| `wrapUpAt` | wrap-up notice at 80% of an allocation |
-| `hardStopAt` | stop at 125% of an allocation |
+| `wrapUpAt` | wrap-up notice at 80% of a cost, output-token or time allocation |
+| `hardStopAt` | stop at 125% of a cost, output-token or time allocation |
 
-These are practical limits, not tuned or validated values. The `max_tokens: 20000` in the methodology's example is an example only. A strategy can set its own `budget` within `explorerMax`.
+These are practical limits, not tuned or validated values. Request counts are never a limit: an allocation's `requests` and `total.requests` are progress checkpoints (one notice that says to keep going), never a refusal, wrap-up or stop. The `max_tokens: 20000` in the methodology's example is an example only. A strategy can set its own `budget` within `explorerMax`.
 
 ## Flow (one orche_task assignment)
 
@@ -53,19 +53,21 @@ These are practical limits, not tuned or validated values. The `max_tokens: 2000
 
 ## Budget control across all stages
 
-- **Admission.** An `orche_spawn` call of any reason (search, verification, parallelism, isolation) is admitted only if the following sum fits the stage's share of `mdsd.total`: what every stage has spent so far, plus the worst case of the sub-workers still running, plus the worst case of the new ones.
+- **Admission.** An `orche_spawn` call of any reason (search, verification, parallelism, isolation) is admitted only if the following cost sum fits the stage's share of `mdsd.total.costUSD`: what every stage has spent so far, plus the worst-case cost of the sub-workers still running, plus that of the new ones. Request counts never refuse a call.
   - Search rounds get up to `1 - reserve` of the total. Every other stage gets up to `1 - final`.
-  - A sub-worker's worst case is its allocation × `hardStopAt`. For requests it is rounded up and adds `REPORT_EXEMPTIONS` (2) report responses.
+  - A sub-worker's worst case is its cost allocation × `hardStopAt`.
   - A worker's allocation is reserved when it is prepared and released when it finishes.
   - A refusal states the figures and the way out: smaller strategies, or a report with `stop.reason "budget"`.
 - **Per session** (explorers, verifiers and implementers in mdsd mode):
-  - The figures are checked after every response: requests, list-price cost, output tokens and time.
+  - The figures are checked after every response: list-price cost, output tokens and time.
   - At `wrapUpAt` the session gets one wrap-up notice, worded for its role.
+  - At its allocation's `requests` the session gets one progress checkpoint notice that tells it to keep going (none after a wrap-up notice). Requests are measured, never an overshoot or a stop.
   - At `hardStopAt` the session is cancelled explicitly. A response that calls the report tool is let through at most twice: a report, and one retry after an invalid one.
   - A timer also checks the time dimension and cancels a response in flight.
 - **The orchestrator itself:**
-  - At `1 - final` of the total it gets a notice: no further stage is admitted, and it should report now.
-  - At the total its turn is stopped and it gets one forced report prompt (`AgentManager.budgetAction`, the request budget's ladder).
+  - At `1 - final` of `total.costUSD` it gets a notice: no further stage is admitted, and it should report now.
+  - At `total.costUSD` its turn is stopped and it gets one forced report prompt (`AgentManager.budgetAction`, the external budget stop).
+  - At `total.requests` (every stage's requests together) it gets one progress checkpoint notice that tells it to keep going; nothing is refused or stopped, and none comes after the cost notice. The summary records it as `checkpoint`.
   - That report may leave explorer findings unaccounted. The gate allows this and records the number, so that the result stays usable.
   - If no report comes within 5 more requests, the assignment fails with its MDSD lines and round files.
 - **Measured but not bounded in advance:**
@@ -74,7 +76,7 @@ These are practical limits, not tuned or validated values. The `max_tokens: 2000
   - the forced report.
 
   The run's summary records them as `overTotal`.
-- **Unknown usage is never counted as zero.** A response cancelled in flight (by a budget stop, the caller, a deadline or the turn cap) is marked `inFlightUnknown`. An orchestrator response without a reported cost counts in `unpricedResponses`.
+- **Unknown usage is never counted as zero.** A response cancelled in flight (by a budget stop, the caller or a deadline) is marked `inFlightUnknown`. An orchestrator response without a reported cost counts in `unpricedResponses`.
 - **What `mdsd.total` does not cover:**
   - main's own requests;
   - other orche_task assignments;
@@ -137,12 +139,12 @@ The unit tests (`test/orchestrator/mdsd.test.ts`) use:
 
 The WorkerPool end-to-end test (`test/extension/mdsd-e2e.test.ts`) runs a style-guide judgment through a one-shot `mdsd` request. It covers:
 
-- two diversified paths and one path stopped by its budget;
-- an adaptive round on the aggregation ids;
+- two diversified paths and one path stopped by its output-token budget;
+- an adaptive round on the aggregation ids, with a path that works on past its request checkpoint;
 - a verifier;
 - a rejected report, then an accepted one;
 - the next plain request without the MDSD tool set;
-- aggregate exhaustion: every stage refused, the orchestrator stopped, a forced report accepted;
+- the request total passed as a checkpoint (a verification stage still admitted), then the cost total exhausted: every stage refused, the orchestrator stopped, a forced report accepted;
 - cancellation.
 
 ## Experiment settings: cross-model replication and explorer scratch

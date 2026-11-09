@@ -121,7 +121,7 @@ export interface PolicyState {
   /** The request of the last progress (checks after it can make a checkpoint-less node count). */
   progressRequest: number;
   /**
-   * The report phase: set by the first report_result call or a report prompt of the runtime (request budget, exhausted output-limit
+   * The report phase: set by the first report_result call or a report prompt of the runtime (an external budget stop, exhausted output-limit
    * recovery, missing-result nudge). From then on every request of the assignment runs at B, whatever the plan says, so a report
    * sent back for its effort is rewritten at B and can never fall back to S (no rejection loop).
    */
@@ -407,7 +407,7 @@ export function integrationRunning(session: object): boolean {
 
 /**
  * The report phase starts (phase policy): every further request of this assignment runs at B (see `PolicyState.reporting`).
- * Called by the runtime BEFORE the model request of a report prompt (request budget, exhausted output-limit recovery, missing-result
+ * Called by the runtime BEFORE the model request of a report prompt (an external budget stop, exhausted output-limit recovery, missing-result
  * nudge), and when a report written below B is sent back. Without a policy (or with the fixed one) a recovery step-down is cleared,
  * so a report prompt never runs below the assignment's level either. Returns the level the next request runs at.
  */

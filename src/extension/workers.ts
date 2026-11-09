@@ -1427,7 +1427,7 @@ export class WorkerPool {
     /** A reused worker whose previous assignment ran in another mode (single <-> strong): the same tools, other model tiers. */
     const previousMode = worker && worker.mode && worker.mode !== args.mainMode ? worker.mode : undefined;
     this.manager ??= new AgentManager(runtime, { resultSchemas: orchestrationResultSchemas, stopTimeoutMs: this.options.stopTimeoutMs });
-    this.manager.setRequestBudget(limits.assignmentRequests);
+    this.manager.setRequestCheckpoint(limits.assignmentRequests);
     const routeRole = args.role === "answer" ? "analyst" : args.role === "explore" ? config.routes.workers?.explorerRoles?.[0] ?? "explorer-path" : args.role === "implement" ? "implementer" : args.role === "verify" ? "verifier" : args.role;
     // `models.orchestrator` (docs/orchestrator.md 12) replaces main's model for the standard roles; unresolvable: inherit main.
     // strong and ultra try `models.strong-orchestrator` first, then `models.orchestrator` (unset or unresolvable strong tier).
@@ -2075,7 +2075,8 @@ export class WorkerPool {
             specialistRoute: role => resolveSpecialistRoute(config.routes, role, (provider, id) => !!runtime.getModel(provider, id)),
             imageTool: () => config.routes.images ? createGenerateImageTool({ cwd: args.cwd, runtime, images: config.routes.images }) : undefined,
             prompt: (planned, imagesAvailable) => subWorkerPrompt(planned, meta.id, config.routes.verifyCommands ?? [], imagesAvailable, !!ultraRun),
-            timeoutMs: limits.assignmentMs, maxTurns: Math.max(50, Math.round((limits.assignmentRequests ?? 200) * 1.5)), ...(unbounded ? { unbounded: true } : {}),
+            // No turn cap: the request count is only a progress checkpoint (limits.assignmentRequests, 0: none), never a stop.
+            timeoutMs: limits.assignmentMs, requestCheckpoint: limits.assignmentRequests, ...(unbounded ? { unbounded: true } : {}),
             // Every sub-worker gets the same activity-aware deadline as this assignment (the resolved limits: base, linear or fixed
             // extensions, activity window, observation), from its own start and judged by its own session; this assignment still bounds it.
             deadline: { limits, ...(config.routes.images ? { toolTimeoutsMs: { generate_image: config.routes.images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } } : {}) },

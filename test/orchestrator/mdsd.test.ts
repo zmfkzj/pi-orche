@@ -182,7 +182,7 @@ describe("mdsd: measurement, aggregation and persisted round data", () => {
     tool(c.id, "read", { path: "/elsewhere/notes.md" });
     ctx.mdsd.observe(c.id, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Partial: payment systems use per-account sequencing; not checked yet." }] } });
     const lines = await ctx.mdsd.finish("search", workers, [
-      outcome(a, { requests: 50, costUSD: 7.5, durationMs: 30 * 60_000, usage: { input: 1, output: 130_000, cacheRead: 0, cacheWrite: 0 }, budget: { wrapUp: "33/40 requests", stoppedBy: "requests at 50/40 requests (1.25x the allocation)" }, data: answerOf([
+      outcome(a, { requests: 50, costUSD: 7.5, durationMs: 30 * 60_000, usage: { input: 1, output: 130_000, cacheRead: 0, cacheWrite: 0 }, budget: { wrapUp: "$4.80/$6", stoppedBy: "cost at $7.50/$6 (1.25x the allocation)" }, data: answerOf([
         { id: "f1", claim: "Kafka keeps per-key ordering only within a partition; the order router at src/a.ts:12 hashes by customer, not by order.", location: ["src/a.ts:12"], uncertainty: "low" },
         { id: "f2", claim: "Retention settings are undocumented.", uncertainty: "high" },
       ], { unexplored_scope: ["load profile in benchmarks/broker-latency.csv", "the consumer group settings in deploy/kafka.yaml"] }) }),
@@ -200,10 +200,10 @@ describe("mdsd: measurement, aggregation and persisted round data", () => {
     expect(ec).toMatchObject({ id: c.id, status: "failed", files: ["/elsewhere/notes.md"], partial: "Partial: payment systems use per-account sequencing; not checked yet." });
     // Redundancy: the mean pairwise Jaccard overlap of the files the finished explorers read (src/a.ts shared of three files).
     expect(mdsd.state.rounds[0]).toMatchObject({ redundancy: 0.33, pairs: [{ a: a.id, b: b.id, files: 0.33 }] });
-    // Allocated vs actual, overshoot and the budget stop are recorded.
+    // Allocated vs actual, overshoot and the budget stop are recorded; requests past the allocation are measured, never an overshoot (a checkpoint).
     expect(ea!.actual).toMatchObject({ requests: 50, costUSD: 7.5, outputTokens: 130_000 });
-    expect(ea!.overshoot).toEqual(["requests 50/40", "cost $7.5/$6", "time 30/25 min", "output tokens 130000/120000"]);
-    expect(ea).toMatchObject({ wrapUp: "33/40 requests", stoppedBy: "requests at 50/40 requests (1.25x the allocation)" });
+    expect(ea!.overshoot).toEqual(["cost $7.5/$6", "time 30/25 min", "output tokens 130000/120000"]);
+    expect(ea).toMatchObject({ wrapUp: "$4.80/$6", stoppedBy: "cost at $7.50/$6 (1.25x the allocation)" });
   });
 
   it("aggregation offers heuristic duplicates, conflicts and gaps with ids; adaptive rounds can only cite those ids", async () => {
@@ -218,7 +218,8 @@ describe("mdsd: measurement, aggregation and persisted round data", () => {
     const text = lines.join("\n");
     expect(text).toContain("redundancy (mean pairwise overlap of files read) 0.33");
     expect(text).toContain("Likely duplicates (heuristic");
-    expect(text).toContain("OVER: requests 50/40");
+    expect(text).toContain("OVER: cost $7.5/$6");
+    expect(text).not.toContain("requests 50/40");
     expect(text).toContain("partial text kept in the round data (no valid report)");
   });
 
@@ -304,20 +305,20 @@ describe("mdsd: adaptive rounds", () => {
 });
 
 describe("mdsd: budget across all stages", () => {
-  it("every stage is admitted on its worst case (allocation x hardStopAt + report responses): search up to 1 - reserve, other stages up to 1 - final", async () => {
+  it("every stage is admitted on its worst-case cost (allocation x hardStopAt): search up to 1 - reserve, other stages up to 1 - final", async () => {
     const settings: MdsdSettings = { ...DEFAULT_MDSD, total: { costUSD: 30, requests: 300 }, reserve: 0.3, final: 0.1 };
     const { mdsd, events } = run({ settings });
     mdsd.observeOrchestrator({ input: 10_000, output: 2_000, cacheRead: 50_000, cost: { total: 3 } });
     const three = [explorer("a", invertRequirements), explorer("b", challengeFavourite), explorer("c", transferDomains)];
     // $3 spent + 3 x ($6 x 1.25) = $25.5 > $21 (70% of $30): refused with the figures and the way out.
-    expect(() => mdsd.validate("search", three, { reason: "search", workers: three, plan: techPlan })).toThrow("Refused (MDSD budget): this search call's worst case is $22.5 and 156 requests (3 worker(s): allocation x 1.25 hard stop, + 2 report responses each), but the search share of mdsd.total has $18 and 209 requests left");
+    expect(() => mdsd.validate("search", three, { reason: "search", workers: three, plan: techPlan })).toThrow("Refused (MDSD budget): this search call's worst-case cost is $22.5 (3 worker(s): allocation x 1.25 hard stop), but the search share of mdsd.total has $18 left");
     const smaller = [explorer("a", { ...invertRequirements, budget: { costUSD: 4 } }), explorer("b", { ...challengeFavourite, budget: { costUSD: 4 } })];
     await mdsd.prepare("search", smaller, signal, { reason: "search", workers: smaller, plan: techPlan });
     // While they run, their worst case is reserved: a verifier is not admitted on top of it ($3 + $10 running + $7.5 > $27? no: fits).
-    expect(mdsd.committed()).toEqual({ costUSD: 10, requests: 104 });
+    expect(mdsd.committed()).toEqual({ costUSD: 10 });
     mdsd.observeOrchestrator({ cost: { total: 0.5 } });
     await mdsd.finish("search", smaller, smaller.map(worker => outcome(worker, { costUSD: 4.5, requests: 30, data: answerOf([]) })));
-    expect(mdsd.committed()).toEqual({ costUSD: 0, requests: 0 });
+    expect(mdsd.committed()).toEqual({ costUSD: 0 });
     mdsd.observeOrchestrator({ cost: { total: 0.25 } });
     // Verifiers get the default allocation, enforced per session with their own notice.
     const verifier: PlannedWorker = { id: "W1.99", name: "check", role: "verify", request: "Check F1", reason: "verification" };
@@ -327,7 +328,7 @@ describe("mdsd: budget across all stages", () => {
     expect(verification[0]).toContain("Cite a verifier's id (e.g. W1.99)");
     // $14.75 spent; two more verifiers ($15 worst) exceed the stage share ($27): refused.
     const two: PlannedWorker[] = [{ ...verifier, id: "W1.100" }, { ...verifier, id: "W1.101" }];
-    expect(() => mdsd.validate("verification", two)).toThrow(/^Refused \(MDSD budget\): this verification call's worst case is \$15 and 104 requests .* the stage share of mdsd.total has \$12.25 and 195 requests left/);
+    expect(() => mdsd.validate("verification", two)).toThrow(/^Refused \(MDSD budget\): this verification call's worst-case cost is \$15 .* the stage share of mdsd.total has \$12.25 left/);
     const summary = mdsd.summary();
     expect(summary.budget).toMatchObject({ spentOrchestratorUSD: 3.75, spentExplorersUSD: 9, spentVerifiersUSD: 2, spentUSD: 14.75, totalUSD: 30, searchLimitUSD: 21, stageLimitUSD: 27, finalAllowanceUSD: 3, allocatedUSD: 8, inFlightUnknown: 1, unpricedResponses: 0 });
     expect(summary.phases.map(item => [item.phase, item.requests, item.costUSD])).toEqual([["planning", 1, 3], ["search-1", 1, 0.5], ["integration-1", 1, 0.25], ["verification-1", 0, 0], ["after-verification-1", 0, 0]]);
@@ -357,12 +358,36 @@ describe("mdsd: budget across all stages", () => {
     mdsd.observeOrchestrator({}); mdsd.enforceOrchestrator(apply);
     mdsd.observeOrchestrator({ cost: { total: 0.1 } }); mdsd.enforceOrchestrator(apply);
     expect(actions.map(item => item[0])).toEqual(["notice", "stop", "stop"]);
-    expect(actions[2]![1]).toMatch(/^The MDSD total budget is used up \(\$10\.1 \/ 5 requests of \$10 \/ 100\) and your turn was stopped\. Call report_result alone now/);
+    expect(actions[2]![1]).toMatch(/^The MDSD total budget is used up \(\$10\.1 of \$10 \(5 requests\)\) and your turn was stopped\. Call report_result alone now/);
     const summary = mdsd.summary();
-    expect(summary.budget).toMatchObject({ noticed: "$9.1 / 2 requests of $10 / 100", stopped: "$10.1 / 5 requests of $10 / 100", unpricedResponses: 1, exhausted: expect.stringContaining("final-report allowance") });
-    expect(summary.budget.overTotal).toMatch(/^spent \$10\.2 \/ 6 requests of \$10 \/ 100/);
+    expect(summary.budget).toMatchObject({ noticed: "$9.1 of $10 (2 requests)", stopped: "$10.1 of $10 (5 requests)", unpricedResponses: 1, exhausted: expect.stringContaining("final-report allowance") });
+    expect(summary.budget.overTotal).toMatch(/^spent \$10\.2 of \$10:/);
     expect(mdsd.lines()[1]).toMatch(/final-report allowance \$1; notice at \$9\.1 .*; STOPPED at \$10\.1 .*usage unknown for 0 cancelled worker response\(s\) and 1 unpriced orchestrator response\(s\); OVER TOTAL/);
     expect(events.filter(event => event.stage === "budget").map(event => event.action)).toEqual(["notice", "stop"]);
+  });
+
+  it("request counts never refuse, notice-to-report or stop: past mdsd.total.requests one progress checkpoint, every spawn reason still admitted; the cost total still refuses and stops", () => {
+    const { mdsd, events } = run({ settings: { ...DEFAULT_MDSD, total: { costUSD: 100, requests: 10 }, final: 0.1 } });
+    const actions: [string, string][] = [];
+    const apply = (action: "notice" | "stop", text: string) => { actions.push([action, text]); return true; };
+    // 30 cheap responses: three times the request total (the old ladder stopped at the total).
+    for (let i = 0; i < 30; i++) { mdsd.observeOrchestrator({ cost: { total: 0.01 } }); mdsd.enforceOrchestrator(apply); }
+    expect(actions.map(item => item[0])).toEqual(["notice"]);
+    expect(actions[0]![1]).toContain("Progress checkpoint: 10 model requests on this MDSD run (all stages together) so far. This is not a limit and nothing is stopped: keep working");
+    expect(mdsd.state.orchestrator).toEqual({ checkpoint: "$0.1 of $100 (10 requests)" });
+    expect(mdsd.state.exhausted).toBeUndefined();
+    for (const reason of ["search", "verification", "parallelism", "isolation"] as const) {
+      const workers = reason === "search" ? [explorer("a", invertRequirements), explorer("b", challengeFavourite)] : [{ role: reason === "verification" ? "verify" : "implement", name: "w" }];
+      expect(() => mdsd.validate(reason, workers, reason === "search" ? { reason, workers: workers as PlannedWorker[], plan: techPlan } : undefined)).not.toThrow();
+    }
+    // The cost total keeps its notice (refusing every stage) and its stop.
+    mdsd.observeOrchestrator({ cost: { total: 90 } }); mdsd.enforceOrchestrator(apply);
+    expect(() => mdsd.validate("verification", [{ role: "verify", name: "w" }])).toThrow(/^Refused \(MDSD budget\): the run reached its final-report allowance/);
+    mdsd.observeOrchestrator({ cost: { total: 10 } }); mdsd.enforceOrchestrator(apply);
+    expect(actions.map(item => item[0])).toEqual(["notice", "notice", "stop"]);
+    expect(events.filter(event => event.stage === "budget").map(event => event.action)).toEqual(["checkpoint", "notice", "stop"]);
+    expect(mdsd.summary().budget).toMatchObject({ checkpoint: "$0.1 of $100 (10 requests)", spentRequests: 32, totalRequests: 10 });
+    expect(mdsd.lines()[1]).toContain("(32 requests; request checkpoint at 10, passed at $0.1 of $100 (10 requests))");
   });
 
   it("after the budget stop the forced report may leave explorer findings unaccounted (recorded), but not claim unchecked verdicts", async () => {
@@ -384,7 +409,7 @@ describe("mdsd: budget across all stages", () => {
   it("an overrun of the total (the orchestrator is bounded by its assignment, not stopped by mdsd.total) is recorded, never hidden", () => {
     const { mdsd } = run({ settings: { ...DEFAULT_MDSD, total: { costUSD: 1, requests: 10 } } });
     for (let i = 0; i < 12; i++) mdsd.observeOrchestrator({ cost: { total: 0.25 } });
-    expect(mdsd.summary().budget.overTotal).toMatch(/^spent \$3 \/ 12 requests of \$1 \/ 10/);
+    expect(mdsd.summary().budget.overTotal).toMatch(/^spent \$3 of \$1:/);
     expect(mdsd.lines()[1]).toContain("OVER TOTAL");
   });
 });
@@ -524,10 +549,10 @@ describe("mdsd: cross-model replication and explorer scratch (experiment setting
     const duplicates = [explorer("analyst", invertRequirements), explorer("architect", relabelled)];
     expect(() => mdsd.validate("search", duplicates, { reason: "search", workers: duplicates, plan: techPlan })).toThrow(/are one search path/);
     const two = [explorer("a", invertRequirements), explorer("b", challengeFavourite)];
-    // Default explorer $6 / 40 requests: worst case $7.5 / 52 requests per cell. $40 total: the search share is $28.
+    // Default explorer $6: worst-case cost $7.5 per cell. $40 total: the search share is $28.
     const tight = { total: { costUSD: 40, requests: 600 } };
     expect(() => run({ settings: { ...DEFAULT_MDSD, ...tight } }).mdsd.validate("search", two, { reason: "search", workers: two, plan: techPlan })).not.toThrow();
-    expect(() => run({ settings: { ...replicated, ...tight } }).mdsd.validate("search", two, { reason: "search", workers: two, plan: techPlan })).toThrow(/worst case is \$30 and 208 requests \(4 worker\(s\)/);
+    expect(() => run({ settings: { ...replicated, ...tight } }).mdsd.validate("search", two, { reason: "search", workers: two, plan: techPlan })).toThrow(/worst-case cost is \$30 \(4 worker\(s\)/);
     const three = [...two, explorer("c", transferDomains)];
     expect(() => run({ settings: replicated, maxSubWorkers: 4 }).mdsd.validate("search", three, { reason: "search", workers: three, plan: techPlan })).toThrow("3 strategies are 6 explorers, above this session's cap of 4 sub-workers per call");
     expect(() => run({ settings: replicated, maxSubWorkers: 6 }).mdsd.validate("search", three, { reason: "search", workers: three, plan: techPlan })).not.toThrow();

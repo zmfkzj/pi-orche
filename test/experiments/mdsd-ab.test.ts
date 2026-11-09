@@ -97,8 +97,8 @@ describe("mdsd-ab r2 matrix harness", () => {
     const { round } = recoverRound();
     const config = matrixConfig(round);
     expect(parseMdsdConfig(config.mdsd)).toMatchObject({ maxRounds: 1, explorerScratch: true, total: { costUSD: 60, requests: 1200 }, replication: { models: [{ model: "cliproxyapi/gpt-6.1-sol", thinking: "max" }, { model: "cliproxyapi/claude-sonnet-5-5", thinking: "max" }] } });
-    expect(admission(config)).toEqual({ cells: 6, worstUSD: 37.5, worstRequests: 462, searchLimitUSD: 42, searchLimitRequests: 840 });
-    expect(() => admission({ ...config, mdsd: { ...config.mdsd, total: { costUSD: 30, requests: 600 } } })).toThrow(/worst case is \$37\.5 and 462 requests \(6 worker\(s\)/);
+    expect(admission(config)).toEqual({ cells: 6, worstUSD: 37.5, searchLimitUSD: 42 });
+    expect(() => admission({ ...config, mdsd: { ...config.mdsd, total: { costUSD: 30, requests: 600 } } })).toThrow(/worst-case cost is \$37\.5 \(6 worker\(s\)/);
     // Six cells above a per-call cap of 4: refused when the run starts, before any explorer exists.
     expect(() => admission({ ...config, single: { ...config.single, maxSubWorkers: 4 } })).toThrow("3 strategies on 2 models are 6 explorers, above the cap of 4");
     expect(admission(matrixConfig(toyRound(round), true))).toMatchObject({ cells: 4 });

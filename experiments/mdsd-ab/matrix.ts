@@ -102,8 +102,8 @@ export function toyRound(round: PinnedRound): PinnedRound {
   };
 }
 
-/** The runtime's own admission of the pinned search call (parse, pin check, cap, budget): throws its refusal; never edits the pin. */
-export function admission(config: Record<string, any>): { cells: number; worstUSD: number; worstRequests: number; searchLimitUSD: number; searchLimitRequests: number } {
+/** The runtime's own admission of the pinned search call (parse, pin check, cap, cost budget): throws its refusal; never edits the pin. Request counts are no admission figure (a progress checkpoint only). */
+export function admission(config: Record<string, any>): { cells: number; worstUSD: number; searchLimitUSD: number } {
   const settings = parseMdsdConfig(config.mdsd);
   const pin = settings.replication?.round;
   if (!pin) throw new Error("no pinned round in the matrix config");
@@ -115,8 +115,7 @@ export function admission(config: Record<string, any>): { cells: number; worstUS
   return {
     cells: models * pin.workers.length,
     worstUSD: models * budgets.reduce((sum, budget) => sum + budget.costUSD * settings.hardStopAt, 0),
-    worstRequests: models * budgets.reduce((sum, budget) => sum + Math.ceil(budget.requests * settings.hardStopAt) + 2, 0),
-    searchLimitUSD: settings.total.costUSD * (1 - settings.reserve), searchLimitRequests: Math.floor(settings.total.requests * (1 - settings.reserve)),
+    searchLimitUSD: settings.total.costUSD * (1 - settings.reserve),
   };
 }
 

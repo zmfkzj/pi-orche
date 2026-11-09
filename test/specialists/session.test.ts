@@ -7,12 +7,13 @@ import { fauxRuntime } from "../helpers/faux.js";
 const tool = (name: string, args: Record<string, unknown>) => reply([call(name, args as never)], { stopReason: "toolUse" });
 const report = { name: "report_answer", label: "Report answer", description: "Submit once.", parameters: Type.Object({ answer: Type.Integer({ minimum: 0 }) }), check: (value: { answer: number }) => value.answer === 13 ? "13 is unlucky." : undefined };
 
-async function run(steps: Parameters<typeof fauxRuntime>[0], options: { maxTurns?: number; signal?: AbortSignal; onSession?: (use: { model: string; thinking?: string }) => void; wrapUp?: SpecialistWrapUp; timeoutMs?: number; unbounded?: boolean } = {}) {
+async function run(steps: Parameters<typeof fauxRuntime>[0], options: { maxTurns?: number | null; requestCheckpoint?: number; signal?: AbortSignal; onSession?: (use: { model: string; thinking?: string }) => void; wrapUp?: SpecialistWrapUp; timeoutMs?: number; unbounded?: boolean } = {}) {
   const faux = await fauxRuntime(steps);
   return runSpecialistSession({
     actor: "framer:W1", route: faux.route, runtime: faux.runtime, cwd: process.cwd(), instructions: "Answer.", prompt: "What is 6 * 7?",
-    tools: ["ls"], report, maxTurns: options.maxTurns ?? 5, timeoutMs: options.timeoutMs ?? 30_000, signal: options.signal ?? new AbortController().signal,
+    tools: ["ls"], report, ...(options.maxTurns === null ? {} : { maxTurns: options.maxTurns ?? 5 }), timeoutMs: options.timeoutMs ?? 30_000, signal: options.signal ?? new AbortController().signal,
     ...(options.onSession ? { onSession: options.onSession } : {}), ...(options.wrapUp ? { wrapUp: options.wrapUp } : {}), ...(options.unbounded ? { unbounded: true } : {}),
+    ...(options.requestCheckpoint ? { requestCheckpoint: options.requestCheckpoint } : {}),
   });
 }
 const seen = (context: { messages: unknown[] }, text: string) => JSON.stringify(context.messages).includes(text);
@@ -51,6 +52,18 @@ describe("specialist session", () => {
       expect((error as SpecialistError).cancelled).toBe(false);
       expect((error as SpecialistError).stats.requests).toBe(2);
     });
+  });
+
+  it("without maxTurns (orche_spawn sub-workers) there is no turn cap; the request checkpoint is one steered notice that keeps the session going", async () => {
+    const counts: number[] = [];
+    const look = (context: { messages: unknown[] }) => { counts.push(JSON.stringify(context.messages).split("Progress checkpoint").length - 1); return tool("ls", {}); };
+    // 60 tool responses: past the old derived cap (max(50, 1.5 x assignmentRequests) with a 0 or small assignmentRequests).
+    const result = await run([...Array.from({ length: 60 }, () => look), tool("report_answer", { answer: 42 })], { maxTurns: null, requestCheckpoint: 5 });
+    expect(result.value).toEqual({ answer: 42 });
+    expect(result.stats.requests).toBe(61);
+    expect(counts.slice(0, 5)).toEqual([0, 0, 0, 0, 0]);
+    expect(counts.slice(5).every(count => count === 1)).toBe(true);
+    expect(result.stats.wrapUp).toBeUndefined();
   });
 
   it("does not start when already cancelled", async () => {

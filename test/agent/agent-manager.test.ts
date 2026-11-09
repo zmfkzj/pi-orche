@@ -627,63 +627,91 @@ describe("real AgentSession deterministic races", () => {
       expect(() => new AgentManager(undefined, { resultSchemaRetries: -1 })).toThrow("resultSchemaRetries");
     });
   });
-  describe("request budget", () => {
+  describe("request checkpoint", () => {
     const workTool = {
       name: "work", label: "work", description: "work", parameters: Type.Object({}),
       execute: async () => ({ content: [{ type: "text" as const, text: "worked" }], details: {} }),
     };
     const work = () => reply([call("work", {})], { stopReason: "toolUse" });
-    it("notices at the budget, stops at 1.5x and gets the forced report under the same assignment", async () => {
-      let noticed = "";
-      let forced = "";
-      const { m, faux } = await setup([
-        work(), work(),
-        context => { noticed = JSON.stringify(context); return work(); },
-        context => { forced = JSON.stringify(context); return result("partial"); },
-      ], [workTool], { requestBudget: 2 });
+    it("one progress notice at the checkpoint; work runs past the old 1.5x stop and grace thresholds and reports under the same assignment", async () => {
+      const contexts: string[] = [];
+      // Checkpoint 2: the old ladder noticed at 2, stopped at 3 and failed at 8; this run reports at its 13th request.
+      const { m, faux } = await setup([...Array.from({ length: 12 }, (): FauxResponseStep => context => { contexts.push(JSON.stringify(context)); return work(); }), result("done")], [workTool], { requestCheckpoint: 2 });
       const events: ManagerEvent[] = [];
       m.subscribe(event => events.push(event));
       const assignment = m.assign("a", "explore", "start");
-      expect(await m.wait("a", 2000)).toMatchObject({ type: "outcome", outcome: { assignmentId: assignment.id, status: "completed", result: { summary: "partial" } } });
-      expect(events.filter(event => event.type === "request_budget").map(event => [event.action, event.requests])).toEqual([["notice", 2], ["stop", 3]]);
-      expect(noticed).toContain("soft budget 2");
-      expect(forced).toContain("request budget for assignment explore is exhausted");
+      expect(await m.wait("a", 4000)).toMatchObject({ type: "outcome", outcome: { assignmentId: assignment.id, status: "completed", result: { summary: "done" } } });
+      expect(events.filter(event => event.type === "request_checkpoint").map(event => event.type === "request_checkpoint" && [event.assignmentId, event.requests])).toEqual([[assignment.id, 2]]);
+      // The notice reaches the next request and tells the worker to go on; no request ever sees a stop or a report prompt.
+      expect(contexts[1]).not.toContain("Progress checkpoint");
+      expect(contexts[2]).toContain("Progress checkpoint: 2 model requests on this assignment so far. This is not a limit and nothing is stopped: keep working");
+      // Contexts carry the history: the last one holds the single notice once.
+      expect(contexts.at(-1)!.match(/Progress checkpoint/g)).toHaveLength(1);
+      expect(contexts.join("")).not.toMatch(/exhausted|turn was stopped|report_result alone now/);
       expect(events.filter(event => event.type === "assignment_nudged")).toEqual([]);
       expect(events.filter(event => event.type === "assignment_outcome")).toHaveLength(1);
-      expect(faux.state.callCount).toBe(4);
+      // Every model call is one of the script's: the notice adds no turn.
+      expect(faux.state.callCount).toBe(13);
+      expect(m.get("a")).toMatchObject({ status: "idle", requestCount: 13 });
     });
-    it("a stop-threshold request that already reports is not aborted", async () => {
-      const { m } = await setup([work(), result("on time")], [workTool], { requestBudget: 1 });
+    it("a response that reports at the checkpoint gets no notice", async () => {
+      const { m } = await setup([work(), result("on time")], [workTool], { requestCheckpoint: 2 });
       const events: ManagerEvent[] = [];
       m.subscribe(event => events.push(event));
       m.assign("a", "explore", "start");
       expect(await m.wait("a", 2000)).toMatchObject({ type: "outcome", outcome: { status: "completed", result: { summary: "on time" } } });
-      expect(events.filter(event => event.type === "request_budget").map(event => event.action)).toEqual(["notice"]);
+      expect(events.filter(event => event.type === "request_checkpoint")).toEqual([]);
+    });
+    it("each assignment has its own checkpoint, and 0 disables it", async () => {
+      expect(() => new AgentManager(undefined, { requestCheckpoint: 1.5 })).toThrow("requestCheckpoint");
+      const { m } = await setup([work(), work(), result("first"), work(), work(), result("second"), work(), work(), result("third")], [workTool], { requestCheckpoint: 2 });
+      const events: ManagerEvent[] = [];
+      m.subscribe(event => events.push(event));
+      const one = m.assign("a", "explore", "one");
+      expect(await m.wait("a", 2000)).toMatchObject({ type: "outcome", outcome: { status: "completed" } });
+      const two = m.assign("a", "explore", "two");
+      expect(await m.wait("a", 2000)).toMatchObject({ type: "outcome", outcome: { status: "completed" } });
+      m.setRequestCheckpoint(0);
+      m.assign("a", "explore", "three");
+      expect(await m.wait("a", 2000)).toMatchObject({ type: "outcome", outcome: { status: "completed", result: { summary: "third" } } });
+      expect(events.filter(event => event.type === "request_checkpoint").map(event => event.type === "request_checkpoint" && [event.assignmentId, event.requests])).toEqual([[one.id, 2], [two.id, 2]]);
+    });
+  });
+  /** An external budget (MDSD's cost total, through budgetAction) keeps its stop, forced report and grace; request counts have none. */
+  describe("external budget stop", () => {
+    const workTool = {
+      name: "work", label: "work", description: "work", parameters: Type.Object({}),
+      execute: async () => ({ content: [{ type: "text" as const, text: "worked" }], details: {} }),
+    };
+    const work = () => reply([call("work", {})], { stopReason: "toolUse" });
+    /** Stop like workers.ts does: on the orchestrator's `usage` event, once `at` responses are in. */
+    const stopAt = (m: AgentManager, at: number) => {
+      let responses = 0;
+      m.subscribe(event => { if (event.type === "usage" && ++responses === at) expect(m.budgetAction("a", "stop", "COST STOP: report now", "MDSD total budget")).toBe(true); });
+    };
+    it("stops the turn and gets the forced report under the same assignment", async () => {
+      let forced = "";
+      const { m, faux } = await setup([work(), work(), context => { forced = JSON.stringify(context); return result("partial"); }], [workTool], { requestCheckpoint: 100 });
+      const events: ManagerEvent[] = [];
+      m.subscribe(event => events.push(event));
+      stopAt(m, 2);
+      m.assign("a", "explore", "start");
+      expect(await m.wait("a", 2000)).toMatchObject({ type: "outcome", outcome: { status: "completed", result: { summary: "partial" } } });
+      expect(forced).toContain("COST STOP: report now");
+      expect(events.filter(event => event.type === "assignment_nudged")).toEqual([]);
+      expect(faux.state.callCount).toBe(3);
     });
     it("fails the assignment when the forced report keeps working past the grace requests", async () => {
-      const { m } = await setup(Array.from({ length: 2 + 6 }, work), [workTool], { requestBudget: 1 });
-      const events: ManagerEvent[] = [];
-      m.subscribe(event => events.push(event));
+      const { m } = await setup(Array.from({ length: 8 }, work), [workTool]);
+      stopAt(m, 1);
       m.assign("a", "explore", "start");
-      expect(await m.wait("a", 4000)).toMatchObject({ type: "outcome", outcome: { status: "failed", error: expect.stringContaining("Request budget exhausted after 7 requests") } });
-      expect(events.filter(event => event.type === "request_budget").map(event => event.action)).toEqual(["notice", "stop", "abort"]);
+      expect(await m.wait("a", 4000)).toMatchObject({ type: "outcome", outcome: { status: "failed", error: expect.stringContaining("MDSD total budget exhausted: no RESULT within 5 requests of the forced report") } });
       expect(m.get("a").status).toBe("idle");
-    });
-    it("each assignment has its own budget and 0 disables it", async () => {
-      expect(() => new AgentManager(undefined, { requestBudget: 1.5 })).toThrow("requestBudget");
-      const { m } = await setup([work(), result("first"), work(), result("second")], [workTool], { requestBudget: 3 });
-      const events: ManagerEvent[] = [];
-      m.subscribe(event => events.push(event));
-      m.assign("a", "explore", "one");
-      expect(await m.wait("a", 2000)).toMatchObject({ type: "outcome", outcome: { status: "completed" } });
-      m.assign("a", "explore", "two");
-      expect(await m.wait("a", 2000)).toMatchObject({ type: "outcome", outcome: { status: "completed" } });
-      expect(events.filter(event => event.type === "request_budget")).toEqual([]);
     });
   });
   /**
    * Pi 1.1.0 adds `agent_settled.aborted` (any abort of the run). The manager deliberately keeps classifying a settled run by its own
-   * state: its own budget stop aborts the run and must still lead to the forced report, and a stop has already finalized the outcome.
+   * state: an external budget stop aborts the run and must still lead to the forced report, and a stop has already finalized the outcome.
    */
   describe("agent_settled.aborted (pi 1.1.0) does not change the outcome", () => {
     const settledFlags = (m: AgentManager) => {
@@ -704,8 +732,10 @@ describe("real AgentSession deterministic races", () => {
       await m.session("a").waitForIdle();
       expect(flags).toEqual([false]);
     });
-    it("the budget stop settles with aborted true and still gets the forced report", async () => {
-      const { m, faux } = await setup([work(), work(), work(), result("partial")], [workTool], { requestBudget: 2 });
+    it("an external budget stop settles with aborted true and still gets the forced report", async () => {
+      const { m, faux } = await setup([work(), work(), work(), result("partial")], [workTool]);
+      let responses = 0;
+      m.subscribe(event => { if (event.type === "usage" && ++responses === 3) m.budgetAction("a", "stop", "COST STOP: report now", "MDSD total budget"); });
       const flags = settledFlags(m);
       const events: ManagerEvent[] = [];
       m.subscribe(event => events.push(event));

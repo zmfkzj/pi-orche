@@ -343,7 +343,7 @@ Repair/infra retry는 새 assignment를 만들지만 이미 쓴 요청·wall·ex
 - Overall 만료는 run-wide liveness로 평가하되 모든 연장은 기존 shared counter에서 차감한다.
 - 중복 timer가 동시에 만료되어도 연장을 한 번만 소비한다(`src/orchestration/run/extension.ts:183`–`:208`).
 - 기다리는 dependency 시간은 node 실행 cap에 포함하지 않지만 run overall에는 포함한다.
-- Request limit은 현재처럼 soft budget이며 실제 강제 ceiling처럼 문서화하지 않는다.
+- Request count는 진행 확인용 checkpoint(한 번의 알림)일 뿐이며 중단·강제 보고·실패 ceiling처럼 동작하거나 문서화하지 않는다.
 - Auto infra retry 기본값은 0; side-effect 안정성·settle 확인이 가능한 명시적 정책만 허용한다.
 - 사용자 cancel은 모든 dispatch/edge 전달보다 우선하며 coordinator re-entry나 worker handover를 하지 않는다.
 - 이미 실행 중인 tool은 강제 rollback하지 않는다; settle 실패는 cleanup incomplete로 기록한다.

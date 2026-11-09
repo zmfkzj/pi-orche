@@ -23,7 +23,7 @@ export class SessionAdapter {
       { triggerTurn: false },
     );
   }
-  /** Runtime notice from pi-orche itself (e.g. a request-budget warning), delivered like a NOTE. */
+  /** Runtime notice from pi-orche itself (e.g. a request checkpoint), delivered like a NOTE (no extra turn). */
   notice(text: string): Promise<void> {
     return this.session.sendCustomMessage(
       { customType: "pi-orche.notice", content: `[pi-orche notice] ${text}`, display: true, details: { text } },

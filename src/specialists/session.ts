@@ -14,7 +14,7 @@ import type { AstRewriteFileGuard } from "../tools/ast.js";
 import { abortable } from "../orchestration/run/deadline.js";
 import type { ModelRoute } from "../orchestration/routing.js";
 import { LivenessTracker } from "../agent/liveness.js";
-import type { RunLimits } from "../orchestration/limits.js";
+import { requestCheckpointNotice, type RunLimits } from "../orchestration/limits.js";
 import { ExtendableDeadline, waitExtendable, withNotExtended, type DeadlineExtension, type NotExtended, type WaitObservation } from "../orchestration/run/extension.js";
 
 export interface SpecialistUsage { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }
@@ -45,8 +45,13 @@ export interface SpecialistRun<S extends TSchema> {
   writeFileGuard?: AstRewriteFileGuard;
   /** Follow-up prompts when the model ends its turn without the report (default 0: the call fails at once). */
   nudges?: number;
-  /** Turns (model responses) before the call fails without a report. */
-  maxTurns: number;
+  /** Turns (model responses) before the call fails without a report (the advisor's fixed cap); absent: no turn cap. */
+  maxTurns?: number;
+  /**
+   * Requests at which the session gets one progress checkpoint notice (steered; orche_spawn sub-workers: `limits.assignmentRequests`
+   * or an MDSD allocation's `requests`). Never a stop: the notice tells the model to keep working. Absent or 0: none.
+   */
+  requestCheckpoint?: number;
   /** Fixed time cap (ms) of the call; ignored when `deadline` is given. */
   timeoutMs: number;
   /**
@@ -62,7 +67,7 @@ export interface SpecialistRun<S extends TSchema> {
   deadline?: SpecialistDeadline;
   /**
    * Completion wait (`--orche-completion-wait unbounded`, src/orchestration/completion-wait.ts): no wall-clock cap at all. The fixed
-   * `timeoutMs` timer is not armed, and a `deadline` only observes (no expiry, extension or stall stop). The turn cap, a budget, a
+   * `timeoutMs` timer is not armed, and a `deadline` only observes (no expiry, extension or stall stop). A turn cap, a budget, a
    * model error and `signal` still end the call.
    */
   unbounded?: boolean;
@@ -85,14 +90,16 @@ export interface SpecialistRun<S extends TSchema> {
   /** Every session event, read-only (liveness of the caller: an orche_spawn sub-worker counts for its orchestrator). A throw is ignored. */
   onEvent?: (event: { type: string; [key: string]: unknown }) => void;
   /**
-   * A budget of the session (an MDSD search worker): once any dimension reaches `wrapUpAt` of its allocation, one steering notice
-   * asks for the report; at `hardStopAt` the call is cancelled. Token, cost and request checks run after each model response (a
-   * response in flight is not cut by them, so it can overshoot); the time dimension also has a timer that cancels in flight.
+   * A budget of the session (an MDSD search worker): once a cost, output-token or time dimension reaches `wrapUpAt` of its
+   * allocation, one steering notice asks for the report; at `hardStopAt` the call is cancelled. Token and cost checks run after each
+   * model response (a response in flight is not cut by them, so it can overshoot); the time dimension also has a timer that cancels
+   * in flight. Its `requests` is no limit: the caller passes it as the {@link SpecialistRun.requestCheckpoint}.
    */
   budget?: SpecialistBudget;
 }
 /** The allocation of a budgeted specialist call and its thresholds (fractions/multiples of the allocation). */
 export interface SpecialistBudget {
+  /** `requests`: the allocation's progress checkpoint (never a wrap-up or stop dimension); the others are enforced. */
   requests: number; minutes: number; costUSD: number; outputTokens: number; wrapUpAt: number; hardStopAt: number;
   /** What the wrap-up notice asks for (after the usage figures); absent: the search worker's text (findings, scopes). */
   notice?: string;
@@ -236,15 +243,15 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
     const active = session;
     const stop = () => { void active.abort().catch(() => undefined); };
     controller.signal.addEventListener("abort", stop, { once: true });
-    // The budget (MDSD search workers): one wrap-up notice, then an explicit cancellation; see SpecialistRun.budget.
-    // `reporting`: the model's last response calls the report tool; the stop lets up to REPORT_EXEMPTIONS such attempts (an invalid
-    // report gets its error and one more try) finish instead of discarding the findings, and no notice interrupts them.
+    // The budget (MDSD search workers): one wrap-up notice, then an explicit cancellation, by cost, output tokens or time (never by
+    // the request count; see SpecialistRun.budget). `reporting`: the model's last response calls the report tool; the stop lets up to
+    // REPORT_EXEMPTIONS such attempts (an invalid report gets its error and one more try) finish instead of discarding the findings,
+    // and no notice interrupts them.
     let wrapped = false, stopped = false, reporting = false, exempted = 0;
     const enforce = () => {
       if (!budget || stopped || captured.value !== undefined || controller.signal.aborted) return;
       const minutes = (Date.now() - startedAt) / 60_000;
       const dimensions: [string, number, string][] = [
-        ["requests", stats.requests / budget.requests, `${stats.requests}/${budget.requests} requests`],
         ["cost", stats.usage.cost / budget.costUSD, `$${stats.usage.cost.toFixed(2)}/$${budget.costUSD}`],
         ["output tokens", stats.usage.output / budget.outputTokens, `${stats.usage.output}/${budget.outputTokens} output tokens`],
         ["time", minutes / budget.minutes, `${minutes.toFixed(1)}/${budget.minutes} min`],
@@ -265,6 +272,7 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
     // The wrap-up notice (SpecialistRun.wrapUp): one steer before the turn cap or the fixed timer ends the call without a report.
     // Never while a report is being made or after one was captured; the caps themselves are unchanged.
     let noticed = false;
+    const maxTurns = run.maxTurns;
     const wrapUpNotice = (why: string) => {
       const wrapUp = run.wrapUp;
       if (!wrapUp || noticed || reporting || captured.value !== undefined || controller.signal.aborted) return;
@@ -280,10 +288,10 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
       tracker?.observe(event as unknown as { type: string; [key: string]: unknown });
       if (run.onEvent) { try { run.onEvent(event as unknown as { type: string; [key: string]: unknown }); } catch { /* an observer cannot alter the session */ } }
       if (event.type === "tool_execution_start") run.onTool?.(event.toolName);
-      if (event.type === "turn_end") {
+      if (event.type === "turn_end" && maxTurns !== undefined) {
         turns++;
-        const left = run.maxTurns - turns;
-        if (left <= 0 && captured.value === undefined) controller.abort(new Error(`no ${run.report.name} within ${run.maxTurns} turns`));
+        const left = maxTurns - turns;
+        if (left <= 0 && captured.value === undefined) controller.abort(new Error(`no ${run.report.name} within ${maxTurns} turns`));
         else if (run.wrapUp && left > 0 && left <= Math.max(1, run.wrapUp.turnsLeft)) wrapUpNotice(`Turn notice: ${left} response${left === 1 ? "" : "s"} left before this session ends without a report.`);
       }
       // A model request is in flight from the start of a turn until its assistant message ends (tools run after that).
@@ -300,6 +308,9 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
         if (event.message.stopReason === "aborted") cutResponse = true;
         reporting = event.message.content.some(part => part.type === "toolCall" && part.name === run.report.name);
         enforce();
+        // The one request checkpoint: a progress notice that keeps the session going (not after a real limit's wrap-up or a report).
+        if (run.requestCheckpoint && stats.requests === run.requestCheckpoint && !wrapped && !reporting && captured.value === undefined && !controller.signal.aborted)
+          void active.steer(requestCheckpointNotice(stats.requests, "this session", run.report.name)).catch(() => undefined);
       }
     });
     try {

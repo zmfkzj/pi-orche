@@ -1,18 +1,20 @@
 /**
  * MDSD mode end to end through WorkerPool (docs/mdsd.md): a one-shot `mdsd` request's answer worker runs the search policy with
  * real faux-model sessions for the orchestrator, its explorers and a verifier — two diversified first-round paths plus one that is
- * stopped by its budget, an adaptive round that acts on the aggregation, verification, a rejected then accepted report — and the
- * next ordinary request runs without the MDSD tool set and gate. A second case exhausts the aggregate budget (every stage refused,
+ * stopped by its output-token budget, an adaptive round that acts on the aggregation (one path works past its request checkpoint),
+ * verification, a rejected then accepted report — and the next ordinary request runs without the MDSD tool set and gate. A second
+ * case passes the request total (a checkpoint: a stage is still admitted) and then exhausts the cost total (every stage refused,
  * the orchestrator stopped, a forced report kept usable); a third cancels the task during a search round. The policy's rules
  * themselves are unit-tested in test/orchestrator/mdsd.test.ts. Deterministic: no real model.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxProvider, type AssistantMessage, type FauxResponseFactory, type FauxResponseStep } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxThinking, fauxToolCall, type AssistantMessage, type FauxResponseFactory, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { WorkerPool } from "../../src/extension/workers.js";
+import { MdsdRun } from "../../src/orchestrator/mdsd.js";
 import { OrcheController } from "../../src/extension/controller.js";
 import { SPAWN_TOOL } from "../../src/orchestrator/spawn.js";
 import { createHarness, tool } from "./harness.js";
@@ -20,6 +22,7 @@ import { createHarness, tool } from "./harness.js";
 const opened: { dispose(): Promise<void> }[] = [];
 const temp: string[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const item of opened.splice(0).reverse()) await item.dispose();
   for (const dir of temp.splice(0)) await rm(dir, { recursive: true, force: true });
 });
@@ -86,7 +89,8 @@ const finalReport = (findings: Record<string, unknown>[], stop = { reason: "suff
 
 describe("mdsd mode through WorkerPool", () => {
   it("one-shot mdsd: diversified first round with a budget-stopped path, an adaptive round on the aggregation, verification, gate rejection then acceptance; the next plain request drops MDSD", async () => {
-    const { workers, execute, general, strong, scratchBase } = await pool({ explorer: { requests: 2, minutes: 30, costUSD: 5, outputTokens: 100_000 } });
+    // 2 requests (a progress checkpoint) and 1000 output tokens (enforced: wrap-up at 800, stop at 1250) per strategy.
+    const { workers, execute, general, strong, scratchBase } = await pool({ explorer: { requests: 2, minutes: 30, costUSD: 5, outputTokens: 1000 } });
     const seen: Record<string, string> = {};
     strong.setResponses(scripted(60, {
       orchestrator: (turn, context) => {
@@ -118,9 +122,11 @@ describe("mdsd mode through WorkerPool", () => {
       attack: turn => turn === 0 ? tool("read", { path: "greeting.txt" }) : explorerReport([
         { id: "f1", claim: "greeting.txt:1 'Hello' is capitalised against the guide.", location: ["greeting.txt:1"], counter_evidence: ["notes.md keeps a capital for the brand name"] },
       ]),
-      // Never reports: its session is stopped at 1.25 x its 2-request allocation, and its last text is kept as partial work.
-      analogy: () => tool("read", { path: "notes.md" }),
-      settle: turn => turn === 0 ? tool("read", { path: "greeting.txt" }) : explorerReport([{ id: "f1", claim: "Every line of greeting.txt checked: line 1 breaks the lowercase rule.", location: ["greeting.txt:1"], uncertainty: "low" }]),
+      // Never reports: each response thinks ~600 output tokens, so its session is stopped at 1.25 x its 1000-token allocation
+      // (third response); it has no text, so no partial work is kept.
+      analogy: () => fauxAssistantMessage([fauxThinking("t".repeat(2400)), fauxToolCall("read", { path: "notes.md" })], { stopReason: "toolUse" }),
+      // Works on past its 2-request checkpoint (the old 1.25x stop and report exemptions) and reports at its fifth request.
+      settle: turn => turn < 4 ? tool("read", { path: "greeting.txt" }) : explorerReport([{ id: "f1", claim: "Every line of greeting.txt checked: line 1 breaks the lowercase rule.", location: ["greeting.txt:1"], uncertainty: "low" }]),
       unseen: turn => turn === 0 ? tool("ls", { path: "." }) : explorerReport([{ id: "f1", claim: "No locale files exist, so nothing overrides the greeting." }]),
       check: () => tool("report_result", { kind: "verify", summary: "greeting.txt:1 is capitalised; STYLE.md requires lowercase", data: { passed: true, evidence: ["read greeting.txt:1: Hello orche", "read STYLE.md:1"], issues: [] } }),
     }));
@@ -135,14 +141,19 @@ describe("mdsd mode through WorkerPool", () => {
     expect(seen.round1).toContain("D1");
     expect(seen.round1).toContain("C1");
     expect(seen.round1).toContain("G1");
-    expect(seen.round1).toContain("requests at 3/2 requests (1.25x the allocation)");
+    expect(seen.round1).toMatch(/output tokens at \d+\/1000 output tokens \(1\.25x the allocation\)/);
+    expect(seen.round1).not.toContain("requests at");
     expect(seen.round2).toContain("MDSD search round 2/3");
     expect(seen.rejected).toContain("unaccounted: F5=W1.5:f1");
     const mdsd = result.details.mdsd!;
     expect(mdsd).toMatchObject({ decision: "diversified", rounds: 2, strategies: 5, distinctSignatures: 5, verificationRounds: 1, gate: "passed" });
     expect(mdsd.explorers.map(item => [item.id, item.round, item.status, item.findings])).toEqual([["W1.1", 1, "done", 2], ["W1.2", 1, "done", 1], ["W1.3", 1, "failed", 0], ["W1.4", 2, "done", 1], ["W1.5", 2, "done", 1]]);
-    expect(mdsd.explorers[2]).toMatchObject({ stoppedBy: "requests at 3/2 requests (1.25x the allocation)", files: 1 });
+    expect(mdsd.explorers[2]).toMatchObject({ stoppedBy: expect.stringMatching(/^output tokens at \d+\/1000 output tokens \(1\.25x the allocation\)$/), files: 1 });
     expect(mdsd.explorers[0]).toMatchObject({ files: 1, allocated: { requests: 2 } });
+    // The settle path ran 5 requests on a 2-request allocation: a checkpoint, no stop and no request overshoot.
+    expect(mdsd.explorers[3]).toMatchObject({ status: "done", actual: { requests: 5 } });
+    expect(mdsd.explorers[3]!.overshoot ?? []).toEqual([]);
+    expect(mdsd.explorers[3]!.stoppedBy).toBeUndefined();
     expect(mdsd.findings).toEqual({ explorers: 5, final: 3, byStatus: { confirmed: 1, unverified: 1, disputed: 1 }, dropped: 0, firstRoundOnly: 1, adaptiveOnly: 1, both: 1, orchestratorOnly: 0 });
     expect(mdsd.budget).toMatchObject({ spentRequests: expect.any(Number), inFlightUnknown: 0 });
     expect(mdsd.phases.map(item => item.phase)).toEqual(["planning", "search-1", "integration-1", "search-2", "integration-2", "verification-1", "after-verification-1"]);
@@ -167,10 +178,13 @@ describe("mdsd mode through WorkerPool", () => {
     expect(plainCalls).toHaveLength(1);
   });
 
-  it("aggregate budget exhausted: the notice refuses every further stage, the stop forces a report that stays usable and is recorded", async () => {
-    const { execute, strong } = await pool({ explorer: { requests: 2, minutes: 30, costUSD: 5, outputTokens: 100_000 }, total: { costUSD: 100, requests: 20 } });
+  it("aggregate budget: the request total is only a checkpoint (a stage is still admitted after it, nothing stops); the cost total's notice refuses every further stage and its stop forces a report that stays usable and is recorded", async () => {
+    const { execute, strong } = await pool({ explorer: { requests: 2, minutes: 30, costUSD: 5, outputTokens: 100_000 }, total: { costUSD: 100, requests: 6 } });
+    // Faux models report no cost: every orchestrator response is charged $5 here, so the cost total is reached at its 20th response.
+    const observe = MdsdRun.prototype.observeOrchestrator;
+    vi.spyOn(MdsdRun.prototype, "observeOrchestrator").mockImplementation(function (this: MdsdRun, usage) { observe.call(this, { ...usage, cost: { total: 5 } }); });
     const seen: Record<string, string> = {};
-    strong.setResponses(scripted(60, {
+    strong.setResponses(scripted(80, {
       orchestrator: (turn, context) => {
         const text = textOf(context);
         if (turn === 0) return tool(SPAWN_TOOL, { reason: "search", plan, workers: [
@@ -180,27 +194,34 @@ describe("mdsd mode through WorkerPool", () => {
         if (text.includes("The MDSD total budget is used up")) {
           return finalReport([{ id: "M1", claim: "greeting.txt:1 breaks the lowercase rule", status: "unverified", provenance: ["F1"], evidence: [], counter_evidence: [], uncertainty: "medium" }], { reason: "budget", basis: "stopped by mdsd.total" });
         }
+        // Past the request total (6: this response, the one before and both explorers' 2 each): a stage is still admitted.
+        if (text.includes("Progress checkpoint") && !seen.checkpoint) {
+          seen.checkpoint = "pending";
+          return tool(SPAWN_TOOL, { reason: "verification", workers: [{ name: "check", role: "verify", request: "Check greeting.txt:1." }] });
+        }
+        if (seen.checkpoint === "pending") seen.checkpoint = lastToolResult(context, SPAWN_TOOL);
         if (text.includes("No further orche_spawn call is admitted") && !seen.refused) {
           seen.refused = "pending";
           return tool(SPAWN_TOOL, { reason: "verification", workers: [{ name: "check", role: "verify", request: "Check greeting.txt:1." }] });
         }
         if (seen.refused === "pending") seen.refused = lastToolResult(context, SPAWN_TOOL);
-        // A noncompliant orchestrator keeps working after the notice: the stop ends its turn.
+        // A noncompliant orchestrator keeps working after the cost notice: the stop ends its turn.
         return tool("read", { path: "greeting.txt" });
       },
       rules: turn => turn === 0 ? tool("read", { path: "STYLE.md" }) : explorerReport([{ id: "f1", claim: "greeting.txt:1 starts with a capital against the lowercase rule.", location: ["greeting.txt:1"] }]),
       attack: turn => turn === 0 ? tool("read", { path: "greeting.txt" }) : explorerReport([{ id: "f1", claim: "Hello is capitalised.", location: ["greeting.txt:3"] }]),
+      check: () => tool("report_result", { kind: "verify", summary: "greeting.txt:1 is capitalised", data: { passed: true, evidence: ["read greeting.txt:1"], issues: [] } }),
     }));
     const result = await execute({ mainMode: "mdsd" });
+    expect(seen.checkpoint).toContain("MDSD verification round 1");
+    expect(seen.checkpoint).not.toContain("Refused");
     expect(seen.refused).toContain("Refused (MDSD budget): the run reached its final-report allowance");
     const mdsd = result.details.mdsd!;
-    expect(mdsd.budget).toMatchObject({ totalRequests: 20, noticed: expect.stringMatching(/^\$0 \/ 18 requests of \$100 \/ 20$/), stopped: expect.stringMatching(/^\$0 \/ 20 requests of \$100 \/ 20$/), exhausted: expect.stringContaining("final-report allowance") });
-    // 20 at the stop, the request the stop cut short (counted, its usage as reported), the forced report: the bounded overshoot.
-    expect(mdsd.budget.spentRequests).toBe(22);
-    expect(mdsd.budget.overTotal).toMatch(/^spent \$0 \/ 22 requests of \$100 \/ 20/);
+    expect(mdsd.budget).toMatchObject({ totalRequests: 6, checkpoint: expect.stringMatching(/^\$10 of \$100 \(6 requests\)$/), noticed: expect.stringMatching(/^\$90 of \$100 \(\d+ requests\)$/), stopped: expect.stringMatching(/^\$100 of \$100 \(\d+ requests\)$/), exhausted: expect.stringContaining("final-report allowance") });
+    expect(mdsd.budget.overTotal).toMatch(/^spent \$1\d\d of \$100:/);
     expect(mdsd.gate).toBe("passed after the budget stop (1 explorer finding(s) left unaccounted)");
-    expect(mdsd.verificationRounds).toBe(0);
-    expect(result.text).toContain("STOPPED at $0 / 20 requests of $100 / 20");
+    expect(mdsd.verificationRounds).toBe(1);
+    expect(result.text).toMatch(/STOPPED at \$100 of \$100 \(\d+ requests\)/);
   });
 
   it("cancelled during a search round: the task ends cancelled, the explorers' sessions are stopped and their partial state is reported", async () => {

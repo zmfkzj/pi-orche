@@ -29,7 +29,7 @@ export const LIMITS = {
   assignmentMs: 25 * 60_000,
   /** Harness abort for an advisor or reviewer assignment (they are consultations, not the work). */
   helperMs: 12 * 60_000,
-  /** orche limits.assignmentRequests (soft request budget per assignment), the product default. */
+  /** orche limits.assignmentRequests (the per-assignment request checkpoint: a progress notice, never a stop), the product default. */
   assignmentRequests: 150,
   /** Revision assignments the worker may get after advice or review. */
   revisions: 1,

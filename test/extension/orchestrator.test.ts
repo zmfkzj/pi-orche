@@ -192,6 +192,28 @@ describe("orchestrator: parallel split", () => {
     expect(JSON.stringify(log[0])).not.toContain("alpha.txt");
   });
 
+  it("sub-workers have no request-derived turn cap: past max(50, 1.5 x assignmentRequests) they keep working, with one progress checkpoint at limits.assignmentRequests", async () => {
+    const checkpoints: number[] = [];
+    const answer = (summary: string) => tool("report_result", { kind: "answer", summary, data: { evidence: ["greeting.txt:1"] } });
+    const steps = scripted(70, {
+      orchestrator: turn => turn === 0
+        ? tool(SPAWN_TOOL, { reason: "parallelism", workers: [{ name: "long", role: "answer", request: "Read greeting.txt 55 times." }, { name: "short", role: "answer", request: "Read greeting.txt once." }] })
+        : tool("report_result", { kind: "implement", summary: "Both sub-workers answered", data: { status: "done", checklist, split: { decision: "split", criteria: ["parallelism"], reason: "two independent reads" } } }),
+      // 55 tool responses and the report: the old cap was max(50, 1.5 x 2) = 50 turns, then the sub-worker failed without a report.
+      long: (turn, context) => { checkpoints.push(textOf(context).split("Progress checkpoint").length - 1); return turn < 55 ? tool("read", { path: "greeting.txt" }) : answer("read 55 times"); },
+      short: () => answer("read once"),
+    });
+    const { h, execute } = await fixture(steps);
+    const path = join(h.agentDir, "orche.config.json");
+    await writeFile(path, JSON.stringify({ ...JSON.parse(await readFile(path, "utf8")), limits: { assignmentRequests: 2 } }));
+    const result = await execute();
+    expect(result.details.spawned?.map(worker => [worker.name, worker.status, worker.requests])).toEqual([["long", "done", 56], ["short", "done", 1]]);
+    // The checkpoint after the long sub-worker's second request reaches every later request once; nothing stops it.
+    expect(checkpoints.slice(0, 2)).toEqual([0, 0]);
+    expect(checkpoints.slice(2).every(count => count === 1)).toBe(true);
+    expect(result.details.status).toBe("done");
+  });
+
   it("refuses overlapping ownership before any sub-worker starts", async () => {
     let refused = "";
     const { execute } = await fixture([

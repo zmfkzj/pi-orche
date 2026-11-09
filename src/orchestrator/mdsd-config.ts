@@ -6,22 +6,24 @@
  * per-strategy budget a strategy may lower (or raise up to `explorerMax`), and a total budget of the whole MDSD assignment — the
  * orchestrator's own responses (planning, integration, synthesis), every explorer, verifier and other sub-worker.
  *
- * Admission (src/orchestrator/mdsd.ts admit): every orche_spawn call is admitted only if what all stages spent, plus the worst case
- * of the sub-workers still running, plus the worst case of the new ones fits: search rounds within (1 - reserve) of `total`, every
- * other stage within (1 - final); the last `final` share is the orchestrator's final-report allowance. A sub-worker's worst case is
- * its allocation x `hardStopAt` (requests: rounded up, plus REPORT_EXEMPTIONS report responses).
- * Sub-workers are enforced per session: a wrap-up notice at `wrapUpAt` of any allocated dimension and an explicit stop at
- * `hardStopAt` (checked after each response, plus a timer for time that also cancels a response in flight).
- * The orchestrator: at (1 - final) of `total` it is told that no further stage is admitted and to report; at `total` its turn is
- * stopped and it gets one forced report prompt (the request budget's ladder, src/agent/agent-manager.ts budgetAction), which has
+ * Admission (src/orchestrator/mdsd.ts admit): every orche_spawn call is admitted only if the cost all stages spent, plus the
+ * worst-case cost of the sub-workers still running, plus that of the new ones fits: search rounds within (1 - reserve) of
+ * `total.costUSD`, every other stage within (1 - final); the last `final` share is the orchestrator's final-report allowance. A
+ * sub-worker's worst case is its cost allocation x `hardStopAt`.
+ * Sub-workers are enforced per session: a wrap-up notice at `wrapUpAt` of the cost, output-token or time allocation and an explicit
+ * stop at `hardStopAt` (checked after each response, plus a timer for time that also cancels a response in flight).
+ * The orchestrator: at (1 - final) of `total.costUSD` it is told that no further stage is admitted and to report; at `total.costUSD`
+ * its turn is stopped and it gets one forced report prompt (src/agent/agent-manager.ts budgetAction), which has
  * BUDGET_GRACE_REQUESTS more responses before the assignment fails with its partial MDSD record.
+ * Request counts are progress checkpoints only (never a refusal, wrap-up or stop): a sub-worker gets one notice at its allocation's
+ * `requests`, the orchestrator one at `total.requests` (all stages), and both are told to keep going.
  * Not bounded in advance, measured and recorded: the response that crosses a line (cost and tokens are known only after it), the
  * report responses let through after a stop, and responses cancelled in flight (their usage is unknown; marked, never zero).
  */
 import { parseSettings, RouteConfigError, type RouteSettings } from "../orchestration/routing.js";
 
 export interface MdsdBudget {
-  /** Model responses (requests) of one explorer session. */
+  /** Model responses (requests) of one explorer session at which it gets its progress checkpoint notice: never a limit. */
   requests: number;
   /** Wall-clock minutes of one explorer session. */
   minutes: number;
@@ -49,15 +51,16 @@ export interface MdsdSettings {
   explorer: MdsdBudget;
   /** The most one strategy may be allocated (a strategy's own budget is clamped to it). */
   explorerMax: MdsdBudget;
-  /** Budget of the whole MDSD run (orchestrator, explorers, verifiers); search rounds may allocate only up to (1 - reserve) of it. */
+  /** Budget of the whole MDSD run (orchestrator, explorers, verifiers): `costUSD` is enforced (search rounds may allocate only up to
+   *  (1 - reserve) of it); `requests` is the run's progress checkpoint (one notice, never a stop). */
   total: { costUSD: number; requests: number };
   /** Fraction of `total` kept for integration, verification and the final synthesis (search rounds cannot allocate it). */
   reserve: number;
   /** Fraction of `total` kept for the orchestrator's final report: no stage is admitted into it; reaching it, the orchestrator is told to report. */
   final: number;
-  /** Fraction of a strategy's budget at which the explorer is told once to wrap up and report. */
+  /** Fraction of a strategy's cost, output-token or time budget at which the explorer is told once to wrap up and report. */
   wrapUpAt: number;
-  /** Multiple of a strategy's budget at which its session is stopped (checked between responses; see the module comment). */
+  /** Multiple of a strategy's cost, output-token or time budget at which its session is stopped (checked between responses; see the module comment). */
   hardStopAt: number;
   /**
    * Every search worker gets a private scratch directory (`<scratch base>/<session>/<its id>`, the same kind of write root every

@@ -56,12 +56,12 @@ it("bounded stop force-disposes an unresponsive SDK abort and observes late reje
   await new Promise(resolve => setTimeout(resolve, 0));
 });
 
-it("request budget updates retain nonnegative safe-integer validation", () => {
+it("request checkpoint updates retain nonnegative safe-integer validation", () => {
   const manager = new AgentManager();
   managers.push(manager);
-  for (const budget of [-1, 0.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
-    expect(() => manager.setRequestBudget(budget)).toThrow("requestBudget must be a nonnegative safe integer");
+  for (const every of [-1, 0.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    expect(() => manager.setRequestCheckpoint(every)).toThrow("requestCheckpoint must be a nonnegative safe integer");
   }
-  expect(() => manager.setRequestBudget(0)).not.toThrow();
-  expect(() => manager.setRequestBudget(1)).not.toThrow();
+  expect(() => manager.setRequestCheckpoint(0)).not.toThrow();
+  expect(() => manager.setRequestCheckpoint(1)).not.toThrow();
 });

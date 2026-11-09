@@ -65,7 +65,13 @@ export interface SubWorkerEnvironment {
   deadline?: Pick<SpecialistDeadline, "limits" | "toolTimeoutsMs">;
   /** Completion wait of the orchestrator's Pi process (`--orche-completion-wait unbounded`): no wall-clock or inactivity stop of a sub-worker. */
   unbounded?: boolean;
-  maxTurns: number;
+  /** An optional fixed turn cap (absent: none, as orche_spawn runs them: the request count is never a stop). */
+  maxTurns?: number;
+  /**
+   * Requests at which a sub-worker gets its one progress checkpoint notice (`limits.assignmentRequests`; absent or 0: none). A
+   * budgeted worker (MDSD) uses its allocation's `requests` instead. A checkpoint never stops the session.
+   */
+  requestCheckpoint?: number;
   sessionFile?(id: string): string | undefined;
   /** Every event of a sub-worker's session (its orchestrator's liveness tracks it), and the end of that session. Throws are ignored. */
   onSessionEvent?(id: string, event: { type: string; [key: string]: unknown }): void;
@@ -192,7 +198,7 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
         // The Bash safety review runs after the sub-worker's own guard allowed the call (it can only refuse more), with its own request and cwd.
         toolGuard: async (name, input) => await guard(name, input) ?? await guardBashReview(name, input, { settings: env.bashReview, access: () => runtimeAccess(env.runtime), cwd, task: worker.request, signal }),
         writeFileGuard: (file, abort) => abort?.aborted ? "cancelled" : guard("ast_rewrite", { path: file }),
-        maxTurns: env.maxTurns, timeoutMs: env.timeoutMs, signal, nudges: 1, onTool, ...(worker.budget ? { budget: worker.budget } : {}), ...(env.unbounded ? { unbounded: true } : {}),
+        maxTurns: env.maxTurns, requestCheckpoint: worker.budget?.requests ?? env.requestCheckpoint, timeoutMs: env.timeoutMs, signal, nudges: 1, onTool, ...(worker.budget ? { budget: worker.budget } : {}), ...(env.unbounded ? { unbounded: true } : {}),
         ...(env.deadline ? { deadline: { ...env.deadline, toolTimeoutsMs: { ...env.deadline.toolTimeoutsMs, ...capabilities.toolTimeoutsMs }, onExtended: extension => onDeadline?.({ type: "extended", extension }), onObservation: observation => onDeadline?.({ type: "observation", observation }) } } : {}),
         onSession: use => { started = true; onModel?.(use); },
         ...(env.onSessionEvent ? { onEvent: (event: { type: string; [key: string]: unknown }) => env.onSessionEvent!(worker.id, event) } : {}),

@@ -18,8 +18,10 @@
  *    strategies target such ids, and a round of 2+ strategies keeps at least one `explore` strategy with new hypotheses or sources;
  *  - search workers are read-only (role answer) and report the output contract (findings with evidence, counter-evidence and
  *    uncertainty; evidence; counter_evidence; uncertainty; explored_scope; unexplored_scope; sources_used; procedures);
- *  - budgets: a strategy's allocation is clamped to `mdsd.explorerMax`, a round must fit the remaining `mdsd.total`, rounds are capped
- *    (`mdsd.maxRounds`); each explorer session gets a wrap-up notice at `wrapUpAt` of its allocation and is stopped at `hardStopAt`;
+ *  - budgets: a strategy's allocation is clamped to `mdsd.explorerMax`, a round's worst-case cost must fit the remaining
+ *    `mdsd.total.costUSD`, rounds are capped (`mdsd.maxRounds`); each explorer session gets a wrap-up notice at `wrapUpAt` of its
+ *    cost, output-token or time allocation and is stopped at `hardStopAt`. Request counts (an allocation's `requests`,
+ *    `mdsd.total.requests`) are progress checkpoints only: one notice to keep going, never a refusal, wrap-up or stop;
  *  - measurement independent of self-reports: what each explorer actually read, searched and ran (its tool calls), pairwise overlap
  *    of the files it read (redundancy), files new to the run (new information), declared-vs-actual evidence scope, allocated vs
  *    actual requests/cost/time/output tokens per explorer, the orchestrator's own usage per phase window;
@@ -47,7 +49,7 @@ import { BOOKKEEPING_TOOLS, type EvidenceLedger } from "../pi/tool-evidence.js";
 import { MAX_SUB_WORKERS, MAX_VERIFICATION_ROUNDS } from "./instructions.js";
 import { DEFAULT_MDSD, type MdsdBudget, type MdsdSeed, type MdsdSettings } from "./mdsd-config.js";
 import type { PlannedWorker, SpawnCall, SpawnReason, SpawnStageHooks, SubWorkerOutcome } from "./spawn.js";
-import { REPORT_EXEMPTIONS } from "../specialists/session.js";
+import { requestCheckpointNotice } from "../orchestration/limits.js";
 
 export const MDSD_OPERATORS = ["EXPAND", "DECOMPOSE", "INVERT", "TRANSFER", "CHALLENGE", "VALIDATE"] as const;
 export const MDSD_REASONING = ["deduction", "induction", "abduction", "backtracking", "comparison", "experiment"] as const;
@@ -264,13 +266,14 @@ export interface MdsdState {
   verifications: { round: number; workers: StageWorker[] }[];
   /** Sub-workers of the other spawn reasons (parallelism, isolation): admitted, budgeted and charged like verifiers. */
   others: { reason: string; workers: StageWorker[] }[];
-  /** The orchestrator's budget steps (mdsd.total): the notice (no further stage admitted) and the stop (forced report). */
-  orchestrator: { noticed?: string; stopped?: string };
+  /** The orchestrator's cost budget steps (mdsd.total.costUSD): the notice (no further stage admitted) and the stop (forced report);
+   *  `checkpoint`: when the request checkpoint notice (mdsd.total.requests) went out (it stops and refuses nothing). */
+  orchestrator: { noticed?: string; stopped?: string; checkpoint?: string };
   /** Orchestrator responses without a reported cost: their spend is unknown (not counted as zero; see summary().budget). */
   unpriced: number;
   /** Allocated budget of all strategies so far (every round). */
   allocated: { costUSD: number; requests: number };
-  /** A search call refused because the total budget or the round cap was used up. */
+  /** A call refused because the cost budget or the round cap was used up. */
   exhausted?: string;
   phases: PhaseWindow[];
 }
@@ -291,6 +294,8 @@ export interface MdsdSummary {
     /** Responses whose usage is unknown: cut in flight by a cancellation (sub-workers), or reported without cost (orchestrator). */
     inFlightUnknown: number; unpricedResponses: number;
     noticed?: string; stopped?: string; overTotal?: string; exhausted?: string;
+    /** When the request checkpoint (mdsd.total.requests) passed: a progress notice only. */
+    checkpoint?: string;
   };
   phases: PhaseWindow[];
   verificationRounds: number;
@@ -430,22 +435,23 @@ export class MdsdRun implements SpawnStageHooks {
     return { costUSD: orchestratorUSD + explorersUSD + verifiersUSD + otherUSD, requests: orchestratorRequests + explorerRequests + verifierRequests + otherRequests, orchestratorUSD, explorersUSD, verifiersUSD, otherUSD };
   }
 
-  // ---- all-stage budget ----
-  /** A sub-worker's worst case: its allocation x hardStopAt (requests rounded up, plus the report responses a stop lets through). */
-  worstCase(allocation: MdsdBudget): { costUSD: number; requests: number } {
-    return { costUSD: allocation.costUSD * this.settings.hardStopAt, requests: Math.ceil(allocation.requests * this.settings.hardStopAt) + REPORT_EXEMPTIONS };
+  // ---- all-stage budget (cost; request counts are progress checkpoints only, never refused or stopped) ----
+  /** A sub-worker's worst-case cost: its allocation x hardStopAt (its requests are no limit, so they have no worst case). */
+  worstCase(allocation: MdsdBudget): { costUSD: number } {
+    return { costUSD: allocation.costUSD * this.settings.hardStopAt };
   }
-  /** The worst case of the sub-workers still running (reserved at prepare, released when they finish). */
-  committed(): { costUSD: number; requests: number } {
+  /** The worst-case cost of the sub-workers still running (reserved at prepare, released when they finish). */
+  committed(): { costUSD: number } {
     const running = [
       ...this.state.explorers.filter(item => item.status === "running").map(item => item.allocated),
       ...[...this.state.verifications, ...this.state.others].flatMap(stage => stage.workers).filter(item => item.status === "running" && item.allocated).map(item => item.allocated!),
     ].map(item => this.worstCase(item));
-    return { costUSD: running.reduce((sum, item) => sum + item.costUSD, 0), requests: running.reduce((sum, item) => sum + item.requests, 0) };
+    return { costUSD: running.reduce((sum, item) => sum + item.costUSD, 0) };
   }
   /**
-   * Admission of an orche_spawn call: spent by every stage + running worst cases + the new workers' worst cases must fit the
-   * stage's share of mdsd.total (search: 1 - reserve; every other reason: 1 - final). Throws with the figures and the way out.
+   * Admission of an orche_spawn call: the cost spent by every stage + running worst cases + the new workers' worst cases must fit
+   * the stage's share of mdsd.total.costUSD (search: 1 - reserve; every other reason: 1 - final). Throws with the figures and the
+   * way out. Request counts never refuse a call.
    */
   private admit(reason: SpawnReason, allocations: readonly MdsdBudget[]): void {
     const { total, reserve, final, hardStopAt } = this.settings;
@@ -453,34 +459,38 @@ export class MdsdRun implements SpawnStageHooks {
     const spent = this.spent();
     const running = this.committed();
     const share = search ? 1 - reserve : 1 - final;
-    const limitUSD = total.costUSD * share, limitRequests = Math.floor(total.requests * share);
-    const worst = allocations.map(item => this.worstCase(item));
-    const cost = worst.reduce((sum, item) => sum + item.costUSD, 0), requests = worst.reduce((sum, item) => sum + item.requests, 0);
-    const leftCost = limitUSD - spent.costUSD - running.costUSD, leftRequests = limitRequests - spent.requests - running.requests;
+    const limitUSD = total.costUSD * share;
+    const worst = allocations.map(item => this.worstCase(item).costUSD);
+    const cost = worst.reduce((sum, item) => sum + item, 0);
+    const leftCost = limitUSD - spent.costUSD - running.costUSD;
     const noticed = this.state.orchestrator.noticed;
-    if (!noticed && cost <= leftCost + 1e-9 && requests <= leftRequests) return;
-    const smallest = worst.length ? Math.min(...worst.map(item => item.costUSD)) : 0;
+    if (!noticed && cost <= leftCost + 1e-9) return;
+    const smallest = worst.length ? Math.min(...worst) : 0;
     if (noticed) this.state.exhausted ??= `final-report allowance reached (${noticed})`;
-    else if (leftCost < smallest || leftRequests < Math.min(...worst.map(item => item.requests))) this.state.exhausted ??= `${search ? "search" : "stage"} share of mdsd.total ($${round2(spent.costUSD)} spent, $${round2(running.costUSD)} running, of $${round2(limitUSD)}; ${spent.requests} + ${running.requests} of ${limitRequests} requests)`;
-    this.event({ stage: "admission", reason, refused: true, worstUSD: round2(cost), worstRequests: requests, leftUSD: round2(leftCost), leftRequests });
+    else if (leftCost < smallest) this.state.exhausted ??= `${search ? "search" : "stage"} share of mdsd.total ($${round2(spent.costUSD)} spent, $${round2(running.costUSD)} running, of $${round2(limitUSD)})`;
+    this.event({ stage: "admission", reason, refused: true, worstUSD: round2(cost), leftUSD: round2(leftCost) });
     const way = search ? 'Use fewer or smaller strategies (strategy.budget), or integrate, verify and report with data.mdsd.stop.reason "budget".' : 'Check fewer things yourself, or report with data.mdsd.stop.reason "budget" (unchecked findings stay unverified).';
-    throw new Error(`Refused (MDSD budget): ${noticed ? `the run reached its final-report allowance (${noticed}); no further stage is admitted. ` : ""}this ${reason} call's worst case is $${round2(cost)} and ${requests} requests (${allocations.length} worker(s): allocation x ${hardStopAt} hard stop, + ${REPORT_EXEMPTIONS} report responses each), but the ${search ? "search" : "stage"} share of mdsd.total has $${round2(Math.max(0, leftCost))} and ${Math.max(0, leftRequests)} requests left (all stages spent $${round2(spent.costUSD)} / ${spent.requests} requests, still running $${round2(running.costUSD)}; mdsd.total $${total.costUSD} / ${total.requests} requests: search up to ${Math.round((1 - reserve) * 100)}%, other stages up to ${Math.round((1 - final) * 100)}%, the rest is the final-report allowance). ${way}`);
+    throw new Error(`Refused (MDSD budget): ${noticed ? `the run reached its final-report allowance (${noticed}); no further stage is admitted. ` : ""}this ${reason} call's worst-case cost is $${round2(cost)} (${allocations.length} worker(s): allocation x ${hardStopAt} hard stop), but the ${search ? "search" : "stage"} share of mdsd.total has $${round2(Math.max(0, leftCost))} left (all stages spent $${round2(spent.costUSD)}, still running $${round2(running.costUSD)}; mdsd.total $${total.costUSD}: search up to ${Math.round((1 - reserve) * 100)}%, other stages up to ${Math.round((1 - final) * 100)}%, the rest is the final-report allowance; request counts are never refused). ${way}`);
   }
   /**
-   * After each orchestrator response: at (1 - final) of mdsd.total a notice (no further stage; report now), at mdsd.total the stop
-   * (its turn ends, one forced report). `apply` performs them (workers.ts: AgentManager.budgetAction) and says whether it acted.
+   * After each orchestrator response: at (1 - final) of mdsd.total.costUSD a notice (no further stage; report now), at the cost total
+   * the stop (its turn ends, one forced report). `apply` performs them (workers.ts: AgentManager.budgetAction) and says whether it
+   * acted. At mdsd.total.requests (all stages) one progress checkpoint notice that tells the orchestrator to keep going: never a stop,
+   * a refused stage or a forced report, and none once a cost notice asked for the report.
    */
   enforceOrchestrator(apply: (action: "notice" | "stop", text: string) => boolean): void {
     const { total, final } = this.settings;
     const spent = this.spent();
-    const at = `$${round2(spent.costUSD)} / ${spent.requests} requests of $${total.costUSD} / ${total.requests}`;
+    const at = `$${round2(spent.costUSD)} of $${total.costUSD} (${spent.requests} requests)`;
     const state = this.state.orchestrator;
-    if (!state.stopped && (spent.costUSD >= total.costUSD || spent.requests >= total.requests)) {
+    if (!state.stopped && spent.costUSD >= total.costUSD) {
       const text = `The MDSD total budget is used up (${at}) and your turn was stopped. Call report_result alone now with what you have: data.mdsd with stop.reason "budget", every explorer finding kept or dropped where you can (unaccounted ones are recorded as such), findings you could not check marked unverified, explored and unexplored scope${this.options.readOnly ? "" : '; data.status "blocked" with data.reason if the work is unfinished'}.`;
       if (apply("stop", text)) { state.stopped = at; this.state.exhausted ??= `mdsd.total (${at})`; this.event({ stage: "budget", action: "stop", at }); }
-    } else if (!state.noticed && !state.stopped && (spent.costUSD >= total.costUSD * (1 - final) || spent.requests >= total.requests * (1 - final))) {
-      const text = `MDSD budget: all stages spent ${at}; the final-report allowance (the last ${Math.round(final * 100)}%) has begun. No further orche_spawn call is admitted. Integrate what you have and call report_result now with data.mdsd.stop.reason "budget" (unchecked findings stay unverified; unexplored scope stays listed). At the total your turn is stopped and you get one forced report prompt.`;
+    } else if (!state.noticed && !state.stopped && spent.costUSD >= total.costUSD * (1 - final)) {
+      const text = `MDSD budget: all stages spent ${at}; the final-report allowance (the last ${Math.round(final * 100)}% of the cost total) has begun. No further orche_spawn call is admitted. Integrate what you have and call report_result now with data.mdsd.stop.reason "budget" (unchecked findings stay unverified; unexplored scope stays listed). At the cost total your turn is stopped and you get one forced report prompt.`;
       if (apply("notice", text)) { state.noticed = at; this.event({ stage: "budget", action: "notice", at }); }
+    } else if (!state.checkpoint && !state.noticed && !state.stopped && spent.requests >= total.requests) {
+      if (apply("notice", requestCheckpointNotice(spent.requests, "this MDSD run (all stages together)"))) { state.checkpoint = at; this.event({ stage: "budget", action: "checkpoint", at }); }
     }
   }
 
@@ -693,7 +703,6 @@ export class MdsdRun implements SpawnStageHooks {
       if (outcome) {
         explorer.actual = { requests: outcome.requests, costUSD: round2(outcome.costUSD * 10000) / 10000, durationMs: outcome.durationMs, ...(outcome.usage ? { outputTokens: outcome.usage.output, inputTokens: outcome.usage.input, cacheReadTokens: outcome.usage.cacheRead } : {}) };
         const over: string[] = [];
-        if (outcome.requests > explorer.allocated.requests) over.push(`requests ${outcome.requests}/${explorer.allocated.requests}`);
         if (outcome.costUSD > explorer.allocated.costUSD) over.push(`cost $${round2(outcome.costUSD)}/$${explorer.allocated.costUSD}`);
         if (outcome.durationMs > explorer.allocated.minutes * 60_000) over.push(`time ${round2(outcome.durationMs / 60_000)}/${explorer.allocated.minutes} min`);
         if (outcome.usage && outcome.usage.output > explorer.allocated.outputTokens) over.push(`output tokens ${outcome.usage.output}/${explorer.allocated.outputTokens}`);
@@ -909,7 +918,8 @@ export class MdsdRun implements SpawnStageHooks {
         unpricedResponses: state.unpriced,
         ...(state.orchestrator.noticed ? { noticed: state.orchestrator.noticed } : {}),
         ...(state.orchestrator.stopped ? { stopped: state.orchestrator.stopped } : {}),
-        ...(spent.costUSD > this.settings.total.costUSD || spent.requests > this.settings.total.requests ? { overTotal: `spent $${round2(spent.costUSD)} / ${spent.requests} requests of $${this.settings.total.costUSD} / ${this.settings.total.requests}: the response that crossed it, report responses after a stop, the forced report` } : {}),
+        ...(state.orchestrator.checkpoint ? { checkpoint: state.orchestrator.checkpoint } : {}),
+        ...(spent.costUSD > this.settings.total.costUSD ? { overTotal: `spent $${round2(spent.costUSD)} of $${this.settings.total.costUSD}: the response that crossed it, report responses after a stop, the forced report` } : {}),
         ...(state.exhausted ? { exhausted: state.exhausted } : {}),
       },
       phases: state.phases.map(item => ({ ...item, costUSD: round2(item.costUSD * 10000) / 10000 })),
@@ -924,7 +934,7 @@ export class MdsdRun implements SpawnStageHooks {
     const findings = summary.findings;
     return [
       `MDSD: ${summary.decision ?? (summary.rounds ? "diversified" : "single path (no search round)")}; ${summary.rounds}/${summary.maxRounds} search round(s), ${summary.strategies} strateg${summary.strategies === 1 ? "y" : "ies"} (${summary.distinctSignatures} distinct signature${summary.distinctSignatures === 1 ? "" : "s"})${summary.replication ? `, each on ${summary.replication.models.length} models: ${summary.replication.cells} explorer cells${summary.replication.pinned ? " (pinned first round)" : ""}` : ""}, redundancy per round ${summary.redundancy.map(value => value ?? "n/a").join(" / ") || "n/a"}; findings ${findings.explorers} proposed${findings.final !== undefined ? ` → ${findings.final} final (${Object.entries(findings.byStatus ?? {}).map(([status, count]) => `${count} ${status}`).join(", ") || "none"}; ${findings.dropped ?? 0} dropped; provenance: first round only ${findings.firstRoundOnly}, adaptive rounds only ${findings.adaptiveOnly}, both ${findings.both}, orchestrator only ${findings.orchestratorOnly})` : ""}; verification ${summary.verificationRounds}/${MAX_VERIFICATION_ROUNDS} round(s); report gate ${summary.gate ?? "not reached"}`,
-      `MDSD budget: spent $${summary.budget.spentUSD} of $${summary.budget.totalUSD} (${summary.budget.spentRequests}/${summary.budget.totalRequests} requests): orchestrator $${summary.budget.spentOrchestratorUSD}, explorers $${summary.budget.spentExplorersUSD} (allocated $${summary.budget.allocatedUSD}, ${summary.budget.allocatedRequests} requests), verifiers $${summary.budget.spentVerifiersUSD}${summary.budget.spentOtherUSD ? `, other sub-workers $${summary.budget.spentOtherUSD}` : ""}; final-report allowance $${summary.budget.finalAllowanceUSD}${summary.budget.noticed ? `; notice at ${summary.budget.noticed}` : ""}${summary.budget.stopped ? `; STOPPED at ${summary.budget.stopped}` : ""}${summary.budget.inFlightUnknown || summary.budget.unpricedResponses ? `; usage unknown for ${summary.budget.inFlightUnknown} cancelled worker response(s) and ${summary.budget.unpricedResponses} unpriced orchestrator response(s)` : ""}${summary.budget.overTotal ? `; OVER TOTAL: ${summary.budget.overTotal}` : ""}${summary.budget.exhausted ? `; exhausted: ${summary.budget.exhausted}` : ""}; orchestrator per phase: ${summary.phases.filter(item => item.requests).map(item => `${item.phase} ${item.requests} req $${round2(item.costUSD)}`).join(", ") || "none"}`,
+      `MDSD budget: spent $${summary.budget.spentUSD} of $${summary.budget.totalUSD} (${summary.budget.spentRequests} requests; request checkpoint at ${summary.budget.totalRequests}${summary.budget.checkpoint ? `, passed at ${summary.budget.checkpoint}` : ""}): orchestrator $${summary.budget.spentOrchestratorUSD}, explorers $${summary.budget.spentExplorersUSD} (allocated $${summary.budget.allocatedUSD}, ${summary.budget.allocatedRequests} requests), verifiers $${summary.budget.spentVerifiersUSD}${summary.budget.spentOtherUSD ? `, other sub-workers $${summary.budget.spentOtherUSD}` : ""}; final-report allowance $${summary.budget.finalAllowanceUSD}${summary.budget.noticed ? `; notice at ${summary.budget.noticed}` : ""}${summary.budget.stopped ? `; STOPPED at ${summary.budget.stopped}` : ""}${summary.budget.inFlightUnknown || summary.budget.unpricedResponses ? `; usage unknown for ${summary.budget.inFlightUnknown} cancelled worker response(s) and ${summary.budget.unpricedResponses} unpriced orchestrator response(s)` : ""}${summary.budget.overTotal ? `; OVER TOTAL: ${summary.budget.overTotal}` : ""}${summary.budget.exhausted ? `; exhausted: ${summary.budget.exhausted}` : ""}; orchestrator per phase: ${summary.phases.filter(item => item.requests).map(item => `${item.phase} ${item.requests} req $${round2(item.costUSD)}`).join(", ") || "none"}`,
     ];
   }
 }
@@ -1002,7 +1012,7 @@ export function explorerBrief(plan: MdsdPlan, strategy: MdsdStrategy, allocated:
     ...(strategy.purpose ? [`  purpose: ${strategy.purpose}${strategy.targets?.length ? ` (targets ${strategy.targets.join(", ")} of the earlier rounds' aggregation)` : ""}`] : []),
     `  constraints:${list(plan.constraints)}   # mandatory`,
     `  success:${list(plan.success)}`,
-    `  budget: at most ${allocated.requests} model responses, about ${allocated.minutes} minutes, about $${allocated.costUSD} (list price), ${allocated.outputTokens} output tokens. Near the limit you get a wrap-up notice: then report at once; past ${Math.round(hardStopAt * 100)}% of a limit your session is stopped and its findings are lost.`,
+    `  budget: about ${allocated.minutes} minutes, about $${allocated.costUSD} (list price), ${allocated.outputTokens} output tokens. Near one of these limits you get a wrap-up notice: then report at once; past ${Math.round(hardStopAt * 100)}% of a limit your session is stopped and its findings are lost. At ${allocated.requests} model responses you get a progress checkpoint: not a limit, keep searching.`,
     "  output: [findings, evidence, counter_evidence, uncertainty, explored_scope, unexplored_scope, sources_used, procedures]",
     'Report: report_result {kind:"answer", summary, data:{findings:[{id:"f1",claim,location:["path:line"],evidence:[what you saw: file:line, command and outcome],counter_evidence:[what speaks against it],uncertainty:"low"|"medium"|"high"}], evidence:[…], counter_evidence:[…], uncertainty:"what remains uncertain overall", explored_scope:[what you examined and how], unexplored_scope:[what you did NOT get to or could not check], sources_used:[files, commands, documents you actually used], procedures:[the steps you actually ran]}}. Your findings are proposals: the orchestrator validates them. Mark what you could not verify; never present a guess as a checked fact; keep unexplored_scope honest — it decides what is searched next.',
   ].join("\n");
@@ -1018,7 +1028,7 @@ export function mdsdSection(readOnly: boolean, maxSubWorkers: number = MAX_SUB_W
     "3. Integration (yours, after each round): the result lists every finding (F…, with the explorer ref W….:f…), likely duplicates (D…), conflict candidates (C…), gaps from unexplored scope (G…) and high-uncertainty findings, plus the measured redundancy (overlap of the files explorers actually read) and the files new to the run per explorer. The lists are heuristics: merge real duplicates, resolve conflicts with evidence, and decide what remains uncertain or unexplored.",
     `4. Adaptive selection: only when another round is worth its cost, call reason "search" again with adapt {basis: the F/D/C/G ids that justify it, reason}. Each strategy states purpose "exploit" (targets: those ids) or "explore" (hypotheses or information sources no earlier strategy had); a round of 2+ strategies keeps at least one explore strategy, so an early explanation is not just amplified. Stop when the evidence suffices, progress stalls, or the round cap or budget is reached (stop.reason).`,
     "5. Verification and final judgment (separate from search): check every finding you keep yourself (read, grep, bash; cite the [orche ref Tn] of those calls) or with fresh verifiers (reason \"verification\", then cite the verifier's id). Explorers agreeing is not proof; a finding you could not check stays \"unverified\". Keep dissent: a finding with credible counter-evidence is \"disputed\" with its dissent. Account for every explorer finding: kept in a final finding's provenance, or in data.mdsd.dropped with the reason (duplicate of …, refuted by …, out of scope).",
-    `Report data.mdsd: ${REPORT_FORMAT}${readOnly ? "" : " (next to status, checklist and the other implement fields)"}. Caps: ${settings.maxRounds} search rounds; per strategy by default ${settings.explorer.requests} requests, ${settings.explorer.minutes} min, $${settings.explorer.costUSD}, ${settings.explorer.outputTokens} output tokens (strategy.budget may set its own up to ${settings.explorerMax.requests} requests, ${settings.explorerMax.minutes} min, $${settings.explorerMax.costUSD}); the whole run (your own responses, every explorer and verifier) $${settings.total.costUSD} and ${settings.total.requests} requests, of which search rounds may allocate up to ${Math.round((1 - settings.reserve) * 100)}% (the rest is kept for integration, verification and synthesis) and other stages up to ${Math.round((1 - settings.final) * 100)}%; every orche_spawn is admitted only if its worst case fits; at ${Math.round((1 - settings.final) * 100)}% you are told to report (no further stage), at 100% your turn is stopped and you get one forced report prompt (report data.mdsd.stop.reason "budget"); verification ${MAX_VERIFICATION_ROUNDS} rounds; ${maxSubWorkers} workers per orche_spawn call; sub-workers cannot spawn. If the work cannot be completed, report ${readOnly ? "data.unresolved" : "status \"blocked\" with data.reason"} and data.mdsd.stop.reason "blocked" with what was found so far.`,
+    `Report data.mdsd: ${REPORT_FORMAT}${readOnly ? "" : " (next to status, checklist and the other implement fields)"}. Caps: ${settings.maxRounds} search rounds; per strategy by default ${settings.explorer.minutes} min, $${settings.explorer.costUSD}, ${settings.explorer.outputTokens} output tokens and a progress checkpoint at ${settings.explorer.requests} requests (strategy.budget may set its own up to ${settings.explorerMax.minutes} min, $${settings.explorerMax.costUSD}, checkpoint up to ${settings.explorerMax.requests} requests); the whole run (your own responses, every explorer and verifier) $${settings.total.costUSD}, of which search rounds may allocate up to ${Math.round((1 - settings.reserve) * 100)}% (the rest is kept for integration, verification and synthesis) and other stages up to ${Math.round((1 - settings.final) * 100)}%; every orche_spawn is admitted only if its worst-case cost fits; at ${Math.round((1 - settings.final) * 100)}% of the cost you are told to report (no further stage), at 100% your turn is stopped and you get one forced report prompt (report data.mdsd.stop.reason "budget"). Request counts are never a cap: at ${settings.total.requests} requests of the whole run you get one progress checkpoint and keep going. Verification ${MAX_VERIFICATION_ROUNDS} rounds; ${maxSubWorkers} workers per orche_spawn call; sub-workers cannot spawn. If the work cannot be completed, report ${readOnly ? "data.unresolved" : "status \"blocked\" with data.reason"} and data.mdsd.stop.reason "blocked" with what was found so far.`,
     ...replicationSection(settings),
     ...seedSection(settings),
   ].join("\n");

@@ -65,7 +65,7 @@ export interface AgentSnapshot {
   status: "idle" | "running" | "stopping" | "disposed";
   currentAssignment?: Assignment;
   completedAssignments: number;
-  /** Assignment-local completed model requests (also counted with the budget disabled). */
+  /** Assignment-local completed model requests (also counted with the request checkpoints disabled). */
   requestCount?: number;
   /** Session activity only: no prompt, tool arguments, or message content. */
   lastActivityAt?: number;
@@ -131,11 +131,10 @@ export interface AgentManagerOptions {
   /** Rejected RESULTs a worker may correct per assignment before it fails (default 3). */
   resultSchemaRetries?: number;
   /**
-   * Soft limit on model requests per assignment; 0 (default) disables it. Reaching it injects a
-   * wrap-up notice; at 1.5x the turn is stopped and the worker is asked once to report what it
-   * has; a few requests later without a RESULT the assignment fails.
+   * Request checkpoint per assignment; 0 (default) disables it. At this many model requests the worker gets one progress notice
+   * telling it to keep working: never a stop, a forced report or a failure.
    */
-  requestBudget?: number;
+  requestCheckpoint?: number;
   /**
    * Opt-in session records. `sessionTarget` is asked for every spawned worker that was not given a `sessionDir`/`sessionFile` itself
    * and persists its session as a regular pi JSONL; `onAgent` receives each worker's {@link AgentRecordEntry} once, when it is
@@ -150,7 +149,8 @@ export type ManagerEvent = { timestamp: number } & (
   | { type: "result_rejected"; agentId: string; assignmentId: string; kind: string; attempt: number; errors: string }
   /** A report sent back to be rewritten (not a result retry; see SpawnOptions.reviseResult). */
   | { type: "result_rewrite"; agentId: string; assignmentId: string; kind: string; attempt: number; reason: string }
-  | { type: "request_budget"; agentId: string; assignmentId: string; requests: number; budget: number; action: "notice" | "stop" | "abort" }
+  /** The request checkpoint passed: one progress notice was sent and nothing was stopped. */
+  | { type: "request_checkpoint"; agentId: string; assignmentId: string; requests: number }
   | { type: "assignment_outcome"; outcome: Outcome }
   | { type: "message_sent"; message: OrcheMessage }
   | {
