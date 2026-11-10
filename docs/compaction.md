@@ -1,8 +1,77 @@
-# Worker compaction and state preservation (`workerCompaction`)
+# Worker compaction and state preservation (`workerCompaction`), main-session ratio (`mainCompaction`)
 
 Long assignments outgrow their context. orche keeps the task state outside every LLM context and puts it back when a worker
 compacts; this page describes when worker sessions compact, what they get back, how the original evidence stays reachable, and
-what is recorded. The main session is never changed by these settings.
+what is recorded. The main session is never changed by these worker settings; its own ratio policy is
+[`mainCompaction`](#main-session-maincompaction-orcheconfigjson-default-on) below.
+
+## Main session: `mainCompaction` (orche.config.json, default on)
+
+Pi's `compaction.reserveTokens` and `compaction.modelOverrides` (settings.json) accept integer token counts only, so a reserve
+that should follow the model would need one entry per model. orche therefore gives the **main** session a ratio of its own:
+once main's context is above `usageRatio` (default **0.8**, i.e. 80% used, 20% left) of the **current** model's context window,
+main compacts through Pi's ordinary compaction (`ctx.compact()`: the same summary request, `keepRecentTokens` from settings.json,
+every extension's `session_before_compact` / `session_compact` hooks). Source: `src/extension/main-compaction.ts`.
+
+```json
+{ "mainCompaction": { "usageRatio": 0.8, "midRun": true } }
+```
+
+| value | meaning |
+|---|---|
+| omitted, `true` | on with the defaults (`usageRatio` 0.8, `midRun` true) |
+| `false` or `{ "enabled": false }` | off: Pi's own settings alone decide, exactly as before |
+| a number, e.g. `0.75` | on with that ratio (0.1 to 0.95) |
+| `{ "usageRatio", "midRun", "enabled" }` | `midRun: false` compacts only between runs (see below) |
+
+- **Measure and capacity.** The usage is Pi's own estimate (`ctx.getContextUsage().tokens`, the estimator of Pi's threshold
+  check) against `contextWindow` of the model Pi resolves for limits. Nothing is listed per model: a model registered today, a
+  model switch (`/model`, Ctrl+P) or an extended window uses its own registry metadata (`contextWindow`); a wrong `contextWindow`
+  (e.g. a provider that reports none and gets a default) gives a wrong threshold. Compaction needs strictly more than
+  `floor(contextWindow × usageRatio)` tokens. Without a usable window (none or 0) or while Pi knows no usage (right after a
+  compaction, until the next response) nothing is decided.
+- **When.** (1) After a main run settled (not aborted) and Pi is idle, after Pi's own queued prompts; (2) after a model switch
+  while idle; (3) with `midRun`, between the tool turns of a running response. Pi offers extensions no compaction inside a run and
+  `ctx.compact()` aborts the run first, so the response is stopped after its tool results are stored (the TUI shows the abort of
+  the next, never-sent request), compacted, and continued with a hidden `orche-main-compaction` note. The mid-run trigger is
+  skipped (the run goes on, the next boundary checks again) while the user has queued messages, while a one-shot
+  `/orche <mode> <prompt>` request or held-back input is pending, outside interactive/RPC mode, and when Pi's own threshold
+  compacts before the next request anyway. A restored session that is already above the ratio compacts at its first such point.
+- **Precedence.** The ratio is a ceiling ("compact no later than 80%"); Pi's integer threshold stays as it is and the earlier
+  of the two acts. A `reserveTokens`/`modelOverrides` entry that leaves less than `1 − usageRatio` of a window free compacts
+  that model earlier (natively, mid-run); one that leaves more is overtaken by the ratio. orche does not cancel Pi's earlier
+  threshold compactions (Pi would show "Auto-compaction cancelled" at every check). Integer `keepRecentTokens`/`reserveTokens`
+  remain valid and still shape the summary. Manual `/compact` and overflow recovery are unchanged; `compaction.enabled: false`
+  in settings.json switches the ratio off as well.
+- **Other triggers.** The cliproxyapi provider's proactive compaction (`@router-for-me/pi-cliproxyapi-provider`
+  `extensions/auto-compact.ts`) fires at `contextWindow − compaction.reserveTokens` (the ordinary value, default 16384) through a
+  synthetic overflow; any compaction clears its pending trigger, so it never doubles one of ours. It has no switch of its own
+  (only `compaction.enabled: false` stops it). An extension that calls `ctx.compact()` itself looks like a manual compaction to
+  orche; run only one such ratio extension.
+- **Bounded.** One attempt at a time, none while any compaction runs (and a pending one gives way when Pi compacted first); a
+  failed or cancelled attempt is not retried before the next user input, a model switch or a session start (Pi's threshold and
+  overflow recovery still apply). Esc during the summary stops the interrupted response for good. If the first usage measured
+  after orche's compaction is still above the ratio (Pi keeps the latest message verbatim when it alone exceeds
+  `keepRecentTokens`), the ratio waits until usage is below it again: no compaction loop.
+- **Messages during a compaction.** Pi starts the turn of a `triggerTurn` message even while it compacts outside a run (it
+  only queues such messages behind a running response), so a background `orche_task` result arriving during the summary would
+  start a main run beside it. orche's own turn-starting messages (task results, the notice that an approved queued task was
+  dropped) are therefore held from the moment orche requests its compaction, and during any other manual compaction from its
+  `session_before_compact` (the user's `/compact`, another extension's `ctx.compact()`), and sent once afterwards in arrival
+  order: behind the continuation note of an interrupted response, as one run (or queued behind a run that started meanwhile).
+  After Esc during the summary they are shown without starting a turn (main sees them with the next prompt), as orche does
+  with held-back results after an abort; a session shutdown or `/reload` keeps them in that session the same way and never
+  carries them into the next one. Pi's threshold and overflow compactions run inside a run, where Pi queues such messages
+  itself, so nothing is held for them. **Not covered:** messages other extensions send with `triggerTurn` (e.g. a woken
+  pi-session-bus note) do not pass through orche, and a manual compaction someone else starts is only seen from its
+  `session_before_compact` on; Pi's public API offers no way to hold either, so such a message can still start a run during a
+  summary, exactly as it can during `/compact` without orche.
+- **Main only.** The extension that runs this is loaded in the main Pi session; worker, sub-worker and specialist sessions are
+  created with `noExtensions` and keep their own settings (below: 50% for single-workflow workers, off for specialists and by
+  default for `orche_spawn` sub-workers). `print`/`json` runs keep Pi's own behaviour only.
+- **Activation.** A config change applies at the next session start or `/reload`. New orche code applies once the installed
+  package has it (a git install: the change pushed, then `pi update --extensions` or `pi update <source>`) and the session is
+  reloaded (`/reload`) or restarted.
 
 ## What already existed (unchanged defaults)
 
@@ -94,6 +163,11 @@ last hour). A `records.maxBytes` limit can delete older idle records earlier; th
 - `compaction`: `reason`, `policy`, `triggerTokens`, `early`, `tokensBefore`/`tokensAfter` (Pi estimates), `summaryUsage` (provider
   usage of the summary request), `essentialsChars`, `essentialsSections`, `essentialsMissing`, `reference` (`valid`/`unavailable`/`invalid`).
 - `compaction_cancelled` (`cause`, `fallback`) and `compaction_failed` (`errorMessage`).
+- `output_cap` with `request: "summary"`: the `max_output_tokens` decision for Pi's summary requests (Claude through CLIProxyAPI;
+  `src/pi/output-cap.ts` `withSummaryOutputCap`), recorded when it differs from the previous summary decision. Pi sends summaries
+  without its `before_provider_request` hook, so without this view they carried no budget and the proxy default applied. Only
+  requests in Pi's own summary shape (Pi's summarization system prompt, `cacheRetention: "none"`, no hook, no `maxTokens`) get it;
+  extensions' and other direct requests through the session runtime keep their payload.
 - `spawn` events carry each sub-worker's `compactions` (and `compactionEvents` when some were refused or failed).
 
 ## Disable / roll back

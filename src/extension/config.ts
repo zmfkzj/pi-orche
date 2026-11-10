@@ -7,6 +7,7 @@ import { parseRouteConfig, RouteConfigError, type RouteConfig } from "../orchest
 import { parseMdsdConfig, type MdsdSettings } from "../orchestrator/mdsd-config.js";
 import { DEFAULT_WINDOW_MS } from "./concurrent-sessions.js";
 import { DEFAULT_CONTEXT_WARNING, type ContextWarningSettings } from "./context-warning.js";
+import { DEFAULT_MAIN_COMPACTION, parseMainCompactionConfig, type MainCompactionSettings } from "./main-compaction.js";
 import { DEFAULT_THINKING_POLICY, resolveThinkingPolicy, type ThinkingPolicySettings } from "../pi/thinking-policy.js";
 import { DEFAULT_OUTPUT_CAP, type OutputCapSettings } from "../pi/output-cap.js";
 import { MAX_SUB_WORKERS, SUB_WORKER_CAP_MAX, SUB_WORKER_CAP_MIN } from "../orchestrator/instructions.js";
@@ -374,10 +375,10 @@ export function parseBashReviewConfig(value: unknown): BashReviewSettings {
 
 /**
  * Load one orche config file: the route settings (validated by `parseRouteConfig`) plus the extension-only
- * `concurrentSessions`, `records`, `taskContext`, `contextWarning`, `single`, `thinkingPolicy`, `writeRoots`, `bashReview`, `mdsd` and `workerCompaction` settings, validated here and removed before the route parser sees the file.
+ * `concurrentSessions`, `records`, `taskContext`, `contextWarning`, `mainCompaction`, `single`, `thinkingPolicy`, `writeRoots`, `bashReview`, `mdsd` and `workerCompaction` settings, validated here and removed before the route parser sees the file.
  * `warnings` lists settings that were ignored (removed `single` keys, keys of the removed coordinator); the file still loads.
  */
-export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; single: SingleSettings; thinkingPolicy: ThinkingPolicySettings; outputCap: OutputCapSettings; writeRoots: string[]; bashReview: BashReviewSettings; mdsd?: MdsdSettings; workerCompaction?: WorkerCompactionSettings; warnings: string[] }> {
+export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; mainCompaction: MainCompactionSettings; single: SingleSettings; thinkingPolicy: ThinkingPolicySettings; outputCap: OutputCapSettings; writeRoots: string[]; bashReview: BashReviewSettings; mdsd?: MdsdSettings; workerCompaction?: WorkerCompactionSettings; warnings: string[] }> {
   let value: unknown;
   try { value = JSON.parse(await readFile(path, "utf8")); }
   catch (error) { throw new RouteConfigError(`Cannot load route config ${path}: ${error instanceof Error ? error.message : String(error)}`); }
@@ -386,6 +387,7 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
   let records: RecordsConfig | undefined;
   let taskContext = { ...DEFAULT_TASK_CONTEXT };
   let contextWarning: ContextWarningSettings = { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
+  let mainCompaction: MainCompactionSettings = { ...DEFAULT_MAIN_COMPACTION };
   let single: SingleSettings = { ...DEFAULT_SINGLE };
   let thinkingPolicy: ThinkingPolicySettings = { ...DEFAULT_THINKING_POLICY };
   let outputCap: OutputCapSettings = { ...DEFAULT_OUTPUT_CAP };
@@ -395,11 +397,14 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
   let workerCompaction: WorkerCompactionSettings | undefined;
   const warnings: string[] = [];
   if (value && typeof value === "object" && !Array.isArray(value)) {
-    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, single: singleValue, thinkingPolicy: thinkingPolicyValue, outputCap: outputCapValue, writeRoots: writeRootsValue, bashReview: bashReviewValue, mdsd: mdsdValue, workerCompaction: workerCompactionValue, ...rest } = value as Record<string, unknown>;
+    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, mainCompaction: mainCompactionValue, single: singleValue, thinkingPolicy: thinkingPolicyValue, outputCap: outputCapValue, writeRoots: writeRootsValue, bashReview: bashReviewValue, mdsd: mdsdValue, workerCompaction: workerCompactionValue, ...rest } = value as Record<string, unknown>;
     if (Object.hasOwn(value, "concurrentSessions")) concurrent = parseConcurrentSessionsConfig(concurrentSessions);
     if (Object.hasOwn(value, "records")) records = parseRecordsConfig(recordsValue);
     if (Object.hasOwn(value, "taskContext")) taskContext = parseTaskContextConfig(taskContextValue);
     if (Object.hasOwn(value, "contextWarning")) contextWarning = parseContextWarningConfig(contextWarningValue);
+    if (Object.hasOwn(value, "mainCompaction")) {
+      try { mainCompaction = parseMainCompactionConfig(mainCompactionValue); } catch (error) { throw new RouteConfigError(error instanceof Error ? error.message : String(error)); }
+    }
     if (Object.hasOwn(value, "single")) single = parseSingleConfig(singleValue, warnings);
     if (Object.hasOwn(value, "thinkingPolicy")) thinkingPolicy = parseThinkingPolicyConfig(thinkingPolicyValue);
     if (Object.hasOwn(value, "outputCap")) outputCap = parseOutputCapConfig(outputCapValue);
@@ -411,7 +416,7 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
     }
     routeValue = rest;
   }
-  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, single, thinkingPolicy, outputCap, writeRoots, bashReview, ...(mdsd ? { mdsd } : {}), ...(workerCompaction ? { workerCompaction } : {}), warnings: warnings.map(warning => `${warning} (${path})`) };
+  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, mainCompaction, single, thinkingPolicy, outputCap, writeRoots, bashReview, ...(mdsd ? { mdsd } : {}), ...(workerCompaction ? { workerCompaction } : {}), warnings: warnings.map(warning => `${warning} (${path})`) };
 }
 export class NoRouteError extends Error {
   override readonly name = "NoRouteError";

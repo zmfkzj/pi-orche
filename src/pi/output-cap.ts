@@ -17,9 +17,17 @@
  * It is then clamped to the context room (window minus a conservative estimate of the request minus a reserve); when the room is
  * below {@link MIN_OUTPUT_CAP} the field is left out (the proxy default and Pi's overflow handling decide, as before).
  *
+ * Pi's summary requests (compaction's history and turn-prefix summaries, branch summaries) do not pass through that hook: Pi sends
+ * them through the session's stream function without `onPayload` (Pi 1.5.0-1.5.2 `core/compaction/compaction.js`
+ * `completeSummarization`), so the proxy default applied to them. {@link withSummaryOutputCap} gives them the same budget through the
+ * session's own runtime view, recognising them by Pi's own summary request shape; every other request is left as it was. Their
+ * decisions carry `request: "summary"`.
+ *
  * Sending the field is not the same as the model producing more than 32000 tokens: that the upstream API accepts and honours a larger
  * value is a property of the proxy and the provider, observed only as far as docs/length-recovery.md says.
  */
+import { generateSummary, type ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { getSystemMessageText, type AssistantMessage, type Context } from "@earendil-works/pi-ai";
 import { isCliproxyClaude, modelMatches, type EffortModel } from "./effort-mapping.js";
 
 export interface OutputCapRule {
@@ -60,6 +68,8 @@ export interface OutputCapDecision {
   /** The request clamped the budget to the context room. */
   clamped?: boolean;
   model?: string;
+  /** summary: a summary request Pi sends without its payload hook ({@link withSummaryOutputCap}); absent for ordinary requests. */
+  request?: "summary";
 }
 
 /** Conservative token estimate of a Responses payload: 1 token per 3 characters of its JSON (overestimates for code and prose). */
@@ -96,6 +106,8 @@ export function decideOutputCap(model: CapModel | undefined, payload: Record<str
 interface CapState {
   settings: OutputCapSettings;
   last?: OutputCapDecision;
+  /** The last summary decision, kept apart so summaries never change what {@link lastOutputCap} reports for ordinary requests. */
+  lastSummary?: OutputCapDecision;
   onDecision?: (decision: OutputCapDecision) => void;
 }
 const states = new WeakMap<object, CapState>();
@@ -110,21 +122,89 @@ export function lastOutputCap(session: object): OutputCapDecision | undefined {
   return states.get(session)?.last;
 }
 
+/** Decide one request of `session`, report a decision that differs from the last one of its kind, and return the payload with the
+ *  budget (undefined: leave it). */
+function applyOutputCap(session: object, model: CapModel | undefined, payload: unknown, summary: boolean): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+  let state = states.get(session);
+  if (!state) states.set(session, state = { settings: { ...DEFAULT_OUTPUT_CAP } });
+  const body = payload as Record<string, unknown>;
+  const decided = decideOutputCap(model, body, state.settings);
+  const decision: OutputCapDecision = summary ? { ...decided, request: "summary" } : decided;
+  const last = summary ? state.lastSummary : state.last;
+  const changed = !last || last.cap !== decision.cap || last.source !== decision.source || last.model !== decision.model;
+  if (summary) state.lastSummary = decision; else state.last = decision;
+  if (changed) { try { state.onDecision?.(decision); } catch { /* observers cannot change the request */ } }
+  if (decision.cap === undefined || decision.source === "payload") return undefined;
+  return { ...body, max_output_tokens: decision.cap };
+}
+
 /** Pi `before_provider_request` handler for one orche session: returns the payload with the budget, or undefined to leave it. */
 export function outputCapHandler(getSession: () => { model?: CapModel } | undefined) {
   return (event: { payload: unknown }): unknown => {
     const session = getSession();
-    if (!session || !event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) return undefined;
-    let state = states.get(session);
-    if (!state) states.set(session, state = { settings: { ...DEFAULT_OUTPUT_CAP } });
-    const payload = event.payload as Record<string, unknown>;
+    if (!session) return undefined;
     let model: CapModel | undefined;
     try { model = session.model; } catch { model = undefined; }
-    const decision = decideOutputCap(model, payload, state.settings);
-    const changed = !state.last || state.last.cap !== decision.cap || state.last.source !== decision.source || state.last.model !== decision.model;
-    state.last = decision;
-    if (changed) { try { state.onDecision?.(decision); } catch { /* observers cannot change the request */ } }
-    if (decision.cap === undefined || decision.source === "payload") return undefined;
-    return { ...payload, max_output_tokens: decision.cap };
+    return applyOutputCap(session, model, event.payload, false);
   };
+}
+
+/** The system prompt of a request: Pi's normalized leading system message, else `systemPrompt`. */
+function systemPromptOf(context: Context): string | undefined {
+  const first = context.messages[0];
+  return first?.role === "system" ? getSystemMessageText(first) : context.systemPrompt;
+}
+
+let piSummaryPrompt: Promise<string | undefined> | undefined;
+/**
+ * Pi's summarization system prompt (`SUMMARIZATION_SYSTEM_PROMPT` of `core/compaction/utils.js`, shared by compaction's history and
+ * turn-prefix summaries and by branch summaries; Pi does not export it). Read once from Pi's own exported `generateSummary`, given a
+ * local stream function that captures the request and answers it: no request leaves the process. Undefined when this Pi no longer
+ * calls the stream function that way; summaries then keep the proxy default (as before this view), which the tests would show.
+ */
+export function summarySystemPrompt(): Promise<string | undefined> {
+  return piSummaryPrompt ??= (async () => {
+    let prompt: string | undefined;
+    const answer = { role: "assistant", content: [], stopReason: "stop" } as unknown as AssistantMessage;
+    const capture = (_model: unknown, context: Context) => { prompt = systemPromptOf(context); return { result: async () => answer }; };
+    try { await generateSummary([], { reasoning: false } as never, undefined, undefined, undefined, undefined, undefined, undefined, undefined, capture as never); }
+    catch { /* the prompt was read before Pi looked at the answer */ }
+    return prompt;
+  })();
+}
+
+/**
+ * One session's view of `runtime` that gives Pi's summary requests the budget of {@link outputCapHandler}, and only them. The view is
+ * the session's `modelRuntime`, so it serves Pi's SDK stream function (agent-loop requests, which carry Pi's `onPayload`, and
+ * summaries, which carry none), Pi's cache warmer (`maxTokens: 1`), and anything holding `session.modelRuntime` or an extension's
+ * `ctx.modelRegistry` (Pi builds that registry on the session's runtime). A `streamSimple` call is a summary only in Pi's own summary
+ * shape: Pi's summarization system prompt ({@link summarySystemPrompt}), `cacheRetention: "none"` (Pi's `completeSummarization`),
+ * no `onPayload` and no explicit `maxTokens`. Only such a call gets an `onPayload` that applies {@link decideOutputCap} with the
+ * session's settings and the model of that request (the provider's callback model, the routed one when Pi routes a virtual model;
+ * else the requested one). Every other call (agent-loop turns, extension and direct requests, Pi's bug-report summary with its own
+ * prompt and `maxTokens`), and every other method, is the runtime itself (bound to it). Nothing global changes: other sessions on
+ * the same runtime and the runtime itself are untouched. Pi gets this view as the session's `modelRuntime`, so its stream function
+ * stays the one it marked as resolving auth through that runtime (summaries are not pre-authenticated, as before), and no other
+ * extension hook is replayed for summaries.
+ */
+export async function withSummaryOutputCap(runtime: ModelRuntime, getSession: () => object | undefined): Promise<ModelRuntime> {
+  const summaryPrompt = await summarySystemPrompt();
+  const isSummary = (context: Context, options: Parameters<ModelRuntime["streamSimple"]>[2]) =>
+    summaryPrompt !== undefined && options?.cacheRetention === "none" && !options.onPayload && options.maxTokens === undefined
+    && systemPromptOf(context) === summaryPrompt;
+  const streamSimple: ModelRuntime["streamSimple"] = (model, context, options) => {
+    const session = getSession();
+    if (!session || !isSummary(context, options)) return runtime.streamSimple(model, context, options);
+    return runtime.streamSimple(model, context, {
+      ...options,
+      onPayload: (payload, payloadModel) => applyOutputCap(session, (payloadModel ?? model) as CapModel, payload, true),
+    });
+  };
+  return new Proxy(runtime, {
+    get(target, key) {
+      const value = key === "streamSimple" ? streamSimple : Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }

@@ -9,6 +9,7 @@ import { OrcheController, type OrcheControllerOptions } from "./controller.js";
 import { inheritsMain, inheritsMainThinking, isDelegatingMode, MAIN_MODES, modeTiers, tierThinking, type MainMode, type ModelTiers } from "../orchestration/routing.js";
 import { delegationRules, guardBusyToolCall, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
 import { contextWarning, DEFAULT_CONTEXT_WARNING, type ContextWarningSettings, type ContextWarningState } from "./context-warning.js";
+import { DEFAULT_MAIN_COMPACTION, MainCompaction, type MainCompactionSettings } from "./main-compaction.js";
 import { CONFIG_FILE, DEFAULT_SINGLE, loadOrcheConfigFile } from "./config.js";
 import { DEFAULT_BASH_REVIEW, guardBashReview, registryAccess, type BashReviewSettings } from "./bash-review.js";
 import { orcheTaskParameters, WORKER_CAPABILITY_CHANNEL, WorkerPool, type GoneWorker, type WorkerCapabilityAnswer } from "./workers.js";
@@ -42,19 +43,19 @@ const ACTIVATE_BUILTINS = ["grep", "find", "ls"];
  * extension-only keys (`concurrentSessions`, `records`) that the plain route parser behind `discoverMainMode` (mode.ts) rejects as unknown, which
  * made a config with `records` look invalid at session start and drop its `mainMode`.
  */
-async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup & { contextWarning?: ContextWarningSettings; spawn?: boolean; advisor?: boolean; bashReview?: BashReviewSettings; warnings?: string[]; models?: ModelTiers }> {
+async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup & { contextWarning?: ContextWarningSettings; mainCompaction?: MainCompactionSettings; spawn?: boolean; advisor?: boolean; bashReview?: BashReviewSettings; warnings?: string[]; models?: ModelTiers }> {
   const candidates = [...(options.projectTrusted ? [join(options.cwd, ".pi", CONFIG_FILE)] : []), join(options.agentDir, CONFIG_FILE)];
   for (const path of candidates) {
     try { await access(path); } catch { continue; }
     try {
-      const { routes, contextWarning, single, bashReview, warnings } = await loadOrcheConfigFile(path);
+      const { routes, contextWarning, mainCompaction, single, bashReview, warnings } = await loadOrcheConfigFile(path);
       // The tiers with the top-level extendedContext filled in where a tier leaves it out, as routes resolve it (routing.ts);
       // not for `{ "model": "main" }`, which keeps main's own context window.
       const models = routes.models ? Object.fromEntries(Object.entries(routes.models).map(([tier, route]) => {
         const extendedContext = inheritsMain(route) ? undefined : route.extendedContext ?? routes.extendedContext;
         return [tier, { ...route, ...(extendedContext !== undefined ? { extendedContext } : {}) }];
       })) as ModelTiers : undefined;
-      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), ...(routes.legacyMainMode ? { legacyMode: routes.legacyMainMode } : {}), path, contextWarning, spawn: single.spawn, advisor: single.advisor, bashReview, ...(warnings.length ? { warnings } : {}), ...(models ? { models } : {}) };
+      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), ...(routes.legacyMainMode ? { legacyMode: routes.legacyMainMode } : {}), path, contextWarning, mainCompaction, spawn: single.spawn, advisor: single.advisor, bashReview, ...(warnings.length ? { warnings } : {}), ...(models ? { models } : {}) };
     } catch (error) {
       return { path, error: error instanceof Error ? error.message : String(error) };
     }
@@ -293,17 +294,20 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       try { lastUi?.notify(`orche: ${event.task.id}, the task you approved (${event.task.role}: ${event.task.request}), was dropped and did not start: ${event.reason}.`, "warning"); } catch { /* the UI may be gone */ }
       // `result`: the result of the job it waited for says so; `cancel`: the caller hears it. `start`: that result said it would start.
       if (event.source !== "start") return;
-      pi.sendMessage(
+      // Held while main compacts outside a run (main-compaction.ts): Pi would start that turn beside the summary.
+      mainCompaction.deliver(
         { customType: QUEUE_MESSAGE_TYPE, content: `[orche queued task ${event.task.id} dropped] The task the user approved to run after ${event.task.after} (${event.task.role}: ${event.task.request}) did not start: ${event.reason}. Nothing was delegated. Tell the user; delegate it again only when they ask.`, display: true, details: { queued: event.task.id, after: event.task.after, reason: event.reason } },
         { triggerTurn: true, deliverAs: "followUp" },
       );
     };
 
-    const deliverResult = (job: Job, triggerTurn = true) => pi.sendMessage(
-      { customType: TASK_RESULT_TYPE, content: jobResultContent(job), display: true, details: { job: job.id, worker: job.worker, role: job.role, status: job.status, startedAt: job.startedAt, ...(job.finishedAt ? { finishedAt: job.finishedAt } : {}), ...(job.record ? { record: job.record } : {}), ...(job.result?.details ? { task: job.result.details } : {}) } },
-      // Starts main's next turn when it is idle; queued behind the current turn when main is talking with the user.
-      triggerTurn ? { triggerTurn: true, deliverAs: "followUp" } : { triggerTurn: false },
-    );
+    const deliverResult = (job: Job, triggerTurn = true) => {
+      const message = { customType: TASK_RESULT_TYPE, content: jobResultContent(job), display: true, details: { job: job.id, worker: job.worker, role: job.role, status: job.status, startedAt: job.startedAt, ...(job.finishedAt ? { finishedAt: job.finishedAt } : {}), ...(job.record ? { record: job.record } : {}), ...(job.result?.details ? { task: job.result.details } : {}) } };
+      // Starts main's next turn when it is idle; queued behind the current turn when main is talking with the user; held while
+      // main compacts outside a run and sent once afterwards (main-compaction.ts `deliver`).
+      if (triggerTurn) mainCompaction.deliver(message, { triggerTurn: true, deliverAs: "followUp" });
+      else pi.sendMessage(message, { triggerTurn: false });
+    };
     /**
      * The one-shot `/orche <mode> <prompt>` request whose run is going on (docs/orchestrator.md 14.5): main's mode is its override until
      * that run settles, and only what belongs to the request enters the run: its prompt and the context Pi sends with it, user steers
@@ -413,6 +417,11 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     const state = new MainModeState(pi);
     let warningSettings: ContextWarningSettings = { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
     let warningState: ContextWarningState = { warnedLevel: 0 };
+    /** `mainCompaction` of the config file read at session start (defaults without a valid file): main's ratio compaction (main-compaction.ts). */
+    let mainCompactionSettings: MainCompactionSettings = { ...DEFAULT_MAIN_COMPACTION };
+    // Main session only: worker and sub-worker sessions are created with `noExtensions` and never load this extension.
+    const mainCompaction = new MainCompaction({ settings: () => mainCompactionSettings, canInterrupt: () => !oneShot && !heldBack.length });
+    mainCompaction.register(pi);
     /** `single.spawn` of the config file read at session start: whether the single worker is an orchestrator (orche_spawn). */
     let spawn: boolean = DEFAULT_SINGLE.spawn;
     /** `bashReview` of the config file read at session start (defaults without a valid file): main's Bash safety review (bash-review.ts). */
@@ -499,6 +508,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       state.setConfig(found.mode, found.path);
       warningSettings = found.contextWarning ?? { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
       warningState = { warnedLevel: 0 };
+      mainCompactionSettings = found.mainCompaction ?? { ...DEFAULT_MAIN_COMPACTION };
       spawn = found.spawn ?? DEFAULT_SINGLE.spawn;
       bashReview = found.bashReview ?? { ...DEFAULT_BASH_REVIEW };
       // Only a model or a thinking level of its own changes main's hand-off rule; `{ "model": "main" }` and `thinking: "main"` keep
@@ -866,12 +876,14 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     // A settled session runs no queued continuation: no user prompt is still queued (Esc returned them to the editor).
     // A one-shot request ends with its run; what it held back runs next, each as its own run (Pi starts them after this event).
     pi.on("agent_settled", (event, ctx) => {
+      // A run main-compaction.ts interrupted for a mid-run compaction is not a user abort (it continues after the summary).
+      const aborted = mainCompaction.effectiveAborted(event.aborted);
       resetQueued();
       // Not at agent_end: Pi's auto-retry starts after it, and the note must reach that retry.
-      longResponse.settled(event.aborted);
+      longResponse.settled(aborted);
       if (!oneShot && !heldBack.length) return;
       endOneShot(ctx.ui);
-      releaseHeldBack(ctx.ui, event.aborted);
+      releaseHeldBack(ctx.ui, aborted);
     });
     pi.registerMessageRenderer(TASK_RESULT_TYPE, renderJobResultMessage);
     pi.on("session_shutdown", async () => {

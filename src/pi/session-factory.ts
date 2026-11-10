@@ -30,7 +30,7 @@ import type { createAssignmentProjector } from "./context-projection.js";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { projectImageContext } from "./image-context.js";
 import { lengthRecoveryHandlers, type LengthRecoveryOptions } from "./length-recovery.js";
-import { outputCapHandler } from "./output-cap.js";
+import { outputCapHandler, withSummaryOutputCap } from "./output-cap.js";
 import { thinkingPolicyOf } from "./thinking-policy.js";
 import { atEffectiveBaseline, thinkingStateOf } from "./thinking-state.js";
 import { BOOKKEEPING_TOOLS, evidenceLedgerOf, recordToolCall, refText } from "./tool-evidence.js";
@@ -452,7 +452,9 @@ export async function createSession(
   const sessionManager = sessionManagerFor(options);
   const { session } = await createAgentSession({
     cwd: options.cwd,
-    modelRuntime: runtime,
+    // Session-local view: Pi's summary requests skip before_provider_request, so they get the output budget here (output-cap.ts);
+    // every other request through it (turns, extensions' ctx.modelRegistry, direct calls) is unchanged.
+    modelRuntime: await withSummaryOutputCap(runtime, () => createdSession),
     model,
     thinkingLevel: options.route.thinking ?? "off",
     // Allow a later hand-over upgrade, but do not register task_plan for run workers.
