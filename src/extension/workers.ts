@@ -60,6 +60,7 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { beginThinkingPolicy, checkPolicyPlan, DEFAULT_THINKING_POLICY, onTaskPlan, reportGateError, reportRewriteReason, requireReplan, thinkingPolicySummary, type ThinkingPolicySettings, type ThinkingPolicySummary } from "../pi/thinking-policy.js";
 import { effortMappingFor, type EffortAliasRule } from "../pi/effort-mapping.js";
 import { configureOutputCap } from "../pi/output-cap.js";
+import { configureSummaryBudget } from "../pi/summary-budget.js";
 import { nextBaseline, setThinkingPhase, stepDownLevel, thinkingStateOf } from "../pi/thinking-state.js";
 import { THINKING_LEVELS } from "../pi/thinking-levels.js";
 import { ADVISOR_TIMEOUT_MS, advisorLines, AssignmentAdvisor, type AdvisorDetails, type AdvisorSource } from "../single/advisor.js";
@@ -1589,6 +1590,8 @@ export class WorkerPool {
     beginThinkingPolicy(activeSession, thinkingPolicy, baselineLevel, args.role);
     // Explicit output budget for Claude via CLIProxyAPI (src/pi/output-cap.ts; orche.config.json `outputCap`).
     configureOutputCap(activeSession, config.outputCap, decision => meta.recordEvent?.({ type: "output_cap", timestamp: Date.now(), worker: meta.id, ...decision }));
+    // Summary output-limit stops (src/pi/summary-budget.ts); the session's budget level outlives the assignment, like its summary.
+    configureSummaryBudget(activeSession, event => meta.recordEvent?.({ ...event, timestamp: Date.now(), worker: meta.id }));
     thinkingStateOf(activeSession).onSwitch = change => meta.recordEvent?.({ type: "thinking_change", worker: meta.id, ...change });
     if (activeSession.model) meta.model = `${activeSession.model.provider}/${activeSession.model.id}`;
     meta.thinking = activeSession.thinkingLevel ?? meta.thinking ?? route.thinking ?? "off";

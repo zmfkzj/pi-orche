@@ -17,6 +17,7 @@ import { AgentManager } from "../../src/agent/agent-manager.js";
 import { orchestrationResultSchemas } from "../../src/orchestration/result-schemas.js";
 import { WORKER_TOOL_NAMES } from "../../src/tools/index.js";
 import { decideOutputCap, configureOutputCap, lastOutputCap, MIN_OUTPUT_CAP, summarySystemPrompt, type OutputCapDecision, type OutputCapSettings } from "../../src/pi/output-cap.js";
+import { configureSummaryBudget, summaryBudgetLevel, summaryBudgetTokens, SUMMARY_BUDGET_MAX, SUMMARY_BUDGET_MIN, SUMMARY_BUDGET_UNKNOWN, type SummaryLengthStop } from "../../src/pi/summary-budget.js";
 import { createSession } from "../../src/pi/session-factory.js";
 import { parseOutputCapConfig } from "../../src/extension/config.js";
 import { beginThinkingPolicy, PHASE_THINKING_POLICY } from "../../src/pi/thinking-policy.js";
@@ -323,6 +324,126 @@ describe("Pi's summary requests (compaction) through orche's session factory", (
     expect(caps(seen)).toEqual([128_000, undefined, undefined]);
     expect(decisions).toEqual([{ cap: 128_000, source: "catalog", model: name }]);
   });
+
+  /** The text of a summary request's last user message (Pi's prompt plus orche's budget note). */
+  const promptOf = (context: { messages: { role: string; content: unknown }[] }) => JSON.stringify(context.messages.filter(message => message.role === "user").at(-1)?.content ?? "");
+  type Sent = { prompt: string; cap: unknown };
+  /** A summary answer that records its prompt and the payload's cap; `stop`: the stop reason of the answer. */
+  const answer = (sent: Sent[], text: string, stop: "stop" | "length" | "error" = "stop", errorMessage?: string): FauxResponseFactory => (async (context, options, _state, model) => {
+    const body = { model: model.id, instructions: "x", input: context.messages, stream: true };
+    const sentBody = ((await options?.onPayload?.(body, model)) ?? body) as Record<string, unknown>;
+    sent.push({ prompt: promptOf(context as never), cap: sentBody.max_output_tokens });
+    return { ...reply(text, { stopReason: stop, ...(errorMessage ? { errorMessage } : {}) }), usage: { input: 10, output: stop === "length" ? 128_000 : 5, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+  }) as FauxResponseFactory;
+  /** Two turns, then a manual compaction keeping only the last answer, with the given summary answers (history first). */
+  async function compactWith(env: Env, session: AgentSession, summaries: FauxResponseFactory[]) {
+    env.faux.setResponses([reply("First answer"), reply("Second answer"), ...summaries]);
+    await session.prompt("First question");
+    await session.prompt("Second question");
+    session.settingsManager.applyOverrides({ compaction: { keepRecentTokens: 1 } });
+    return session.compact().then(result => ({ ok: true as const, summary: result.summary }), (error: unknown) => ({ ok: false as const, error: error instanceof Error ? error.message : String(error) }));
+  }
+  const budgetOf = (prompt: string) => Number(/under about ([\d,]+) tokens/.exec(prompt)?.[1]?.replace(/,/g, ""));
+
+  it("summary budget: both summary requests (history, turn prefix) carry the budget note after Pi's prompt; turns do not", async () => {
+    const env = await setup();
+    const { session } = await open(env, "claude-opus-5-5");
+    const sent: Sent[] = [];
+    const turns: string[] = [];
+    const turn = (text: string): FauxResponseFactory => (context => { turns.push(promptOf(context as never)); return reply(text); }) as FauxResponseFactory;
+    env.faux.setResponses([turn("First answer"), turn("Second answer"), answer(sent, "History summary"), answer(sent, "Turn prefix summary")]);
+    await session.prompt("First question");
+    await session.prompt("Second question");
+    session.settingsManager.applyOverrides({ compaction: { keepRecentTokens: 1 } });
+    const result = await session.compact();
+    expect(result.summary).toContain("History summary");
+    expect(result.summary).not.toContain("orche summary budget"); // the note is in the request, never in the stored summary
+    expect(sent).toHaveLength(2);
+    for (const entry of sent) {
+      expect(entry.prompt).toContain("orche summary budget (takes precedence over any instruction to preserve everything)");
+      expect(budgetOf(entry.prompt)).toBe(SUMMARY_BUDGET_MAX); // min(32000, 128000 / 4)
+      expect(entry.prompt).not.toContain("stopped at the response limit");
+      expect(entry.prompt).not.toContain("is restored verbatim"); // not a task session: nothing is restored
+      expect(entry.cap).toBe(128_000); // the output cap is unchanged
+    }
+    expect(sent[0]!.prompt.indexOf("orche summary budget")).toBeGreaterThan(sent[0]!.prompt.indexOf("<conversation>"));
+    for (const prompt of turns) expect(prompt).not.toContain("orche summary budget");
+    expect(summaryBudgetTokens({ maxTokens: 64_000 })).toBe(16_000);
+    expect(summaryBudgetTokens({})).toBe(SUMMARY_BUDGET_UNKNOWN);
+    expect(summaryBudgetTokens({ maxTokens: 128_000 }, 10)).toBe(SUMMARY_BUDGET_MIN);
+  });
+
+  it("summary budget: a cut-off summary is sent once more at once with half the budget; the compaction succeeds and the stop is recorded", async () => {
+    const env = await setup();
+    const { session } = await open(env, "claude-opus-5-5");
+    const stops: SummaryLengthStop[] = [];
+    configureSummaryBudget(session, event => stops.push(event));
+    const sent: Sent[] = [];
+    const result = await compactWith(env, session, [answer(sent, "PARTIAL HISTORY", "length"), answer(sent, "Short history"), answer(sent, "Turn prefix summary")]);
+    expect(result).toMatchObject({ ok: true });
+    if (!result.ok) return;
+    expect(result.summary).toContain("Short history");
+    expect(result.summary).not.toContain("PARTIAL HISTORY"); // a cut-off answer never becomes the checkpoint
+    expect(sent.map(entry => budgetOf(entry.prompt))).toEqual([32_000, 16_000, 16_000]);
+    expect(sent[1]!.prompt).toContain("The previous attempt at this summary stopped at the response limit and was discarded");
+    expect(sent[2]!.prompt).not.toContain("stopped at the response limit"); // the turn prefix is a fresh request at the raised level
+    expect(sent.map(entry => entry.cap)).toEqual([128_000, 128_000, 128_000]);
+    expect(stops).toEqual([{ type: "summary_length_stop", model: `${env.faux.provider.id}/claude-opus-5-5`, budgetTokens: 32_000, nextBudgetTokens: 16_000, outputTokens: expect.any(Number), cap: 128_000, retry: true }]);
+    expect(summaryBudgetLevel(session)).toBe(1);
+  });
+
+  it("summary budget: exhaustion fails the compaction as Pi did (no partial checkpoint), and the next compaction never repeats the cut-off request", async () => {
+    const env = await setup();
+    const { session } = await open(env, "claude-opus-5-5");
+    const stops: SummaryLengthStop[] = [];
+    configureSummaryBudget(session, event => stops.push(event));
+    const sent: Sent[] = [];
+    const failed = await compactWith(env, session, [answer(sent, "PARTIAL 1", "length"), answer(sent, "PARTIAL 2", "length")]);
+    expect(failed).toEqual({ ok: false, error: expect.stringContaining("generation hit the token cap") });
+    expect(session.sessionManager.getEntries().some(entry => entry.type === "compaction")).toBe(false);
+    expect(stops.map(stop => [stop.budgetTokens, stop.nextBudgetTokens, stop.retry])).toEqual([[32_000, 16_000, true], [16_000, 8_000, false]]);
+    // The next compaction (e.g. the next threshold check) starts at the raised level: a smaller request, not the same one again.
+    const ok = await compactWith(env, session, [answer(sent, "History summary"), answer(sent, "Turn prefix summary")]);
+    expect(ok).toMatchObject({ ok: true });
+    expect(sent.map(entry => budgetOf(entry.prompt))).toEqual([32_000, 16_000, 8_000, 8_000]);
+    expect(stops).toHaveLength(2);
+    // Session-local: another session on the same runtime starts at the ordinary budget.
+    const other = await open(env, "claude-opus-5-5");
+    const fresh: Sent[] = [];
+    expect(await compactWith(env, other.session, [answer(fresh, "H"), answer(fresh, "T")])).toMatchObject({ ok: true });
+    expect(fresh.map(entry => budgetOf(entry.prompt))).toEqual([32_000, 32_000]);
+    // A reused session keeps its level across assignments (its oversized summary is still there); only the observer changes.
+    configureSummaryBudget(session, undefined);
+    expect(summaryBudgetLevel(session)).toBe(2);
+  });
+
+  it("summary budget: a provider error (usage limit) and an abort are not output-limit stops: no re-send, no record, level unchanged", async () => {
+    const env = await setup();
+    const { session } = await open(env, "claude-opus-5-5");
+    const stops: SummaryLengthStop[] = [];
+    configureSummaryBudget(session, event => stops.push(event));
+    session.settingsManager.applyOverrides({ retry: { enabled: false } });
+    const sent: Sent[] = [];
+    const failed = await compactWith(env, session, [answer(sent, "", "error", "You have hit your ChatGPT usage limit.")]);
+    expect(failed).toEqual({ ok: false, error: expect.stringContaining("You have hit your ChatGPT usage limit.") });
+    expect(failed.ok ? "" : failed.error).not.toContain("token cap");
+    expect(sent).toHaveLength(1);
+    expect(stops).toEqual([]);
+    expect(summaryBudgetLevel(session)).toBe(0);
+    // Abort: an aborted summary request passes through as aborted: not re-sent, not recorded.
+    const model = env.runtime.getModel(env.faux.provider.id, "claude-opus-5-5")!;
+    const prompt = await summarySystemPrompt();
+    const controller = new AbortController();
+    const aborted: Sent[] = [];
+    env.faux.setResponses([async (...args: Parameters<FauxResponseFactory>) => { controller.abort(); return answer(aborted, "PARTIAL", "length")(...args); }, answer(aborted, "never")] as FauxResponseFactory[]);
+    const context = { messages: [{ role: "system" as const, content: prompt!, timestamp: 0 }, { role: "user" as const, content: [{ type: "text" as const, text: "summarize" }], timestamp: 0 }] };
+    const message = await session.modelRuntime.streamSimple(model, context, { cacheRetention: "none", signal: controller.signal }).result();
+    expect(aborted).toHaveLength(1);
+    expect(message.stopReason).toBe("aborted");
+    expect(stops).toEqual([]);
+    expect(summaryBudgetLevel(session)).toBe(0);
+  });
+
 
   it("the real Codex Responses request body of a compaction carries the budget (body builder, no network)", async () => {
     const env = await setup();

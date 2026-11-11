@@ -138,6 +138,49 @@ restored and `essentialsError` is recorded. A failed summary (`session_compact_f
 keeps the original context. Intentional early compaction (`reason: threshold`, `early: true`), real overflow recovery (`reason:
 overflow`) and output-limit recovery (`length_stop`, no compaction) stay distinguishable in the record.
 
+## Summary budget (`src/pi/summary-budget.ts`, every orche session)
+
+Pi's repeated compactions are iterative: each summary request carries the previous summary with Pi's update rules ("PRESERVE all
+existing information from the previous summary", then add the new messages) and only asks for concise sections. A long worker
+therefore wrote a larger summary at every compaction until one no longer fitted in one response. Research it-0139
+(cliproxyapi/claude-fable-5-2, thinking max, 1M window, stable 500k trigger, `max_output_tokens` 128000 from the catalog) grew
+from 34k to 272k characters over nine compactions (reported output 25k → 144k tokens; every one was a split-turn compaction, so
+that usage adds a history and a turn-prefix request); then each threshold check sent the same request again and Pi refused the
+cut-off answer (`Summarization failed: generation hit the token cap and the summary is incomplete`): six failures about 16
+minutes apart, each with the context unchanged and one more tool turn in between. it-0138's four runs show the same growth
+(output 15k → 109k tokens) without reaching the cap. The later `You have hit your ChatGPT usage limit.` was a separate provider
+error (it failed the worker's own next request first, then the compaction after it).
+
+So orche's session view of the model runtime (`withSummaryOutputCap`, `src/pi/output-cap.ts`), which already recognises Pi's
+summary requests by their shape, appends one instruction block to every summary request (compaction history and turn prefix,
+branch summaries):
+
+- the whole summary stays under a token budget: a quarter of the request model's catalog `maxTokens`, at most 32000 (16000 when
+  the model has none, never below 4096); when the previous summary or the new messages are larger, older detail is condensed
+  (finished work in short lines, superseded or repeated detail dropped, exact paths, identifiers, numbers and errors kept), and
+  the current state, open problems and next steps stay complete; this takes precedence over Pi's "preserve everything" rule;
+- in task sessions (`taskCompaction`), the `orche:task-essentials` message ("Assignment in progress at compaction time …") is
+  restored verbatim after the summary from orche's own state, so the summary only points to it instead of copying it. The
+  verbatim assignment, Task DAG with checkpoints, ledger and (extended) work log and transcript reference are restored exactly as
+  before, independent of the summary.
+
+When a summary answer still stops at the output limit (`stopReason: "length"`), the session's budget level rises (the budget
+halves per level, down to 4096) and the request is sent once more right away with the smaller budget and a note that the
+previous attempt was discarded. A second cut-off answer is returned to Pi, which fails the compaction exactly as before (no
+partial summary becomes a checkpoint, the context is kept); the next compaction of that session (the next threshold check, an
+overflow recovery, a manual `/compact`) starts from the raised level, so the request that was cut off is never sent unchanged
+again. The level belongs to the session and is kept across assignments (a reused worker still carries its large summary).
+Provider errors (e.g. a usage limit), aborts and complete answers are passed through untouched and are never re-sent here; Pi's
+own retry of transient errors is unchanged. The output cap (`outputCap`) is unchanged and independent: `outputCap: "off"` still
+leaves the payload alone, while the instruction is part of the summary prompt.
+
+Limits: the budget is an instruction; a model can still exceed it (then the re-send above applies). It bounds each summary
+request, not the merged checkpoint: a split-turn compaction joins a history and a turn-prefix summary, and when there are no new
+messages before the turn Pi reuses the previous summary verbatim as the history part, so a summary that was already oversized
+before this change shrinks only at the next compaction that rewrites it. Whether the provider honours `max_output_tokens`
+exactly is not observable from the records (the compaction record holds the combined usage of both requests).
+
+
 ## Extended essentials (`src/pi/compaction-state.ts`)
 
 Built from orche's state, never from a model summary, each part labelled by its authority:
@@ -168,6 +211,9 @@ last hour). A `records.maxBytes` limit can delete older idle records earlier; th
   without its `before_provider_request` hook, so without this view they carried no budget and the proxy default applied. Only
   requests in Pi's own summary shape (Pi's summarization system prompt, `cacheRetention: "none"`, no hook, no `maxTokens`) get it;
   extensions' and other direct requests through the session runtime keep their payload.
+- `summary_length_stop`: a summary answer that stopped at the output limit: `model`, `budgetTokens` (asked for),
+  `nextBudgetTokens`, `outputTokens` (provider-reported), `cap` (the `max_output_tokens` orche sent; absent: none), `retry` (true:
+  re-sent at once; false: the second cut-off answer, returned to Pi, followed by `compaction_failed`).
 - `spawn` events carry each sub-worker's `compactions` (and `compactionEvents` when some were refused or failed).
 
 ## Disable / roll back

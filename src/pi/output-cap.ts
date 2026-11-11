@@ -29,6 +29,7 @@
 import { generateSummary, type ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { getSystemMessageText, type AssistantMessage, type Context } from "@earendil-works/pi-ai";
 import { isCliproxyClaude, modelMatches, type EffortModel } from "./effort-mapping.js";
+import { budgetedSummary } from "./summary-budget.js";
 
 export interface OutputCapRule {
   /** `provider/id` with `*` wildcards. */
@@ -187,19 +188,24 @@ export function summarySystemPrompt(): Promise<string | undefined> {
  * the same runtime and the runtime itself are untouched. Pi gets this view as the session's `modelRuntime`, so its stream function
  * stays the one it marked as resolving auth through that runtime (summaries are not pre-authenticated, as before), and no other
  * extension hook is replayed for summaries.
+ * Every summary request also gets orche's summary budget ({@link budgetedSummary}, summary-budget.ts): an instruction appended to
+ * Pi's prompt, and one immediate re-send with a halved budget when the answer stops at the output limit. `restoredLabel` names the
+ * essentials heading a task session restores verbatim after each compaction (undefined: none).
  */
-export async function withSummaryOutputCap(runtime: ModelRuntime, getSession: () => object | undefined): Promise<ModelRuntime> {
+export async function withSummaryOutputCap(runtime: ModelRuntime, getSession: () => object | undefined, options: { restoredLabel?: () => string | undefined } = {}): Promise<ModelRuntime> {
   const summaryPrompt = await summarySystemPrompt();
   const isSummary = (context: Context, options: Parameters<ModelRuntime["streamSimple"]>[2]) =>
     summaryPrompt !== undefined && options?.cacheRetention === "none" && !options.onPayload && options.maxTokens === undefined
     && systemPromptOf(context) === summaryPrompt;
-  const streamSimple: ModelRuntime["streamSimple"] = (model, context, options) => {
+  const streamSimple: ModelRuntime["streamSimple"] = (model, context, requestOptions) => {
     const session = getSession();
-    if (!session || !isSummary(context, options)) return runtime.streamSimple(model, context, options);
-    return runtime.streamSimple(model, context, {
-      ...options,
+    if (!session || !isSummary(context, requestOptions)) return runtime.streamSimple(model, context, requestOptions);
+    // The summary budget (summary-budget.ts) adds its instruction and re-sends a cut-off answer once; every attempt gets the cap.
+    const restoredLabel = options.restoredLabel?.();
+    return budgetedSummary(session, model, context, budgeted => runtime.streamSimple(model, budgeted, {
+      ...requestOptions,
       onPayload: (payload, payloadModel) => applyOutputCap(session, (payloadModel ?? model) as CapModel, payload, true),
-    });
+    }), { ...(requestOptions?.signal ? { signal: requestOptions.signal } : {}), ...(restoredLabel ? { restoredLabel } : {}), cap: () => states.get(session)?.lastSummary?.cap });
   };
   return new Proxy(runtime, {
     get(target, key) {

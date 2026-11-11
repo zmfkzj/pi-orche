@@ -9,6 +9,7 @@ import { parseWorkerCompaction, resolveCompaction } from "../../src/pi/compactio
 import { composeEssentials, renderReference, renderWorkLog } from "../../src/pi/compaction-state.js";
 import { evidenceLedgerOf } from "../../src/pi/tool-evidence.js";
 import { createSubWorkerRunner, subWorkerCompaction } from "../../src/orchestrator/sub-worker.js";
+import { configureSummaryBudget, type SummaryLengthStop } from "../../src/pi/summary-budget.js";
 
 /**
  * Worker compaction with the real Pi SDK (AgentSession, native compaction, session JSONL) and a faux model: the absolute policy,
@@ -26,8 +27,8 @@ const tool = (name: string, args: Record<string, unknown>) => reply([call(name, 
 /** Pi's summary requests (history and split-turn prefix) run under the summarization system prompt. */
 const isSummary = (context: { messages: { role: string }[] }) => JSON.stringify(context.messages.filter(message => message.role === "system")).includes("context summarization assistant");
 
-async function runtimeWith(window: number) {
-  const faux = fauxProvider({ provider: `wc-${Math.random().toString(36).slice(2, 8)}`, models: [{ id: "m", contextWindow: window, maxTokens: 4096 }] });
+async function runtimeWith(window: number, maxTokens = 4096) {
+  const faux = fauxProvider({ provider: `wc-${Math.random().toString(36).slice(2, 8)}`, models: [{ id: "m", contextWindow: window, maxTokens }] });
   const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
   runtime.registerNativeProvider(faux.provider);
   return { faux, runtime, route: { role: "test", model: `${faux.provider.id}/m`, thinking: "off" as const } };
@@ -139,6 +140,42 @@ describe("workerCompaction with the real SDK", () => {
     expect(sink.events.some(event => event.type === "compaction_failed" && event.reason === "threshold")).toBe(true);
     expect(session.sessionManager.getEntries().some(entry => entry.type === "compaction")).toBe(false);
     expect(JSON.stringify(session.messages)).toContain("LINE-0 ");
+  });
+
+  it("summary budget in a task session: threshold summaries are told the essentials are restored; after a cut-off summary the next threshold compaction asks for less, and the essentials come back verbatim", async () => {
+    const cwd = await temp();
+    await writeFile(join(cwd, "large.txt"), LARGE);
+    const f = await runtimeWith(200_000, 128_000);
+    const prompts: string[] = [];
+    let summaries = 0;
+    // The first threshold compaction's history summary is cut off twice (the re-send included): Pi fails it and keeps the context.
+    f.faux.setResponses(Array(40).fill(script(() => (summaries++ < 2 ? reply("PARTIAL", { stopReason: "length" }) : reply("SUMMARY")), 6)).map(step => ((context: Parameters<Exclude<FauxResponseStep, { role: string }>>[0], ...rest: unknown[]) => {
+      if (isSummary(context)) prompts.push(JSON.stringify(context.messages.at(-1)));
+      return (step as (...args: unknown[]) => ReturnType<typeof reply>)(context, ...rest);
+    }) as FauxResponseStep));
+    const sink = { stats: [] as CompactionStats[], events: [] as CompactionEvent[] };
+    const request = "R1: read large.txt\nOriginal request\nRead it six times.";
+    const session = await createSession({ cwd, route: f.route, modelRuntime: f.runtime, tools: ["read"], instructions: "test", sessionFile: join(cwd, "s.jsonl"),
+      taskCompaction: workerCompaction({ policy: "absolute", triggerTokens: 16_384, keepRecentTokens: 2_000 }, request, sink) });
+    disposers.push(() => session.dispose());
+    const stops: SummaryLengthStop[] = [];
+    configureSummaryBudget(session, event => stops.push(event));
+    await session.prompt("Read large.txt six times.");
+    expect(session.getLastAssistantText()).toBe("done");
+    const budgets = prompts.map(prompt => Number(/under about ([\d,]+) tokens/.exec(prompt)?.[1]?.replace(/,/g, "")));
+    expect(budgets.length).toBeGreaterThan(2);
+    expect(budgets.slice(0, 2)).toEqual([32_000, 16_000]); // the cut-off request and its immediate re-send
+    expect(budgets.slice(2).every(budget => budget <= 8_000)).toBe(true); // later threshold compactions never repeat it
+    expect(prompts.filter(prompt => prompt.includes("stopped at the response limit"))).toHaveLength(1);
+    for (const prompt of prompts) expect(prompt).toContain('A message that starts with \\"Assignment in progress at compaction time (superseded by any later Assignment message)\\" is restored verbatim');
+    expect(stops.map(stop => stop.retry)).toEqual([true, false]);
+    expect(sink.events).toContainEqual(expect.objectContaining({ type: "compaction_failed", reason: "threshold", errorMessage: expect.stringContaining("generation hit the token cap") }));
+    expect(sink.stats.length).toBeGreaterThan(0);
+    const compactions = session.sessionManager.getEntries().filter(entry => entry.type === "compaction");
+    expect(compactions.every(entry => !entry.summary.includes("PARTIAL"))).toBe(true);
+    // The assignment is restored verbatim from orche's state after every successful compaction, whatever the summary says.
+    const restored = session.messages.filter(message => message.role === "custom").map(message => JSON.stringify(message));
+    expect(restored.at(-1)).toContain(JSON.stringify(`Assignment in progress at compaction time (superseded by any later Assignment message):\nRequirements checklist and original request, verbatim:\n${request}`).slice(1, -1));
   });
 
   it("an essentials callback that fails after the compaction restores the text checked before it and records the error", async () => {

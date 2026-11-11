@@ -452,9 +452,10 @@ export async function createSession(
   const sessionManager = sessionManagerFor(options);
   const { session } = await createAgentSession({
     cwd: options.cwd,
-    // Session-local view: Pi's summary requests skip before_provider_request, so they get the output budget here (output-cap.ts);
-    // every other request through it (turns, extensions' ctx.modelRegistry, direct calls) is unchanged.
-    modelRuntime: await withSummaryOutputCap(runtime, () => createdSession),
+    // Session-local view: Pi's summary requests skip before_provider_request, so they get the output budget here (output-cap.ts),
+    // and the summary budget (summary-budget.ts; task sessions: their essentials are restored, not summarized); every other request
+    // through it (turns, extensions' ctx.modelRegistry, direct calls) is unchanged.
+    modelRuntime: await withSummaryOutputCap(runtime, () => createdSession, { restoredLabel: () => options.taskCompaction ? COMPACTION_ASSIGNMENT_LABEL : undefined }),
     model,
     thinkingLevel: options.route.thinking ?? "off",
     // Allow a later hand-over upgrade, but do not register task_plan for run workers.
