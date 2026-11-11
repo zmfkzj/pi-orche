@@ -211,7 +211,7 @@ describe("orche_task changes: attribution", () => {
  */
 describe("orche_task changes: writes in git-ignored paths (observed, not audited)", () => {
   const ignore = (cwd: string) => writeFile(join(cwd, ".gitignore"), ".local-data/\n");
-  const UNAUDITED = "Written outside the git audit (git-ignored or otherwise outside the git audit, written by this worker's edit/write calls; observed writes, not diffed or validated: check the files themselves): ";
+  const UNAUDITED = "Written outside the git audit (git-ignored or otherwise outside the git audit, written by this worker's edit/write calls; observed writes, not diffed or validated by orche: the worker's own report states how it checked them): ";
 
   it("ignored-only writes are listed as observed writes, never 'No files changed' (text, details and run.json)", async () => {
     const { h, execute } = await fixture(() => [
@@ -419,7 +419,7 @@ describe("formatTaskChanges", () => {
   it("lists observed writes outside the git audit on their own line, capped like the other lists", () => {
     const lines = formatTaskChanges({ changes: [], otherChanges: [], unaudited: Array.from({ length: 52 }, (_, i) => `.local-data/f${i}`) });
     expect(lines[0]).toBe("Changed files: none in the git audit");
-    expect(lines[1]!.startsWith("Written outside the git audit (git-ignored or otherwise outside the git audit, written by this worker's edit/write calls; observed writes, not diffed or validated: check the files themselves): .local-data/f0, ")).toBe(true);
+    expect(lines[1]!.startsWith("Written outside the git audit (git-ignored or otherwise outside the git audit, written by this worker's edit/write calls; observed writes, not diffed or validated by orche: the worker's own report states how it checked them): .local-data/f0, ")).toBe(true);
     expect(lines[1]!.endsWith(", … 2 more")).toBe(true);
     expect(formatTaskChanges({ changes: [], otherChanges: [{ ...added("o"), reason: "r" }], unaudited: ["i"] })[0]).toBe("Changed files: none attributed to this worker in the git audit");
   });

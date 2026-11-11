@@ -61,7 +61,7 @@ describe("mainMode: tool sets", () => {
     expect(seen[0]).toContain("Never stop to ask the user to switch modes in order to proceed");
     expect(seen[0]).toContain("refine the requirements with the user: goal, constraints and acceptance criteria");
     expect(seen[0]).toContain("ONE orche_task in ONE end-to-end assignment");
-    expect(seen[0]).toContain("do not re-read the changed code or re-run the project checks to verify it yourself");
+    expect(seen[0]).toContain("do not re-read the changed code or re-run the project checks, do not re-judge the readings, designs or policy interpretations it chose");
     expect(seen[0]).toContain("explore | answer | implement | verify | game-asset | video");
     for (const removed of ["orche_run", "Judgment before Production", "start with explore", "dispatch a verify worker", "prefer multi", "never split", "/orche mode auto"]) expect(seen[0]).not.toContain(removed);
     expect(seen[1]).toContain(EXTERNAL_PERMISSION);
@@ -564,7 +564,7 @@ describe("single-worker mode and one-turn override", () => {
 
   it("single policy keeps reuse and supervision explicit", () => {
     const rules = delegationRules("single");
-    for (const criterion of ["Never claim a reuse that did not happen", "a worker that is gone (idle expiry, eviction, reload) is continued by a NEW worker", "never poll orche_task_status", "call orche_task_attach to wait for the result again", "a worker's report is not acceptance", "report unverified items as unverified", "Intent/Purpose; numbered requirements checklist R1..Rn", "Original request section containing the user's ORIGINAL request text verbatim"])
+    for (const criterion of ["Never claim a reuse that did not happen", "a worker that is gone (idle expiry, eviction, reload) is continued by a NEW worker", "never poll orche_task_status", "call orche_task_attach to wait for the result again", "Results: the worker owns acceptance.", "its unresolved, unverified and blocked items as such", "Intent/Purpose; numbered requirements checklist R1..Rn", "Original request section containing the user's ORIGINAL request text verbatim"])
       expect(rules).toContain(criterion);
   });
 });

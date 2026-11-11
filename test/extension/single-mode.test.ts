@@ -33,8 +33,9 @@ describe("single mode does the work", () => {
       "Never stop to ask the user to switch modes in order to proceed",
       "never end a turn without attempting the requested change because of its size or risk",
       "The worker owns the whole task end to end",
-      "problems and user follow-ups go to the SAME worker (pass its id in `worker`)",
-      "Read the report: its checklist, the checks it names and the readings it chose; do not re-read the changed code or re-run the project checks to verify it yourself",
+      "user follow-ups go to the SAME worker (pass its id in `worker`)",
+      "Results: the worker owns acceptance.",
+      "do not re-read the changed code or re-run the project checks, do not re-judge the readings, designs or policy interpretations it chose",
       "Send a separate verify assignment only when the user",
       "This workflow is the same with and without a UI",
     ]) expect(rules).toContain(instruction);
@@ -48,7 +49,7 @@ describe("single mode does the work", () => {
     expect(delegationRules("single")).toBe(rules);
   });
 
-  it.each(["print", "tui"] as const)("delegates once end to end, accepts with main-run checks and finishes in %s", async mode => {
+  it.each(["print", "tui"] as const)("delegates once end to end and finishes in %s; main's read-only and trusted-check tools stay available", async mode => {
     const h = await createHarness({
       mainMode: "single", mode,
       mainSteps: [

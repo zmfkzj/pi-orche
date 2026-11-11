@@ -16,10 +16,10 @@
 ## 2. 구조
 
 ```text
-User ⇄ main (single 모드: 대화·요구사항 정리·보고서 검토, 편집 불가)
+User ⇄ main (single 모드: 대화·요구사항 정리·결과 보고, 편집 불가, 결과의 실질 검수 없음)
           │ orche_task {role, request(Intent, R1..Rn, 제약, 가정, 원문)}
           ▼
-       orchestrator (예전 single worker 자리, persistent, main 모델 상속 또는 models.orchestrator, 50% compaction)
+       orchestrator (예전 single worker 자리, persistent, main 모델 상속 또는 models.orchestrator, 50% compaction; 해석·구현·검증·수정과 수락을 끝까지 맡는다)
           │ 분할 판단: Parallelism / Isolation / Independent verification. 기본은 분할하지 않고 직접 작업
           │ orche_spawn {reason, workers[]}  ← 필요할 때만
           ▼
@@ -30,15 +30,15 @@ User ⇄ main (single 모드: 대화·요구사항 정리·보고서 검토, 편
           (표준 역할 sub-worker의 모델: models.worker, 없으면 orchestrator 모델 상속. §12)
 ```
 
-- **main**: 사용자의 요구사항을 구체화하고 명확하게 정리해 orchestrator 하나에게 넘긴다(인계 형식은 지금 single 그대로). 단순 응답은 직접 답한다. 결과는 보고서로 검토한다(코드 재확인·check 재실행 없음).
-- **orchestrator**: 세 기준으로 분할 여부를 판단한다. 나눌 필요가 없으면 직접 작업하고(기본값), 필요하면 `orche_spawn`으로 sub-worker를 띄운 뒤 결과를 통합하고 확인한다. 판단과 근거를 보고서의 `data.split`에 짧게 남긴다.
+- **main**: 사용자의 요구사항을 구체화하고 명확하게 정리해 orchestrator 하나에게 넘긴다(인계 형식은 지금 single 그대로). 단순 응답은 직접 답한다. 결과는 보고서대로 사용자에게 전한다(checklist는 worker의 자기 보고, 고른 해석·미해결·미검증·막힘은 그대로). 결과의 실질을 검수하지 않는다: 코드 재확인·check 재실행을 하지 않고, worker가 고른 해석·설계·정책 판단을 다시 판정하거나 자기 판정으로 정정·worker 교체를 하지 않는다(2026-11-11 사용자 정정 "main이 검수 역할을 하는게 의도된 동작이 아닌데" → "수정"). 후속은 사용자 요청(같은 worker), worker 자신의 보고(스스로 보고한 unmet·partial·blocked를 그대로 전달), 운영 사건(timeout·실패·취소·사라진 worker)에서만 나온다.
+- **orchestrator**: 수락을 맡는다. 애매한 해석은 요청 원문과 요청이 가리키는 정본 지시·문서로 스스로 정하고(사용자만 정할 수 있는 것은 `data.unresolved`), 보고 전에 모든 요구와 원문을 기준으로 결과(git 이 추적하지 않는 산출물 포함)를 스스로 확인해 같은 assignment 안에서 바로잡는다(`assignmentPrompt`). 세 기준으로 분할 여부를 판단한다. 나눌 필요가 없으면 직접 작업하고(기본값), 필요하면 `orche_spawn`으로 sub-worker를 띄운 뒤 결과를 통합하고 확인한다(sub-worker 보고서 검토·check 실행은 orchestrator 몫). 판단과 근거를 보고서의 `data.split`에 짧게 남긴다.
 - **sub-worker**: 한 번 쓰고 버리는 세션. 자기 요청만 보고, 자기 소유 파일만 쓸 수 있고, spawn 도구가 없다. 시간 제한은 orchestrator assignment와 같은 활동 기반 기한이다(같은 `limits`: 기본 30분 + 10, 20, … 100분, 명시적 고정 `extensionMs` 호환, `observeMs` 관측). 기한은 자기 시작 시각부터 세고 자기 세션 활동으로만 연장된다. 자기 타임아웃은 그 sub-worker만 `failed`로 만들고(사유 idle/budget/stalled), orchestrator assignment가 끝나면 남은 연장과 관계없이 즉시 `cancelled`된다(README "`orche_spawn` sub-workers get the same deadline").
 
 ## 3. 구현 요점
 
 | 항목 | 위치 | 동작 |
 |---|---|---|
-| main 규칙 | `src/extension/mode.ts` `delegationRules` | single 인계 형식 + 보고서 기반 검토(`mainReview` 분기 제거, G-M2의 `report`만 남김) + "분할은 orchestrator가 판단한다" |
+| main 규칙 | `src/extension/mode.ts` `delegationRules` | single 인계 형식 + 보고서 그대로 전하기(`SUPERVISION_BASE`: 수락은 worker 몫, main 은 실질 검수·자기 판정 정정·교체 없음; `mainReview` 분기 제거) + "분할은 orchestrator가 판단한다" |
 | orchestrator 지시 | `src/orchestrator/instructions.ts` | 5장에서 고른 분할 판단 지시문, spawn 사용법, `data.split` 보고 |
 | spawn 도구 | `src/orchestrator/spawn.ts`, `src/orchestrator/sub-worker.ts` | 병렬 실행(호출당 최대 4, `single.maxSubWorkers`로 2–8), 깊이 1, 소유 파일 검증·쓰기 guard·사후 audit, verifier는 새 세션·읽기 전용, specialist route, 모델 상속 |
 | 연결 | `src/extension/workers.ts` | orchestrator 세션에만 `orche_spawn` 등록, sub-worker 기록을 run record와 결과에 남김 |
@@ -52,8 +52,8 @@ User ⇄ main (single 모드: 대화·요구사항 정리·보고서 검토, 편
 
 | 항목 | 결정 | 새 구조에서의 형태 | 근거 |
 |---|---|---|---|
-| G-M2: report 기반 main 검토 | **유지** (선택지 제거) | main은 보고서(checklist, worker가 든 check, 고른 해석)만 보고 검토하고 코드 재확인·check 재실행을 하지 않는다. `single.mainReview` 스위치와 `evidence` 분기는 지웠다(`src/extension/mode.ts` `SUPERVISION_BASE`). orchestrator 결과에는 `Split:` 줄과 sub-worker 상태가 붙으므로 main은 그것도 보고서로 읽는다(`ORCHESTRATOR_SUPERVISION`). | G-M+G-M2 합산 48/48 vs 46/48, main context 0.41배, 비용 0.97배(사전 등록 판정 통과, `docs/specialist-orchestration.md` 10.7). 측정으로 이긴 유일한 감독 변경이라 그대로 둔다. |
-| 요구사항 R1..Rn + 원문 그대로 인계 | **유지** | main→orchestrator 인계 형식은 그대로다(Intent/Purpose, `R1: …`, 제약, 가정, Original request 원문). checklist의 `verifiedBy`, `data.ambiguities`, 2회 연속 미충족 시 새 worker도 그대로다. orchestrator→sub-worker는 이 형식을 강요하지 않고 "자기 완결적 요청(목표, 수락 기준, 제약, 파일 참조, 필요하면 사용자 원문)"만 요구한다(`SPAWN_USAGE`). | 기존 single의 기본 계약이고 G-L·G-M2 모두 이 위에서 측정됐다. sub-worker는 한 번 쓰고 버리는 세션이라 checklist·task_plan 부담을 지우지 않는다(검토는 orchestrator 몫). |
+| G-M2: report 기반 main 검토 | **변형** (2026-11-11: 검토 → 보고) | main은 보고서(checklist, worker가 든 check, 고른 해석, 미해결·미검증)를 worker 자기 보고로 전하고 코드 재확인·check 재실행을 하지 않는다. `single.mainReview` 스위치와 `evidence` 분기는 지웠다(`src/extension/mode.ts` `SUPERVISION_BASE`). 예전에는 main이 고른 해석을 사용자 원문과 대조해 정정을 보냈다. 이것은 main의 실질 검수였고 사용자가 의도하지 않은 동작이라고 정정해 없앰다. 해석 대조·요구별 확인·수정은 orchestrator assignment 지시로 옮겼다(`src/extension/workers.ts` `assignmentPrompt`, 결과 줄의 해석 안내). orchestrator 결과에는 `Split:` 줄과 sub-worker 상태가 붙으므로 main은 그것도 보고서로 전한다(`ORCHESTRATOR_SUPERVISION`). | G-M+G-M2 합산 48/48 vs 46/48, main context 0.41배, 비용 0.97배(사전 등록 판정 통과, `docs/specialist-orchestration.md` 10.7). 해석 대조를 worker로 옮긴 변경은 벤치로 재측정하지 않았다(사용자 역할 경계 결정). |
+| 요구사항 R1..Rn + 원문 그대로 인계 | **유지** | main→orchestrator 인계 형식은 그대로다(Intent/Purpose, `R1: …`, 제약, 가정, Original request 원문). checklist의 `verifiedBy`, `data.ambiguities`, 사용자만 정할 수 있는 것의 `data.unresolved`, (worker 자기 checklist 기준) 2회 연속 미충족 시 새 worker도 그대로다. orchestrator→sub-worker는 이 형식을 강요하지 않고 "자기 완결적 요청(목표, 수락 기준, 제약, 파일 참조, 필요하면 사용자 원문)"만 요구한다(`SPAWN_USAGE`). | 기존 single의 기본 계약이고 G-L·G-M2 모두 이 위에서 측정됐다. sub-worker는 한 번 쓰고 버리는 세션이라 checklist·task_plan 부담을 지우지 않는다(검토는 orchestrator 몫). |
 | 모델 상속, 50% compaction | **유지 + 확장** | orchestrator는 main의 현재 모델·thinking을 상속하고 50%에서 compaction한다(기존). 표준 역할 sub-worker는 orchestrator의 현재 모델·thinking(과 main의 context window)을 상속한다(`"thinkingPolicy": "phase"`에서는 orchestrator 할당의 기준 수준 B에서 지원 수준 한 단계 아래, verify는 B; docs/thinking-policy.md). sub-worker는 짧은 one-shot이라 50% compaction·task_plan이 없다. specialist는 원래 route를 쓴다. | 사용자가 고른 모델로 일한다는 원칙을 한 단계 더 적용한 것. 모델을 섞는 실험(v2의 별도 route, multi의 역할별 route)은 이득을 보이지 못했다. |
 | 참조 기반 위임 | **유지 + 확장** | main 규칙의 `REFERENCE_RULE`은 그대로. orchestrator에게도 "요청은 자기 완결적으로, 자기 추론은 붙이지 말 것, 파일 참조"를 주고, sub-worker 결과는 요약·핵심 data·변경 파일만 orchestrator에 돌아간다(`formatSpawn`, 요약 4,000자 제한). | `0eb4faa`(delegate by reference). 별도 A/B 측정은 없다. 복사본을 붙이면 cold start인 sub-worker의 context만 커지므로 같은 원칙을 적용한다. |
 | task ledger, task_plan DAG | **유지** (ledger는 opt-in 그대로) | ledger(`single.ledger`)와 orchestrator의 순차 task_plan DAG는 그대로다. orchestrator의 DAG는 자기 작업 순서일 뿐 sub-worker 스케줄러가 아니다. 병렬은 `orche_spawn` 한 호출(최대 4개 동시, 모두 끝나면 반환)뿐이다. sub-worker 기록은 run record의 agent·`spawn` 이벤트로 남는다. | G-L 기준 통과(회귀 0, 비용 −0.1%)했지만 품질 이득은 없어 opt-in 유지. 범용 DAG 엔진은 아래 Gate A 때문에 만들지 않는다. |

@@ -32,7 +32,7 @@ describe("single-workflow task delegation", () => {
     const result = await execute({ mainMode });
     expect(pool.session("W1").getActiveToolNames()).toContain("task_plan");
     expect(result.details).toMatchObject({ checklist: checklist("partial"), plan, compactions: { count: 0, events: [] } });
-    expect(result.text).toContain("Checklist (worker self-report, not acceptance): 0/1 met, 0 with a named passing check; unmet: R1 (partial: greeting.txt:1 inspected)");
+    expect(result.text).toContain("Checklist (worker self-report; report it as such): 0/1 met, 0 with a named passing check; unmet: R1 (partial: greeting.txt:1 inspected)");
     expect(await readFile(join(result.details.record!, "events.jsonl"), "utf8")).toContain('"type":"task_plan"');
     expect(await readFile(join(result.details.record!, "run.json"), "utf8")).toContain('"checklist"');
   });
@@ -57,10 +57,35 @@ describe("single-workflow task delegation", () => {
   it("warns after two consecutive unmet/partial reports and resets after met", async () => {
     const { execute } = await fixture([report("unmet"), report("partial"), report("met"), report("unmet"), report("unmet")]);
     expect((await execute()).text).not.toContain("consecutive assignments");
-    expect((await execute({ worker: "W1" })).text).toContain("Note: R1 unmet in 2 consecutive assignments of W1; hand only the unmet items to a NEW worker (omit worker)");
+    expect((await execute({ worker: "W1" })).text).toContain("Note: R1 unmet in 2 consecutive assignments of W1; hand only the unmet items to a NEW worker (omit worker) with their requirements and the relevant context (counted from the worker's own checklists, not from a review).");
     expect((await execute({ worker: "W1" })).text).not.toContain("consecutive assignments");
     expect((await execute({ worker: "W1" })).text).not.toContain("consecutive assignments");
     expect((await execute({ worker: "W1" })).text).toContain("2 consecutive assignments");
+  });
+  // Main/worker boundary (user correction 2026-11-11: main acting as the reviewer was not intended): the assignment makes the worker
+  // settle readings and check every requirement itself; the result reports its readings without asking main to re-judge them.
+  it("the worker owns acceptance: its assignment asks it to settle readings and check every requirement; main is told to report its readings, not re-judge them", async () => {
+    const ambiguities = [{ id: "R1", readings: ["keep duplicates in the denominator", "count identical content once"], chosen: "count identical content once" }];
+    const { execute } = await fixture([
+      context => {
+        const assignment = JSON.stringify(context.messages);
+        for (const duty of [
+          "settle it from the Original request text and the instructions, documents or policies the request names as authoritative",
+          "a conflict those sources cannot settle and only the user can decide also goes in data.unresolved",
+          "Before reporting, check the result yourself against every requirement and the Original request (outputs that git does not track included) and correct what falls short within this assignment",
+          "you own acceptance, and main neither intervenes while you run nor reviews or corrects your result afterwards",
+          "every met item needs verifiedBy",
+        ]) expect(assignment).toContain(duty);
+        return tool("report_result", { kind: "implement", summary: "Evidence-backed result", data: { status: "done", checklist: checklist("met"), ambiguities, unresolved: ["whether audit images may join the reference bank is the user's decision"] } });
+      },
+    ]);
+    const result = await execute();
+    expect(result.text).toContain("Checklist (worker self-report; report it as such): 1/1 met, 1 with a named passing check");
+    expect(result.text).toContain('Ambiguities resolved by the worker: R1: chose "count identical content once" over "keep duplicates in the denominator"');
+    expect(result.text).toContain("Note: these readings are the worker's own resolution; report them as such and do not re-judge them yourself. A different reading goes to the same worker only when the user asks for it.");
+    expect(result.text).toContain("unresolved: [\"whether audit images may join the reference bank is the user's decision\"]");
+    for (const review of ["check each chosen reading", "before accepting", "send a correction", "not acceptance"]) expect(result.text).not.toContain(review);
+    expect(result.details.ambiguities).toEqual(ambiguities);
   });
   it("inherits current main model/thinking and switches the same real session at the next hand-off", async () => {
     const { h, execute, pool } = await fixture([]);

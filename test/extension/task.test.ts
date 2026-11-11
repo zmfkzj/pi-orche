@@ -129,7 +129,7 @@ describe("orche_task persistent session workers", () => {
     // single.spawn is on by default: the single worker is the task's orchestrator (docs/orchestrator.md).
     if (endToEnd) {
       expect(instruction).toContain("Own the task end to end as its orchestrator: first decide whether to split it (Orchestration below), then analyse the requirements and create the Task DAG with task_plan, covering every requirement id.");
-      expect(instruction).toContain(`ambiguities:[{id:"R2",readings:["reading A","reading B"],chosen:"reading A"}],${SPLIT_FORMAT}}}`);
+      expect(instruction).toContain(`ambiguities:[{id:"R2",readings:["reading A","reading B"],chosen:"reading A"}],unresolved:["a decision only the user can make"],${SPLIT_FORMAT}}}`);
       expect(instruction).toContain(SPLIT_JUDGMENT);
     } else expect(instruction).toBe(HEAD_IMPLEMENT.replace("${scope}", JSON.stringify(files)));
     expect(h.orche.faux.getPendingResponseCount()).toBe(0);

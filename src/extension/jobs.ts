@@ -576,7 +576,7 @@ export class TaskJobs {
 export function jobResultContent(job: Job): string {
   const header = `[orche task result · ${job.id} · ${job.worker ?? "?"} ${job.role} · ${job.status} after ${formatDuration((job.finishedAt ?? Date.now()) - job.startedAt)}]`;
   const guidance = job.status === "done"
-    ? "Review it as the single-workflow rules say and report to the user."
+    ? "Report it to the user as the single-workflow result rules say (the worker owns acceptance; do not review it yourself)."
     : job.status === "cancelled" ? "The job was cancelled; tell the user what was done so far." : "The job did not complete; tell the user and decide with them whether to retry (same worker for a follow-up).";
   return `${header}\n${job.result?.text ?? ""}\n\n${guidance}${job.queueNote ? `\n\n${job.queueNote}` : ""}`;
 }
