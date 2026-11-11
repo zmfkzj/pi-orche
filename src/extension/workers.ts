@@ -60,7 +60,8 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { beginThinkingPolicy, checkPolicyPlan, DEFAULT_THINKING_POLICY, onTaskPlan, reportGateError, reportRewriteReason, requireReplan, thinkingPolicySummary, type ThinkingPolicySettings, type ThinkingPolicySummary } from "../pi/thinking-policy.js";
 import { effortMappingFor, type EffortAliasRule } from "../pi/effort-mapping.js";
 import { configureOutputCap } from "../pi/output-cap.js";
-import { setThinkingPhase, stepDownLevel, thinkingStateOf } from "../pi/thinking-state.js";
+import { nextBaseline, setThinkingPhase, stepDownLevel, thinkingStateOf } from "../pi/thinking-state.js";
+import { THINKING_LEVELS } from "../pi/thinking-levels.js";
 import { ADVISOR_TIMEOUT_MS, advisorLines, AssignmentAdvisor, type AdvisorDetails, type AdvisorSource } from "../single/advisor.js";
 import { StrongReflection, type ReflectionSummary } from "../single/reflection.js";
 import { flat, peerLabel, peerNoteContent, type PeerNote } from "./peer-notes.js";
@@ -100,9 +101,11 @@ type TaskArgs = Omit<OrcheRunArgs, "model"> & TaskParameters & {
   inheritedThinking?: ThinkingLevel;
   /**
    * Set while main runs a one-shot `/orche <mode> <prompt>` turn: `mainMode` is that request's mode and `session` the session's own.
-   * The assignment runs in the request's mode, and with task ledgers pins it to its task (see {@link RequestMode}).
+   * The assignment runs in the request's mode, and with task ledgers pins it to its task (see {@link RequestMode}). `effort`: the
+   * request's `--effort`, this assignment's baseline thinking whatever its tier or route sets, and main's thinking for the tiers that
+   * name it (`"main"`); never pinned, so a later assignment without it runs at the usual levels.
    */
-  oneShot?: { session: MainMode };
+  oneShot?: { session: MainMode; effort?: ThinkingLevel };
   /** Called once, the moment the worker has its assignment (before it runs): the background job's "started" point. */
   onStarted?: (info: TaskStartedInfo) => void;
 };
@@ -125,7 +128,7 @@ export interface TaskStartedInfo {
  * `/orche <mode> <prompt>` turn) or `task` (it continued, with task ledgers, a task such a request pinned; `by` names it).
  * `session` is the session's own mode at that moment.
  */
-export interface RequestMode { mode: DelegatingMode; source: "one-shot" | "task"; by?: string; session?: MainMode }
+export interface RequestMode { mode: DelegatingMode; source: "one-shot" | "task"; by?: string; session?: MainMode; /** The one-shot request's `--effort` (never kept by a task). */ effort?: ThinkingLevel }
 /** Why a worker is gone, and what is left of it for a successor's briefing. */
 export interface GoneWorker {
   id: string;
@@ -347,6 +350,11 @@ interface Worker {
   mode?: MainMode;
   /** The one-shot request mode of the worker's current assignment (recorded with its job start); never a pin for later assignments. */
   requestMode?: DelegatingMode;
+  /**
+   * The baseline the worker had before a one-shot request's `--effort` replaced it (set by the first such assignment); the next
+   * assignment without an effort starts from it unless its route gives a level of its own, so the effort never outlives its request.
+   */
+  ownBaseline?: string;
   /** The session has the ultra tool set (orche_spawn with the ultra reasons, orche_adopt): created in ultra mode. */
   ultraTools?: boolean;
   /** The session has the MDSD tool set (orche_spawn with the MDSD reasons and strategy specs): created in mdsd mode. */
@@ -1244,7 +1252,10 @@ export class WorkerPool {
    */
   private requestModeOf(args: TaskArgs, ledgerOn: boolean): RequestMode | undefined {
     if (!isDelegatingMode(args.mainMode)) return undefined;
-    if (args.oneShot) return { mode: args.mainMode, source: "one-shot", session: args.oneShot.session };
+    if (args.oneShot) {
+      const effort = args.oneShot.effort;
+      return { mode: args.mainMode, source: "one-shot", session: args.oneShot.session, ...(effort && (THINKING_LEVELS as readonly string[]).includes(effort) ? { effort } : {}) };
+    }
     if (!ledgerOn) return undefined;
     // Ledgers come from session entries (untrusted): only a valid mode counts.
     const task = args.task !== undefined ? this.ledgers.get(args.task) : undefined;
@@ -1292,6 +1303,10 @@ export class WorkerPool {
     // Everything below (tiers, prompts, tools, ultra) reads the request's mode, never the session's, for such assignments.
     const requestMode = this.requestModeOf(args, ledgerOn);
     if (requestMode) args = { ...args, mainMode: requestMode.mode };
+    // A one-shot request's --effort (docs/orchestrator.md 14.5): this assignment's baseline thinking (below, after the route), and main's
+    // thinking for the tiers that name main's (`thinking: "main"`, `{ "model": "main" }`); routes and tiers themselves stay as configured.
+    const effort = requestMode?.source === "one-shot" ? requestMode.effort : undefined;
+    const mainThinking = effort ?? args.thinking;
     const ultraMode = args.mainMode === "ultra";
     const mdsdMode = args.mainMode === "mdsd";
     const ledgerNotes: string[] = [];
@@ -1462,9 +1477,10 @@ export class WorkerPool {
     /** Where this assignment's model comes from (run.json, split log): a config tier's model, main's model named by the tier
      * (`config:main`) or inherited (`main`), or a configured route. */
     const modelSource: AssignmentModelSource = configured ? "config" : mainModel ? (tierMain ? "config:main" : "main") : "route";
-    /** Where its thinking comes from, in the same terms (AssignmentThinkingSource): the tier's level, main's named by the tier, main's inherited, a route. */
+    /** Where its thinking comes from, in the same terms (AssignmentThinkingSource): the tier's level, main's named by the tier, main's
+     * inherited, a route; `effort` for a one-shot request's --effort, which replaces all of them for this assignment. */
     const tierApplies = !!configured || !!mainModel && tierMain;
-    const thinkingSource: AssignmentThinkingSource = modelSource === "route" ? "route" : tierApplies && tierLevel ? "config" : tierApplies && inheritsMainThinking(tier) ? "config:main" : "main";
+    const thinkingSource: AssignmentThinkingSource = effort ? "effort" : modelSource === "route" ? "route" : tierApplies && tierLevel ? "config" : tierApplies && inheritsMainThinking(tier) ? "config:main" : "main";
     if (inheritMain && !configured && args.model && !mainModel) modelWarnings.push(`Warning: main model ${sessionModel} is unresolvable in orche's runtime; falling back to configured route ${route.model}.`);
     if (inheritMain && !configured && !args.model) modelWarnings.push(worker && this.manager.session(worker.id).model
       ? "Warning: main model is absent; keeping this worker's current model and thinking."
@@ -1560,12 +1576,24 @@ export class WorkerPool {
     // left (a step level, a recovery step-down, a cancelled run).
     const thinkingPolicy = config.thinkingPolicy ?? DEFAULT_THINKING_POLICY;
     meta.thinkingPolicy = thinkingPolicy;
+    // A one-shot request's --effort is B whatever the tier, route or reused worker says (the implicit floor included; Pi clamps it). The
+    // worker's own B is kept aside: its next assignment without an effort starts from it unless its route sets a level again (a reused
+    // worker whose route is kept, e.g. a specialist, would otherwise start from this request's B: thinking-state.ts nextBaseline).
+    if (effort) {
+      meta.ownBaseline ??= baselineLevel ?? nextBaseline(activeSession);
+      baselineLevel = effort;
+    } else if (meta.ownBaseline !== undefined) {
+      baselineLevel ??= meta.ownBaseline;
+      meta.ownBaseline = undefined;
+    }
     beginThinkingPolicy(activeSession, thinkingPolicy, baselineLevel, args.role);
     // Explicit output budget for Claude via CLIProxyAPI (src/pi/output-cap.ts; orche.config.json `outputCap`).
     configureOutputCap(activeSession, config.outputCap, decision => meta.recordEvent?.({ type: "output_cap", timestamp: Date.now(), worker: meta.id, ...decision }));
     thinkingStateOf(activeSession).onSwitch = change => meta.recordEvent?.({ type: "thinking_change", worker: meta.id, ...change });
     if (activeSession.model) meta.model = `${activeSession.model.provider}/${activeSession.model.id}`;
     meta.thinking = activeSession.thinkingLevel ?? meta.thinking ?? route.thinking ?? "off";
+    /** The level the --effort runs at on this worker's model (B after Pi's clamp). */
+    const effortApplied = effort ? meta.thinking : undefined;
     meta.contextWindow = activeSession.model?.contextWindow ?? meta.contextWindow;
     clearTimeout(meta.timer);
     meta.role = args.role;
@@ -1620,7 +1648,7 @@ export class WorkerPool {
     /** The sub-workers' thinking (SubWorkerThinkingSource): models.worker's level, main's CURRENT thinking named by it
      * (`thinking: "main"`, or `model: "main"` without a level), else the orchestrator's current one. */
     const subThinkingSource: Exclude<SubWorkerThinkingSource, "route"> = subSource === "orchestrator" ? "orchestrator" : workerLevel ? "config" : inheritsMainThinking(workerTier) ? "config:main" : "orchestrator";
-    const subThinking: ThinkingLevel | undefined = subThinkingSource === "config" ? workerLevel : subThinkingSource === "config:main" ? args.thinking ?? "off" : current.thinking;
+    const subThinking: ThinkingLevel | undefined = subThinkingSource === "config" ? workerLevel : subThinkingSource === "config:main" ? mainThinking ?? "off" : current.thinking;
     const subRoute: ModelRoute = subSource === "config:main"
       ? { role: routeRole, model: sessionModel!, thinking: subThinking ?? "off", extendedContext: false }
       : subSource === "config"
@@ -1647,7 +1675,7 @@ export class WorkerPool {
     const advisorOn = singleWorkflow && config.single.advisor && !advisorDeclined;
     const advisorRoute = advisorOn ? helperTierRoute({
       name: "advisor", tiers: advisorTiers(config.routes.models, args.mainMode), current: { ...current, role: "advisor" }, runtime, sessionModel,
-      mainResolvable: !!args.model && !!runtime.getModel(args.model.provider, args.model.id), mainThinking: args.thinking, extendedContext: config.routes.extendedContext, warnings: modelWarnings,
+      mainResolvable: !!args.model && !!runtime.getModel(args.model.provider, args.model.id), mainThinking, extendedContext: config.routes.extendedContext, warnings: modelWarnings,
     }) : undefined;
     const advisorWindow = advisorRoute && (advisorRoute.source === "config:main" || advisorRoute.source === "orchestrator" && mainModel) ? mainWindow : undefined;
     const definitions = requirementDefinitions(handoffRequest);
@@ -1790,7 +1818,11 @@ export class WorkerPool {
         ? `Request mode: ${requestMode.mode} (one-shot /orche ${requestMode.mode}; the session stays in ${requestMode.session ?? "its mode"}). ${keep}.`
         : `Request mode: ${requestMode.mode} (kept from the one-shot /orche ${requestMode.mode} request that ${requestMode.source} ${requestMode.by} belongs to; the session is in ${requestMode.session ?? "another mode"}). ${keep}.`];
     };
-    const modeLines = (): string[] => [...requestLine(), ...(usesStrongTiers(args.mainMode)
+    /** A one-shot request's --effort: the level asked for, the one this worker's model runs it at, and that it ends with the request. */
+    const effortLine = (): string[] => effort
+      ? [`Effort: ${effort} (one-shot /orche ${args.mainMode} --effort ${effort}): ${meta.id} runs at ${effortApplied ?? effort}${effortApplied && effortApplied !== effort ? " (the nearest level its model supports)" : ""}${singleWorkflow ? "; sub-workers and the advisor follow it unless their models tier sets a level of its own" : ""}. Later requests, and this worker's or task's continuations, run at the usual levels.`]
+      : [];
+    const modeLines = (): string[] => [...requestLine(), ...effortLine(), ...(usesStrongTiers(args.mainMode)
       ? [`Mode: ${args.mainMode} (orchestrator: ${tierKey && modelSource !== "route" ? `models.${tierKey}` : modelSource === "route" ? "a configured route" : "main's model"}${orchestrating ? `; sub-workers: ${subSource === "orchestrator" ? "the orchestrator's model" : `models.${workerKey}`}` : ""}${advisorRoute ? `; advisor: ${advisorRoute.key ? `models.${advisorRoute.key}` : "the orchestrator's model"}` : ""})`] : []), ...reflectionLines()];
     const reflectionLines = (): string[] => {
       if (!reflection) return [];

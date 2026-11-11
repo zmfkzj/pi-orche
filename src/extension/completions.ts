@@ -3,6 +3,7 @@
  * whole argument string that parseOrcheCommand accepts; the prompt modes end with a space so the prompt can be typed right away.
  */
 import { MAIN_MODES, type MainMode } from "../orchestration/routing.js";
+import { THINKING_LEVELS } from "../pi/thinking-levels.js";
 
 export interface CommandCompletion { value: string; label: string; description?: string }
 
@@ -37,10 +38,20 @@ export function orcheCompletions(workerIds: readonly string[] = []): CommandComp
   return items.filter(item => !seen.has(item.value) && !!seen.add(item.value));
 }
 
+/**
+ * `<mode> --effort <level> ` for a one-shot mode, offered only once `--` follows the mode word (a plain `<mode> ` stays a free prompt
+ * with no suggestions); each ends with a space so the prompt follows.
+ */
+function effortCompletions(typed: string): CommandCompletion[] {
+  const mode = MAIN_MODES.find(item => typed.startsWith(`${item} --`));
+  if (!mode) return [];
+  return THINKING_LEVELS.map(level => ({ value: `${mode} --effort ${level} `, label: `${mode} --effort ${level} <prompt>`, description: `This request at reasoning effort ${level} (session and config unchanged)` }));
+}
+
 /** Candidates starting with the typed text; a lone exact match is dropped so Enter submits the command instead of re-applying it. */
 export function completeOrcheArguments(prefix: string, workerIds: readonly string[] = []): CommandCompletion[] | null {
   const typed = prefix.trimStart();
-  const items = orcheCompletions(workerIds).filter(item => item.value.startsWith(typed));
+  const items = [...orcheCompletions(workerIds), ...effortCompletions(typed)].filter(item => item.value.startsWith(typed));
   if (items.length === 0 || (items.length === 1 && items[0]!.value === typed)) return null;
   return items;
 }

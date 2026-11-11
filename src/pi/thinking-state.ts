@@ -136,6 +136,16 @@ function apply(session: ThinkingSession, state: ThinkingState, level: string | u
 }
 
 /**
+ * The baseline an assignment start without one of its own takes (see {@link beginThinking}): a level set on the session by someone else
+ * since this module last set one, otherwise the previous B, otherwise the session's level.
+ */
+export function nextBaseline(session: ThinkingSession): string {
+  const state = thinkingStateOf(session);
+  const current = session.thinkingLevel ?? "off";
+  return state.applied !== undefined && current !== state.applied ? current : state.baseline ?? current;
+}
+
+/**
  * Start an assignment: fix B and S and run at B. `baseline` is the assignment's level when its owner knows it (Pi clamps it to the
  * model). Without it: a level set on the session by someone else since this module last set one is the new B (an owner that changed
  * the level directly); otherwise the previous B stays (a recovery or phase level of the previous assignment never becomes B).
@@ -143,8 +153,7 @@ function apply(session: ThinkingSession, state: ThinkingState, level: string | u
  */
 export function beginThinking(session: ThinkingSession, baseline?: string, effortRules?: readonly EffortAliasRule[]): ThinkingState {
   const state = thinkingStateOf(session);
-  const current = session.thinkingLevel ?? "off";
-  const wanted = baseline ?? (state.applied !== undefined && current !== state.applied ? current : state.baseline ?? current);
+  const wanted = baseline ?? nextBaseline(session);
   if (effortRules !== undefined) state.effortRules = effortRules;
   state.override = undefined;
   state.phase = "baseline";

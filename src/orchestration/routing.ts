@@ -123,10 +123,10 @@ export type AssignmentModelSource = "config" | "config:main" | "main" | "route";
 /**
  * Where its thinking level comes from, in the same terms: the tier's own level (`config`), main's current thinking named by the
  * tier (`config:main`: `thinking: "main"`, or `model: "main"` without a level), main's thinking inherited because the tier does
- * not say (`main`), or a route or the reused worker's own (`route`). The level recorded next to it is the one the session runs
- * on, after Pi clamped it to the model.
+ * not say (`main`), or a route or the reused worker's own (`route`); `effort`: a one-shot request's `--effort`, which replaces all
+ * of these for that request's assignments. The level recorded next to it is the one the session runs on, after Pi clamped it to the model.
  */
-export type AssignmentThinkingSource = AssignmentModelSource;
+export type AssignmentThinkingSource = AssignmentModelSource | "effort";
 /** Where a sub-worker's model comes from: `models.worker`'s model (`config`), main's model named by it with `"main"`
  * (`config:main`), the orchestrator's model because it is unset (`orchestrator`), or a specialist's route (`route`). */
 export type SubWorkerModelSource = "config" | "config:main" | "orchestrator" | "route";
