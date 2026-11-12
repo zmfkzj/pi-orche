@@ -138,6 +138,60 @@ describe("test-runner output reductions", () => {
   });
 });
 
+// Shapes from the reduction corpus (experiments/stage-eval/reduction-corpus.ts): outputs the test reducer cut to a line or two
+// and that the agent then reread in full.
+describe("test reduction only removes passing-test progress (change #6)", () => {
+  const listing = (n: number) => ["LICENSE.txt", "README.md", "", "src/pkg:", ...repeat("module_$i.py", n), "", "tests:", ...repeat("test_module_$i.py", n)];
+
+  it("does not treat a directory header, a comment or prose as a test summary", () => {
+    // `ls src tests` printed "tests:" and only that line survived (55 corpus cases).
+    expect(filterOutput("bash", listing(40).join("\n"), { command: "ls; ls src/pkg tests" })).toBeUndefined();
+    for (const header of ["# Fails closed when the lock is held.", "Tests: the outbox case with a real broker", "time: 03:00", "test files changed: 40 attempts"]) {
+      expect(filterOutput("bash", [header, ...repeat("plain line $i of a document", 80)].join("\n"), { command: "cat notes.md" })).toBeUndefined();
+    }
+  });
+
+  it("keeps another command's output next to a passing test run and drops only the passing lines", () => {
+    const result = filtered("git status --short && ls tests && npx vitest run", [
+      " M src/a.ts", "?? src/b.ts", "tests:", "a.test.ts", "b.test.ts", "", " RUN  v3.2.7 /repo", ...passes(120), ...vitestSummary,
+    ]);
+    for (const line of [" M src/a.ts", "?? src/b.ts", "tests:", "a.test.ts", "b.test.ts", " RUN  v3.2.7 /repo", ...vitestSummary]) expect(result.text.split("\n")).toContain(line);
+    expect(result.text).not.toContain("✓");
+    expect(result.omittedLines).toBe(121);
+  });
+
+  it("drops pytest -v and -rA PASSED lines, keeps headers, skips and the footer", () => {
+    const result = filtered("python -m pytest -v -rA", [
+      "============================= test session starts ==============================", "platform linux -- Python 3.14.4, pytest-9.0.1", "collected 81 items",
+      ...repeat("tests/test_mod.py::test_case_$i PASSED                               [ 50%]", 80), "tests/test_mod.py::test_slow SKIPPED (needs db)                       [100%]",
+      "=========================== short test summary info ============================", ...repeat("PASSED tests/test_mod.py::test_case_$i", 80), "SKIPPED [1] tests/test_mod.py:9: needs db",
+      "======================== 80 passed, 1 skipped in 1.20s =========================",
+    ]);
+    expect(result.text).not.toMatch(/test_case_\d+/);
+    expect(result.text).toContain("collected 81 items");
+    expect(result.text).toContain("SKIPPED [1] tests/test_mod.py:9: needs db");
+    expect(result.text).toContain("80 passed, 1 skipped");
+  });
+
+  it("drops the console output of passing tests and node TAP bookkeeping", () => {
+    const vitest = filtered("npx vitest run", [...repeat("stdout | test/a.test.ts > case $i", 40).flatMap(line => [line, "debug: noisy log"]), ...passes(40), ...vitestSummary]);
+    expect(vitest.text).toBe(vitestSummary.join("\n"));
+    const tap = filtered("node --test", [...repeat("# Subtest: case $i", 60).flatMap(line => [line, "ok 1 - case", "  ---", "  duration_ms: 0.4", "  ..."]), "# tests 60", "# pass 60", "# fail 0"]);
+    expect(tap.text).toBe(["# tests 60", "# pass 60", "# fail 0"].join("\n"));
+  });
+
+  it("keeps a failing run's diagnostics and context as before, and stays bounded", () => {
+    const result = filtered("git log --oneline -3; npx vitest run", ["abc123 fix parser", ...passes(150), ...failure(1), ...passes(150), " Test Files  1 failed | 60 passed (61)"]);
+    expect(result.text).toContain("abc123 fix parser");
+    expect(result.text).toContain("AssertionError: expected 1 to be 2");
+    expect(result.text).toContain("logged decisive diagnostic context");
+    expect(result.text).not.toContain("✓");
+    const huge = filterOutput("bash", [...passes(50), ...repeat("unrelated build log line $i with some text to make it long enough", 400), ...vitestSummary].join("\n"), { command: "make && npx vitest run" })!;
+    expect(huge.reason).toMatch(/^specialized summary was too large/);
+    expect(huge.text.length).toBeLessThan(12_000);
+  });
+});
+
 describe("compiler and linter reductions", () => {
   it("collapses duplicate plain tsc errors with up to five locations and indented continuations", () => {
     const result = filtered("tsc --noEmit", [

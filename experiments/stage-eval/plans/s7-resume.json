@@ -1,0 +1,24 @@
+{
+  "out": "results/stage-eval/main",
+  "phase": "s7-resume",
+  "tasks": [
+    "youssofal__mtplx-21",
+    "stravalib__stravalib-709_interface"
+  ],
+  "arms": [
+    {
+      "name": "S7",
+      "kind": "single",
+      "runtime": "s7"
+    }
+  ],
+  "repeats": 1,
+  "seed": "stage-eval-2026-11-12",
+  "concurrency": 2,
+  "scratch": "/var/tmp/pi-arthur/pi-orche/01a1cdc1-73e0-7158-af61-a2b9df812464/W3/scratch",
+  "sweCache": "/var/tmp/pi-arthur/pi-orche/01a1cdc1-73e0-7158-af61-a2b9df812464/W2/swe-cache",
+  "maxRuns": 12,
+  "budgetUsd": 6,
+  "piBin": "/home/arthur/.bun/bin/pi",
+  "firstRepeat": 3
+}

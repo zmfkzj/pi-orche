@@ -115,21 +115,28 @@ function previewLines(analysis: Analysis, numbered: boolean): OutputReduction {
   return { text: preview, omittedLines: lines.length - shown.size, reason };
 }
 
-const TEST_SUMMARY = /^(?:Test (?:Files|Suites)|Tests:|Tests\s{1,40}\d|Snapshots:|Time:|Ran all test suites|Duration\s|Start at\s|Test run finished|# (?:tests|suites|pass|fail|cancelled|skipped|todo|duration_ms)|(?:={1,100}\s{0,40})?\d{1,9} (?:passed|failed)|test result:|FAIL\s{1,40}\S{1,500}\s{1,40}[\d.]{1,20}s|\d{1,9} (?:passing|failing|pending))/i;
+// Runner footers carry counts or timings and are case-sensitive: a directory header ("tests:"), a comment ("# Fails closed") or
+// prose ("Tests: the outbox case …", "time: 03:00") is not a test summary, so it neither classifies an output as test output nor
+// survives as a "summary" while the rest is dropped.
+const TEST_SUMMARY = /^(?:Test Files\s{1,40}\d|Test Suites:\s{0,40}\d|Tests:?\s{1,40}\d|Snapshots:\s{0,40}\d|Time:\s{0,40}[\d.]{1,20}\s{0,40}m?s\b|Ran all test suites|Duration\s{1,40}[\d.]{1,20}m?s\b|Start at\s{1,40}\d|Test run finished|# (?:tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) \d|(?:={1,100}\s{0,40})?\d{1,9} (?:passed|failed)\b|test result:|FAIL\s{1,40}\S{1,500}\s{1,40}[\d.]{1,20}s|\d{1,9} (?:passing|failing|pending)\b)/;
 function testSummary(line: string): boolean {
   const plain = line.trim();
-  return TEST_SUMMARY.test(plain) || (plain.endsWith("=") && /\b(?:passed|failed)\b/i.test(plain));
+  return TEST_SUMMARY.test(plain) || (plain.endsWith("=") && /\d{1,9} (?:passed|failed)\b/.test(plain));
 }
 function testPass(line: string): boolean {
   const plain = line.trim();
-  if (/^(?:[✓√✔]|PASS\b|ok\s{1,40}\d{1,9}\s{1,40}-|ok\s{1,40}\S{1,500}\s{1,40}(?:[\d.]{1,20}s|\(cached\))|\.\.\.|[.s]{1,2000}$)/i.test(plain)) return true;
+  if (/^(?:[✓√✔]|PASS\b|PASSED\s|ok\s{1,40}\d{1,9}\s{1,40}-|ok\s{1,40}\S{1,500}\s{1,40}(?:[\d.]{1,20}s|\(cached\))|\.\.\.|[.s]{1,2000}$)/i.test(plain)) return true;
   if (plain.startsWith("test ") && plain.includes("...") && /\.\.\.\s{1,40}ok\b/.test(plain)) return true;
+  // pytest -v: "tests/test_a.py::test_ok PASSED   [ 50%]"
+  if (/^\S{1,1000}::\S{0,1000}\s{1,40}(?:PASSED|SKIPPED|XFAIL|XPASS)(?:\s{1,40}\[\s{0,40}\d{1,3}%\s{0,40}\])?$/.test(plain)) return true;
   const progress = /\[\s{0,40}\d{1,3}%\s{0,40}\]$/.exec(plain);
   if (progress && /^\.{1,2000}$/.test(plain.slice(0, progress.index).trimEnd().split(/\s+/).at(-1) ?? "")) return true;
   const words = plain.split(/\s+/);
   return /^(?:\[\d{1,3}%\]|[\d.]{1,20}m?s)$/.test(words.at(-1) ?? "")
     && (/^\.{1,2000}$/.test(words.at(-2) ?? "") || /\(\d{1,9} tests?\)/.test(plain));
 }
+/** Runner bookkeeping around passing tests (TAP subtest headers and YAML blocks, node spec suite headers). */
+const RUNNER_NOISE = /^\s{0,40}(?:# Subtest:\s|▶\s|---$|\.\.\.$|duration_ms:|type: '(?:test|suite)')/;
 const FAILURE_HEADER = /^\s{0,40}(?:FAIL\b|FAILED\b|[✗×]|not ok\b|(?:[-─]{1,100}\s{0,40})?(?:Failed Tests|FAILURES|ERRORS)\b|failures:|\d{1,9}\)\s)/i;
 const STACK = /^\s{0,40}(?:at\s|❯\s|File "[^"\n]{0,1000}", line \d{1,9})/;
 
@@ -143,7 +150,8 @@ function testOutput(analysis: Analysis): OutputReduction | undefined {
     const plain = line;
     const summary = testSummary(plain);
     if (FAILURE_HEADER.test(plain)) { inFailure = true; stacks = 0; passingTap = false; inConsole = false; }
-    if (hasFailure && (/stdout\s{0,40}\||stderr\s{0,40}\||Captured std(?:out|err)|console\.(?:log|warn|error)/.test(plain) || (plain.includes("----") && plain.includes("stdout")))) inConsole = true;
+    if (hasFailure ? /stdout\s{0,40}\||stderr\s{0,40}\||Captured std(?:out|err)|console\.(?:log|warn|error)/.test(plain) || (plain.includes("----") && plain.includes("stdout"))
+      : /^\s{0,40}(?:stdout|stderr)\s{0,40}\|\s|Captured std(?:out|err)\b/.test(plain)) inConsole = true;
     if (summary || STATUS.test(plain)) { kept.push(line); continue; }
     if (diagnostic[i]) { kept.push(line); continue; }
     if (testPass(plain)) {
@@ -151,14 +159,19 @@ function testOutput(analysis: Analysis): OutputReduction | undefined {
       // dropping progress at a recognizable runner result, not an arbitrary ✓.
       const runnerResult = (/\.(?:[cm]?[jt]sx?|py|rs)\b/.test(plain) && /\d{1,9}(?:ms|s)|\[\s{0,40}\d{1,3}%/.test(plain))
         || /^\s{0,40}(?:PASS\s|ok\s|test\s)/.test(plain);
-      if (inConsole && !runnerResult) { kept.push(line); continue; }
+      if (inConsole && !runnerResult) { if (hasFailure) kept.push(line); continue; }
       inConsole = false; inFailure = false; passingTap = /^\s{0,40}ok\s{1,40}\d{1,9}\s{1,40}-/.test(plain); continue;
     }
     if (passingTap && /^\s{1,40}(?:---|duration_ms:|type:|\.\.\.)/.test(plain)) continue;
     if (inFailure && STACK.test(plain) && ++stacks > 10) continue;
     // With failures, conservatively retain all non-progress output: code frames,
     // console output (including output preceding a failure), diffs, and unknown text.
-    if (hasFailure || inFailure) kept.push(line);
+    if (hasFailure || inFailure) { kept.push(line); continue; }
+    // A passing run drops only what is known to be passing-test progress, runner bookkeeping and the console output of passing
+    // tests; other text (another command's output in the same bash call, runner headers, warnings-free notes) stays, so the
+    // reduction never hides information that is not about a passing test.
+    if (inConsole || !plain.trim() || RUNNER_NOISE.test(plain)) continue;
+    kept.push(line);
   }
   if (!lines.some(testSummary)) {
     // Go has no aggregate footer; its last package result serves as the summary.
@@ -313,7 +326,7 @@ export function filterOutput(toolName: string, text: string, input?: Record<stri
       specialized = true; candidate = tscOutput(analysis);
     } else if (/\b(?:eslint|biome)\b/.test(command) || sample.some(line => /\d{1,9}:\d{1,9}\s{1,40}(?:error|warning)\s|:\d{1,9}:\d{1,9}\s{1,40}lint\/\S{1,500}/.test(line))) {
       specialized = true; candidate = lintOutput(analysis);
-    } else if (/\b(?:vitest|jest|mocha|pytest)\b|\bnode\b[^\n]{0,500}--test\b|\b(?:go|cargo)\s{1,40}test\b/.test(command)
+    } else if (/\b(?:vitest|jest|mocha|pytest|tox|nox)\b|\bnode\b[^\n]{0,500}--test\b|\b(?:go|cargo|bun|deno)\s{1,40}test\b|\bnpm\s{1,40}(?:run\s{1,40})?test\b|\bpython3?\s{1,40}-m\s{1,40}unittest\b/.test(command)
       || sample.some(line => testSummary(line) || /^(?:ok|FAIL)\s{1,40}\S{1,500}\s{1,40}(?:[\d.]{1,20}s|\(cached\))/.test(line.trim()))) {
       specialized = true; candidate = testOutput(analysis);
     }

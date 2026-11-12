@@ -1,0 +1,14 @@
+{
+  "out": "results/stage-eval/pilot",
+  "phase": "pilot",
+  "tasks": ["d8-build-graph", "stravalib__stravalib-709_interface"],
+  "arms": [{"name": "A", "kind": "pure"}, {"name": "B", "kind": "direct", "runtime": "baseline"}, {"name": "C", "kind": "single", "runtime": "baseline"}, {"name": "D", "kind": "single-advisor", "runtime": "baseline"}],
+  "repeats": 1,
+  "seed": "stage-eval-2026-11-12",
+  "concurrency": 8,
+  "scratch": "/var/tmp/pi-arthur/pi-orche/01a1cdc1-73e0-7158-af61-a2b9df812464/W2/scratch",
+  "sweCache": "/var/tmp/pi-arthur/pi-orche/01a1cdc1-73e0-7158-af61-a2b9df812464/W2/swe-cache",
+  "maxRuns": 12,
+  "budgetUsd": 30,
+  "piBin": "/home/arthur/.bun/bin/pi"
+}

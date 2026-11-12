@@ -1,0 +1,28 @@
+{
+  "out": "results/stage-eval/main",
+  "phase": "image2",
+  "tasks": [
+    "img-console-recording"
+  ],
+  "arms": [
+    {
+      "name": "C",
+      "kind": "single",
+      "runtime": "baseline"
+    },
+    {
+      "name": "S2",
+      "kind": "single",
+      "runtime": "s2"
+    }
+  ],
+  "repeats": 4,
+  "seed": "stage-eval-image-2026-11-12",
+  "concurrency": 4,
+  "scratch": "/var/tmp/pi-arthur/pi-orche/01a1cdc1-73e0-7158-af61-a2b9df812464/W2/scratch",
+  "sweCache": "/var/tmp/pi-arthur/pi-orche/01a1cdc1-73e0-7158-af61-a2b9df812464/W2/swe-cache",
+  "maxRuns": 10,
+  "budgetUsd": 20,
+  "piBin": "/home/arthur/.bun/bin/pi",
+  "firstRepeat": 5
+}

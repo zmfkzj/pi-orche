@@ -6,7 +6,8 @@
  * formatWorkers(), stop(id|"all") and roster() implement the pool slash commands. */
 import { Type, type Static } from "typebox";
 import { getAgentDir, type AgentToolResult, type ModelRegistry, type ModelRuntime, type Skill } from "@earendil-works/pi-coding-agent";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
 import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -49,6 +50,7 @@ import { createAssignmentProjector, type ContextClearedStats } from "../pi/conte
 import { planProgress, recordFailure, recordHandoff, recordPlan, recordResult, renderLedgerForWorker, renderLedgerSummary, renderResumeBriefing, renderTimeoutResume, startLedger, type LedgerEvent, type TaskLedger } from "../single/ledger.js";
 import { appendSplitLog } from "../orchestrator/split-log.js";
 import { ORCHESTRATOR_TEAM_LINE, orchestratorSection, SPLIT_FORMAT, splitError, splitOf, unresolvedError, MAX_SUB_WORKERS, MAX_VERIFICATION_ROUNDS, type SplitDecision } from "../orchestrator/instructions.js";
+import { REGRESSION_RULE, REGRESSION_TOOL, StartingState, createRegressionCheckTool } from "../tools/regression-check.js";
 import { createSpawnTool, outcomeModelUse, scopePaths, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnReason, type SubWorkerOutcome } from "../orchestrator/spawn.js";
 import { createSubWorkerRunner } from "../orchestrator/sub-worker.js";
 import { ADOPT_UNAVAILABLE, createAdoptTool, subWorkerFloor, ultraSection, UltraRun, type UltraState, type UltraSummary } from "../orchestrator/ultra.js";
@@ -178,6 +180,8 @@ export interface TaskDetails {
   compactions?: { count: number; events: CompactionStats[] };
   /** Read telemetry of the assignment (src/pi/read-telemetry.ts): reads, repeated paths, and repeats right after each compaction. */
   rereads?: ReadTelemetry;
+  /** The assignment's regression_check runs (src/tools/regression-check.ts): command, verdict and counts per call. */
+  regression?: StartingState["checks"];
   /** The one-shot `--summary-budget` profile the assignment ran with (absent: standard). */
   summaryBudget?: SummaryBudgetProfile;
   warnings?: string[];
@@ -376,6 +380,8 @@ interface Worker {
   ultraCarry?: { task: string; state: UltraState };
   /** The worker's private scratch directory (outside the workspace), created at its first assignment. */
   scratch?: string;
+  /** The starting state of the current implement assignment (regression_check); cleared when the assignment ends. */
+  startState?: StartingState;
   /** Write roots outside the workspace of the assignment in flight (scratch + configured/assigned roots); cleared when it ends. */
   roots?: WriteRoot[];
   /** Record directory of the worker's last assignment. */
@@ -908,7 +914,7 @@ export function assignmentPrompt(args: Pick<TaskParameters, "role" | "request" |
     explore: 'Investigate independently, read source and reproduce. DO NOT EDIT. Report findings with concrete evidence and optionally data.cause. report_result {kind:"explore",summary,data:{cause,evidence}}.',
     answer: `Strictly read-only.${ultra ? " Run the Ultra mode stages below (sub-workers of a read-only task are read-only too)." : mdsd ? " Follow the MDSD search policy below: first decide whether diversified search pays (sub-workers of a read-only task are read-only too)." : args.orchestrate ? " First decide whether to split the question (Orchestration below; sub-workers of a read-only task are read-only too)." : ""} Inspect relevant files and provide an evidence-backed answer, concrete code references and explanations. Never change files.${workflow ? " Settle ambiguous readings from the Original request and the instructions or sources it names as authoritative, and check the answer against every requirement before reporting: you own its correctness, and main does not review or correct it afterwards. A question only the user can decide goes in data.unresolved, not into a guessed answer." : ""} report_result {kind:"answer",summary:FULL_EVIDENCED_ANSWER,data:{evidence${workflow ? ',checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence"}],unresolved:["a decision only the user can make"]' : ""}${split}}}.${workflow ? " Checklist is required when the request contains R-ids; unresolved may be omitted when there is none." : ""}`,
     implement: workflow
-      ? `Own the task end to end${ultra ? " as its ultra orchestrator (Ultra mode below): the candidates implement, you" : mdsd ? " as its MDSD orchestrator (MDSD search policy below): explorers search, you judge and implement; first decide whether diversified search pays, then" : args.orchestrate ? " as its orchestrator: first decide whether to split it (Orchestration below), then" : ": first"} analyse the requirements and create the Task DAG with task_plan, covering every requirement id. If a requirement can be read more than one way with observably different behaviour, settle it from the Original request text and the instructions, documents or policies the request names as authoritative: choose the reading closest to them, implement it, and report it in data.ambiguities; a conflict those sources cannot settle and only the user can decide also goes in data.unresolved. Then execute nodes sequentially in dependency order, updating statuses, implementing completely, adding or updating tests, running the project's relevant checks and iterating until they pass, preserving unrelated changes. Before reporting, check the result yourself against every requirement and the Original request (outputs that git does not track included) and correct what falls short within this assignment: you own acceptance, and main neither intervenes while you run nor reviews or corrects your result afterwards. Write scope: ${scope}. Finish with report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks],checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence",verifiedBy:"test name or check command that asserts this requirement's acceptance and passed"}],ambiguities:[{id:"R2",readings:["reading A","reading B"],chosen:"reading A"}],unresolved:["a decision only the user can make"]${split}}}. Checklist is required when the request contains R-ids; every met item needs verifiedBy, otherwise report it partial. ambiguities and unresolved may be omitted when there are none.`
+      ? `Own the task end to end${ultra ? " as its ultra orchestrator (Ultra mode below): the candidates implement, you" : mdsd ? " as its MDSD orchestrator (MDSD search policy below): explorers search, you judge and implement; first decide whether diversified search pays, then" : args.orchestrate ? " as its orchestrator: first decide whether to split it (Orchestration below), then" : ": first"} analyse the requirements and create the Task DAG with task_plan, covering every requirement id. ${AMBIGUITY_RULE} Then execute nodes sequentially in dependency order, updating statuses, implementing completely, adding or updating tests, running the project's relevant checks and iterating until they pass, preserving unrelated changes. Before reporting, check the result yourself against every requirement and the Original request (outputs that git does not track included) and correct what falls short within this assignment: you own acceptance, and main neither intervenes while you run nor reviews or corrects your result afterwards. Write scope: ${scope}. Finish with report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks],checklist:[{id:"R1",status:"met" or "unmet" or "partial",evidence:"concrete evidence",verifiedBy:"test name or check command that asserts this requirement's acceptance and passed"}],ambiguities:[{id:"R2",readings:["reading A","reading B"],chosen:"reading A"}],unresolved:["a decision only the user can make"]${split}}}. Checklist is required when the request contains R-ids; every met item needs verifiedBy, otherwise report it partial. ambiguities and unresolved may be omitted when there are none.${ultra || mdsd ? "" : `\n${REGRESSION_RULE}`}`
       : `Implement completely, preserving unrelated changes. Write scope: ${scope}. Run local checks on touched files. report_result {kind:"implement",summary,data:{status:"done" or "blocked",reason,evidence:[checks]}}.`,
     "game-asset": `Game asset production. Create or modify game assets (sprites, sprite sheets/atlases, tilesets, textures, icons/UI art, 3D models, animations, VFX, SFX/music, fonts, and their engine import/metadata files) inside the write scope ${scope}. First detect the engine and the project's conventions (Unity .meta, Godot .import/.tres, Unreal, Phaser/Pixi atlas JSON; existing naming, folder layout, resolution/pixels-per-unit, palette, pivot/origin, power-of-two, compression). Produce assets with locally available tools via bash (check command -v first: ImageMagick, Inkscape, Blender --background with Python, Aseprite --batch, ffmpeg, sox, Python Pillow/numpy, or hand-written SVG/procedural scripts); keep reusable generator scripts with the assets when the project has a place for them, and leave no temp files in the workspace. Never hand-fabricate binary bytes. Verify every output is valid (identify/file/ffprobe/blender), and view raster outputs or rendered previews with the read tool. Do not download third-party assets unless the request allows it; record source and license when you do. report_result {kind:"game-asset",summary,data:{status:"done" or "blocked",reason,outputs:[{path,type,spec}],evidence:[checks]}}. spec is a descriptive string.`,
     video: `Video production. Plan and produce video deliverables inside the write scope ${scope}: script/storyboard/shot list, editing and compositing, motion graphics (code-based such as Remotion, Motion Canvas or manim when the project uses them), subtitles (SRT/VTT), audio mixing and loudness normalization, thumbnails and final encodes. Use locally available tools via bash (check command -v first: ffmpeg/ffprobe, the project's own video tooling, Python, ImageMagick, sox). Render a short draft before long renders; make final encode settings explicit (container, video codec, resolution, fps, CRF/bitrate, pixel format, audio codec/sample rate, loudness target). Verify every output with ffprobe (duration, streams, resolution, fps) and inspect extracted frames with the read tool. Leave no intermediate files in the workspace unless requested. report_result {kind:"video",summary,data:{status:"done" or "blocked",reason,outputs:[{path,type,spec}],evidence:[checks]}}. spec is a descriptive string.`,
@@ -918,6 +924,14 @@ export function assignmentPrompt(args: Pick<TaskParameters, "role" | "request" |
   // An orchestrator is not told it works alone: "You work alone" read as a ban on sub-workers (evaluation v2, docs/orchestrator.md 9).
   return `Assignment: ${args.role}. ${args.orchestrate ? ORCHESTRATOR_TEAM_LINE : "You work alone; there are no peers or backlog."}\n${task}\n\n${instructions[args.role]}${rasterInstructions}${extraInstructions ? `\n${extraInstructions}` : ""}\nStart summary with the conclusion (1–3 sentences), then evidence as path:line references and command outcomes. Do not paste code, diffs or logs the reader can open. Answer summaries stay complete but cite code by location instead of long quotes.\n\n${gitAssignmentLine(grant)}`;
 }
+
+/**
+ * Change #7 (docs/stage-eval.md): requirements are made testable and their material ambiguities surfaced BEFORE implementation, in the
+ * first plan, instead of being reported only at the end. A worker cannot ask mid-run; asking the user means ending the assignment
+ * blocked on the question, and that is reserved for an ambiguity whose wrong reading would waste most of the work or be hard to undo.
+ * A clarification policy stated in the request (an unattended benchmark: "nobody can answer questions during this run") wins.
+ */
+export const AMBIGUITY_RULE = "Acceptance first: before any edit, write for each requirement a testable acceptance criterion (the observable behaviour and the test or check that will show it) in its task_plan node note. If a requirement can be read more than one way with observably different behaviour (a material ambiguity), name it in that note and settle it from the Original request text and the instructions, documents or policies the request names as authoritative: choose the reading closest to them, implement it, and report it in data.ambiguities; a conflict those sources cannot settle and only the user can decide also goes in data.unresolved. You cannot ask the user while you run. Only when such an unsettled ambiguity decides most of the work or a hard-to-undo change (data migration, public API, deletion), and the request states no clarification policy, stop before that part: complete what does not depend on it, then report status blocked with the question, its readings and your recommended reading in data.unresolved, so the user decides. Otherwise never stop for a question: proceed with the closest reading. A clarification policy in the request (for example that nobody can answer questions during the run) takes precedence.";
 
 /** The system instructions of an orche_task worker session; `spawn`: the session has orche_spawn (single workflow, `single.spawn`). */
 export function workerSystemInstructions(spawn: boolean): string {
@@ -1080,10 +1094,13 @@ export class WorkerPool {
           if (held) return held;
           await worker.advisor?.beforeReport();
         }
-        const blocked = await this.guard(worker, name, input);
+        // regression_check runs a shell command (twice): the same guards and Bash safety review as a bash call.
+        if (name === REGRESSION_TOOL && !worker.startState) return `${REGRESSION_TOOL} is available only in a single-workflow implement assignment of a git work tree.`;
+        const asShell = name === REGRESSION_TOOL ? "bash" : name;
+        const blocked = await this.guard(worker, asShell, input);
         if (blocked) return blocked;
         // Bash safety review, after the existing guards allowed the call: it can only refuse more, never allow what they refused.
-        const reviewed = await this.reviewBash(worker, name, input);
+        const reviewed = await this.reviewBash(worker, asShell, input);
         if (reviewed) return reviewed;
         await worker.activity?.enter(worker.id, name);
         // A worker that edits before it plans starts the plan advisor at that first edit (single.advisor).
@@ -1558,6 +1575,8 @@ export class WorkerPool {
       meta.thinking = route.thinking ?? "off";
       baselineLevel = route.thinking ?? "off";
       const customTools = [...(images ? [createGenerateImageTool({ cwd: args.cwd, runtime, images })] : []), ...(singleWorkflow ? [taskPlanToolFor(meta, () => this.manager!.session(meta.id))] : []),
+      // regression_check: registered with the single workflow; usable only while an implement assignment has a starting state.
+      ...(singleWorkflow ? [createRegressionCheckTool(() => meta.startState)] : []),
       // orche_spawn: registered once per session; usable only while an orchestrator assignment set `meta.spawn` (the guard refuses it otherwise).
       // Its per-call cap (single.maxSubWorkers) is fixed with the schema here; prompts and the runtime check use the same meta value.
       ...(spawnTool ? [createSpawnTool(() => meta.spawn ?? SPAWN_UNAVAILABLE, { ultra: !!meta.ultraTools, mdsd: !!meta.mdsdTools, ...(meta.maxSubWorkers !== undefined ? { maxSubWorkers: meta.maxSubWorkers } : {}) })] : []),
@@ -1872,7 +1891,7 @@ export class WorkerPool {
       return [`Reflection (single.strongReflection, experiment): ${where}${summary.sameResponseHolds ? `; ${summary.sameResponseHolds} report_result call${summary.sameResponseHolds === 1 ? "" : "s"} of the same response held until it was read` : ""}.`];
     };
     const workflowDetails = () => ({ ...modeDetails(), thinking: meta.thinking, ...(Object.keys(answered).length ? { models: { ...answered } } : {}), ...(meta.plan ? { plan: structuredClone(meta.plan) } : {}), ...policyDetails(),
-      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(singleWorkflow ? readDetails(this.manager!, meta.id) : {}), ...(meta.summaryBudget ? { summaryBudget: meta.summaryBudget } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(meta.gui ? { gui: true as const } : {}), ...(meta.webFetch ? { webFetch: true as const } : webFetch.unavailable ? { webFetchUnavailable: webFetch.unavailable } : {}), ...(meta.codeGraph ? { codeGraph: true as const } : codeGraph.unavailable ? { codeGraphUnavailable: codeGraph.unavailable } : {}), ...(reflection ? { reflection: reflection.summary() } : {}), ...spawnedDetails() });
+      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(singleWorkflow ? readDetails(this.manager!, meta.id) : {}), ...(meta.startState?.checks.length ? { regression: [...meta.startState.checks] } : {}), ...(meta.summaryBudget ? { summaryBudget: meta.summaryBudget } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(meta.gui ? { gui: true as const } : {}), ...(meta.webFetch ? { webFetch: true as const } : webFetch.unavailable ? { webFetchUnavailable: webFetch.unavailable } : {}), ...(meta.codeGraph ? { codeGraph: true as const } : codeGraph.unavailable ? { codeGraphUnavailable: codeGraph.unavailable } : {}), ...(reflection ? { reflection: reflection.summary() } : {}), ...spawnedDetails() });
     let requests = 0;
     /** Provider-reported cost of this assignment's own requests (the split log); undefined while none was reported. */
     let ownCostUSD: number | undefined;
@@ -2056,7 +2075,7 @@ export class WorkerPool {
         ...(extra.summary ? { summary: extra.summary } : {}),
         ...(extra.failure ? { failure: extra.failure } : {}),
         ...(status === "cancelled" && this.options.controller.cancelledByUser ? { cancelledByUser: true } : {}),
-        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs, model: details.model, thinking: details.thinking, ...(details.models ? { models: { ...details.models } } : {}), modelSource, thinkingSource, checklist: details.checklist, plan: details.plan, compactions: details.compactions, ...(details.rereads ? { rereads: details.rereads } : {}), ...(details.summaryBudget ? { summaryBudget: details.summaryBudget } : {}), warnings: details.warnings, ...(details.split ? { split: details.split } : {}), ...(details.thinkingPolicy ? { thinkingPolicy: details.thinkingPolicy } : {}), ...(details.mode ? { mode: details.mode } : {}), ...(details.ultra ? { ultra: details.ultra } : {}), ...(details.mdsd ? { mdsd: details.mdsd } : {}) },
+        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs, model: details.model, thinking: details.thinking, ...(details.models ? { models: { ...details.models } } : {}), modelSource, thinkingSource, checklist: details.checklist, plan: details.plan, compactions: details.compactions, ...(details.rereads ? { rereads: details.rereads } : {}), ...(details.regression ? { regression: details.regression } : {}), ...(details.summaryBudget ? { summaryBudget: details.summaryBudget } : {}), warnings: details.warnings, ...(details.split ? { split: details.split } : {}), ...(details.thinkingPolicy ? { thinkingPolicy: details.thinkingPolicy } : {}), ...(details.mode ? { mode: details.mode } : {}), ...(details.ultra ? { ultra: details.ultra } : {}), ...(details.mdsd ? { mdsd: details.mdsd } : {}) },
         workspace: { changes: details.changes, otherChanges: details.otherChanges, ...(details.unaudited ? { unaudited: details.unaudited } : {}), ...(details.submodules ? { submodules: details.submodules } : {}), ...(details.headMoved ? { headMoved: details.headMoved } : {}) },
         ...(details.git ? { git: details.git } : {}),
         ...(retired.length ? { retired } : {}),
@@ -2085,6 +2104,12 @@ export class WorkerPool {
       // HEAD before the snapshot: a commit made in between then shows up as a HEAD move instead of vanishing.
       gitBaseline = grant || audit ? await captureGitBaseline(args.cwd, grant, signal) : undefined;
       before = await audit?.snapshot();
+      // regression_check's starting state: the workspace as this implement assignment found it (a private git tree; nothing of the
+      // user's index, worktree or HEAD changes). Unavailable outside git; the tool then says so.
+      if (singleWorkflow && args.role === "implement" && !readOnly) {
+        await meta.startState?.close();
+        meta.startState = await StartingState.capture(args.cwd, join(meta.scratch ?? tmpdir(), `start-state-${Date.now().toString(36)}`), signal).catch(() => undefined);
+      }
       let prefix = "";
       if (reusedContext) {
         const stale = audit && before && meta.tree ? await audit.compare(meta.tree, before) : undefined;
@@ -2356,6 +2381,8 @@ export class WorkerPool {
       if (advisor) { await advisor.finish({ reported: false }).catch(() => undefined); this.advisors.delete(advisor); }
       meta.advisor = undefined;
       meta.reflection = undefined;
+      // The starting-state copy lives only as long as its assignment.
+      if (meta.startState) { const state = meta.startState; meta.startState = undefined; await state.close(); }
       await stopPromise;
       // Whatever happened above, the record ends here (a no-op when the outcome was recorded already) and shows this worker's totals.
       if (record) {

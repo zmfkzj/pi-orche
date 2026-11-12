@@ -7,7 +7,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage as reply, fauxToolCall as call, type FauxResponseStep, type ToolResultMessage } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { createAssignmentProjector } from "../../src/pi/context-projection.js";
-import { IMAGE_CONTEXT_LIMITS, OMITTED_TOOL_IMAGE } from "../../src/pi/image-context.js";
+import { IMAGE_CONTEXT_LIMITS, OMITTED_TOOL_IMAGE, keptImageStart } from "../../src/pi/image-context.js";
 import { createSession } from "../../src/pi/session-factory.js";
 import { fauxRuntime } from "../helpers/faux.js";
 
@@ -48,7 +48,9 @@ describe("image budget on actual worker provider requests", () => {
     await session.prompt("One long GUI assignment");
     expect(requests).toHaveLength(total + 1);
     requests.forEach((request, index) => {
-      expect(imageCount(request)).toBe(Math.min(index, IMAGE_CONTEXT_LIMITS.maxImages));
+      // Batched default: all images up to the ceiling (8), then pruned to 4 and growing again (8 → 4 at the 9th image).
+      expect(imageCount(request)).toBe(index - keptImageStart(Array(index).fill(png.length), IMAGE_CONTEXT_LIMITS));
+      expect(imageCount(request)).toBe(index <= IMAGE_CONTEXT_LIMITS.maxImages ? index : IMAGE_CONTEXT_LIMITS.keepImages + (index - IMAGE_CONTEXT_LIMITS.maxImages - 1));
       expect(results(request)).toHaveLength(index);
       for (const result of results(request)) {
         expect(request.some(m => m.role === "assistant" && m.content.some(b => b.type === "toolCall" && b.id === result.toolCallId))).toBe(true);
@@ -68,7 +70,7 @@ describe("image budget on actual worker provider requests", () => {
     const resumed = await createSession({ cwd: root, route: f.route, modelRuntime: f.runtime, instructions: "test", tools: [], sessionFile: session.sessionFile });
     sessions.push(resumed);
     await resumed.prompt("Continue from the same record");
-    expect(imageCount(requests.at(-1)!)).toBe(IMAGE_CONTEXT_LIMITS.maxImages);
+    expect(imageCount(requests.at(-1)!)).toBe(total - keptImageStart(Array(total).fill(png.length), IMAGE_CONTEXT_LIMITS));
     expect(imageCount(resumed.messages)).toBe(total);
   });
 });

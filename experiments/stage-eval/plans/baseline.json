@@ -1,0 +1,14 @@
+{
+  "out": "results/stage-eval/main",
+  "phase": "baseline",
+  "tasks": ["d8-build-graph", "d1-transactional-outbox", "sqlfluff__sqlfluff-7615", "scientific-python__docstub-123", "tox-dev__tox-3904", "pypa__build-1027", "youssofal__mtplx-21", "stravalib__stravalib-709_interface"],
+  "arms": [{"name": "A", "kind": "pure"}, {"name": "B", "kind": "direct", "runtime": "baseline"}, {"name": "C", "kind": "single", "runtime": "baseline"}, {"name": "D", "kind": "single-advisor", "runtime": "baseline"}],
+  "repeats": 3,
+  "seed": "stage-eval-2026-11-12",
+  "concurrency": 8,
+  "scratch": "/var/tmp/pi-arthur/pi-orche/01a1cdc1-73e0-7158-af61-a2b9df812464/W2/scratch",
+  "sweCache": "/var/tmp/pi-arthur/pi-orche/01a1cdc1-73e0-7158-af61-a2b9df812464/W2/swe-cache",
+  "maxRuns": 110,
+  "budgetUsd": 140,
+  "piBin": "/home/arthur/.bun/bin/pi"
+}
