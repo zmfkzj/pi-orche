@@ -67,8 +67,9 @@ every extension's `session_before_compact` / `session_compact` hooks). Source: `
   `session_before_compact` on; Pi's public API offers no way to hold either, so such a message can still start a run during a
   summary, exactly as it can during `/compact` without orche.
 - **Main only.** The extension that runs this is loaded in the main Pi session; worker, sub-worker and specialist sessions are
-  created with `noExtensions` and keep their own settings (below: 50% for single-workflow workers, off for specialists and by
-  default for `orche_spawn` sub-workers). `print`/`json` runs keep Pi's own behaviour only.
+  created with `noExtensions` and keep their own settings (below: 50% for single-workflow workers unless `workerCompaction`
+  sets a `usageRatio`, off for specialists and by default for `orche_spawn` sub-workers). `print`/`json` runs keep Pi's own
+  behaviour only.
 - **Activation.** A config change applies at the next session start or `/reload`. New orche code applies once the installed
   package has it (a git install: the change pushed, then `pi update --extensions` or `pi update <source>`) and the session is
   reloaded (`/reload`) or restarted.
@@ -87,16 +88,14 @@ every extension's `session_before_compact` / `session_compact` hooks). Source: `
 - `orche_spawn` sub-workers ran with compaction **disabled**: a long sub-worker that reached the window failed (Pi skips overflow
   recovery when compaction is off).
 
-## `workerCompaction` (orche.config.json, opt-in experiment)
+## `workerCompaction` (orche.config.json, opt-in)
 
 ```json
 {
   "workerCompaction": {
-    "policy": "absolute",
-    "triggerTokens": 32000,
-    "keepRecentTokens": 8000,
-    "roles": { "sub-worker": { "triggerTokens": 48000 } },
-    "models": [{ "model": "cliproxyapi/gpt-6-*", "triggerTokens": 32000 }],
+    "usageRatio": 0.7,
+    "roles": { "verify": { "usageRatio": 0.3 }, "sub-worker": { "usageRatio": 0.6 } },
+    "models": [{ "model": "cliproxyapi/gpt-6-*", "usageRatio": 0.4 }],
     "essentials": "extended",
     "subWorkers": true
   }
@@ -105,15 +104,47 @@ every extension's `session_before_compact` / `session_compact` hooks). Source: `
 
 | key | default | meaning |
 |---|---|---|
-| `policy` | `"window-ratio"` | `window-ratio`: the stable 50% trigger. `absolute`: compact once the context passes `triggerTokens` (per model, then per role, then the base value), **never later** than the stable trigger. |
-| `triggerTokens` | — | absolute trigger, ≥ 16384. |
-| `keepRecentTokens` | min(20000, trigger/4) | recent tokens kept verbatim; at most half the trigger. |
+| `usageRatio` | — (0.5) | compact once the worker's context exceeds this fraction of **its own** model's window (0.1 to 0.95, the range of `mainCompaction.usageRatio`). Base value, per role, per model. |
+| `policy` | `"window-ratio"` | `window-ratio`: compact at the worker's ratio (`usageRatio`, else the stable 50%). `absolute` (experiment): compact once the context passes `triggerTokens`, **never later** than the worker's ratio trigger. |
+| `triggerTokens` | — | absolute trigger, ≥ 16384 (only with `policy: "absolute"`; ignored otherwise). |
+| `keepRecentTokens` | see below | recent tokens kept verbatim by an absolute or `usageRatio` trigger; at most half the trigger. |
+| `roles` | — | `{ "<role>": { "usageRatio"?, "triggerTokens"?, "keepRecentTokens"? } }` for `implement`, `answer`, `explore`, `verify` (orche_task workers, by the role of the current assignment) and `sub-worker` (every standard `orche_spawn` sub-worker, whatever its own role). |
+| `models` | — | `[{ "model": "provider/id" (with `*` wildcards), "usageRatio"?, "triggerTokens"?, "keepRecentTokens"? }]`; the first match wins, before roles. |
 | `essentials` | `"basic"` | `basic`: what existed (assignment, DAG, ledger). `extended`: also main's messages, the work log and the checked transcript reference (below). |
-| `subWorkers` | `false` | standard `orche_spawn` sub-workers (not game-asset/video) compact by the same policy (role `sub-worker`) with their own essentials. |
+| `subWorkers` | `false` | standard `orche_spawn` sub-workers (not game-asset/video) compact by the same settings (role `sub-worker`) with their own essentials. |
+
+`"workerCompaction": 0.6` is short for `{ "usageRatio": 0.6 }` (sub-workers stay off).
+
+**Usage ratio per worker.** Each worker session resolves its own settings from its model and role: the first matching `models`
+rule, else its `roles` entry, else the base values, and the chosen rule's fields override the base values one by one (a matching
+model rule without `usageRatio` takes the **base** `usageRatio`, not the role's: the same precedence `triggerTokens` and
+`keepRecentTokens` always had). Settings are read from orche.config.json per assignment and applied at every assignment
+boundary and model switch (`applyTaskCompaction`), so a reused worker gets the ratio of its new role and model, and the guard
+state below starts afresh; one session's settings never affect another's. Configuration distinguishes roles and models, not
+individual workers (two `implement` workers on the same model share one value).
+
+- **Measure.** Pi compacts a worker once its context estimate exceeds `window − reserveTokens`; orche sets
+  `reserveTokens = window − ⌈window × usageRatio⌉`, so the trigger is `⌈window × usageRatio⌉` tokens (strictly more is needed;
+  0.5 is exactly the stable trigger, for odd windows too).
+- **Below 0.5 (early).** A ratio trigger below the stable 50% is an early compaction like an absolute one: it is at least 16384
+  tokens (never above the stable trigger; a window too small for that keeps 50%), keeps `keepRecentTokens` (default
+  min(20000, trigger/4), at most trigger/2), and goes through the preflight below (refusal falls back to the stable 50%).
+- **0.5 and above.** Not early, never refused: keeps Pi's default 20000 recent tokens (as the stable policy) or the configured
+  `keepRecentTokens` (at most half the trigger). A high ratio leaves less room for the next response and the summary request (0.95
+  of 200k leaves 10k); Pi's overflow recovery still applies.
+- **With `policy: "absolute"`.** The ratio replaces 50% as the ceiling (`min(triggerTokens, ratio trigger)`), and a refused early
+  compaction falls back to the ratio when that is 0.5 or more (`fallback: "ratio"`), else to the stable 50%. A role or model
+  rule with only `usageRatio` under the absolute policy uses its ratio trigger.
+- **Invalid values** (outside 0.1–0.95, not a finite number, a string, `null`, an unknown field) fail loading orche.config.json
+  with the offending path (e.g. `config.workerCompaction.roles.verify.usageRatio: expected a fraction of the context window from
+  0.1 to 0.95`), like every other orche.config.json error.
+- **Not covered.** Game-asset/video specialists and library run workers keep compaction off; sub-workers compact only with
+  `subWorkers: true`; the main session uses `mainCompaction`.
 
 Only Pi's own compaction settings change (`reserveTokens = window - trigger`, `keepRecentTokens`): Pi's native compaction stays the
 single engine, so there is no second compactor and no re-entrancy. The settings are applied at every assignment boundary
-(`applyTaskCompaction`). No trigger value is claimed optimal; the evaluation is in `pi-eval-loop/docs/results-ctx-state-1.md`.
+(`applyTaskCompaction`). No trigger value is claimed optimal; the evaluation of absolute triggers is in
+`pi-eval-loop/docs/results-ctx-state-1.md`.
 
 **Headroom.** After a compaction the context holds the system prompt and tool schemas (an orche worker: about 7-10k tokens), Pi's
 summary, the restored essentials and `keepRecentTokens`; the next response must fit after them. Hence the minimum trigger, the cap
@@ -123,15 +154,16 @@ on `keepRecentTokens`, and the loop guard below.
 
 Before Pi discards anything (`session_before_compact`) orche builds the essentials once and, with extended essentials, checks the
 transcript reference: the session must be persisted (records on; an in-memory fallback of `sessionManagerFor` counts as
-unavailable), the file must exist and must already hold the last entry about to be summarized. An **early** compaction (absolute
-policy below the stable trigger, reason `threshold`) is refused when
+unavailable), the file must exist and must already hold the last entry about to be summarized. An **early** compaction (a trigger
+below the stable 50%, from `triggerTokens` or from a `usageRatio` below 0.5; reason `threshold`) is refused when
 
 - the reference is not valid (`reference_invalid`), or the essentials cannot be built or miss a required section (`essentials_invalid`);
 - the previous compaction freed too little or left the context within 15% of the trigger (`loop_guard`);
 - the assignment already ran 40 early compactions (`early_limit`).
 
-A refusal records `compaction_cancelled` with its cause and switches the session to the stable 50% policy for the rest of the
-assignment (bounded: no retry loop; the next assignment starts afresh). Stable threshold, overflow and manual compactions are never
+A refusal records `compaction_cancelled` with its cause and switches the session to the non-early policy for the rest of the
+assignment: the worker's `usageRatio` when it is 0.5 or more (`fallback: "ratio"`), else the stable 50% (`fallback: "stable"`)
+(bounded: no retry loop; the next assignment starts afresh). Stable or late-ratio threshold, overflow and manual compactions are never
 refused (the context must shrink); their essentials say when the transcript cannot be re-read. After a successful compaction
 (`session_compact`) the projector is reset and the essentials are rebuilt; if that fails, the text checked in the preflight is
 restored and `essentialsError` is recorded. A failed summary (`session_compact_failed`) is recorded as `compaction_failed`; Pi
@@ -180,6 +212,49 @@ messages before the turn Pi reuses the previous summary verbatim as the history 
 before this change shrinks only at the next compaction that rewrites it. Whether the provider honours `max_output_tokens`
 exactly is not observable from the records (the compaction record holds the combined usage of both requests).
 
+### Compact profile (`/orche <mode> --summary-budget compact`, opt-in per request)
+
+The budget above is the `standard` profile and stays the default for every session. A one-shot request can ask for `compact`:
+`/orche strong --effort=max --summary-budget=compact <PROMPT>`. The options come right after the mode word, in any order, each at
+most once, and `--` ends them. The option is refused in direct mode. It applies to the orche_task assignments of that one request
+only (`src/extension/workers.ts`: the profile is set at each assignment start, and an assignment without it is `standard` again).
+It also covers their orche_spawn sub-workers when those compact (`workerCompaction.subWorkers`). It is never pinned by a task
+ledger. orche.config.json, main's session and other sessions are not affected. Detection: `package.json`
+`piOrche.capabilities` contains `oneshot.summaryBudget`.
+
+| | standard | compact |
+|---|---|---|
+| budget per summary request | min(32000, catalog `maxTokens` / 4) | min(16000, catalog `maxTokens` / 8) |
+| without a catalog `maxTokens` | 16000 | 8000 |
+| floor after output-limit stops | 4096 | 4096 |
+| claude-fable-5-2 / opus (maxTokens 128000) | 32000 | 16000 |
+| immediate re-send of a cut-off answer | once, at half | once, at half |
+| `max_output_tokens` (`outputCap`) | unchanged | unchanged |
+
+The compact note adds a priority list to the same instruction block:
+- Never drop: decisions with their rationale; unresolved questions, open hypotheses, blockers and failed attempts with their
+  cause; constraints and acceptance criteria from the user or main; findings with their evidence (exact paths, identifiers,
+  numbers, commands and outcomes); what is done, what is in progress and the next steps.
+- Drop first: content that can be read again (a path and what to look for is enough), narration, and superseded detail.
+
+The task essentials (verbatim assignment, messages from main, Task DAG with checkpoints, ledger, extended work log and transcript
+reference) are still restored from orche's state after every compaction, whatever the summary keeps.
+
+**Why 16000.** Research it-0140 (Fable, maxTokens 128000, so the 32000 standard budget) ran nine compactions that all succeeded.
+They took 9.0 minutes on average, about 20% of the wall-clock time. Its summaries stayed at 104–120 KB, roughly the standard
+budget at 3 characters per token. The provider-reported output of a compaction was 47–79k tokens: a split-turn compaction sends
+two requests, and the output includes reasoning at the session's level. In the worker records, `tokensAfter` was 42–69k tokens of
+which the restored essentials were 17–25k characters. Halving the budget is the smallest change that should show a measurable
+effect. It keeps 16000 tokens, about 48 KB, for the narrative state; the assignment, DAG and checkpoints do not depend on it.
+
+What is NOT shown yet:
+- that compact summaries lose nothing a later step needs (quality);
+- the net time saved: it depends on re-reads and on the reasoning share of a summary request, which the budget does not set.
+
+The records below exist to measure both. The comparison has not been run, and no paid replay was done.
+
+Roll back: stop sending the option. No config change is needed.
+
 
 ## Extended essentials (`src/pi/compaction-state.ts`)
 
@@ -203,9 +278,14 @@ last hour). A `records.maxBytes` limit can delete older idle records earlier; th
 
 ## Telemetry (run record `events.jsonl`)
 
-- `compaction`: `reason`, `policy`, `triggerTokens`, `early`, `tokensBefore`/`tokensAfter` (Pi estimates), `summaryUsage` (provider
-  usage of the summary request), `essentialsChars`, `essentialsSections`, `essentialsMissing`, `reference` (`valid`/`unavailable`/`invalid`).
-- `compaction_cancelled` (`cause`, `fallback`) and `compaction_failed` (`errorMessage`).
+- `compaction`: `reason`, `policy`, `triggerTokens`, `usageRatio` (the configured ratio in effect; absent: 50%), `early`, `tokensBefore`/`tokensAfter` (Pi estimates), `summaryUsage` (provider
+  usage of the summary request), `essentialsChars`, `essentialsSections`, `essentialsMissing`, `reference` (`valid`/`unavailable`/`invalid`),
+  `durationMs` (the whole compaction: Pi's `session_before_compact` to `session_compact`, preflight, every summary request and the
+  essentials), `summaryChars` (the summary Pi stored), `summaryBudget` (`{profile, tokens, level}` of the last summary request) and
+  `summaryRequests` (`{requests, retries, ms, outputTokens}`: the summary requests of this compaction, their immediate re-sends, their
+  summed own time and output). `summaryRequests.ms` is part of `durationMs`; never add the two.
+- `compaction_cancelled` (`cause`, `fallback`: `stable` or `ratio`) and `compaction_failed` (`errorMessage`, and `durationMs`,
+  `summaryBudget`, `summaryRequests` as above).
 - `output_cap` with `request: "summary"`: the `max_output_tokens` decision for Pi's summary requests (Claude through CLIProxyAPI;
   `src/pi/output-cap.ts` `withSummaryOutputCap`), recorded when it differs from the previous summary decision. Pi sends summaries
   without its `before_provider_request` hook, so without this view they carried no budget and the proxy default applied. Only
@@ -213,7 +293,23 @@ last hour). A `records.maxBytes` limit can delete older idle records earlier; th
   extensions' and other direct requests through the session runtime keep their payload.
 - `summary_length_stop`: a summary answer that stopped at the output limit: `model`, `budgetTokens` (asked for),
   `nextBudgetTokens`, `outputTokens` (provider-reported), `cap` (the `max_output_tokens` orche sent; absent: none), `retry` (true:
-  re-sent at once; false: the second cut-off answer, returned to Pi, followed by `compaction_failed`).
+  re-sent at once; false: the second cut-off answer, returned to Pi, followed by `compaction_failed`), `profile` (`standard` or `compact`).
+- Result `details.rereads` and run.json `outcome.rereads` (`src/pi/read-telemetry.ts`, every single-workflow assignment): `reads`,
+  `readChars`, `repeats` / `repeatChars` (reads of a path this assignment read before), `paths`, and per compaction
+  `afterCompaction[]` = `{compaction, calls, reads, repeats, repeatChars}` over the first 30 tool calls after it. Here `repeats`
+  counts reads of a path read before that compaction. A repeat after a compaction is a PROXY for context the summary did not keep:
+  it can also be a deliberate re-check or a changed file. `details.summaryBudget` / `outcome.summaryBudget`: the one-shot profile,
+  when one was used.
+
+**Comparing summary budgets** (no model calls; read the records of runs with and without `--summary-budget compact`):
+- Direct measurements:
+  - minutes per compaction (`durationMs`);
+  - summary size (`summaryChars`) and output (`summaryUsage.output`, `summaryRequests.outputTokens`);
+  - failures and re-sends (`compaction_failed`, `summary_length_stop`, `summaryRequests.retries`).
+- Proxies for lost context: post-compaction repeats (`afterCompaction[].repeats` / `repeatChars`), essentials completeness
+  (`essentialsMissing` empty), and checkpoints (restored from the DAG, independent of the summary).
+- Left to the caller's own evaluation: the quality of the work (gate passes, review findings, rework). Two runs are not a
+  controlled comparison.
 - `spawn` events carry each sub-worker's `compactions` (and `compactionEvents` when some were refused or failed).
 
 ## Disable / roll back

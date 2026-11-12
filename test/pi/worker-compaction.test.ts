@@ -10,6 +10,7 @@ import { composeEssentials, renderReference, renderWorkLog } from "../../src/pi/
 import { evidenceLedgerOf } from "../../src/pi/tool-evidence.js";
 import { createSubWorkerRunner, subWorkerCompaction } from "../../src/orchestrator/sub-worker.js";
 import { configureSummaryBudget, type SummaryLengthStop } from "../../src/pi/summary-budget.js";
+import { beginReadTelemetry, POST_COMPACTION_WINDOW, readTelemetry } from "../../src/pi/read-telemetry.js";
 
 /**
  * Worker compaction with the real Pi SDK (AgentSession, native compaction, session JSONL) and a faux model: the absolute policy,
@@ -35,7 +36,7 @@ async function runtimeWith(window: number, maxTokens = 4096) {
 }
 
 /** A worker-like task compaction: verbatim request + work log + reference (extended) or the request alone (basic). */
-function workerCompaction(policyValue: unknown, request: string, sink: { stats: CompactionStats[]; events: CompactionEvent[] }, options: { extended?: boolean; essentials?: () => string } = {}): TaskCompaction {
+function workerCompaction(policyValue: unknown, request: string, sink: { stats: CompactionStats[]; events: CompactionEvent[] }, options: { extended?: boolean; essentials?: () => string; role?: string } = {}): TaskCompaction {
   const settings = parseWorkerCompaction(policyValue);
   return {
     essentials: options.essentials ?? (({ session, reference }) => composeEssentials([
@@ -44,7 +45,7 @@ function workerCompaction(policyValue: unknown, request: string, sink: { stats: 
     ])),
     onCompact: stats => sink.stats.push(stats),
     onEvent: event => sink.events.push(event),
-    policy: model => resolveCompaction(settings, { contextWindow: model.contextWindow, model: `${model.provider}/${model.id}`, role: "implement" }),
+    policy: model => resolveCompaction(settings, { contextWindow: model.contextWindow, model: `${model.provider}/${model.id}`, role: options.role ?? "implement" }),
     retrieval: !!options.extended,
   };
 }
@@ -178,6 +179,47 @@ describe("workerCompaction with the real SDK", () => {
     expect(restored.at(-1)).toContain(JSON.stringify(`Assignment in progress at compaction time (superseded by any later Assignment message):\nRequirements checklist and original request, verbatim:\n${request}`).slice(1, -1));
   });
 
+  it("compaction telemetry: whole duration, summary size, budget profile and its requests; post-compaction re-reads of paths read before; failed compactions carry their duration", async () => {
+    const cwd = await temp();
+    await writeFile(join(cwd, "large.txt"), LARGE);
+    const f = await runtimeWith(200_000, 128_000);
+    f.faux.setResponses(Array(20).fill(script()));
+    const sink = { stats: [] as CompactionStats[], events: [] as CompactionEvent[] };
+    const session = await createSession({ cwd, route: f.route, modelRuntime: f.runtime, tools: ["read"], instructions: "test", sessionFile: join(cwd, "s.jsonl"),
+      taskCompaction: workerCompaction({ policy: "absolute", triggerTokens: 16_384, keepRecentTokens: 2_000 }, "R1", sink) });
+    disposers.push(() => session.dispose());
+    configureSummaryBudget(session, undefined, "compact");
+    beginReadTelemetry(session);
+    await session.prompt("Read large.txt three times.");
+    expect(session.getLastAssistantText()).toBe("done");
+    expect(sink.stats.length).toBeGreaterThan(0);
+    const first = sink.stats[0]!;
+    expect(first.durationMs).toBeGreaterThanOrEqual(0);
+    expect(first.summaryChars).toBe(session.sessionManager.getEntries().find(entry => entry.type === "compaction")!.summary.length);
+    expect(first.summaryBudget).toEqual({ profile: "compact", tokens: 16_000, level: 0 });
+    expect(first.summaryRequests).toMatchObject({ requests: expect.any(Number), retries: 0 });
+    expect(first.summaryRequests!.requests).toBeGreaterThanOrEqual(1);
+    expect(first.summaryRequests!.ms).toBeLessThanOrEqual(first.durationMs! + 5); // the requests' time is part of the whole, never added to it
+    const reads = readTelemetry(session)!;
+    expect(reads).toMatchObject({ reads: 3, repeats: 2, paths: 1 });
+    expect(reads.afterCompaction.length).toBe(sink.stats.length);
+    // Every read after a compaction re-reads large.txt, which was read before it: counted as a post-compaction repeat (a proxy).
+    const afterReads = reads.afterCompaction.reduce((sum, window) => sum + window.reads, 0);
+    expect(reads.afterCompaction.reduce((sum, window) => sum + window.repeats, 0)).toBe(afterReads);
+    expect(reads.afterCompaction.every(window => window.calls <= POST_COMPACTION_WINDOW)).toBe(true);
+    // A failed compaction reports its duration and the budget it asked for.
+    const g = await runtimeWith(200_000, 128_000);
+    g.faux.setResponses(Array(30).fill(script(() => reply("", { stopReason: "error", errorMessage: "summary provider down" }))));
+    const failedSink = { stats: [] as CompactionStats[], events: [] as CompactionEvent[] };
+    const failing = await createSession({ cwd, route: g.route, modelRuntime: g.runtime, tools: ["read"], instructions: "test", sessionFile: join(cwd, "f.jsonl"),
+      taskCompaction: workerCompaction({ policy: "absolute", triggerTokens: 16_384, keepRecentTokens: 2_000 }, "R1", failedSink) });
+    disposers.push(() => failing.dispose());
+    failing.settingsManager.applyOverrides({ retry: { enabled: false } });
+    await failing.prompt("Read large.txt three times.");
+    const failure = failedSink.events.find(event => event.type === "compaction_failed");
+    expect(failure).toMatchObject({ durationMs: expect.any(Number), summaryBudget: { profile: "standard", tokens: 32_000, level: 0 }, summaryRequests: { requests: 1, retries: 0 } });
+  });
+
   it("an essentials callback that fails after the compaction restores the text checked before it and records the error", async () => {
     const cwd = await temp();
     await writeFile(join(cwd, "large.txt"), LARGE);
@@ -203,10 +245,61 @@ describe("workerCompaction with the real SDK", () => {
     disposers.push(() => plain.dispose());
     expect(plain.settingsManager.getCompactionSettings(plain.model).enabled).toBe(false);
   });
+
+  it("usageRatio per role: with one config and the same window and workload, verify compacts above its 30% and implement only above its 80% (never at the old 50%)", async () => {
+    const config = { usageRatio: 0.8, roles: { verify: { usageRatio: 0.3 } } };
+    async function run(role: string) {
+      const cwd = await temp();
+      await writeFile(join(cwd, "large.txt"), LARGE);
+      const f = await runtimeWith(100_000);
+      f.faux.setResponses(Array(30).fill(script(undefined, 10)));
+      const sink = { stats: [] as CompactionStats[], events: [] as CompactionEvent[] };
+      const session = await createSession({ cwd, route: f.route, modelRuntime: f.runtime, tools: ["read"], instructions: "test", sessionFile: join(cwd, "s.jsonl"), taskCompaction: workerCompaction(config, "R1", sink, { role }) });
+      disposers.push(() => session.dispose());
+      const settings = session.settingsManager.getCompactionSettings(session.model);
+      await session.prompt("Read large.txt ten times.");
+      expect(session.getLastAssistantText()).toBe("done");
+      return { settings, sink };
+    }
+    const verify = await run("verify");
+    const implement = await run("implement");
+    expect(verify.settings).toMatchObject({ reserveTokens: 70_000, keepRecentTokens: 7_500 });
+    expect(implement.settings).toMatchObject({ reserveTokens: 20_000, keepRecentTokens: 20_000 });
+    expect(verify.sink.stats.length).toBeGreaterThan(0);
+    expect(verify.sink.stats[0]).toMatchObject({ reason: "threshold", policy: "window-ratio", usageRatio: 0.3, triggerTokens: 30_000, early: true });
+    expect(verify.sink.stats[0]!.tokensBefore).toBeGreaterThan(30_000);
+    expect(verify.sink.stats[0]!.tokensBefore).toBeLessThanOrEqual(50_000);
+    expect(implement.sink.stats.length).toBeGreaterThan(0);
+    for (const stats of implement.sink.stats) expect(stats).toMatchObject({ reason: "threshold", policy: "window-ratio", usageRatio: 0.8, triggerTokens: 80_000, early: false });
+    expect(Math.min(...implement.sink.stats.map(stats => stats.tokensBefore))).toBeGreaterThan(80_000);
+    expect(verify.sink.stats.length).toBeGreaterThan(implement.sink.stats.length);
+    expect([...verify.sink.events, ...implement.sink.events]).toEqual([]);
+  });
+
+  it("a refused early compaction falls back to the configured non-early ratio, or to the stable 50% when the ratio itself is early", async () => {
+    async function refused(policyValue: unknown) {
+      const cwd = await temp();
+      await writeFile(join(cwd, "large.txt"), LARGE);
+      const f = await runtimeWith(200_000);
+      f.faux.setResponses(Array(20).fill(script()));
+      const sink = { stats: [] as CompactionStats[], events: [] as CompactionEvent[] };
+      // In memory: the transcript reference of extended essentials is unavailable, so every early compaction is refused.
+      const session = await createSession({ cwd, route: f.route, modelRuntime: f.runtime, tools: ["read"], instructions: "test", taskCompaction: workerCompaction(policyValue, "R1", sink, { extended: true }) });
+      disposers.push(() => session.dispose());
+      await session.prompt("Read large.txt three times.");
+      return { sink, settings: session.settingsManager.getCompactionSettings(session.model) };
+    }
+    const ratio = await refused({ policy: "absolute", triggerTokens: 16_384, usageRatio: 0.8, essentials: "extended" });
+    expect(ratio.sink.events).toEqual([expect.objectContaining({ type: "compaction_cancelled", cause: "reference_invalid", fallback: "ratio", triggerTokens: 16_384 })]);
+    expect(ratio.settings).toMatchObject({ reserveTokens: 40_000, keepRecentTokens: 20_000 });
+    const early = await refused({ usageRatio: 0.1, essentials: "extended" });
+    expect(early.sink.events).toEqual([expect.objectContaining({ type: "compaction_cancelled", cause: "reference_invalid", fallback: "stable", triggerTokens: 20_000 })]);
+    expect(early.settings).toMatchObject({ reserveTokens: 100_000 });
+  });
 });
 
 describe("orche_spawn sub-worker compaction", () => {
-  async function runSub(compaction: unknown) {
+  async function runSub(compaction: unknown, reads = 3) {
     const cwd = await temp();
     await writeFile(join(cwd, "large.txt"), LARGE);
     const f = await runtimeWith(40_000);
@@ -214,7 +307,7 @@ describe("orche_spawn sub-worker compaction", () => {
     let restored = "";
     const respond: FauxResponseStep = context => {
       if (isSummary(context)) return reply("SUMMARY");
-      if (step++ < 3) return tool("read", { path: "large.txt" });
+      if (step++ < reads) return tool("read", { path: "large.txt" });
       restored = JSON.stringify(context.messages);
       return tool("report_result", { kind: "answer", summary: "read it", data: { checklist: [{ id: "R1", status: "met", evidence: "large.txt:1", verifiedBy: "read large.txt" }] } });
     };
@@ -241,6 +334,15 @@ describe("orche_spawn sub-worker compaction", () => {
     expect(restored).toContain("SUBTASK R1: read large.txt and report");
     expect(restored).toContain("W1.1.jsonl");
     expect(restored).not.toContain("Messages from main");
+  });
+
+  it("a sub-worker compacts at the usage ratio of role sub-worker: a later ratio than 50% keeps it uncompacted, an earlier one compacts", async () => {
+    // Two reads (~23k tokens) in a 40k window: above the stable 20k trigger, below 90% (36k), above a sub-worker ratio of 0.45 (18k).
+    expect((await runSub({ subWorkers: true }, 2)).outcome.compactions).toBeGreaterThan(0);
+    const late = await runSub({ subWorkers: true, roles: { "sub-worker": { usageRatio: 0.9 } } }, 2);
+    expect(late.outcome.status).toBe("done");
+    expect(late.outcome.compactions).toBe(0);
+    expect((await runSub({ subWorkers: true, usageRatio: 0.9, roles: { "sub-worker": { usageRatio: 0.45 } } }, 2)).outcome.compactions).toBeGreaterThan(0);
   });
 
   it("subWorkerCompaction essentials hold the sub-worker's prompt only (basic) and require the reference when extended", () => {

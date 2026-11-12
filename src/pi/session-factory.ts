@@ -31,6 +31,9 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { projectImageContext } from "./image-context.js";
 import { lengthRecoveryHandlers, type LengthRecoveryOptions } from "./length-recovery.js";
 import { outputCapHandler, withSummaryOutputCap } from "./output-cap.js";
+import { summaryBudgetUse, takeSummaryRequests, type SummaryBudgetUse, type SummaryRequests } from "./summary-budget.js";
+import { markCompaction, recordToolResult } from "./read-telemetry.js";
+import { readNodeRefusal } from "./read-node-guard.js";
 import { thinkingPolicyOf } from "./thinking-policy.js";
 import { atEffectiveBaseline, thinkingStateOf } from "./thinking-state.js";
 import { BOOKKEEPING_TOOLS, evidenceLedgerOf, recordToolCall, refText } from "./tool-evidence.js";
@@ -117,6 +120,8 @@ export interface CompactionStats {
   reason?: "manual" | "threshold" | "overflow";
   policy?: ResolvedCompaction["policy"];
   triggerTokens?: number;
+  /** The configured `workerCompaction` usage ratio in effect (absent: the stable 50%). */
+  usageRatio?: number;
   early?: boolean;
   essentialsChars?: number;
   essentialsSections?: string[];
@@ -127,11 +132,20 @@ export interface CompactionStats {
   summaryUsage?: { input: number; output: number };
   /** The essentials callback failed after the compaction; the text checked before it was restored instead (or none). */
   essentialsError?: string;
+  /** Wall-clock time of the whole compaction: from Pi's session_before_compact to session_compact (preflight, every summary request
+   *  and the essentials). The summary requests' own time is `summaryRequests.ms`, part of it: never add the two. */
+  durationMs?: number;
+  /** Characters of the summary Pi stored (the essentials restored after it are `essentialsChars`). */
+  summaryChars?: number;
+  /** The summary budget the (last) summary request asked for, its profile and level (summary-budget.ts). */
+  summaryBudget?: SummaryBudgetUse;
+  /** The summary requests of this compaction: count, immediate re-sends after an output-limit stop, their summed time and output tokens. */
+  summaryRequests?: SummaryRequests;
 }
 /** A compaction that did not happen: refused by orche's preflight (`cause`), cancelled by another handler or aborted, or failed. */
 export type CompactionEvent =
-  | { type: "compaction_cancelled"; reason: string; cause: "reference_invalid" | "essentials_invalid" | "loop_guard" | "early_limit" | "aborted"; fallback?: "stable"; tokensBefore?: number; triggerTokens?: number; detail?: string }
-  | { type: "compaction_failed"; reason: string; errorMessage?: string; willRetry: boolean };
+  | { type: "compaction_cancelled"; reason: string; cause: "reference_invalid" | "essentials_invalid" | "loop_guard" | "early_limit" | "aborted"; fallback?: "stable" | "ratio"; tokensBefore?: number; triggerTokens?: number; detail?: string }
+  | { type: "compaction_failed"; reason: string; errorMessage?: string; willRetry: boolean; durationMs?: number; summaryBudget?: SummaryBudgetUse; summaryRequests?: SummaryRequests };
 export interface EssentialsContext {
   session: AgentSession;
   /** The transcript reference checked before this compaction (only with `retrieval`). */
@@ -167,6 +181,8 @@ interface CompactionState {
   cancelling?: boolean;
   /** The last entry before the current assignment (its entries follow it). */
   startEntry?: string;
+  /** When Pi's compaction in progress started (session_before_compact), for its duration. */
+  startedAt?: number;
 }
 const compactionStates = new WeakMap<AgentSession, CompactionState>();
 const compactionStateOf = (session: AgentSession): CompactionState => {
@@ -211,6 +227,8 @@ function createCompactionExtension(options: SessionOptions, getSession: () => Ag
     if (!taskCompaction) return undefined;
     const session = getSession();
     const state = compactionStateOf(session);
+    state.startedAt = Date.now();
+    takeSummaryRequests(session); // this compaction's summary requests are counted from here
     const entries = event.branchEntries;
     const kept = entries.findIndex(entry => entry.id === event.preparation.firstKeptEntryId);
     const discarded = (kept > 0 ? entries[kept - 1] : entries.at(-1))?.id;
@@ -230,10 +248,12 @@ function createCompactionExtension(options: SessionOptions, getSession: () => Ag
     if (!cause) { state.early++; return undefined; }
     state.fallback = cause;
     state.cancelling = true;
+    state.startedAt = undefined;
     state.preflight = undefined;
-    if (session.model) session.settingsManager.applyOverrides({ compaction: piCompactionSettings(stableCompaction(session.model.contextWindow)) });
+    // Back to the non-early policy: the configured usage ratio when it is not early itself (compaction-policy.ts), else the stable 50%.
+    if (session.model) session.settingsManager.applyOverrides({ compaction: piCompactionSettings(resolved.fallback ?? stableCompaction(session.model.contextWindow)) });
     const detail = cause === "reference_invalid" && reference && reference.status !== "valid" ? reference.reason : cause === "essentials_invalid" ? essentialsError ?? `missing: ${preview?.missing.join(", ") ?? "essentials"}` : cause === "loop_guard" ? `previous compaction left ${state.last?.tokensAfter} tokens; trigger ${resolved.triggerTokens}` : undefined;
-    try { taskCompaction.onEvent?.({ type: "compaction_cancelled", reason: event.reason, cause, fallback: "stable", tokensBefore, triggerTokens: resolved.triggerTokens, ...(detail ? { detail } : {}) }); } catch { /* telemetry cannot change the decision */ }
+    try { taskCompaction.onEvent?.({ type: "compaction_cancelled", reason: event.reason, cause, fallback: resolved.fallback ? "ratio" : "stable", tokensBefore, triggerTokens: resolved.triggerTokens, ...(detail ? { detail } : {}) }); } catch { /* telemetry cannot change the decision */ }
     return { cancel: true };
   };
   const handler = (event: SessionCompactEvent) => {
@@ -257,24 +277,39 @@ function createCompactionExtension(options: SessionOptions, getSession: () => Ag
     state.last = { tokensAfter };
     const usage = event.compactionEntry.usage;
     const resolved = state.fallback || !state.resolved ? undefined : state.resolved;
+    const durationMs = state.startedAt !== undefined ? Date.now() - state.startedAt : undefined;
+    state.startedAt = undefined;
+    const summaryBudget = summaryBudgetUse(session);
+    const summaryRequests = takeSummaryRequests(session);
+    const summary = event.compactionEntry.summary;
+    try { markCompaction(session); } catch { /* telemetry only */ }
     taskCompaction?.onCompact?.({
       tokensBefore: event.compactionEntry.tokensBefore, tokensAfter, reason: event.reason,
-      ...(resolved ? { policy: resolved.policy, triggerTokens: resolved.triggerTokens, early: resolved.early } : state.fallback ? { policy: "window-ratio" as const } : {}),
+      ...(resolved ? { policy: resolved.policy, triggerTokens: resolved.triggerTokens, early: resolved.early, ...(resolved.usageRatio !== undefined ? { usageRatio: resolved.usageRatio } : {}) }
+        : state.fallback ? { policy: "window-ratio" as const, ...(state.resolved?.fallback?.usageRatio !== undefined ? { usageRatio: state.resolved.fallback.usageRatio, triggerTokens: state.resolved.fallback.triggerTokens } : {}) } : {}),
       ...(result ? { essentialsChars: result.text.length, essentialsSections: result.sections, essentialsMissing: result.missing } : {}),
       ...(pre?.reference ? { reference: pre.reference.status } : {}),
       ...(usage ? { summaryUsage: { input: usage.input ?? 0, output: usage.output ?? 0 } } : {}),
       ...(essentialsError ? { essentialsError } : {}),
+      ...(durationMs !== undefined ? { durationMs } : {}),
+      ...(typeof summary === "string" ? { summaryChars: summary.length } : {}),
+      ...(summaryBudget ? { summaryBudget } : {}),
+      ...(summaryRequests ? { summaryRequests } : {}),
     });
   };
   const failed = (event: SessionCompactFailedEvent) => {
     const session = getSession();
     const state = compactionStateOf(session);
     state.preflight = undefined;
+    const durationMs = state.startedAt !== undefined ? Date.now() - state.startedAt : undefined;
+    state.startedAt = undefined;
     if (state.cancelling) { state.cancelling = false; return; }
+    const summaryBudget = summaryBudgetUse(session);
+    const summaryRequests = takeSummaryRequests(session);
     try {
       options.taskCompaction?.onEvent?.(event.aborted
         ? { type: "compaction_cancelled", reason: event.reason, cause: "aborted", ...(event.errorMessage ? { detail: event.errorMessage } : {}) }
-        : { type: "compaction_failed", reason: event.reason, ...(event.errorMessage ? { errorMessage: event.errorMessage } : {}), willRetry: event.willRetry });
+        : { type: "compaction_failed", reason: event.reason, ...(event.errorMessage ? { errorMessage: event.errorMessage } : {}), willRetry: event.willRetry, ...(durationMs !== undefined ? { durationMs } : {}), ...(summaryBudget ? { summaryBudget } : {}), ...(summaryRequests ? { summaryRequests } : {}) });
     } catch { /* telemetry only */ }
   };
   return { path, resolvedPath: path, hidden: true, sourceInfo: createSyntheticSourceInfo(path, { source: "orche" }),
@@ -284,7 +319,8 @@ function createCompactionExtension(options: SessionOptions, getSession: () => Ag
  * Worker-session hygiene that every orche session gets: output-limit recovery (length-recovery.ts), a suggestion on Pi's bare
  * `Tool X not found` result (unknown-tool.ts), the explicit output budget of Claude requests through CLIProxyAPI (output-cap.ts), and
  * the tool-call ledger behind checkpoint evidence (tool-evidence.ts: a `[orche ref Tn]` line on tool results when the assignment's
- * thinking policy links evidence). None of them re-routes a tool call.
+ * thinking policy links evidence), and the tool boundary of read nodes (read-node-guard.ts: only read-only tools while a Task DAG node
+ * marked read:true runs at the read level). None of them re-routes a tool call.
  */
 function createWorkerHygieneExtension(options: SessionOptions, getSession: () => AgentSession | undefined): Extension {
   const path = "<orche:worker-hygiene>";
@@ -298,17 +334,26 @@ function createWorkerHygieneExtension(options: SessionOptions, getSession: () =>
   const toolResult = (event: { toolCallId: string; toolName: string; input?: Record<string, unknown>; isError: boolean; content: unknown[]; structuredContent?: unknown }) => {
     const session = getSession();
     if (!session) return undefined;
+    try { recordToolResult(session, event); } catch { /* telemetry only */ }
     const thinking = thinkingStateOf(session);
     const running = thinkingPolicyOf(session)?.plan?.nodes.find(node => node.status === "running")?.id;
     const record = recordToolCall(session, event, { request: thinking.requestSeq, ...(thinking.requestLevel ? { level: thinking.requestLevel } : {}), atBaseline: atEffectiveBaseline(thinking, thinking.requestLevel), ...(running ? { node: running } : {}) });
     if (!evidenceLedgerOf(session).tag || BOOKKEEPING_TOOLS.has(event.toolName)) return undefined;
     return { content: [...event.content, { type: "text" as const, text: refText(record) }], ...(event.structuredContent !== undefined ? { structuredContent: event.structuredContent } : {}) };
   };
+  // Read nodes (read-node-guard.ts): only read-only tools while a read node runs at the read level, in every mode.
+  const toolCall = (event: { toolName: string }) => {
+    const session = getSession();
+    if (!session) return undefined;
+    const reason = readNodeRefusal(session, event.toolName);
+    return reason === undefined ? undefined : { block: true, reason };
+  };
   return {
     path, resolvedPath: path, hidden: true,
     sourceInfo: createSyntheticSourceInfo(path, { source: "orche" }),
     handlers: new Map([
       ["message_end", [messageEnd as never]],
+      ["tool_call", [toolCall as never]],
       ["session_before_compact", [length.session_before_compact as never]],
       ["agent_before_settle", [length.agent_before_settle as never]],
       ["before_provider_request", [outputCap as never]],

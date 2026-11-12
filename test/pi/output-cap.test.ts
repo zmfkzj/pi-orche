@@ -17,7 +17,7 @@ import { AgentManager } from "../../src/agent/agent-manager.js";
 import { orchestrationResultSchemas } from "../../src/orchestration/result-schemas.js";
 import { WORKER_TOOL_NAMES } from "../../src/tools/index.js";
 import { decideOutputCap, configureOutputCap, lastOutputCap, MIN_OUTPUT_CAP, summarySystemPrompt, type OutputCapDecision, type OutputCapSettings } from "../../src/pi/output-cap.js";
-import { configureSummaryBudget, summaryBudgetLevel, summaryBudgetTokens, SUMMARY_BUDGET_MAX, SUMMARY_BUDGET_MIN, SUMMARY_BUDGET_UNKNOWN, type SummaryLengthStop } from "../../src/pi/summary-budget.js";
+import { configureSummaryBudget, summaryBudgetLevel, summaryBudgetProfile, summaryBudgetTokens, summaryBudgetUse, SUMMARY_BUDGET_COMPACT_MAX, SUMMARY_BUDGET_COMPACT_UNKNOWN, SUMMARY_BUDGET_MAX, SUMMARY_BUDGET_MIN, SUMMARY_BUDGET_UNKNOWN, type SummaryLengthStop } from "../../src/pi/summary-budget.js";
 import { createSession } from "../../src/pi/session-factory.js";
 import { parseOutputCapConfig } from "../../src/extension/config.js";
 import { beginThinkingPolicy, PHASE_THINKING_POLICY } from "../../src/pi/thinking-policy.js";
@@ -388,7 +388,7 @@ describe("Pi's summary requests (compaction) through orche's session factory", (
     expect(sent[1]!.prompt).toContain("The previous attempt at this summary stopped at the response limit and was discarded");
     expect(sent[2]!.prompt).not.toContain("stopped at the response limit"); // the turn prefix is a fresh request at the raised level
     expect(sent.map(entry => entry.cap)).toEqual([128_000, 128_000, 128_000]);
-    expect(stops).toEqual([{ type: "summary_length_stop", model: `${env.faux.provider.id}/claude-opus-5-5`, budgetTokens: 32_000, nextBudgetTokens: 16_000, outputTokens: expect.any(Number), cap: 128_000, retry: true }]);
+    expect(stops).toEqual([{ type: "summary_length_stop", model: `${env.faux.provider.id}/claude-opus-5-5`, profile: "standard", budgetTokens: 32_000, nextBudgetTokens: 16_000, outputTokens: expect.any(Number), cap: 128_000, retry: true }]);
     expect(summaryBudgetLevel(session)).toBe(1);
   });
 
@@ -443,6 +443,47 @@ describe("Pi's summary requests (compaction) through orche's session factory", (
     expect(stops).toEqual([]);
     expect(summaryBudgetLevel(session)).toBe(0);
   });
+
+  it("compact profile: half the standard budget with the priority list, the same cap, the same one immediate retry and floor; standard again at the next assignment", async () => {
+    const env = await setup();
+    const { session } = await open(env, "claude-opus-5-5");
+    const stops: SummaryLengthStop[] = [];
+    configureSummaryBudget(session, event => stops.push(event), "compact");
+    expect(summaryBudgetProfile(session)).toBe("compact");
+    const sent: Sent[] = [];
+    expect(await compactWith(env, session, [answer(sent, "History summary"), answer(sent, "Turn prefix summary")])).toMatchObject({ ok: true });
+    expect(sent.map(entry => budgetOf(entry.prompt))).toEqual([16_000, 16_000]); // min(16000, 128000 / 8), per request
+    for (const entry of sent) {
+      expect(entry.prompt).toContain("Never drop: decisions made and their rationale; unresolved questions, open hypotheses, blockers");
+      expect(entry.prompt).toContain("Drop first: content of files, documents and tool output that can be read again");
+      expect(entry.cap).toBe(128_000); // the provider output cap is untouched: the budget is the instruction
+    }
+    expect(summaryBudgetUse(session)).toEqual({ profile: "compact", tokens: 16_000, level: 0 });
+    // A cut-off compact summary: one immediate re-send at half, recorded with its profile; a second cut-off fails as before.
+    const cut: Sent[] = [];
+    const failed = await compactWith(env, session, [answer(cut, "PARTIAL 1", "length"), answer(cut, "PARTIAL 2", "length")]);
+    expect(failed).toMatchObject({ ok: false });
+    expect(cut.map(entry => budgetOf(entry.prompt))).toEqual([16_000, 8_000]);
+    expect(stops.map(stop => [stop.profile, stop.budgetTokens, stop.nextBudgetTokens, stop.retry])).toEqual([["compact", 16_000, 8_000, true], ["compact", 8_000, 4_096, false]]);
+    expect(summaryBudgetTokens({ maxTokens: 128_000 }, 10, "compact")).toBe(SUMMARY_BUDGET_MIN);
+    expect(summaryBudgetTokens({ maxTokens: 64_000 }, 0, "compact")).toBe(8_000);
+    expect(summaryBudgetTokens({}, 0, "compact")).toBe(SUMMARY_BUDGET_COMPACT_UNKNOWN);
+    expect(summaryBudgetTokens({ maxTokens: 1_000_000 }, 0, "compact")).toBe(SUMMARY_BUDGET_COMPACT_MAX);
+    // The next assignment without the opt-in is standard again; the session's level (2 stops) is kept, so no cut-off request repeats.
+    configureSummaryBudget(session, undefined);
+    expect(summaryBudgetProfile(session)).toBe("standard");
+    expect(summaryBudgetLevel(session)).toBe(2);
+    const after: Sent[] = [];
+    expect(await compactWith(env, session, [answer(after, "H"), answer(after, "T")])).toMatchObject({ ok: true });
+    expect(after.map(entry => budgetOf(entry.prompt))).toEqual([8_000, 8_000]); // 32000 / 2^2
+    for (const entry of after) expect(entry.prompt).not.toContain("Never drop");
+    // Another session on the same runtime is never affected by this session's profile.
+    const other = await open(env, "claude-opus-5-5");
+    const fresh: Sent[] = [];
+    expect(await compactWith(env, other.session, [answer(fresh, "H"), answer(fresh, "T")])).toMatchObject({ ok: true });
+    expect(fresh.map(entry => budgetOf(entry.prompt))).toEqual([32_000, 32_000]);
+  });
+
 
 
   it("the real Codex Responses request body of a compaction carries the budget (body builder, no network)", async () => {

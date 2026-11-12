@@ -35,6 +35,7 @@ export const taskPlanParameters = Type.Object({
     note: Type.Optional(Type.String({ maxLength: 500 })),
     phase: Type.Optional(Type.Union([Type.Literal("step"), Type.Literal("integrate")], { description: "step (default): one piece of the work; integrate: comparing every requirement with the actual changes and checks, final verification" })),
     hard: Type.Optional(Type.Boolean({ description: "true: this step needs full effort (design decision, root cause of an unclear failure, concurrency/security, ambiguous requirement, hard-to-reverse change)" })),
+    read: Type.Optional(Type.Boolean({ description: "true: simple reading only (read and search sources, record what they say; no decision, edit, command or check). It runs at low effort with read-only tools; never for a decision, repair or verification" })),
     parent: Type.Optional(Type.String({ minLength: 1, maxLength: 100, description: "Id of the node this one was split from (re-decomposition); the children together carry the parent's covers" })),
     checkpoint: Type.Optional(checkpointSchema),
   }, { additionalProperties: false }), { minItems: 1, maxItems: MAX_NODES }),
@@ -107,12 +108,12 @@ export function renderTaskPlan(plan: TaskPlan): string {
   const ordered = orderTaskPlan(plan);
   const finished = new Set(ordered.filter(node => ["done", "skipped"].includes(node.status)).map(node => node.id));
   const next = ordered.find(node => node.status === "pending" && node.dependsOn.every(id => finished.has(id)));
-  const tags = (node: TaskPlan["nodes"][number]) => `${node.phase === "integrate" ? " {integrate}" : ""}${node.hard ? " {hard}" : ""}${node.parent ? ` {split of ${node.parent}}` : ""}`;
+  const tags = (node: TaskPlan["nodes"][number]) => `${node.phase === "integrate" ? " {integrate}" : ""}${node.hard ? " {hard}" : ""}${node.read ? " {read}" : ""}${node.parent ? ` {split of ${node.parent}}` : ""}`;
   return [...ordered.map(node => `${node.id} [${node.status}]${tags(node)} ${shorten(node.title)} (${node.covers.join(", ") || "no requirements"})${node.dependsOn.length ? ` <- ${node.dependsOn.join(", ")}` : ""}${node.note ? ` — ${node.note}` : ""}${node.checkpoint ? renderCheckpoint(node.checkpoint) : ""}`), `Next ready: ${next ? `${next.id} — ${shorten(next.title)}` : "none"}`].join("\n");
 }
 
 /**
- * A replacement plan keeps what its nodes already had when it omits it: the phase, the hard flag, the split parent and, while a
+ * A replacement plan keeps what its nodes already had when it omits it: the phase, the hard and read flags, the split parent and, while a
  * node's status is unchanged (a done node stays done), its checkpoint. A reopened node loses its old checkpoint: it no longer stands.
  */
 export function carryOver(previous: TaskPlan | undefined, plan: TaskPlan): TaskPlan {
@@ -127,6 +128,7 @@ export function carryOver(previous: TaskPlan | undefined, plan: TaskPlan): TaskP
         ...node,
         ...(node.phase === undefined && old.phase !== undefined ? { phase: old.phase } : {}),
         ...(node.hard === undefined && old.hard !== undefined ? { hard: old.hard } : {}),
+        ...(node.read === undefined && old.read !== undefined ? { read: old.read } : {}),
         ...(node.parent === undefined && old.parent !== undefined ? { parent: old.parent } : {}),
         ...(node.checkpoint === undefined && old.checkpoint && node.status === old.status ? { checkpoint: old.checkpoint } : {}),
       };
@@ -174,7 +176,7 @@ export interface TaskPlanToolOptions {
  */
 export function createTaskPlanTool(onPlan: (plan: TaskPlan) => void | readonly string[], requiredIds: readonly string[] | (() => readonly string[]) = [], options: TaskPlanToolOptions = {}): ToolDefinition {
   return {
-    name: "task_plan", label: "Task plan", description: `Replace the current Task DAG. Cover every requirement id (bare ids like R3 in covers), execute nodes sequentially in dependency order and update statuses as work progresses. Keep titles short (over ${MAX_TITLE_CHARS} characters they are shortened); details go in note. Optional per node: phase "integrate" for requirement comparison and final verification, hard:true for a step that needs full effort, parent for a node split from another, and a checkpoint when the node is finished (${CHECKPOINT_FORMAT}). Omitted phase, hard, parent and checkpoints of unchanged nodes are kept from the previous plan.`,
+    name: "task_plan", label: "Task plan", description: `Replace the current Task DAG. Cover every requirement id (bare ids like R3 in covers), execute nodes sequentially in dependency order and update statuses as work progresses. Keep titles short (over ${MAX_TITLE_CHARS} characters they are shortened); details go in note. Optional per node: phase "integrate" for requirement comparison and final verification, hard:true for a step that needs full effort, read:true for a node of simple reading only (low effort, read-only tools; never a decision, repair or verification), parent for a node split from another, and a checkpoint when the node is finished (${CHECKPOINT_FORMAT}). Omitted phase, hard, read, parent and checkpoints of unchanged nodes are kept from the previous plan.`,
     parameters: taskPlanParameters,
     execute: async (_id, args) => {
       try {
@@ -186,6 +188,8 @@ export function createTaskPlanTool(onPlan: (plan: TaskPlan) => void | readonly s
         const known = new Set([...incoming.nodes, ...previous?.nodes ?? []].map(node => node.id));
         const badParents = incoming.nodes.filter(node => node.parent !== undefined && (node.parent === node.id || !known.has(node.parent)));
         if (badParents.length) throw new Error(`Invalid parent: ${badParents.map(node => `${node.id} -> ${node.parent}`).join(", ")}; parent names the node (of this or the previous plan) a node was split from.`);
+        const mixedRead = incoming.nodes.filter(node => node.read && (node.hard || node.phase === "integrate"));
+        if (mixedRead.length) throw new Error(`Invalid read nodes: ${mixedRead.map(node => node.id).join(", ")} ${mixedRead.length > 1 ? "are" : "is"} marked read:true and also ${mixedRead.some(node => node.phase === "integrate") ? "phase integrate" : "hard"}; a read node is simple reading only. Set read:false (or split the reading into its own node).`);
         const rendered = renderTaskPlan(incoming); // Validate before cloning or publishing a potentially huge plan.
         checkCheckpoints(previous, incoming, options.checkpointsRequired?.() ?? false);
         const policyNotes = options.validate?.(previous, incoming) ?? [];

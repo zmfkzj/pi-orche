@@ -20,7 +20,7 @@
  * Precedence: the ratio is a ceiling, Pi's integer threshold stays as it is. A reserve that leaves less than `1 - usageRatio`
  * of a window free (e.g. a large `modelOverrides` entry) still compacts earlier; manual `/compact` and overflow recovery are
  * unchanged; `compaction.enabled: false` in Pi's settings turns this off too. Only the main session loads this module: worker
- * sessions are created with `noExtensions` and keep their own policy (src/pi/compaction-policy.ts, 50%).
+ * sessions are created with `noExtensions` and keep their own policy (src/pi/compaction-policy.ts: 50%, or `workerCompaction.usageRatio`).
  *
  * Bounded: one attempt in flight; none while any compaction runs; a failed or cancelled attempt is not retried before the next
  * user input, a model switch or a session start; when the first measured usage after our compaction is still above the

@@ -60,8 +60,9 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { beginThinkingPolicy, checkPolicyPlan, DEFAULT_THINKING_POLICY, onTaskPlan, reportGateError, reportRewriteReason, requireReplan, thinkingPolicySummary, type ThinkingPolicySettings, type ThinkingPolicySummary } from "../pi/thinking-policy.js";
 import { effortMappingFor, type EffortAliasRule } from "../pi/effort-mapping.js";
 import { configureOutputCap } from "../pi/output-cap.js";
-import { configureSummaryBudget } from "../pi/summary-budget.js";
-import { nextBaseline, setThinkingPhase, stepDownLevel, thinkingStateOf } from "../pi/thinking-state.js";
+import { configureSummaryBudget, SUMMARY_BUDGET_PROFILES, type SummaryBudgetProfile } from "../pi/summary-budget.js";
+import { beginReadTelemetry, readTelemetry, type ReadTelemetry } from "../pi/read-telemetry.js";
+import { nextBaseline, READ_LEVEL, setThinkingPhase, stepDownLevel, thinkingStateOf } from "../pi/thinking-state.js";
 import { THINKING_LEVELS } from "../pi/thinking-levels.js";
 import { ADVISOR_TIMEOUT_MS, advisorLines, AssignmentAdvisor, type AdvisorDetails, type AdvisorSource } from "../single/advisor.js";
 import { StrongReflection, type ReflectionSummary } from "../single/reflection.js";
@@ -104,9 +105,10 @@ type TaskArgs = Omit<OrcheRunArgs, "model"> & TaskParameters & {
    * Set while main runs a one-shot `/orche <mode> <prompt>` turn: `mainMode` is that request's mode and `session` the session's own.
    * The assignment runs in the request's mode, and with task ledgers pins it to its task (see {@link RequestMode}). `effort`: the
    * request's `--effort`, this assignment's baseline thinking whatever its tier or route sets, and main's thinking for the tiers that
-   * name it (`"main"`); never pinned, so a later assignment without it runs at the usual levels.
+   * name it (`"main"`); never pinned, so a later assignment without it runs at the usual levels. `summaryBudget`: the request's
+   * `--summary-budget` (the summary budget profile of the worker's sessions); never pinned either.
    */
-  oneShot?: { session: MainMode; effort?: ThinkingLevel };
+  oneShot?: { session: MainMode; effort?: ThinkingLevel; summaryBudget?: SummaryBudgetProfile };
   /** Called once, the moment the worker has its assignment (before it runs): the background job's "started" point. */
   onStarted?: (info: TaskStartedInfo) => void;
 };
@@ -129,7 +131,11 @@ export interface TaskStartedInfo {
  * `/orche <mode> <prompt>` turn) or `task` (it continued, with task ledgers, a task such a request pinned; `by` names it).
  * `session` is the session's own mode at that moment.
  */
-export interface RequestMode { mode: DelegatingMode; source: "one-shot" | "task"; by?: string; session?: MainMode; /** The one-shot request's `--effort` (never kept by a task). */ effort?: ThinkingLevel }
+export interface RequestMode {
+  mode: DelegatingMode; source: "one-shot" | "task"; by?: string; session?: MainMode;
+  /** The one-shot request's `--effort` and `--summary-budget` (never kept by a task). */
+  effort?: ThinkingLevel; summaryBudget?: SummaryBudgetProfile;
+}
 /** Why a worker is gone, and what is left of it for a successor's briefing. */
 export interface GoneWorker {
   id: string;
@@ -170,6 +176,10 @@ export interface TaskDetails {
   ambiguities?: Ambiguity[];
   plan?: TaskPlan;
   compactions?: { count: number; events: CompactionStats[] };
+  /** Read telemetry of the assignment (src/pi/read-telemetry.ts): reads, repeated paths, and repeats right after each compaction. */
+  rereads?: ReadTelemetry;
+  /** The one-shot `--summary-budget` profile the assignment ran with (absent: standard). */
+  summaryBudget?: SummaryBudgetProfile;
   warnings?: string[];
   durationMs: number;
   /**
@@ -372,6 +382,8 @@ interface Worker {
   lastRecord?: string;
   /** The thinking policy of the assignment in flight (orche.config.json `thinkingPolicy`, read per task). */
   thinkingPolicy?: ThinkingPolicySettings;
+  /** The one-shot `--summary-budget` of the assignment in flight (undefined: standard); its sub-workers' sessions take it too. */
+  summaryBudget?: SummaryBudgetProfile;
   /** The plan advisor of the assignment in flight (`single.advisor`); started by its first task_plan or edit, cleared when it ends. */
   advisor?: AssignmentAdvisor;
   /** The strong-mode reflection of the assignment in flight (`single.strongReflection`); cleared when it ends. */
@@ -416,6 +428,12 @@ export function thinkingPolicyInstructions(policy: ThinkingPolicySettings): stri
   }
   return policy.checkpoints ? `Task DAG checkpoints (thinkingPolicy): ${checkpoint}${evidence} ${integrate}` : "";
 }
+
+/**
+ * Read nodes (docs/thinking-policy.md "Read nodes"), every mode and thinking policy: the instruction every single-workflow worker gets.
+ * The runtime holds the boundary (low effort, read-only tools, rework/integration/hard never at it); marking a node is the worker's.
+ */
+export const READ_NODE_INSTRUCTIONS = `Read nodes: mark a Task DAG node read:true only for simple reading, i.e. opening and searching the sources the work needs and recording what they say (paths, values, quotes) in its checkpoint. It runs at ${READ_LEVEL} effort, and only read-only tools work while it runs (read, grep, find, ls, ast_search, codegraph, browser_fetch). Leave read unset for anything that decides, interprets, designs, plans, edits, runs commands, repairs or verifies, even when that work also reads. Such nodes, and every integration, hard or reopened node, run at your baseline effort. When the reading turns into a judgement, finish the read node with its checkpoint and continue in a node without read.`;
 
 /** The step level of `baseline` on the model of `route` (its supported levels; the baseline itself when there is none below). */
 function stepRouteThinking(runtime: { getModel(provider: string, id: string): Parameters<typeof getSupportedThinkingLevels>[0] | undefined }, route: ModelRoute, effortAliases?: readonly EffortAliasRule[]): ThinkingLevel | undefined {
@@ -474,6 +492,16 @@ export function renderMainMessages(messages: readonly InjectedMessage[], maxChar
   let text = lines.join("\n");
   if (text.length > maxChars) text = `${lines.slice(0, 1).join("")}\n…\n${lines.slice(-3).join("\n")}`.slice(0, maxChars);
   return `Messages from main during this assignment, verbatim and oldest first (they amend the assignment; where two conflict the later one wins; advisor and peer notes are advisory and not repeated here):\n${text}`;
+}
+
+/** The assignment's read telemetry for the result and run.json (`rereads`); nothing when the session is gone or read nothing. */
+function readDetails(manager: AgentManager, worker: string): { rereads?: ReadTelemetry } {
+  try {
+    const telemetry = readTelemetry(manager.session(worker));
+    return telemetry ? { rereads: telemetry } : {};
+  } catch {
+    return {};
+  }
 }
 
 function taskCompactionFor(worker: Worker): TaskCompaction {
@@ -1254,8 +1282,10 @@ export class WorkerPool {
   private requestModeOf(args: TaskArgs, ledgerOn: boolean): RequestMode | undefined {
     if (!isDelegatingMode(args.mainMode)) return undefined;
     if (args.oneShot) {
-      const effort = args.oneShot.effort;
-      return { mode: args.mainMode, source: "one-shot", session: args.oneShot.session, ...(effort && (THINKING_LEVELS as readonly string[]).includes(effort) ? { effort } : {}) };
+      const { effort, summaryBudget } = args.oneShot;
+      // SDK callers may pass anything: only valid values count (a bogus one is ignored, as for --effort).
+      return { mode: args.mainMode, source: "one-shot", session: args.oneShot.session, ...(effort && (THINKING_LEVELS as readonly string[]).includes(effort) ? { effort } : {}),
+        ...(summaryBudget && (SUMMARY_BUDGET_PROFILES as readonly string[]).includes(summaryBudget) ? { summaryBudget } : {}) };
     }
     if (!ledgerOn) return undefined;
     // Ledgers come from session entries (untrusted): only a valid mode counts.
@@ -1590,8 +1620,12 @@ export class WorkerPool {
     beginThinkingPolicy(activeSession, thinkingPolicy, baselineLevel, args.role);
     // Explicit output budget for Claude via CLIProxyAPI (src/pi/output-cap.ts; orche.config.json `outputCap`).
     configureOutputCap(activeSession, config.outputCap, decision => meta.recordEvent?.({ type: "output_cap", timestamp: Date.now(), worker: meta.id, ...decision }));
-    // Summary output-limit stops (src/pi/summary-budget.ts); the session's budget level outlives the assignment, like its summary.
-    configureSummaryBudget(activeSession, event => meta.recordEvent?.({ ...event, timestamp: Date.now(), worker: meta.id }));
+    // Summary output-limit stops (src/pi/summary-budget.ts); the session's budget level outlives the assignment, like its summary. The
+    // profile is this assignment's: a one-shot --summary-budget, else standard (an opt-in never outlives its request).
+    const summaryBudget = requestMode?.source === "one-shot" ? requestMode.summaryBudget : undefined;
+    configureSummaryBudget(activeSession, event => meta.recordEvent?.({ ...event, timestamp: Date.now(), worker: meta.id }), summaryBudget ?? "standard");
+    meta.summaryBudget = summaryBudget;
+    beginReadTelemetry(activeSession);
     thinkingStateOf(activeSession).onSwitch = change => meta.recordEvent?.({ type: "thinking_change", worker: meta.id, ...change });
     if (activeSession.model) meta.model = `${activeSession.model.provider}/${activeSession.model.id}`;
     meta.thinking = activeSession.thinkingLevel ?? meta.thinking ?? route.thinking ?? "off";
@@ -1796,13 +1830,17 @@ export class WorkerPool {
     /** The model and thinking this assignment runs on: the session's, after Pi resolved and clamped them (see model-use.ts). */
     const modelUse = () => formatModelUse({ model: meta.model, thinking: meta.thinking, answered });
     const policyDetails = (): Pick<TaskDetails, "thinkingPolicy"> => {
-      if (thinkingPolicy.mode === "fixed" && !thinkingPolicy.checkpoints) return {};
-      try { const summary = thinkingPolicySummary(this.manager!.session(meta.id)); return summary ? { thinkingPolicy: summary } : {}; } catch { return {}; }
+      // Fixed mode without checkpoints shows the policy only when a read node ran (docs/thinking-policy.md "Read nodes").
+      try {
+        const summary = thinkingPolicySummary(this.manager!.session(meta.id));
+        if (!summary || thinkingPolicy.mode === "fixed" && !thinkingPolicy.checkpoints && !summary.requests?.read) return {};
+        return { thinkingPolicy: summary };
+      } catch { return {}; }
     };
     const policyLines = (): string[] => {
       const summary = policyDetails().thinkingPolicy;
       if (!summary) return [];
-      return [`Thinking policy: ${summary.mode}${summary.mode === "phase" ? ` (baseline ${summary.baseline ?? "?"}, steps ${summary.step ?? "?"}): ${summary.switches} level switch${summary.switches === 1 ? "" : "es"}` : " (checkpoints)"}${summary.escalated?.length ? `; at baseline: ${summary.escalated.map(item => `${item.node} (${item.reason})`).join(", ")}` : ""}${summary.redecompositions ? `; ${summary.redecompositions} re-decomposition${summary.redecompositions === 1 ? "" : "s"}` : ""}${summary.falseRedecompositions ? `; ${summary.falseRedecompositions} plan update${summary.falseRedecompositions === 1 ? "" : "s"} did not split the node as asked` : ""}${summary.reportRewrites ? `; ${summary.reportRewrites} report${summary.reportRewrites === 1 ? "" : "s"} written below the baseline rewritten at it` : ""}`];
+      return [`Thinking policy: ${summary.mode}${summary.mode === "phase" ? ` (baseline ${summary.baseline ?? "?"}, steps ${summary.step ?? "?"}): ${summary.switches} level switch${summary.switches === 1 ? "" : "es"}` : thinkingPolicy.checkpoints ? " (checkpoints)" : ` (baseline ${summary.baseline ?? "?"})`}${summary.requests?.read ? `; ${summary.requests.read} of ${summary.requests.total} request${summary.requests.total === 1 ? "" : "s"} in read nodes at ${summary.read ?? "low"}` : ""}${summary.escalated?.length ? `; at baseline: ${summary.escalated.map(item => `${item.node} (${item.reason})`).join(", ")}` : ""}${summary.redecompositions ? `; ${summary.redecompositions} re-decomposition${summary.redecompositions === 1 ? "" : "s"}` : ""}${summary.falseRedecompositions ? `; ${summary.falseRedecompositions} plan update${summary.falseRedecompositions === 1 ? "" : "s"} did not split the node as asked` : ""}${summary.reportRewrites ? `; ${summary.reportRewrites} report${summary.reportRewrites === 1 ? "" : "s"} written below the baseline rewritten at it` : ""}`];
     };
     /** strong and ultra: the mode, the tier the model came from, and (ultra) the stage summary; nothing in single (unchanged details). */
     const modeDetails = (): Pick<TaskDetails, "mode" | "modelTier" | "ultra" | "mdsd" | "requestMode"> => ({
@@ -1834,7 +1872,7 @@ export class WorkerPool {
       return [`Reflection (single.strongReflection, experiment): ${where}${summary.sameResponseHolds ? `; ${summary.sameResponseHolds} report_result call${summary.sameResponseHolds === 1 ? "" : "s"} of the same response held until it was read` : ""}.`];
     };
     const workflowDetails = () => ({ ...modeDetails(), thinking: meta.thinking, ...(Object.keys(answered).length ? { models: { ...answered } } : {}), ...(meta.plan ? { plan: structuredClone(meta.plan) } : {}), ...policyDetails(),
-      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(meta.gui ? { gui: true as const } : {}), ...(meta.webFetch ? { webFetch: true as const } : webFetch.unavailable ? { webFetchUnavailable: webFetch.unavailable } : {}), ...(meta.codeGraph ? { codeGraph: true as const } : codeGraph.unavailable ? { codeGraphUnavailable: codeGraph.unavailable } : {}), ...(reflection ? { reflection: reflection.summary() } : {}), ...spawnedDetails() });
+      ...(singleWorkflow ? { compactions: { count: meta.compactions!.length, events: [...meta.compactions!] } } : {}), ...(singleWorkflow ? readDetails(this.manager!, meta.id) : {}), ...(meta.summaryBudget ? { summaryBudget: meta.summaryBudget } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(meta.gui ? { gui: true as const } : {}), ...(meta.webFetch ? { webFetch: true as const } : webFetch.unavailable ? { webFetchUnavailable: webFetch.unavailable } : {}), ...(meta.codeGraph ? { codeGraph: true as const } : codeGraph.unavailable ? { codeGraphUnavailable: codeGraph.unavailable } : {}), ...(reflection ? { reflection: reflection.summary() } : {}), ...spawnedDetails() });
     let requests = 0;
     /** Provider-reported cost of this assignment's own requests (the split log); undefined while none was reported. */
     let ownCostUSD: number | undefined;
@@ -2018,7 +2056,7 @@ export class WorkerPool {
         ...(extra.summary ? { summary: extra.summary } : {}),
         ...(extra.failure ? { failure: extra.failure } : {}),
         ...(status === "cancelled" && this.options.controller.cancelledByUser ? { cancelledByUser: true } : {}),
-        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs, model: details.model, thinking: details.thinking, ...(details.models ? { models: { ...details.models } } : {}), modelSource, thinkingSource, checklist: details.checklist, plan: details.plan, compactions: details.compactions, warnings: details.warnings, ...(details.split ? { split: details.split } : {}), ...(details.thinkingPolicy ? { thinkingPolicy: details.thinkingPolicy } : {}), ...(details.mode ? { mode: details.mode } : {}), ...(details.ultra ? { ultra: details.ultra } : {}), ...(details.mdsd ? { mdsd: details.mdsd } : {}) },
+        outcome: { status: details.status, requests: details.requests, durationMs: details.durationMs, model: details.model, thinking: details.thinking, ...(details.models ? { models: { ...details.models } } : {}), modelSource, thinkingSource, checklist: details.checklist, plan: details.plan, compactions: details.compactions, ...(details.rereads ? { rereads: details.rereads } : {}), ...(details.summaryBudget ? { summaryBudget: details.summaryBudget } : {}), warnings: details.warnings, ...(details.split ? { split: details.split } : {}), ...(details.thinkingPolicy ? { thinkingPolicy: details.thinkingPolicy } : {}), ...(details.mode ? { mode: details.mode } : {}), ...(details.ultra ? { ultra: details.ultra } : {}), ...(details.mdsd ? { mdsd: details.mdsd } : {}) },
         workspace: { changes: details.changes, otherChanges: details.otherChanges, ...(details.unaudited ? { unaudited: details.unaudited } : {}), ...(details.submodules ? { submodules: details.submodules } : {}), ...(details.headMoved ? { headMoved: details.headMoved } : {}) },
         ...(details.git ? { git: details.git } : {}),
         ...(retired.length ? { retired } : {}),
@@ -2108,6 +2146,7 @@ export class WorkerPool {
             codeGraph: planned => codeGraphCapability(this.options.capability, { cwd: planned.workspace ?? args.cwd, workerId: planned.id, role: planned.role, readOnly: !WRITING_KINDS.has(planned.role) }),
             ...(standardSubRoute !== subRoute ? { verifyRoute: subRoute, verifyThinkingSource: subThinkingSource } : {}),
             ...(thinkingPolicy.mode === "phase" ? { lengthLadder: thinkingPolicy.lengthRecovery } : {}),
+            ...(summaryBudget ? { summaryBudget } : {}),
             specialistRoute: role => resolveSpecialistRoute(config.routes, role, (provider, id) => !!runtime.getModel(provider, id)),
             imageTool: () => config.routes.images ? createGenerateImageTool({ cwd: args.cwd, runtime, images: config.routes.images }) : undefined,
             prompt: (planned, imagesAvailable) => subWorkerPrompt(planned, meta.id, config.routes.verifyCommands ?? [], imagesAvailable, !!ultraRun),
@@ -2150,6 +2189,7 @@ export class WorkerPool {
         orchestrating && args.verificationRounds !== undefined && args.verificationRounds !== MAX_VERIFICATION_ROUNDS ? `Verification rounds for this assignment: at most ${args.verificationRounds} (set by main; this replaces the default of ${MAX_VERIFICATION_ROUNDS}).` : "",
         // The DAG is required for implement; an answer worker that plans gets the same rules from task_plan's own errors and notes.
         singleWorkflow && args.role === "implement" ? thinkingPolicyInstructions(thinkingPolicy) : "",
+        singleWorkflow ? READ_NODE_INSTRUCTIONS : "",
       ].filter(Boolean).join("\n");
       const prompt = `${assignmentPrompt({ ...args, request: handoffRequest, orchestrate: orchestrating, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant, orchestrating ? (ultraRun ? ultraSection(readOnly, maxSubWorkers) : mdsdRun ? mdsdSection(readOnly, maxSubWorkers, config.mdsd ?? DEFAULT_MDSD) : orchestratorSection(undefined, maxSubWorkers)) : "")}${rootsLine ? `\n${rootsLine}` : ""}`;
       const handoff = reusedContext && workflowMode ? prompt.replace(/^(Assignment[^\n]*\n)/, "$1This Assignment message supersedes earlier requirement ids and plans, including any assignment preserved at compaction time. Use only this round's requirements and Task DAG.\n") : prompt;

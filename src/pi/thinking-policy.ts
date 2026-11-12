@@ -13,6 +13,10 @@
  *   step node while it runs, and between two ordinary steps (no switch back to B just to start the next step).
  * - The report phase: from the first report_result call or a report prompt of the runtime, B for every further request. A report
  *   whose request ran below B is discarded and written again at B (reportRewriteReason), never accepted.
+ * In EVERY mode (fixed included; docs/thinking-policy.md "Read nodes"): a running node marked `read: true` (simple reading, no
+ * decision) runs at the read level R (`low`, src/pi/thinking-state.ts readLevelFor) unless it is an integration or hard node or rework;
+ * the session's tool guard (src/pi/read-node-guard.ts) lets only read-only tools run meanwhile. A re-plan or the report phase returns
+ * to B, and a report written at R is rewritten at B like a report written at S.
  * Level changes apply from the next request; task_plan calls, report_result calls and the runtime's report prompts are the
  * boundaries the runtime sees.
  *
@@ -35,7 +39,7 @@
  */
 import type { TaskPlan } from "../tools/task-plan.js";
 import type { EffortAliasRule } from "./effort-mapping.js";
-import { atEffectiveBaseline, beginThinking, hasLowerStep, setThinkingPhase, THINKING_LEVELS, thinkingStateOf, type ThinkingSession } from "./thinking-state.js";
+import { atEffectiveBaseline, beginThinking, hasLowerStep, setThinkingPhase, THINKING_LEVELS, thinkingStateOf, type ThinkingPhase, type ThinkingSession } from "./thinking-state.js";
 import { checkCalls, classifyEvidence, evidenceLedgerOf, resetEvidence, type EvidenceCheck } from "./tool-evidence.js";
 
 export type ThinkingPolicyMode = "fixed" | "phase";
@@ -101,6 +105,8 @@ export interface PolicyState {
   everFinished: Set<string>;
   /** Nodes that run at B whatever their phase, with the reason. */
   escalated: Map<string, string>;
+  /** Rework in every mode (reopened after finished, or its check failed): never at the read level, whatever `escalation` says. */
+  reworked: Set<string>;
   /** The request (thinking-state requestSeq) at which a node was last set running by an accepted plan. */
   runningSince: Map<string, number>;
   /** An integration node was running or done in an accepted plan: new nodes from then on are rework. */
@@ -148,7 +154,7 @@ export function beginThinkingPolicy(session: ThinkingSession, settings: Thinking
   beginThinking(session, baseline, settings.effortAliases ?? []);
   resetEvidence(session, settings.evidence !== "off");
   const state: PolicyState = {
-    settings: { ...settings }, ...(kind ? { kind } : {}), everSeen: new Set(), everFinished: new Set(), escalated: new Map(), runningSince: new Map(),
+    settings: { ...settings }, ...(kind ? { kind } : {}), everSeen: new Set(), everFinished: new Set(), escalated: new Map(), reworked: new Set(), runningSince: new Map(),
     integrationStarted: false, failedCovers: new Set(), lineage: new Map(), replan: false, redecompositions: 0, falseRedecompositions: 0,
     progress: 0, progressRequest: 0, reporting: false, reportRewrites: 0, gateRejections: 0, evidenceVerdicts: {},
   };
@@ -156,7 +162,7 @@ export function beginThinkingPolicy(session: ThinkingSession, settings: Thinking
   return state;
 }
 
-export interface PhaseTarget { phase: "baseline" | "step"; reason: string; node?: string }
+export interface PhaseTarget { phase: ThinkingPhase; reason: string; node?: string }
 
 const atBaseline = (node: PlanNode, settings: ThinkingPolicySettings, escalated: ReadonlyMap<string, string>): string | undefined =>
   node.phase === "integrate" ? `integration node ${node.id}`
@@ -164,13 +170,23 @@ const atBaseline = (node: PlanNode, settings: ThinkingPolicySettings, escalated:
     : settings.escalation && escalated.has(node.id) ? `node ${node.id}: ${escalated.get(node.id)}`
     : undefined;
 
+/**
+ * Whether `node` runs at the read level R (every mode; docs/thinking-policy.md "Read nodes"): a running node marked `read: true`
+ * that is not an integration or hard node and not rework (reopened after it was finished, or its check failed). Undefined: it does not.
+ */
+export const readNode = (node: PlanNode | undefined, reworked: ReadonlySet<string> = new Set()): PlanNode | undefined =>
+  node && node.read && node.status === "running" && node.phase !== "integrate" && !node.hard && !reworked.has(node.id) ? node : undefined;
+
 /** The phase the next request should run in (pure; see the module comment). `current`: the phase the session is in now. */
-export function phaseTarget(settings: ThinkingPolicySettings, plan: TaskPlan | undefined, context: { escalated: ReadonlyMap<string, string>; replan: boolean; current: "baseline" | "step"; reporting?: boolean }): PhaseTarget {
-  if (settings.mode !== "phase") return { phase: "baseline", reason: "fixed policy" };
+export function phaseTarget(settings: ThinkingPolicySettings, plan: TaskPlan | undefined, context: { escalated: ReadonlyMap<string, string>; replan: boolean; current: ThinkingPhase; reporting?: boolean; reworked?: ReadonlySet<string> }): PhaseTarget {
   if (context.reporting) return { phase: "baseline", reason: "report" };
   if (context.replan) return { phase: "baseline", reason: "re-plan" };
   if (!plan) return { phase: "baseline", reason: "planning" };
   const running = plan.nodes.find(node => node.status === "running");
+  // Simple reading runs at R in every mode, whatever the policy (fixed included).
+  const read = readNode(running, context.reworked);
+  if (read) return { phase: "read", reason: `read node ${read.id}`, node: read.id };
+  if (settings.mode !== "phase") return { phase: "baseline", reason: "fixed policy" };
   if (running) {
     const why = atBaseline(running, settings, context.escalated);
     return why ? { phase: "baseline", reason: why, node: running.id } : { phase: "step", reason: `step node ${running.id}`, node: running.id };
@@ -189,15 +205,18 @@ function escalate(state: PolicyState, id: string, reason: string): void {
 
 /** Apply the target phase; returns the line for the task_plan result when the level changes. */
 function steer(session: ThinkingSession, state: PolicyState): string[] {
-  if (state.settings.mode !== "phase") return [];
   const thinking = thinkingStateOf(session);
-  const target = phaseTarget(state.settings, state.plan, { escalated: state.escalated, replan: state.replan, current: thinking.phase, reporting: state.reporting });
+  // Fixed mode changes nothing unless a read node is or was running (a read node's R, then back to B).
+  if (state.settings.mode !== "phase" && thinking.phase !== "read" && !readNode(state.plan?.nodes.find(node => node.status === "running"), state.reworked)) return [];
+  const target = phaseTarget(state.settings, state.plan, { escalated: state.escalated, replan: state.replan, current: thinking.phase, reporting: state.reporting, reworked: state.reworked });
   const before = session.thinkingLevel;
   setThinkingPhase(session, target.phase, target.reason, target.node);
   const after = session.thinkingLevel;
   if (before === after) return [];
   return [target.phase === "step"
     ? `Thinking: the next requests run at ${after}, one level below the baseline ${thinking.baseline} (${target.reason}). Mark a node hard:true before it runs if it needs full effort.`
+    : target.phase === "read"
+    ? `Thinking: the next requests run at ${after} for simple reading (${target.reason}): only read-only tools work until you finish it; record what the sources say, decide nothing here. Edits, commands, decisions and checks belong to the next node without read, at the baseline ${thinking.baseline}.`
     : `Thinking: the next requests run at the baseline ${after} (${target.reason}).`];
 }
 
@@ -326,8 +345,8 @@ export function onTaskPlan(session: ThinkingSession, plan: TaskPlan): string[] {
   const notes: string[] = [];
   const integrationBefore = state.integrationStarted;
   for (const node of plan.nodes) {
-    if ((node.status === "running" || node.status === "pending") && state.everFinished.has(node.id)) escalate(state, node.id, "reopened after it was finished (rework)");
-    if (node.checkpoint?.verification === "failed" && node.status !== "done") escalate(state, node.id, "its verification failed (rework)");
+    if ((node.status === "running" || node.status === "pending") && state.everFinished.has(node.id)) { escalate(state, node.id, "reopened after it was finished (rework)"); state.reworked.add(node.id); }
+    if (node.checkpoint?.verification === "failed" && node.status !== "done") { escalate(state, node.id, "its verification failed (rework)"); state.reworked.add(node.id); }
     if (node.checkpoint?.verification === "failed" || node.status === "blocked") for (const id of node.covers) state.failedCovers.add(id);
   }
   // Rework under a new id: a node that did not exist before, added after the integration started, as a child of a finished node,
@@ -372,7 +391,8 @@ export function onTaskPlan(session: ThinkingSession, plan: TaskPlan): string[] {
 /** A rejected task_plan call or a message from main: plan again at B until the next accepted plan. */
 export function requireReplan(session: ThinkingSession, reason: string): void {
   const state = policies.get(session);
-  if (!state || state.settings.mode !== "phase") return;
+  // Phase mode, and every mode while a read node runs: plan again at B (a rejected plan never keeps the read level).
+  if (!state || state.settings.mode !== "phase" && thinkingStateOf(session).phase !== "read") return;
   state.replan = true;
   setThinkingPhase(session, "baseline", reason);
 }
@@ -413,7 +433,8 @@ export function integrationRunning(session: object): boolean {
  */
 export function beginReportPhase(session: ThinkingSession, reason: string): string | undefined {
   const state = policies.get(session);
-  if (state?.settings.mode === "phase") state.reporting = true;
+  // Every mode: in fixed mode it only matters for read nodes (B is the level otherwise), and keeps a later plan from returning to R.
+  if (state) state.reporting = true;
   setThinkingPhase(session, "baseline", reason);
   return session.thinkingLevel;
 }
@@ -426,14 +447,16 @@ export function beginReportPhase(session: ThinkingSession, reason: string): stri
  */
 export function reportRewriteReason(session: object): string | undefined {
   const state = policies.get(session);
-  if (!state || state.settings.mode !== "phase") return undefined;
+  if (!state) return undefined;
   const thinking = thinkingStateOf(session);
+  // Phase mode: any response below B. Every other mode: a response at a read node's level (a recovery step-down is not checked, as before).
+  if (state.settings.mode !== "phase" && thinking.requestPhase !== "read") return undefined;
   const level = thinking.requestLevel;
   if (level === undefined || atEffectiveBaseline(thinking, level) || !THINKING_LEVELS.includes(level as never)) return undefined;
   state.reportRewrites++;
   beginReportPhase(session as ThinkingSession, "report rewrite");
   const running = state.plan?.nodes.find(node => node.status === "running");
-  return `This report_result was written at the reduced step effort (${level})${running ? ` while node ${running.id} is still running` : ""}; the final report is written at the baseline effort (${thinking.baseline}), which applies from your next request. It is not counted as a failed attempt. Check the integration against every requirement (finish or block the running node with task_plan if needed), then call report_result alone again`;
+  return `This report_result was written at the reduced ${thinking.requestPhase === "read" ? "read" : "step"} effort (${level})${running ? ` while node ${running.id} is still running` : ""}; the final report is written at the baseline effort (${thinking.baseline}), which applies from your next request. It is not counted as a failed attempt. Check the integration against every requirement (finish or block the running node with task_plan if needed), then call report_result alone again`;
 }
 
 /** Whether a report claims full success: implement `status: "done"`, or an answer whose checklist items are all met. */
@@ -475,6 +498,10 @@ export interface ThinkingPolicySummary {
   /** The effort B and S reach the model as, and where that mapping came from (src/pi/effort-mapping.ts). */
   effective?: { baseline?: string; step?: string; source: string; aliases?: Record<string, string> };
   switches: number;
+  /** R: the level read nodes run at (docs/thinking-policy.md "Read nodes"). */
+  read?: string;
+  /** Model requests of the assignment, how many ran below B's effective effort, and how many in a read node. */
+  requests?: { total: number; belowBaseline: number; read: number };
   escalated?: { node: string; reason: string }[];
   redecompositions?: number;
   falseRedecompositions?: number;
@@ -491,6 +518,8 @@ export function thinkingPolicySummary(session: object): ThinkingPolicySummary | 
   const names = thinking.effort?.names;
   return {
     mode: state.settings.mode,
+    requests: { total: thinking.requestSeq, belowBaseline: thinking.requestsBelowBaseline, read: thinking.readRequests },
+    ...(thinking.read ? { read: thinking.read } : {}),
     ...(thinking.baseline ? { baseline: thinking.baseline } : {}),
     ...(thinking.step ? { step: thinking.step } : {}),
     ...(thinking.effort ? { effective: { ...(thinking.baseline ? { baseline: names?.[thinking.baseline] ?? thinking.baseline } : {}), ...(thinking.step ? { step: names?.[thinking.step] ?? thinking.step } : {}), source: thinking.effort.source, ...(Object.keys(thinking.effort.aliases).length ? { aliases: thinking.effort.aliases } : {}) } } : {}),

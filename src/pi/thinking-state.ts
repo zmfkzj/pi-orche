@@ -9,7 +9,8 @@
  *   highest level the model supports whose EFFECTIVE effort is below B's (never `off`; S = B when there is none; src/pi/effort-mapping.ts:
  *   a level a proxy sends as the same effort as B, like CLIProxyAPI's xhigh → max for Claude, is not a step down). S is computed once
  *   from B, never from the current level, so it cannot drift lower step after step;
- * - the phase policy (src/pi/thinking-policy.ts) switches between B and S at Task DAG boundaries;
+ * - the phase policy (src/pi/thinking-policy.ts) switches between B and S at Task DAG boundaries, and in every mode to the read level R
+ *   while a Task DAG node marked `read: true` runs: {@link READ_LEVEL} (`low`) or the nearest supported level below it, never above B;
  * - the legacy output-limit recovery (src/pi/length-recovery.ts) may lower the CURRENT level by one supported level for its last
  *   attempt (`override`), cleared at the next delivered output, the next phase switch or the next assignment.
  *
@@ -46,6 +47,27 @@ export function stepDownLevel(available: readonly string[], level: string, names
   return undefined;
 }
 
+/** The effort of simple reading (Task DAG nodes marked `read: true`; docs/thinking-policy.md "Read nodes"): explicit, not relative to B. */
+export const READ_LEVEL = "low";
+
+/**
+ * R: the level a read node runs at for a model whose levels are `available`. B itself when B's effective effort is not above
+ * {@link READ_LEVEL}'s (R never raises); else the highest available level (never `off`) whose effective effort is at most `low`'s;
+ * B when the model has none (R = B: nothing changes).
+ */
+export function readLevelFor(available: readonly string[], baseline: string, names?: Readonly<Record<string, string>>): string {
+  const cap = (THINKING_LEVELS as readonly string[]).indexOf(READ_LEVEL); // the effort `low` itself, whatever a proxy makes of its name
+  if (effectiveRank(baseline, names) <= cap) return baseline;
+  for (let i = (THINKING_LEVELS as readonly string[]).indexOf(READ_LEVEL); i >= 1; i--) {
+    const candidate = THINKING_LEVELS[i]!;
+    if (available.includes(candidate) && effectiveRank(candidate, names) <= cap) return candidate;
+  }
+  return baseline;
+}
+
+/** Which level the session runs at: B, S (the phase policy's step) or R (a read node). */
+export type ThinkingPhase = "baseline" | "step" | "read";
+
 export interface ThinkingSwitch {
   timestamp: number;
   from: string;
@@ -60,20 +82,28 @@ export interface ThinkingState {
   baseline?: string;
   /** S: the highest supported level whose effective effort is below B's (B when there is none), computed once per assignment. */
   step?: string;
+  /** R: the read level of this assignment ({@link readLevelFor}), computed once with B and S. */
+  read?: string;
   /** `thinkingPolicy.effortAliases` of the assignment (kept until the next assignment that passes them). */
   effortRules?: readonly EffortAliasRule[];
   /** The effective level of each name for the session's model, computed with B and S (records; src/pi/effort-mapping.ts). */
   effort?: EffortMapping;
-  /** Which of the two the phase policy wants now. */
-  phase: "baseline" | "step";
+  /** Which of the three the policy wants now. */
+  phase: ThinkingPhase;
   /** A one-off lower level of the legacy output-limit recovery, above the phase level until cleared. */
   override?: string;
   /** The level this module last set, to tell a change made elsewhere (e.g. the owner's new level) from its own. */
   applied?: string;
   /** The level the latest model request ran at (noted when its response starts; {@link noteRequestLevel}). */
   requestLevel?: string;
+  /** The phase the latest model request ran in (noted with {@link requestLevel}). */
+  requestPhase?: ThinkingPhase;
   /** Model requests of this assignment so far (1 for the first); the request a tool call or task_plan call belongs to. */
   requestSeq: number;
+  /** Requests of this assignment whose level ran below B's effective effort (records: how much of the work ran at S). */
+  requestsBelowBaseline: number;
+  /** Requests of this assignment that ran in the read phase (records). */
+  readRequests: number;
   /** This assignment's level changes (records, result details). */
   switches: ThinkingSwitch[];
   /** Called for every switch (records); must not throw. */
@@ -84,7 +114,7 @@ const states = new WeakMap<object, ThinkingState>();
 
 export function thinkingStateOf(session: object): ThinkingState {
   let state = states.get(session);
-  if (!state) states.set(session, state = { phase: "baseline", switches: [], requestSeq: 0 });
+  if (!state) states.set(session, state = { phase: "baseline", switches: [], requestSeq: 0, requestsBelowBaseline: 0, readRequests: 0 });
   return state;
 }
 
@@ -94,7 +124,7 @@ const available = (session: ThinkingSession): string[] => {
 
 /** The level the state asks for now. */
 export function wantedLevel(state: ThinkingState): string | undefined {
-  return state.override ?? (state.phase === "step" ? state.step : state.baseline);
+  return state.override ?? (state.phase === "step" ? state.step : state.phase === "read" ? state.read ?? state.baseline : state.baseline);
 }
 
 /** The effective level of each name for `session`'s model under the assignment's alias rules. */
@@ -160,10 +190,14 @@ export function beginThinking(session: ThinkingSession, baseline?: string, effor
   state.switches = [];
   state.requestLevel = undefined;
   state.requestSeq = 0;
+  state.requestsBelowBaseline = 0;
+  state.readRequests = 0;
+  state.requestPhase = undefined;
   apply(session, state, wanted, "assignment start");
   state.baseline = session.thinkingLevel ?? wanted;
   state.effort = mappingOf(session, state);
   state.step = stepDownLevel(available(session), state.baseline, state.effort.names) ?? state.baseline;
+  state.read = readLevelFor(available(session), state.baseline, state.effort.names);
   state.applied = session.thinkingLevel ?? state.baseline;
   return state;
 }
@@ -176,6 +210,9 @@ export function noteRequestLevel(session: ThinkingSession): void {
   const state = thinkingStateOf(session);
   state.requestLevel = session.thinkingLevel ?? "off";
   state.requestSeq++;
+  state.requestPhase = state.override !== undefined ? state.phase === "read" ? "read" : "step" : state.phase;
+  if (!atEffectiveBaseline(state, state.requestLevel)) state.requestsBelowBaseline++;
+  if (state.phase === "read") state.readRequests++;
 }
 
 /** Ensure B and S exist (a session used without an explicit assignment start). */
@@ -185,13 +222,14 @@ function ensure(session: ThinkingSession): ThinkingState {
     state.baseline = session.thinkingLevel ?? "off";
     state.effort = mappingOf(session, state);
     state.step = stepDownLevel(available(session), state.baseline, state.effort.names) ?? state.baseline;
+    state.read = readLevelFor(available(session), state.baseline, state.effort.names);
     state.applied = state.baseline;
   }
   return state;
 }
 
-/** Switch to the phase level (B or S); clears a recovery override. No-op when already there. */
-export function setThinkingPhase(session: ThinkingSession, phase: "baseline" | "step", reason: string, node?: string): ThinkingState {
+/** Switch to the phase level (B, S or R); clears a recovery override. No-op when already there. */
+export function setThinkingPhase(session: ThinkingSession, phase: ThinkingPhase, reason: string, node?: string): ThinkingState {
   const state = ensure(session);
   state.phase = phase;
   state.override = undefined;

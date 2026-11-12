@@ -1,7 +1,38 @@
 # Task DAG thinking policy (`thinkingPolicy`)
 
 Status: implemented 2026-10-08, **off by default** (`"fixed"`). Opt in with `"thinkingPolicy": "phase"`. Real-model quality is
-**not measured yet** (see Evaluation).
+**not measured yet** (see Evaluation). Read nodes (below) are on in every mode and policy.
+
+## Read nodes (every mode, every policy; implemented 2026-11-12)
+
+User decision 2026-11-12: the calling workflow splits the work mechanically. Orche only tells simple reading apart and runs it at
+effort `low`, in all modes. There is no option. A worker marks a Task DAG node `read: true` (task_plan) for simple reading only:
+opening and searching the sources the work needs and recording what they say in the node's checkpoint.
+
+| | rule | where |
+|---|---|---|
+| level | R = `low`, an explicit effort and not one level below B: the nearest supported level at or below `low`, never `off`, never above B (B at or below low stays B; a model without such a level keeps B). A proxy alias that sends `low` as a higher effort does not count as low. Fixed per assignment with B and S. | `src/pi/thinking-state.ts` `readLevelFor`, `READ_LEVEL` |
+| when | while a read node is `running`, unless it is also `phase: "integrate"` or `hard` (task_plan refuses those combinations) or rework (reopened after it was finished, or its checkpoint says verification failed). Fixed and phase policy alike. | `src/pi/thinking-policy.ts` `readNode`, `phaseTarget` |
+| after | the next node without read runs at B (fixed) or by the phase rules (phase); a rejected task_plan, a message from main and the report phase go to B | same |
+| tools | while a read node runs, and for the rest of every response that ran at R, only `read`, `grep`, `find`, `ls`, `ast_search`, codegraph query tools, `browser_fetch`, `task_plan`, `report_result` and `send_message` run. Edits, `bash`, `diagnostics`, `orche_spawn`, image tools and any other tool are refused with what to do instead. | `src/pi/read-node-guard.ts`, the worker hygiene extension (`session-factory.ts`) |
+| report | a `report_result` written in a response at R is sent back and rewritten at B (fixed included), bounded like the S rewrite | `reportRewriteReason` |
+| records | `details.thinkingPolicy` / run.json `outcome.thinkingPolicy` gain `read` (R) and `requests: {total, belowBaseline, read}`. In fixed mode without checkpoints they appear only when a read node ran. `thinking_change` events name the read node. | `thinkingPolicySummary` |
+| applies to | every single-workflow orche_task worker (single, strong, ultra, mdsd), every role that plans with task_plan; all of them get the instruction (`READ_NODE_INSTRUCTIONS`, src/extension/workers.ts) | |
+| does not apply | direct mode (main edits, no Task DAG), orche_spawn sub-workers and specialists (no task_plan), the advisor, main's session | |
+
+How reliable the boundary is:
+- Guaranteed by the runtime: low effort never edits, runs a command, checks or spawns anything. An integration, hard or reworked
+  node never runs at R. A report or re-plan never runs at R.
+- Instruction only: what the model concludes in its reasoning while it reads. The instruction and the tool description say to
+  decide nothing in a read node and to finish it when the reading turns into a judgement. A decision, repair or verification that
+  also reads belongs in a node without read.
+- Marking a node read is the worker's choice. A caller that wants a mechanical split (the agent_workflow research harness) tells the
+  worker which reading to put in read nodes (for example a context-pack reading list as the first node). It can also run a
+  separate reading turn with `/orche <mode> --effort low <PROMPT>`. Detection: `package.json` `piOrche.capabilities` contains
+  `task_plan.readNodes`.
+
+Not measured: whether reading at low misses constraints a later baseline node then needs. The records count read requests, and
+post-compaction re-reads are in `outcome.rereads` (docs/compaction.md). Quality needs the caller's own evaluation.
 
 ## Purpose
 

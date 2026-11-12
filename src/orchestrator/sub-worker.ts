@@ -21,6 +21,7 @@ import { mergeCapabilities, type WorkerCapabilityProvider } from "../extension/c
 import { runSpecialistSession, SpecialistError, type SpecialistDeadline, type SpecialistReport, type SpecialistStats } from "../specialists/session.js";
 import { guardBashReview, runtimeAccess, type BashReviewSettings } from "../extension/bash-review.js";
 import { resolveCompaction, type WorkerCompactionSettings } from "../pi/compaction-policy.js";
+import type { SummaryBudgetProfile } from "../pi/summary-budget.js";
 import { composeEssentials, renderReference, renderWorkLog } from "../pi/compaction-state.js";
 import { evidenceLedgerOf } from "../pi/tool-evidence.js";
 import type { TaskCompaction } from "../pi/session-factory.js";
@@ -89,6 +90,8 @@ export interface SubWorkerEnvironment {
    * the checked reference to its own transcript); never another worker's state. Absent or off: compaction stays off, as before.
    */
   compaction?: WorkerCompactionSettings;
+  /** The orchestrator assignment's one-shot `--summary-budget` (absent: standard) for standard sub-workers' compactions. */
+  summaryBudget?: SummaryBudgetProfile;
   /** The codegraph capability of one sub-worker (pi-codegraph's MCP tools in its session), asked like `webFetch`. Absent: none. */
   codeGraph?(worker: PlannedWorker): { provider?: WorkerCapabilityProvider; unavailable?: string };
 }
@@ -206,6 +209,7 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
         ...(env.skills?.length ? { skills: env.skills } : {}),
         ...(!specialist && env.lengthLadder ? { lengthRecovery: { ladder: env.lengthLadder } } : {}),
         ...(compaction ? { taskCompaction: compaction } : {}),
+        ...(compaction && env.summaryBudget ? { summaryBudget: env.summaryBudget } : {}),
       });
       const report = value as Report;
       return { ...base, status: statusOf(worker.role, report.data), summary: report.summary, ...(report.data !== undefined ? { data: report.data } : {}), ...fromStats(stats), ...compactionFields() } satisfies SubWorkerOutcome;

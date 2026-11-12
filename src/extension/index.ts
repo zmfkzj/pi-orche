@@ -34,6 +34,7 @@ import { registerDependencyProvider } from "./dependencies.js";
 import { createOrcheDependencyProvider, runDependencyCommand, type OrcheDependencyOptions } from "./doctor.js";
 import { parseRouteRequest, PEER_NOTE_MAX, peerLabel, SESSION_BUS_ROUTE_EVENT } from "./peer-notes.js";
 import { THINKING_LEVELS } from "../pi/thinking-levels.js";
+import { SUMMARY_BUDGET_PROFILES, type SummaryBudgetProfile } from "../pi/summary-budget.js";
 
 export const RESULT_MESSAGE_TYPE = "orche-result";
 /** Pi built-ins that stay Pi's own but are switched on next to our tools. */
@@ -128,7 +129,7 @@ export const QUEUE_MESSAGE_TYPE = "orche-task-queue";
 
 export const ORCHE_USAGE = "Usage: /orche single|strong|ultra|mdsd|direct [--effort LEVEL] <PROMPT> | /orche mode [single|strong|ultra|mdsd|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche splits [DAYS] | /orche models | /orche cancel | /orche detach | /orche doctor | /orche install-deps";
 export type OrcheCommand =
-  | { mode: MainMode; prompt: string; effort?: ThinkingLevel }
+  | { mode: MainMode; prompt: string; effort?: ThinkingLevel; summaryBudget?: SummaryBudgetProfile }
   | { mode: "cancel" }
   | { mode: "detach" }
   | { mode: "workers" }
@@ -143,48 +144,79 @@ export type OrcheCommand =
  * The one-shot request whose run is going on (`oneShot` in the extension): its mode, the jobs it started, whether main answers yet, its
  * `--effort` and, in direct mode, main's thinking before and after the effort was applied (restored when the request ends).
  */
-interface OneShotRequest { mode: MainMode; jobs: Set<string>; answering: boolean; effort?: ThinkingLevel; mainThinking?: { before: ThinkingLevel; applied: ThinkingLevel } }
+interface OneShotRequest { mode: MainMode; jobs: Set<string>; answering: boolean; effort?: ThinkingLevel; summaryBudget?: SummaryBudgetProfile; mainThinking?: { before: ThinkingLevel; applied: ThinkingLevel } }
 /** The values of a one-shot request's `--effort`: Pi's thinking levels, exactly as `pi --thinking` takes them (lowest first). */
 export const EFFORT_LEVELS: readonly ThinkingLevel[] = THINKING_LEVELS;
 const isEffortLevel = (value: string): value is ThinkingLevel => (EFFORT_LEVELS as readonly string[]).includes(value);
-/** `--effort` as an option token: followed by whitespace, `=` or the end (`--efforts` or `--effort-x` are prompt text). */
-const EFFORT_FLAG = /^--effort(?=[\s=]|$)/;
+/** Every one-shot option token (docs/orchestrator.md 14.5): `--effort` and `--summary-budget`, each followed by
+ *  whitespace, `=` or the end (`--efforts` or `--effort-x` are prompt text). */
+const ONE_SHOT_OPTION = /^--(effort|summary-budget)(?=[\s=]|$)/;
+const ONE_SHOT_OPTION_ANYWHERE = /(?:^|\s)--(effort|summary-budget)(?=[\s=]|$)/;
+type OneShotOption = "effort" | "summary-budget";
+/** The values of `--summary-budget` (src/pi/summary-budget.ts profiles). */
+export const SUMMARY_BUDGET_VALUES: readonly SummaryBudgetProfile[] = SUMMARY_BUDGET_PROFILES;
 const EFFORT_VALUES = `Valid values: ${EFFORT_LEVELS.join(", ")} (Pi's thinking levels; a model that lacks one runs the nearest level it supports)`;
-const effortUsageLine = (mode: string) => `Usage: /orche ${mode} --effort <LEVEL> <PROMPT> (the option right after the mode word; -- after it ends the options). Nothing was sent.`;
+const OPTION_VALUES: Record<OneShotOption, string> = {
+  effort: EFFORT_VALUES,
+  "summary-budget": `Valid values: ${SUMMARY_BUDGET_VALUES.join(", ")} (compact: half the compaction summary budget; docs/compaction.md)`,
+};
+const OPTION_PLACEHOLDER: Record<OneShotOption, string> = { effort: "<LEVEL>", "summary-budget": "<BUDGET>" };
+const validOption = (name: OneShotOption, value: string): boolean =>
+  name === "effort" ? isEffortLevel(value) : (SUMMARY_BUDGET_VALUES as readonly string[]).includes(value);
+const optionUsageLine = (mode: string, name: OneShotOption) => `Usage: /orche ${mode} --${name} ${OPTION_PLACEHOLDER[name]} <PROMPT> (the options right after the mode word; -- after them ends the options). Nothing was sent.`;
 /**
- * The arguments of a one-shot `<mode>` after the mode word (`rest`, after its one delimiter): `--effort <LEVEL>` or `--effort=<LEVEL>`
- * first (whitespace before it is only a separator), then ONE whitespace character and the prompt verbatim, as after the mode word;
- * `--` there ends the options (a prompt that itself starts with `--effort`). Without the option the prompt is `rest` unchanged.
+ * The arguments of a one-shot `<mode>` after the mode word (`rest`, after its one delimiter): options first (whitespace before and
+ * between them only separates), each `--name <VALUE>` or `--name=<VALUE>` and given at most once: `--effort`, `--summary-budget`; then ONE whitespace character and the prompt verbatim, as after the mode word; `--` after the options ends them
+ * (a prompt that itself starts with an option). Without options the prompt is `rest` unchanged.
  * Undefined: no prompt (the caller shows the usage); `error`: an option that cannot be used, with what to type instead.
  */
-function parseOneShotArgs(mode: MainMode, rest: string): { prompt: string; effort?: ThinkingLevel } | { error: string } | undefined {
-  const option = rest.trimStart();
-  if (!EFFORT_FLAG.test(option)) return /\S/.test(rest) ? { prompt: rest } : undefined;
-  let tail = option.slice("--effort".length);
-  const gap = tail.startsWith("=") ? "=" : /^\s*/.exec(tail)![0];
-  const value = /^\S*/.exec(tail.slice(gap.length))![0];
-  tail = tail.slice(gap.length + value.length);
-  if (!value) return { error: `orche ${mode}: --effort needs a level. ${EFFORT_VALUES}. ${effortUsageLine(mode)}` };
-  if (!isEffortLevel(value)) return { error: `orche ${mode}: invalid --effort "${value}". ${EFFORT_VALUES}. ${effortUsageLine(mode)}` };
+function parseOneShotArgs(mode: MainMode, rest: string): { prompt: string; effort?: ThinkingLevel; summaryBudget?: SummaryBudgetProfile } | { error: string } | undefined {
+  const given = new Map<OneShotOption, string>();
+  let tail = rest;
+  for (;;) {
+    const option = tail.trimStart();
+    const match = ONE_SHOT_OPTION.exec(option);
+    if (!match) break;
+    const name = match[1] as OneShotOption;
+    let after = option.slice(match[0].length);
+    const gap = after.startsWith("=") ? "=" : /^\s*/.exec(after)![0];
+    const value = /^\S*/.exec(after.slice(gap.length))![0];
+    after = after.slice(gap.length + value.length);
+    if (given.has(name)) {
+      const so = [...given].map(([key, val]) => `--${key} ${val}`).join(" ");
+      return { error: `orche ${mode}: --${name} is given more than once; give it once. To start the prompt itself with "--${name}", put -- before the prompt: /orche ${mode} ${so} -- <PROMPT>. Nothing was sent.` };
+    }
+    if (!value) return { error: `orche ${mode}: --${name} needs a ${name === "effort" ? "level" : "value"}. ${OPTION_VALUES[name]}. ${optionUsageLine(mode, name)}` };
+    if (!validOption(name, value)) return { error: `orche ${mode}: invalid --${name} "${value}". ${OPTION_VALUES[name]}. ${optionUsageLine(mode, name)}` };
+    if (mode === "direct" && name !== "effort") return { error: `orche direct: --${name} applies to orche_task workers and direct mode runs none; use it with /orche single|strong|ultra|mdsd. Nothing was sent.` };
+    given.set(name, value);
+    tail = after;
+  }
+  if (!given.size) return /\S/.test(rest) ? { prompt: rest } : undefined;
   let prompt = tail.slice(1);
-  // `--` ends the options (whitespace before it only separates, as before the option); ONE delimiter after it, then the prompt.
+  // `--` ends the options (whitespace before it only separates, as before an option); ONE delimiter after it, then the prompt.
   const end = /^\s*--(?=\s|$)/.exec(prompt);
   if (end) prompt = prompt.slice(end[0].length + 1);
-  else if (EFFORT_FLAG.test(prompt.trimStart())) return { error: `orche ${mode}: --effort is given more than once; give it once. To start the prompt itself with "--effort", put -- before the prompt: /orche ${mode} --effort ${value} -- <PROMPT>. Nothing was sent.` };
-  if (!/\S/.test(prompt)) return { error: `orche ${mode}: no prompt after --effort ${value}. ${effortUsageLine(mode)}` };
-  return { prompt, effort: value };
+  if (!/\S/.test(prompt)) {
+    const last = [...given.keys()].at(-1)!;
+    return { error: `orche ${mode}: no prompt after ${[...given].map(([key, val]) => `--${key} ${val}`).join(" ")}. ${optionUsageLine(mode, last)}` };
+  }
+  const effort = given.get("effort") as ThinkingLevel | undefined;
+  const summaryBudget = given.get("summary-budget") as SummaryBudgetProfile | undefined;
+  return { prompt, ...(effort ? { effort } : {}), ...(summaryBudget ? { summaryBudget } : {}) };
 }
 const ONE_SHOT = new RegExp(`^\\s*(${MAIN_MODES.join("|")})(?:\\s([\\s\\S]*))?$`);
 /**
- * What is wrong with an `--effort` that kept `/orche <args>` from being a command: an unusable value, a missing level or prompt, the option
- * given twice, or the option outside a one-shot request (before the mode word, on another subcommand). Undefined otherwise.
+ * What is wrong with a one-shot option that kept `/orche <args>` from being a command: an unusable value, a missing value or prompt, the
+ * option given twice, or the option outside a one-shot request (before the mode word, on another subcommand). Undefined otherwise.
  */
 export function effortUsage(args: string): string | undefined {
   const match = ONE_SHOT.exec(args);
   const parsed = match?.[2] !== undefined ? parseOneShotArgs(match[1] as MainMode, match[2]) : undefined;
   if (parsed && "error" in parsed) return parsed.error;
-  if (!/(?:^|\s)--effort(?=[\s=]|$)/.test(args)) return undefined;
-  return `orche: --effort belongs to a one-shot request, right after its mode word: /orche ${MAIN_MODES.join("|")} --effort <LEVEL> <PROMPT>; /orche mode and the other subcommands do not take it. ${EFFORT_VALUES}. Nothing was sent.`;
+  const name = ONE_SHOT_OPTION_ANYWHERE.exec(args)?.[1] as OneShotOption | undefined;
+  if (!name) return undefined;
+  return `orche: --${name} belongs to a one-shot request, right after its mode word: /orche ${MAIN_MODES.join("|")} --${name} ${OPTION_PLACEHOLDER[name]} <PROMPT>; /orche mode and the other subcommands do not take it. ${OPTION_VALUES[name]}. Nothing was sent.`;
 }
 /** What each mode does to the request of a one-shot `/orche <mode> <prompt>` (usage and refusal texts). */
 const ONE_SHOT_EFFECT: Record<MainMode, string> = {
@@ -201,7 +233,7 @@ const ONE_SHOT_EFFECT: Record<MainMode, string> = {
 export function oneShotUsage(args: string): string | undefined {
   const mode = /^\s*(\S+)\s*$/.exec(args)?.[1];
   if (mode !== "strong" && mode !== "ultra" && mode !== "mdsd") return undefined;
-  return `Usage: /orche ${mode} [--effort LEVEL] <PROMPT>: ${ONE_SHOT_EFFECT[mode]} for this one request (the prompt may span lines; --effort ${EFFORT_LEVELS.join("|")} sets the reasoning effort its workers start at). The session's mode does not change; /orche mode ${mode} switches it.`;
+  return `Usage: /orche ${mode} [--effort LEVEL] <PROMPT>: ${ONE_SHOT_EFFECT[mode]} for this one request (the prompt may span lines; --effort ${EFFORT_LEVELS.join("|")} sets the reasoning effort its workers start at; --summary-budget ${SUMMARY_BUDGET_VALUES.join("|")} sets its workers' compaction summary budget). The session's mode does not change; /orche mode ${mode} switches it.`;
 }
 /**
  * Why a one-shot command is refused while main is busy: it starts only from an idle session, so its own run (prompt, tools, workers)
@@ -516,9 +548,9 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       request.mainThinking = undefined;
       try { if (pi.getThinkingLevel() === saved.applied && saved.applied !== saved.before) pi.setThinkingLevel(saved.before); } catch { /* the session may be gone */ }
     };
-    /** `oneShot` of an orche_task call in a one-shot run: the session's own mode and the request's `--effort` (delegating modes only). */
+    /** `oneShot` of an orche_task call in a one-shot run: the session's own mode and the request's options (delegating modes only). */
     const oneShotArgs = () => state.overriding
-      ? { oneShot: { session: state.session, ...(oneShot?.effort && isDelegatingMode(state.effective) ? { effort: oneShot.effort } : {}) } }
+      ? { oneShot: { session: state.session, ...(oneShot && isDelegatingMode(state.effective) ? { ...(oneShot.effort ? { effort: oneShot.effort } : {}), ...(oneShot.summaryBudget ? { summaryBudget: oneShot.summaryBudget } : {}) } : {}) } }
       : {};
     const endOneShot = (ui: ExtensionContext["ui"]) => {
       if (!oneShot) return;
@@ -986,7 +1018,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
 
     // (2) Delegation, one-turn overrides and worker/session controls.
     pi.registerCommand("orche", {
-      description: "/orche single <prompt>: delegate one request to one worker. /orche strong <prompt>: the same on the strong tiers (models.strong-orchestrator, models.strong-worker). /orche ultra <prompt>: one request with quality-first ultra orchestration on the strong tiers. /orche mdsd <prompt>: one request with the MDSD search policy (diversified exploration paths, integration, adaptive search, verification; docs/mdsd.md) on the strong tiers. /orche direct <prompt>: edit directly for one turn. These one-shot commands leave the session's mode as it is and start only when the session is idle; with task ledgers (single.ledger) a task started by such a request keeps its mode when continued, otherwise later turns run in the session's mode. /orche <mode> --effort <off|minimal|low|medium|high|xhigh|max> <prompt>: the same request at that reasoning effort: every orche_task assignment it starts runs at it (also over a models tier's own level; tiers with thinking \"main\" take it too), /orche direct runs main at it for that run; each model clamps it, and Pi's settings, the session's thinking level for later turns and orche.config.json stay as they are. /orche mode [single|strong|ultra|mdsd|direct]: show/set the session's delegation mode. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche splits [days]: the orchestrator's split decisions over all sessions (split rate, criteria, cost and time), optionally of the last N days. /orche models: the main, orchestrator, worker, advisor, strong-orchestrator and strong-worker models now and where each comes from (config, inherited, Pi), and whether the advisor (single.advisor) is on. /orche cancel: stop the active task. /orche detach: stop waiting for the background task (it keeps running; its result arrives as a message). /orche doctor: check pi-orche's dependencies (npm packages and native bindings, Node.js, git, orche.config.json, configured models) and say what to do when something is wrong. /orche install-deps: install missing npm dependencies; lists what needs a manual step.",
+      description: "/orche single <prompt>: delegate one request to one worker. /orche strong <prompt>: the same on the strong tiers (models.strong-orchestrator, models.strong-worker). /orche ultra <prompt>: one request with quality-first ultra orchestration on the strong tiers. /orche mdsd <prompt>: one request with the MDSD search policy (diversified exploration paths, integration, adaptive search, verification; docs/mdsd.md) on the strong tiers. /orche direct <prompt>: edit directly for one turn. These one-shot commands leave the session's mode as it is and start only when the session is idle; with task ledgers (single.ledger) a task started by such a request keeps its mode when continued, otherwise later turns run in the session's mode. /orche <mode> --effort <off|minimal|low|medium|high|xhigh|max> <prompt>: the same request at that reasoning effort: every orche_task assignment it starts runs at it (also over a models tier's own level; tiers with thinking \"main\" take it too), /orche direct runs main at it for that run; each model clamps it, and Pi's settings, the session's thinking level for later turns and orche.config.json stay as they are. /orche <mode> --summary-budget <standard|compact> <prompt> (not direct; combinable with --effort, any order, each once): the request's orche_task assignments compact with that summary budget (compact: half the standard one). In every mode, a worker's Task DAG node marked read:true (simple reading) runs at low effort with read-only tools. /orche mode [single|strong|ultra|mdsd|direct]: show/set the session's delegation mode. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche splits [days]: the orchestrator's split decisions over all sessions (split rate, criteria, cost and time), optionally of the last N days. /orche models: the main, orchestrator, worker, advisor, strong-orchestrator and strong-worker models now and where each comes from (config, inherited, Pi), and whether the advisor (single.advisor) is on. /orche cancel: stop the active task. /orche detach: stop waiting for the background task (it keeps running; its result arrives as a message). /orche doctor: check pi-orche's dependencies (npm packages and native bindings, Node.js, git, orche.config.json, configured models) and say what to do when something is wrong. /orche install-deps: install missing npm dependencies; lists what needs a manual step.",
       // Read-only: the current roster supplies `stop <id>`; completion never creates, starts or stops workers.
       getArgumentCompletions: prefix => {
         let ids: string[] = [];
@@ -1079,10 +1111,11 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
             ctx.ui.notify(busyRefusal(parsed.mode, state.session), "warning");
             return;
           }
-          const request: OneShotRequest = { mode: parsed.mode, jobs: new Set<string>(), answering: false, ...(parsed.effort ? { effort: parsed.effort } : {}) };
+          const request: OneShotRequest = { mode: parsed.mode, jobs: new Set<string>(), answering: false, ...(parsed.effort ? { effort: parsed.effort } : {}), ...(parsed.summaryBudget ? { summaryBudget: parsed.summaryBudget } : {}) };
           oneShot = request;
           state.setOverride(parsed.mode);
           if (parsed.effort) applyEffort(request, parsed.effort, ctx.ui);
+          if (parsed.summaryBudget) ctx.ui.notify(`orche ${parsed.mode}: this request's orche_task assignments compact with the ${parsed.summaryBudget} summary budget; later requests use the standard one.`, "info");
           showMode(ctx);
           // Keep the command pending until the turn it started has settled: one-shot modes (--print / --mode json)
           // exit as soon as the command returns, which would cut the turn off. sendUserMessage is fire-and-forget,

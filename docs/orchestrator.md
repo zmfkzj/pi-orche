@@ -814,6 +814,15 @@ read-only answer 변형: 모든 sub-worker가 answer/verify, `orche_adopt` 거�
   - clamp: 모델이 그 단계를 지원하지 않으면 Pi의 clamp를 따른다(추론 미지원 모델은 `off`, `xhigh`·`max`가 없는 추론 모델은 가장 가까운 지원 단계, 예: `high`). 결과 줄 `Effort: low (one-shot /orche single --effort low): W1 runs at low; …`가 요청한 단계와 실제 단계를 함께 보여 주고(다르면 `(the nearest level its model supports)`), `details.thinking`·run.json `assignment.thinking`은 실제 단계, `thinkingSource`는 `effort`, `details.requestMode.effort`·run.json `assignment.requestMode.effort`는 요청한 단계다. 시작 알림과 상태 줄(`orche: single (one-turn single, effort low)`)도 있다.
   - 유지되지 않는다: 같은 요청 밖의 다음 assignment는 평소 단계다. 재사용 worker(`worker`)와 ledger로 이어가는 task(`task`)도 마찬가지이고, task ledger는 모드만 고정하고 effort는 저장하지 않는다. route를 그대로 쓰는 재사용 worker(specialist, main 모델이 없을 때)는 effort 이전의 자기 B를 기억했다가 다음 assignment에서 돌아간다(`ownBaseline`, `nextBaseline`).
   - 테스트: `test/extension/one-shot-effort.test.ts`(문법·오류·자동완성, provider가 받은 thinking으로 확인한 계층·floor·clamp·sub-worker·advisor·specialist·재사용·ledger, 확장을 거친 blocking·background·승인 대기 작업, direct 적용·복원·Esc·사용자 변경 유지).
+- **요청 한 건의 요약 예산 `--summary-budget <standard|compact>`**: `/orche strong --effort=max --summary-budget=compact <PROMPT>`처럼 `--effort`와 함께 써도 된다.
+  - 순서와 횟수: 옵션은 모드 단어 바로 뒤에 순서와 상관없이 두고, 각각 한 번만 준다. `--`가 옵션을 끝낸다.
+  - direct 모드: worker가 없어서 거부한다.
+  - 적용 범위: 그 요청이 시작한 orche_task assignment의 worker 세션에 compact 요약 예산 프로필을 쓴다(docs/compaction.md "Compact profile"). compaction하는 sub-worker도 포함한다.
+  - 유지 범위: 다음 assignment, 재사용 worker, task ledger에는 이어지지 않는다(standard로 돌아간다).
+  - 오류 메시지: `--effort`와 같은 형식이다.
+  - 감지: `package.json` `piOrche.capabilities`의 `oneshot.summaryBudget`.
+  - 테스트: `test/extension/one-shot-effort.test.ts` "--summary-budget".
+  - 예전에 제안했던 `--thinking-policy`는 사용자 결정(2026-11-12)으로 만들지 않았다. 단순 읽기는 모든 모드의 read 노드가 맡는다(docs/thinking-policy.md "Read nodes").
 - **요청 = 하나의 실행(run)**: 요청은 자기만의 run으로 실행되고, run이 끝날(settle) 때까지 main의 위임 규칙(system prompt section)·도구 집합·guard가 그 모드의 것이 된다.
   - run에 들어가는 것은 그 요청에 속한 것뿐이다. 프롬프트와 Pi가 함께 보내는 문맥, run 중에 사용자가 넣은 steer(요청을 고치는 입력), 그 요청이 시작한 job의 결과가 여기에 해당한다.
   - run 중에 큐에 들어온 follow-up(사용자 입력이든 다른 확장의 `sendUserMessage`든)은 다른 요청이다. orche가 붙잡아 두고(`orche: queued until the one-shot /orche strong request has ended; …`), run이 끝나면 각각 자기 run으로 세션 모드에서 실행한다. 그 run은 `before_agent_start`부터 다시 시작하므로 프롬프트·도구·dispatch가 모두 세션 모드다.

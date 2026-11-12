@@ -78,6 +78,43 @@ describe("workerCompaction through the worker pool", () => {
     const result = await pool.execute({ role: "implement", request, cwd: h.cwd, projectTrusted: false, mainMode: "single", model: faux.getModel() });
     expect(result.details.compactions?.count).toBe(0);
   });
+  it("usageRatio per role through the pool: a reused worker resolves each assignment's role from orche.config.json, with no state carried over", async () => {
+    const h = await createHarness({ mainSteps: [], orcheSteps: [], records: true, taskContext: { minClearTokens: 0 } });
+    opened.push(h);
+    const config = JSON.parse(await readFile(join(h.agentDir, "orche.config.json"), "utf8"));
+    await writeFile(join(h.agentDir, "orche.config.json"), JSON.stringify({ ...config, workerCompaction: { roles: { implement: { usageRatio: 0.25 }, answer: { usageRatio: 0.9 } } } }));
+    const controller = new OrcheController({ agentDir: h.agentDir, createRuntime: async () => h.runtime });
+    const pool = new WorkerPool({ controller, agentDir: h.agentDir });
+    opened.push(pool);
+    const faux = fauxProvider({ provider: "wc-pool-ratio", models: [{ id: "big", contextWindow: 200_000, maxTokens: 4096 }] });
+    h.runtime.registerNativeProvider(faux.provider);
+    await writeFile(join(h.cwd, "large.txt"), Array.from({ length: 90 }, (_, i) => `ROW-${i} ${"y".repeat(490)}`).join("\n"));
+    const session = () => (pool as unknown as { manager: { session(id: string): { model: unknown; settingsManager: { getCompactionSettings(model: unknown): { reserveTokens: number } } } } }).manager.session("W1");
+    const settingsSeen: number[] = [];
+    const run = (finish: ReturnType<typeof tool>) => {
+      let step = 0;
+      faux.setResponses(Array(30).fill((context => {
+        if (JSON.stringify(context.messages.filter(message => message.role === "system")).includes("context summarization assistant")) return reply("SUMMARY");
+        step++;
+        if (step === 1) { settingsSeen.push(session().settingsManager.getCompactionSettings(session().model).reserveTokens); return tool("task_plan", plan); }
+        return step <= 7 ? tool("read", { path: "large.txt" }) : finish;
+      }) as FauxResponseStep));
+    };
+    const compactionsOf = async (record: string) => (await readFile(join(record, "events.jsonl"), "utf8")).split("\n").filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>).filter(event => event.type === "compaction");
+    // implement (25% = 50k): six reads (~67k) compact early, where the stable 50% (100k) would not (test above).
+    run(report);
+    const first = await pool.execute({ role: "implement", request, cwd: h.cwd, projectTrusted: false, mainMode: "single", model: faux.getModel() });
+    const firstCompactions = await compactionsOf(first.details.record!);
+    expect(firstCompactions.length).toBeGreaterThan(0);
+    expect(firstCompactions[0]).toMatchObject({ reason: "threshold", policy: "window-ratio", usageRatio: 0.25, triggerTokens: 50_000, early: true });
+    // The same worker, now answering (90% = 180k): the same six reads on top of its compacted context do not compact.
+    run(tool("report_result", { kind: "answer", summary: "read it", data: { evidence: ["large.txt:1"], checklist: [{ id: "R1", status: "met", evidence: "large.txt:1", verifiedBy: "read large.txt" }] } }));
+    const second = await pool.execute({ worker: "W1", role: "answer", request, cwd: h.cwd, projectTrusted: false, mainMode: "single", model: faux.getModel() });
+    expect(second.details.worker).toBe("W1");
+    expect(await compactionsOf(second.details.record!)).toEqual([]);
+    expect(settingsSeen).toEqual([150_000, 20_000]);
+  });
+
   it("a compacted worker that is stopped mid-task is replaced after a reload: the new worker is briefed from the ledger and finds the original result in the old worker's transcript", async () => {
     const h = await createHarness({ mainSteps: [], orcheSteps: [], records: true, single: { ledger: true }, taskContext: { minClearTokens: 0 } });
     opened.push(h);

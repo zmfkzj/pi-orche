@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_WORKER_COMPACTION, MIN_TRIGGER_TOKENS, parseWorkerCompaction, resolveCompaction, stableCompaction } from "../../src/pi/compaction-policy.js";
+import { shouldCompact } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_WORKER_COMPACTION, MIN_TRIGGER_TOKENS, parseWorkerCompaction, piCompactionSettings, resolveCompaction, stableCompaction } from "../../src/pi/compaction-policy.js";
 import { checkReference, composeEssentials, renderReference, renderWorkLog } from "../../src/pi/compaction-state.js";
 import { taskCompactionSettings } from "../../src/pi/session-factory.js";
 import { loadOrcheConfigFile } from "../../src/extension/config.js";
@@ -43,6 +44,69 @@ describe("workerCompaction policy", () => {
     expect(parseWorkerCompaction("window-ratio")).toEqual(DEFAULT_WORKER_COMPACTION);
   });
 
+  it("usageRatio: each role and model compacts at its own share of its window; omitted keeps the stable 50%; Pi's threshold fires exactly above it", () => {
+    const settings = parseWorkerCompaction({ usageRatio: 0.7, roles: { verify: { usageRatio: 0.3 }, "sub-worker": { usageRatio: 0.9 } }, models: [{ model: "x/*", keepRecentTokens: 4_000 }, { model: "big/*", usageRatio: 0.4 }] });
+    const window = 200_001; // odd: the stable trigger is ceil(window / 2)
+    const implement = resolveCompaction(settings, { contextWindow: window, model: "a/b", role: "implement" });
+    const verify = resolveCompaction(settings, { contextWindow: window, model: "a/b", role: "verify" });
+    const sub = resolveCompaction(settings, { contextWindow: window, model: "a/b", role: "sub-worker" });
+    expect(implement).toMatchObject({ policy: "window-ratio", usageRatio: 0.7, triggerTokens: 140_001, reserveTokens: 60_000, keepRecentTokens: 20_000, early: false });
+    expect(verify).toMatchObject({ policy: "window-ratio", usageRatio: 0.3, triggerTokens: 60_001, reserveTokens: 140_000, keepRecentTokens: 15_000, early: true });
+    expect(sub).toMatchObject({ usageRatio: 0.9, triggerTokens: 180_001, early: false });
+    // Pi compacts strictly above contextWindow - reserveTokens: one token over each worker's own trigger, never at it.
+    for (const resolved of [implement, verify, sub]) {
+      expect(shouldCompact(resolved.triggerTokens, window, piCompactionSettings(resolved))).toBe(false);
+      expect(shouldCompact(resolved.triggerTokens + 1, window, piCompactionSettings(resolved))).toBe(true);
+    }
+    // The same context is above verify's trigger, between the two, and below implement's.
+    expect(shouldCompact(100_002, window, piCompactionSettings(verify))).toBe(true);
+    expect(shouldCompact(100_002, window, piCompactionSettings(implement))).toBe(false);
+    // A model rule wins over the role, field by field over the BASE values only (as for triggerTokens): x/* has no usageRatio of
+    // its own, so a verify worker on it gets the base 0.7, not verify's 0.3.
+    expect(resolveCompaction(settings, { contextWindow: 200_000, model: "x/y", role: "verify" })).toMatchObject({ usageRatio: 0.7, triggerTokens: 140_000, keepRecentTokens: 4_000 });
+    expect(resolveCompaction(settings, { contextWindow: 1_000_000, model: "big/m", role: "sub-worker" })).toMatchObject({ usageRatio: 0.4, triggerTokens: 400_000, early: true });
+    // Explicit 0.5 is the stable policy (odd window included); no ratio anywhere is the stable policy exactly.
+    const half = resolveCompaction(parseWorkerCompaction(0.5), { contextWindow: window });
+    expect(piCompactionSettings(half)).toEqual(piCompactionSettings(stableCompaction(window)));
+    expect(resolveCompaction(parseWorkerCompaction({ roles: { verify: { usageRatio: 0.3 } } }), { contextWindow: window, role: "implement" })).toEqual(stableCompaction(window));
+  });
+
+  it("usageRatio bounds: early ratio triggers are at least MIN_TRIGGER_TOKENS and keep at most half the trigger; 0.95 leaves 5%", () => {
+    expect(resolveCompaction(parseWorkerCompaction(0.1), { contextWindow: 100_000 })).toMatchObject({ triggerTokens: MIN_TRIGGER_TOKENS, reserveTokens: 100_000 - MIN_TRIGGER_TOKENS, keepRecentTokens: 4_096, early: true });
+    // A window too small for MIN_TRIGGER_TOKENS below its stable trigger: the stable trigger, not early.
+    expect(resolveCompaction(parseWorkerCompaction(0.1), { contextWindow: 20_000 })).toMatchObject({ triggerTokens: 10_000, reserveTokens: 10_000, early: false });
+    expect(resolveCompaction(parseWorkerCompaction(0.1), { contextWindow: 1_000_000 })).toMatchObject({ triggerTokens: 100_000, keepRecentTokens: 20_000, early: true });
+    expect(resolveCompaction(parseWorkerCompaction({ usageRatio: 0.2, keepRecentTokens: 30_000 }), { contextWindow: 200_000 })).toMatchObject({ triggerTokens: 40_000, keepRecentTokens: 20_000 });
+    expect(resolveCompaction(parseWorkerCompaction(0.95), { contextWindow: 200_000 })).toMatchObject({ triggerTokens: 190_000, reserveTokens: 10_000, keepRecentTokens: 20_000, early: false });
+    expect(resolveCompaction(parseWorkerCompaction({ usageRatio: 0.8, keepRecentTokens: 100_000 }), { contextWindow: 200_000 })).toMatchObject({ triggerTokens: 160_000, keepRecentTokens: 80_000 });
+  });
+
+  it("absolute + usageRatio: the ratio replaces 50% as the ceiling and, when not early, as the fallback; omitted keeps the old cap", () => {
+    const late = resolveCompaction(parseWorkerCompaction({ policy: "absolute", triggerTokens: 150_000, usageRatio: 0.8 }), { contextWindow: 200_000 });
+    expect(late).toMatchObject({ policy: "absolute", triggerTokens: 150_000, early: false, usageRatio: 0.8 });
+    const early = resolveCompaction(parseWorkerCompaction({ policy: "absolute", triggerTokens: 32_000, usageRatio: 0.8 }), { contextWindow: 200_000 });
+    expect(early).toMatchObject({ triggerTokens: 32_000, early: true, fallback: { policy: "window-ratio", triggerTokens: 160_000, reserveTokens: 40_000, early: false } });
+    const capped = resolveCompaction(parseWorkerCompaction({ policy: "absolute", triggerTokens: 150_000, usageRatio: 0.3 }), { contextWindow: 200_000 });
+    expect(capped).toMatchObject({ triggerTokens: 60_000, early: true });
+    expect(capped.fallback).toBeUndefined(); // an early ratio falls back to the stable 50%
+    // A role with only a ratio under the absolute policy: its ratio trigger.
+    expect(resolveCompaction(parseWorkerCompaction({ policy: "absolute", triggerTokens: 32_000, roles: { verify: { usageRatio: 0.6 } } }), { contextWindow: 200_000, role: "verify" })).toMatchObject({ triggerTokens: 32_000, usageRatio: 0.6 });
+    expect(resolveCompaction(parseWorkerCompaction({ policy: "absolute", models: [{ model: "a/*", triggerTokens: 32_000 }], roles: { verify: { usageRatio: 0.6 } } }), { contextWindow: 200_000, model: "b/c", role: "verify" })).toMatchObject({ policy: "window-ratio", triggerTokens: 120_000, usageRatio: 0.6 });
+    // Without usageRatio the absolute cap stays the stable trigger (unchanged).
+    expect(resolveCompaction(parseWorkerCompaction({ policy: "absolute", triggerTokens: 150_000 }), { contextWindow: 200_000 })).toMatchObject({ triggerTokens: 100_000, early: false });
+  });
+
+  it("rejects invalid usage ratios at every location with the offending path", () => {
+    for (const bad of [0, 0.05, 0.96, 1, 1.5, -0.5, Number.NaN, Number.POSITIVE_INFINITY, "0.6", null, true]) {
+      expect(() => parseWorkerCompaction({ usageRatio: bad })).toThrow(/config\.workerCompaction\.usageRatio: expected a fraction of the context window from 0\.1 to 0\.95/);
+      expect(() => parseWorkerCompaction({ roles: { verify: { usageRatio: bad } } })).toThrow(/config\.workerCompaction\.roles\.verify\.usageRatio/);
+      expect(() => parseWorkerCompaction({ models: [{ model: "a/b", usageRatio: bad }] })).toThrow(/config\.workerCompaction\.models\[0\]\.usageRatio/);
+    }
+    for (const bad of [0.05, 0.96, Number.NaN]) expect(() => parseWorkerCompaction(bad)).toThrow(/config\.workerCompaction: expected a fraction/);
+    expect(parseWorkerCompaction(0.6)).toEqual({ ...DEFAULT_WORKER_COMPACTION, usageRatio: 0.6 });
+    expect(parseWorkerCompaction({ usageRatio: 0.1, roles: { explore: { usageRatio: 0.95 } } })).toEqual({ policy: "window-ratio", essentials: "basic", subWorkers: false, usageRatio: 0.1, roles: { explore: { usageRatio: 0.95 } } });
+  });
+
   it("is read from orche.config.json and absent when the file does not set it", async () => {
     const dir = await mkdtemp(join(tmpdir(), "orche-compaction-config-"));
     try {
@@ -52,6 +116,10 @@ describe("workerCompaction policy", () => {
       expect((await loadOrcheConfigFile(join(dir, "b.json"))).workerCompaction).toBeUndefined();
       await writeFile(join(dir, "c.json"), JSON.stringify({ routes: {}, default: { model: "p/m" }, workerCompaction: { policy: "absolute" } }));
       await expect(loadOrcheConfigFile(join(dir, "c.json"))).rejects.toThrow(/needs triggerTokens/);
+      await writeFile(join(dir, "d.json"), JSON.stringify({ routes: {}, default: { model: "p/m" }, workerCompaction: { usageRatio: 0.7, roles: { verify: { usageRatio: 0.3 } } } }));
+      expect((await loadOrcheConfigFile(join(dir, "d.json"))).workerCompaction).toEqual({ policy: "window-ratio", essentials: "basic", subWorkers: false, usageRatio: 0.7, roles: { verify: { usageRatio: 0.3 } } });
+      await writeFile(join(dir, "e.json"), JSON.stringify({ routes: {}, default: { model: "p/m" }, workerCompaction: { roles: { verify: { usageRatio: 2 } } } }));
+      await expect(loadOrcheConfigFile(join(dir, "e.json"))).rejects.toThrow(/roles\.verify\.usageRatio/);
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 });

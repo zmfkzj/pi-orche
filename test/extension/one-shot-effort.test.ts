@@ -17,6 +17,7 @@ import { SPAWN_TOOL } from "../../src/orchestrator/spawn.js";
 import { MAIN_MODES } from "../../src/orchestration/routing.js";
 import { createHarness, tool, type Harness } from "./harness.js";
 import { deferred } from "../helpers/faux.js";
+import { summaryBudgetProfile } from "../../src/pi/summary-budget.js";
 
 const opened: { dispose(): Promise<void> }[] = [];
 afterEach(async () => { for (const item of opened.splice(0).reverse()) await item.dispose(); });
@@ -34,7 +35,7 @@ const request = "Intent/Purpose: fix the greeting\nRequirements:\nR1: greeting.t
 const spawnVerifier = () => tool(SPAWN_TOOL, { reason: "verification", workers: [{ name: "check", role: "verify", request: "Original request: greeting.txt says hello. Run your own checks." }] });
 const verified = () => tool("report_result", { kind: "verify", summary: "greeting.txt says hello", data: { passed: true, evidence: ["cat greeting.txt"], issues: [] } });
 const implemented = (split = true) => tool("report_result", { kind: "implement", summary: "Done", data: { status: "done", checklist, split: split ? { decision: "split", criteria: ["verification"], reason: "the user asked for an independent check" } : { decision: "none", reason: "small" } } });
-const runJson = async (record: string) => JSON.parse(await readFile(join(record, "run.json"), "utf8")) as { assignment: Record<string, unknown> };
+const runJson = async (record: string) => JSON.parse(await readFile(join(record, "run.json"), "utf8")) as { assignment: Record<string, unknown>; outcome: Record<string, unknown> };
 const ONE_SHOT = { session: "single" as const };
 
 describe("--effort: grammar and feedback", () => {
@@ -107,6 +108,28 @@ describe("--effort: grammar and feedback", () => {
     expect(values("single --effort high fix")).toBeNull();
     expect(orcheCompletions().some(item => item.value.includes("--effort"))).toBe(false);
     for (const mode of MAIN_MODES) for (const value of values(`${mode} --`)!) expect(parseOrcheCommand(`${value}do it`)).toMatchObject({ mode, prompt: "do it" });
+  });
+});
+
+describe("--summary-budget: grammar", () => {
+  it("parses with or without --effort, in any order, each once; -- ends the options; the old --thinking-policy is prompt text", () => {
+    expect(parseOrcheCommand("strong --summary-budget compact fix it")).toEqual({ mode: "strong", prompt: "fix it", summaryBudget: "compact" });
+    expect(parseOrcheCommand("strong --effort=max --summary-budget=compact fix it")).toEqual({ mode: "strong", prompt: "fix it", effort: "max", summaryBudget: "compact" });
+    expect(parseOrcheCommand("ultra --summary-budget standard\t--effort low -- --effort is text")).toEqual({ mode: "ultra", prompt: "--effort is text", effort: "low", summaryBudget: "standard" });
+    expect(parseOrcheCommand("strong --thinking-policy=phase fix")).toEqual({ mode: "strong", prompt: "--thinking-policy=phase fix" });
+    const cases: [string, string][] = [
+      ["strong --summary-budget tiny fix", 'orche strong: invalid --summary-budget "tiny". Valid values: standard, compact'],
+      ["strong --summary-budget", "orche strong: --summary-budget needs a value."],
+      ["strong --summary-budget compact --summary-budget standard x", "orche strong: --summary-budget is given more than once; give it once."],
+      ["strong --effort max --summary-budget compact", "orche strong: no prompt after --effort max --summary-budget compact."],
+      ["direct --summary-budget compact fix", "orche direct: --summary-budget applies to orche_task workers and direct mode runs none"],
+      ["mode strong --summary-budget compact", "orche: --summary-budget belongs to a one-shot request"],
+    ];
+    for (const [input, message] of cases) {
+      expect(parseOrcheCommand(input), input).toBeUndefined();
+      expect(effortUsage(input), input).toContain(message);
+      expect(effortUsage(input), input).toContain("Nothing was sent.");
+    }
   });
 });
 
@@ -254,6 +277,27 @@ describe("--effort: the request's orche_task assignments", () => {
     const bogus = await execute({ oneShot: { ...ONE_SHOT, effort: "turbo" as never } });
     expect(bogus.details).toMatchObject({ thinking: "medium", thinkingSource: "config" });
     expect(bogus.details.requestMode).not.toHaveProperty("effort");
+  });
+
+  it("--summary-budget compact: the request's worker session uses the compact profile; the next assignment of the same worker is standard; a bogus value is ignored", async () => {
+    const orchestrator = tierProvider("tier-orch", "o1");
+    const { execute, register, pool, h } = await fixture({ records: true, models: { orchestrator: { model: "tier-orch/o1", thinking: "high" } } });
+    register(orchestrator);
+    orchestrator.setResponses([implemented(false), implemented(false), implemented(false)]);
+    const profiles: string[] = [];
+    const profile = () => summaryBudgetProfile((pool as unknown as { manager: { session(id: string): object } }).manager.session("W1"));
+    const first = await execute({ oneShot: { ...ONE_SHOT, summaryBudget: "compact" } });
+    profiles.push(profile());
+    expect(first.details).toMatchObject({ summaryBudget: "compact", requestMode: { source: "one-shot", summaryBudget: "compact" } });
+    expect((await runJson(first.details.record!)).outcome).toMatchObject({ summaryBudget: "compact" });
+    const later = await execute({ worker: "W1" });
+    profiles.push(profile());
+    expect(later.details.summaryBudget).toBeUndefined();
+    const bogus = await execute({ worker: "W1", oneShot: { ...ONE_SHOT, summaryBudget: "tiny" as never } });
+    profiles.push(profile());
+    expect(bogus.details.summaryBudget).toBeUndefined();
+    expect(profiles).toEqual(["compact", "standard", "standard"]);
+    expect(h.notifications).toEqual([]);
   });
 });
 

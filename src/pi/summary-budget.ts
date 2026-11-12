@@ -19,6 +19,14 @@
  * that was cut off is never repeated unchanged. A second cut-off answer is returned to Pi, which fails the compaction as before
  * (keeping the context); the next attempt starts from the raised level. Errors (provider failures such as a usage limit), aborts
  * and complete answers pass through untouched: only an output-limit stop is retried here.
+ *
+ * Profiles (docs/compaction.md "Summary budget"): `standard` (the default) is the budget above. `compact` is an opt-in of one request
+ * (`/orche <mode> --summary-budget compact`, src/extension/index.ts), set per assignment: half the standard budget
+ * ({@link SUMMARY_BUDGET_COMPACT_MAX}, an eighth of `maxTokens`, {@link SUMMARY_BUDGET_COMPACT_UNKNOWN}; same floor and retry) and a
+ * priority list of what must survive (decisions with their rationale, unresolved items, constraints, exact identifiers, next steps)
+ * and what goes first (content that can be re-read). Research it-0140 (Fable, maxTokens 128000) wrote summaries near the 32000-token
+ * standard budget and a compaction took 9 minutes on average, its time growing with the output; compact asks for 16000. The budget
+ * is per summary REQUEST: a compaction that also summarizes a split turn's prefix sends two requests, each under the budget.
  */
 import { createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEvent, type AssistantMessageEventStream, type Context, type Message } from "@earendil-works/pi-ai";
 
@@ -30,11 +38,22 @@ export const SUMMARY_BUDGET_SHARE = 0.25;
 export const SUMMARY_BUDGET_UNKNOWN = 16_000;
 /** Lower bound of the budget after output-limit stops (tokens). */
 export const SUMMARY_BUDGET_MIN = 4_096;
+/** The compact profile: upper bound, share of `maxTokens`, and the budget without a catalog `maxTokens` (half of standard each). */
+export const SUMMARY_BUDGET_COMPACT_MAX = 16_000;
+export const SUMMARY_BUDGET_COMPACT_SHARE = 0.125;
+export const SUMMARY_BUDGET_COMPACT_UNKNOWN = 8_000;
+
+export type SummaryBudgetProfile = "standard" | "compact";
+export const SUMMARY_BUDGET_PROFILES: readonly SummaryBudgetProfile[] = ["standard", "compact"];
+/** The budget and profile of a session's latest summary request (compaction records). */
+export interface SummaryBudgetUse { profile: SummaryBudgetProfile; tokens: number; level: number }
 
 /** A summary answer that stopped at the output limit. */
 export interface SummaryLengthStop {
   type: "summary_length_stop";
   model?: string;
+  /** The session's profile when the request was sent. */
+  profile: SummaryBudgetProfile;
   /** The budget the cut-off request asked for, and the one the next request asks for. */
   budgetTokens: number;
   nextBudgetTokens: number;
@@ -46,18 +65,48 @@ export interface SummaryLengthStop {
   retry: boolean;
 }
 
-interface BudgetState { level: number; onEvent?: (event: SummaryLengthStop) => void }
+/** Summary requests since the last {@link takeSummaryRequests}: count, re-sends, summed request time and output tokens. */
+export interface SummaryRequests { requests: number; retries: number; ms: number; outputTokens: number }
+interface BudgetState { level: number; profile: SummaryBudgetProfile; last?: SummaryBudgetUse; window?: SummaryRequests; onEvent?: (event: SummaryLengthStop) => void }
 const states = new WeakMap<object, BudgetState>();
 const stateOf = (session: object): BudgetState => {
   let state = states.get(session);
-  if (!state) states.set(session, state = { level: 0 });
+  if (!state) states.set(session, state = { level: 0, profile: "standard" });
   return state;
 };
 
-/** The observer of a session's output-limit stops (an assignment start). The budget level is the session's and is kept. */
-export function configureSummaryBudget(session: object, onEvent?: (event: SummaryLengthStop) => void): void {
+/**
+ * An assignment start: the observer of the session's output-limit stops and the profile of this assignment (omitted: standard, so an
+ * opt-in never outlives its request). The budget level is the session's and is kept (a summary that was cut off is never repeated
+ * unchanged, whatever the profile).
+ */
+export function configureSummaryBudget(session: object, onEvent?: (event: SummaryLengthStop) => void, profile: SummaryBudgetProfile = "standard"): void {
   const state = stateOf(session);
   if (onEvent) state.onEvent = onEvent; else delete state.onEvent;
+  state.profile = profile;
+  delete state.last;
+}
+
+/** The session's profile and the budget of its latest summary request (undefined before one). */
+export function summaryBudgetUse(session: object): SummaryBudgetUse | undefined {
+  const state = states.get(session);
+  return state?.last ? { ...state.last } : undefined;
+}
+
+/** The session's current profile (standard when never configured). */
+export function summaryBudgetProfile(session: object): SummaryBudgetProfile {
+  return states.get(session)?.profile ?? "standard";
+}
+
+/**
+ * The summary requests the session sent since the last call (a compaction's one or two requests and a re-send), then starts over.
+ * Their `ms` is the requests' own time, part of the compaction's whole duration; never add the two.
+ */
+export function takeSummaryRequests(session: object): SummaryRequests | undefined {
+  const state = states.get(session);
+  const window = state?.window;
+  if (state) delete state.window;
+  return window;
 }
 
 /** The session's current budget level (0: no output-limit stop yet). */
@@ -65,15 +114,16 @@ export function summaryBudgetLevel(session: object): number {
   return states.get(session)?.level ?? 0;
 }
 
-/** The budget (tokens) for `model` at `level`. */
-export function summaryBudgetTokens(model: { maxTokens?: number } | undefined, level = 0): number {
+/** The budget (tokens) for `model` at `level` in `profile`. */
+export function summaryBudgetTokens(model: { maxTokens?: number } | undefined, level = 0, profile: SummaryBudgetProfile = "standard"): number {
   const max = model?.maxTokens;
-  const base = max && max > 0 ? Math.min(SUMMARY_BUDGET_MAX, Math.floor(max * SUMMARY_BUDGET_SHARE)) : SUMMARY_BUDGET_UNKNOWN;
+  const [cap, share, unknown] = profile === "compact" ? [SUMMARY_BUDGET_COMPACT_MAX, SUMMARY_BUDGET_COMPACT_SHARE, SUMMARY_BUDGET_COMPACT_UNKNOWN] : [SUMMARY_BUDGET_MAX, SUMMARY_BUDGET_SHARE, SUMMARY_BUDGET_UNKNOWN];
+  const base = max && max > 0 ? Math.min(cap, Math.floor(max * share)) : unknown;
   return Math.max(SUMMARY_BUDGET_MIN, Math.floor(base / 2 ** level));
 }
 
 /** The instruction block appended to a summary request. `restoredLabel`: the heading of the essentials orche restores verbatim. */
-export function summaryBudgetNote(tokens: number, options: { retry?: boolean; restoredLabel?: string } = {}): string {
+export function summaryBudgetNote(tokens: number, options: { retry?: boolean; restoredLabel?: string; profile?: SummaryBudgetProfile } = {}): string {
   const lines = [
     "orche summary budget (takes precedence over any instruction to preserve everything):",
     ...(options.retry ? ["- The previous attempt at this summary stopped at the response limit and was discarded. Write a much shorter summary now."] : []),
@@ -81,6 +131,10 @@ export function summaryBudgetNote(tokens: number, options: { retry?: boolean; re
     "- If the previous summary or the new messages are larger, condense: merge finished work into short lines, drop superseded, repeated or already-resolved detail, and keep the exact paths, identifiers, numbers and error messages the next steps need.",
     "- Keep the current state, open problems, blockers and next steps complete.",
     ...(options.restoredLabel ? [`- A message that starts with "${options.restoredLabel}" is restored verbatim after this summary from the task's own records: do not copy its content; one line that points to it is enough.`] : []),
+    ...(options.profile === "compact" ? [
+      "- Compact summary. Never drop: decisions made and their rationale; unresolved questions, open hypotheses, blockers and failed attempts with their cause; constraints and acceptance criteria from the user or main; findings with their evidence (exact paths, identifiers, numbers, commands and outcomes); what is done, what is in progress and the next steps.",
+      "- Drop first: content of files, documents and tool output that can be read again (keep the path and what to look for), narration of how the work went, and detail that a later step superseded.",
+    ] : []),
   ];
   return lines.join("\n");
 }
@@ -106,20 +160,27 @@ export function budgetedSummary(session: object, model: { provider?: string; id?
   const out = createAssistantMessageEventStream();
   const name = model.provider !== undefined || model.id !== undefined ? `${model.provider ?? ""}/${model.id ?? ""}` : undefined;
   const attempt = async (retry: boolean): Promise<void> => {
-    const budget = summaryBudgetTokens(model, state.level);
-    const stream = send(withSummaryNote(context, summaryBudgetNote(budget, { retry, ...(options.restoredLabel ? { restoredLabel: options.restoredLabel } : {}) })));
+    const budget = summaryBudgetTokens(model, state.level, state.profile);
+    state.last = { profile: state.profile, tokens: budget, level: state.level };
+    const startedAt = Date.now();
+    const stream = send(withSummaryNote(context, summaryBudgetNote(budget, { retry, profile: state.profile, ...(options.restoredLabel ? { restoredLabel: options.restoredLabel } : {}) })));
     let terminal: Extract<AssistantMessageEvent, { type: "done" | "error" }> | undefined;
     for await (const event of stream) {
       if (event.type === "done" || event.type === "error") { terminal = event; break; }
       out.push(event);
     }
     const final: AssistantMessage = terminal ? (terminal.type === "done" ? terminal.message : terminal.error) : await stream.result();
+    const window = state.window ??= { requests: 0, retries: 0, ms: 0, outputTokens: 0 };
+    window.requests++;
+    if (retry) window.retries++;
+    window.ms += Date.now() - startedAt;
+    window.outputTokens += final.usage?.output ?? 0;
     if (final.stopReason === "length") {
       state.level++;
       const again = !retry && !options.signal?.aborted;
       const cap = options.cap?.();
       try {
-        state.onEvent?.({ type: "summary_length_stop", ...(name ? { model: name } : {}), budgetTokens: budget, nextBudgetTokens: summaryBudgetTokens(model, state.level),
+        state.onEvent?.({ type: "summary_length_stop", ...(name ? { model: name } : {}), profile: state.profile, budgetTokens: budget, nextBudgetTokens: summaryBudgetTokens(model, state.level, state.profile),
           ...(final.usage ? { outputTokens: final.usage.output } : {}), ...(cap !== undefined ? { cap } : {}), retry: again });
       } catch { /* observers cannot change the request */ }
       if (again) return attempt(true);

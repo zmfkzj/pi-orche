@@ -60,7 +60,7 @@ describe("one-shot commands: grammar, usage and refusals", () => {
   });
 
   it("explains the one-shot usage for a mode without a prompt; busy refusals say why it is not queued and what to do", () => {
-    expect(oneShotUsage("ultra")).toBe("Usage: /orche ultra [--effort LEVEL] <PROMPT>: runs it with the quality-first ultra orchestration on the strong model tiers for this one request (the prompt may span lines; --effort off|minimal|low|medium|high|xhigh|max sets the reasoning effort its workers start at). The session's mode does not change; /orche mode ultra switches it.");
+    expect(oneShotUsage("ultra")).toBe("Usage: /orche ultra [--effort LEVEL] <PROMPT>: runs it with the quality-first ultra orchestration on the strong model tiers for this one request (the prompt may span lines; --effort off|minimal|low|medium|high|xhigh|max sets the reasoning effort its workers start at; --summary-budget standard|compact sets its workers' compaction summary budget). The session's mode does not change; /orche mode ultra switches it.");
     expect(oneShotUsage(" strong \n ")).toContain("Usage: /orche strong [--effort LEVEL] <PROMPT>: delegates it to one worker on the strong model tiers (models.strong-orchestrator, models.strong-worker)");
     // single and direct keep the general usage line they always had.
     for (const input of ["", "   ", "workers now", "Ultra", "strong fix", "single", "direct "]) expect(oneShotUsage(input)).toBeUndefined();

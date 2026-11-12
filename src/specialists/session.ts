@@ -10,6 +10,7 @@ import { Value } from "typebox/value";
 import { formatSchemaErrors } from "../orchestration/schema-errors.js";
 import type { ModelRuntime, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createSession, type SessionOptions, type ToolGuard } from "../pi/session-factory.js";
+import { configureSummaryBudget, type SummaryBudgetProfile } from "../pi/summary-budget.js";
 import type { AstRewriteFileGuard } from "../tools/ast.js";
 import { abortable } from "../orchestration/run/deadline.js";
 import type { ModelRoute } from "../orchestration/routing.js";
@@ -83,6 +84,8 @@ export interface SpecialistRun<S extends TSchema> {
   skills?: SessionOptions["skills"];
   /** Compaction with restored essentials (orche_spawn sub-workers with `workerCompaction.subWorkers`); absent: compaction stays off. */
   taskCompaction?: SessionOptions["taskCompaction"];
+  /** The summary budget profile of this session's compactions (src/pi/summary-budget.ts; absent: standard). */
+  summaryBudget?: SummaryBudgetProfile;
   /** Every tool the specialist starts (progress lines). */
   onTool?: (name: string) => void;
   /** Once the session exists: the `provider/id` and thinking level it really runs on (after Pi resolved the route and clamped the level). */
@@ -236,6 +239,7 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
     });
     session = await abortable(creation, controller.signal);
     if (session.sessionFile) stats.sessionFile = session.sessionFile;
+    if (run.summaryBudget) configureSummaryBudget(session, undefined, run.summaryBudget);
     // The model and level the session really runs on: Pi clamps the route's thinking to the model (a non-reasoning model runs off).
     if (session.model) stats.model = `${session.model.provider}/${session.model.id}`;
     if (session.thinkingLevel) stats.thinking = session.thinkingLevel;

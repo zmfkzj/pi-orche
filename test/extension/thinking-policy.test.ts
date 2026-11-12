@@ -22,7 +22,7 @@ const request = "Intent/Purpose: fix the greeting\nRequirements:\nR1: greeting.t
 const checklist = [{ id: "R1", status: "met", evidence: "greeting.txt:1", verifiedBy: "cat greeting.txt" }];
 const implemented = (split: { decision: string; criteria?: string[]; reason: string } = { decision: "none", reason: "small" }) => tool("report_result", { kind: "implement", summary: "Done", data: { status: "done", checklist, split } });
 const cp = { result: "greeting checked", evidence: ["greeting.txt:1", "cat greeting.txt → hello world"], verification: "passed" };
-type Node = { id: string; title: string; dependsOn: string[]; covers: string[]; status: string; phase?: string; hard?: boolean; note?: string; checkpoint?: unknown };
+type Node = { id: string; title: string; dependsOn: string[]; covers: string[]; status: string; phase?: string; hard?: boolean; read?: boolean; note?: string; checkpoint?: unknown };
 const n = (id: string, status: string, extra: Partial<Node> = {}, dependsOn: string[] = []): Node => ({ id, title: `Work ${id}`, dependsOn, covers: ["R1"], status, ...extra });
 const plan = (...nodes: Node[]) => tool("task_plan", { nodes } as never);
 const read = () => tool("read", { path: "greeting.txt" });
@@ -260,6 +260,45 @@ describe("the default stays fixed", () => {
     expect(seen.slice(1).map(item => item.last).filter(text => /"isError":true/.test(text))).toEqual([]);
     const events = (await readFile(join(result.details.record!, "events.jsonl"), "utf8")).split("\n").filter(Boolean).map(line => JSON.parse(line) as { type: string });
     expect(events.filter(event => event.type === "result_rewrite" || event.type === "thinking_change")).toEqual([]);
+  });
+  it("read nodes (every mode, no option, default fixed policy): a read:true node runs at low with read-only tools; the work after it at B; the record counts them", async () => {
+    for (const mainMode of ["single", "strong"] as const) {
+      const { execute, script, seen } = await fixture();
+      script([
+        plan(n("r", "running", { read: true }), n("a", "pending", {}, ["r"])),
+        read(),
+        tool("edit", { path: "greeting.txt", edits: [] } as never), // refused: a read node runs read-only tools only
+        plan(n("r", "done", { read: true }), n("a", "running", {}, ["r"])),
+        read(),
+        plan(n("r", "done"), n("a", "done", {}, ["r"])),
+        implemented(),
+      ]);
+      const result = await execute({ mainMode });
+      expect(seen.map(item => item.reasoning), mainMode).toEqual(["high", "low", "low", "low", "high", "high", "high"]);
+      expect(seen[0]!.last).toContain("Read nodes: mark a Task DAG node read:true only for simple reading");
+      expect(seen[3]!.last).toContain("Blocked: a read node is running at low effort");
+      expect(result.details.status).toBe("done");
+      expect(result.details.thinkingPolicy).toMatchObject({ mode: "fixed", read: "low", requests: { read: 3 } });
+      expect(result.text).toContain("3 of 7 requests in read nodes at low");
+      const run = JSON.parse(await readFile(join(result.details.record!, "run.json"), "utf8")) as { outcome: Record<string, unknown> };
+      expect(run.outcome).toMatchObject({ thinkingPolicy: { mode: "fixed", requests: { read: 3 } }, rereads: { reads: 2, repeats: 1 } });
+    }
+  });
+  it("read nodes: a report written in a read node is rewritten at B (fixed policy), and the next assignment starts at B", async () => {
+    const { execute, script, seen } = await fixture();
+    script([
+      plan(n("r", "running", { read: true })),
+      implemented(),
+      plan(n("r", "done", { read: true })),
+      implemented(),
+      plan(n("x", "running")), plan(n("x", "done")), implemented(),
+    ]);
+    const first = await execute();
+    expect(first.details.status).toBe("done");
+    expect(seen.slice(0, 4).map(item => item.reasoning)).toEqual(["high", "low", "high", "high"]);
+    expect(seen[2]!.last).toContain("written at the reduced read effort (low)");
+    await execute({ worker: "W1" });
+    expect(seen.slice(4).map(item => item.reasoning)).toEqual(["high", "high", "high"]);
   });
   it.each([
     ["fixed", "fixed"],
