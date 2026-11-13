@@ -279,6 +279,8 @@ A response that hits the model's output limit while still reasoning is no longer
 
 A bash command started with an explicit `timeout` counts as a declared quiet wait: while it runs within that timeout it keeps the worker active for deadline extensions, even without output. Without a timeout a silent command looks idle after two minutes, as before; the extension budget (`limits.maxExtensions`) still caps every assignment.
 
+Another tool without progress updates counts as working for ten minutes after it starts (or its known timeout plus 30 s). A call that declares its own wait as a `timeoutSeconds` or `timeoutMs` argument (positive, finite; the larger if both; at most 6 h) extends that bound to the declared wait plus 30 s, so a long silent check is not judged idle at ten minutes. A declaration never shortens a bound, a bare `timeout` of a non-bash tool is not read (its unit differs between tools), and the extension budget still caps the assignment (`src/agent/liveness.ts` `declaredToolTimeoutMs`).
+
 ### Run records
 
 The sessions orche starts itself (the persistent `orche_task` workers and their sub-workers) used to live in memory only, so afterwards there was no way to see what a worker did, which model each role really used, how many requests each made, or what a failed run cost. Now every `orche_task` leaves a **record**, by default under `<agent dir>/orche/records/` (`PI_CODING_AGENT_DIR`, default `~/.pi/agent`) — outside pi's own `sessions/` directory, so it never shows up in `/resume` or in concurrent-session detection, and never inside the workspace:

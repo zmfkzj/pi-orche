@@ -25,7 +25,9 @@
  *    older than {@link REQUEST_WAIT_MAX_MS}. This covers provider latency, long reasoning without streamed output and retry
  *    backoff, but a stuck HTTP call stops counting after the bound;
  * 3. a **non-bash tool is in flight** and has been for no longer than its bound ({@link TOOL_INFLIGHT_MAX_MS}, or the tool's own
- *    known timeout plus {@link TOOL_TIMEOUT_GRACE_MS}), even without updates: ast_rewrite, diagnostics, generate_image, ... are
+ *    known timeout plus {@link TOOL_TIMEOUT_GRACE_MS}; a call that declares its own wait as a `timeoutSeconds` or `timeoutMs`
+ *    argument extends that bound to the declared wait plus the grace, see {@link declaredToolTimeoutMs}), even without updates:
+ *    ast_rewrite, diagnostics, generate_image, a tool waiting on a long test run ... are
  *    silent by nature. A bash call has NO such bound: it is judged by its progress alone (rule 1), so a silent `sleep 9999`
  *    stops counting once its last progress is older than the window, however long it has been "running";
  * 4. a **declared quiet wait**: a bash call started with an explicit `timeout` argument (seconds) counts as working while it runs
@@ -201,7 +203,7 @@ interface Flight {
   lastProgressAt: number;
   progress: "start" | "output" | "process";
   heartbeat?: { sample: BashHeartbeatSample; at: number };
-  /** bash only: the explicit `timeout` of the call (ms), a declared quiet wait. */
+  /** bash: the explicit `timeout` of the call (ms), a declared quiet wait; another tool: its declared `timeoutMs`/`timeoutSeconds`. */
   declaredMs?: number;
 }
 
@@ -211,6 +213,22 @@ export function declaredBashTimeoutMs(args: unknown): number | undefined {
   const raw = args.timeout;
   const seconds = typeof raw === "number" ? raw : typeof raw === "string" && /^\s*\d+(\.\d+)?\s*$/.test(raw) ? Number(raw) : undefined;
   return seconds !== undefined && Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
+}
+
+/** The longest wait a non-bash tool call can declare for itself (a larger declaration is clamped to it). */
+export const DECLARED_TOOL_WAIT_MAX_MS = 6 * 60 * 60_000;
+
+/**
+ * The wait a non-bash tool call declares for itself, in ms: its `timeoutMs` (ms) or `timeoutSeconds` (s) argument, a positive
+ * finite number or numeric string; the larger when both are given, clamped to {@link DECLARED_TOOL_WAIT_MAX_MS}. A bare `timeout`
+ * is NOT read here: its unit differs between tools (bash seconds, many MCP tools milliseconds). Undefined without a usable one.
+ */
+export function declaredToolTimeoutMs(args: unknown): number | undefined {
+  if (!isObject(args)) return undefined;
+  const num = (raw: unknown) => typeof raw === "number" ? raw : typeof raw === "string" && /^\s*\d+(\.\d+)?\s*$/.test(raw) ? Number(raw) : undefined;
+  const candidates = [num(args.timeoutMs), (() => { const s = num(args.timeoutSeconds); return s === undefined ? undefined : s * 1000; })()]
+    .filter((ms): ms is number => ms !== undefined && Number.isFinite(ms) && ms > 0);
+  return candidates.length ? Math.min(Math.max(...candidates), DECLARED_TOOL_WAIT_MAX_MS) : undefined;
 }
 
 export interface LivenessTrackerOptions {
@@ -337,11 +355,13 @@ export class LivenessTracker {
       }
       return { active, text: parts.join(", ") };
     }
-    const bound = toolInflightBoundMs(flight.name, this.toolTimeoutsMs);
+    // A declared wait only ever extends the bound (never shortens a known or generic one) and is itself finite from the start.
+    const bound = Math.max(toolInflightBoundMs(flight.name, this.toolTimeoutsMs), flight.declaredMs !== undefined ? flight.declaredMs + TOOL_TIMEOUT_GRACE_MS : 0);
     const lastSignal = flight.lastUpdateAt ?? flight.startedAt;
     const withinBound = now - flight.startedAt <= bound;
     const active = withinBound || now - lastSignal <= window;
     let text = `${flight.name} running ${running}, ${flight.lastUpdateAt !== undefined ? `update ${formatDuration(now - flight.lastUpdateAt)} ago` : "no updates"}`;
+    if (flight.declaredMs !== undefined) text += `, declared wait up to ${formatDuration(flight.declaredMs)}`;
     if (!active) text += `, past the ${formatDuration(bound)} bound`;
     return { active, text };
   }
@@ -398,7 +418,7 @@ export class LivenessTracker {
         this.running = true;
         this.flights.delete(id);
         const name = String(event.toolName ?? "tool");
-        const declaredMs = name === "bash" ? declaredBashTimeoutMs(event.args) : undefined;
+        const declaredMs = name === "bash" ? declaredBashTimeoutMs(event.args) : declaredToolTimeoutMs(event.args);
         this.flights.set(id, { toolCallId: id, name, startedAt: now, lastProgressAt: now, progress: "start", ...(declaredMs !== undefined ? { declaredMs } : {}) });
         while (this.flights.size > MAX_FLIGHTS) this.flights.delete(this.flights.keys().next().value!);
         this.lastEventAt = this.lastSignalAt = now;
