@@ -31,7 +31,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { projectImageContext } from "./image-context.js";
 import { lengthRecoveryHandlers, type LengthRecoveryOptions } from "./length-recovery.js";
 import { outputCapHandler, withSummaryOutputCap } from "./output-cap.js";
-import { summaryBudgetUse, takeSummaryRequests, type SummaryBudgetUse, type SummaryRequests } from "./summary-budget.js";
+import { setSummaryDecisionMemory, summaryBudgetUse, takeSummaryRequests, type SummaryBudgetUse, type SummaryRequests } from "./summary-budget.js";
 import { markCompaction, recordToolResult } from "./read-telemetry.js";
 import { readNodeRefusal } from "./read-node-guard.js";
 import { thinkingPolicyOf } from "./thinking-policy.js";
@@ -161,6 +161,8 @@ export interface TaskCompaction {
   policy?: (model: { contextWindow: number; provider: string; id: string }) => ResolvedCompaction;
   /** The essentials point to the original transcript: check it before context is discarded (extended essentials). */
   retrieval?: boolean;
+  /** Opt-in summary rule: past failures are not standing instructions. */
+  decisionMemory?: boolean;
 }
 /** The stable settings (kept for callers and tests): compact above 50% of the window. */
 export function taskCompactionSettings(contextWindow: number) {
@@ -201,6 +203,7 @@ export function applyTaskCompaction(session: AgentSession, taskCompaction: TaskC
   state.last = undefined;
   state.preflight = undefined;
   state.startEntry = session.sessionManager.getLeafId() ?? undefined;
+  setSummaryDecisionMemory(session, taskCompaction?.decisionMemory === true);
   if (!taskCompaction || !session.model) {
     state.resolved = undefined;
     session.settingsManager.applyOverrides({ compaction: { enabled: false } });
