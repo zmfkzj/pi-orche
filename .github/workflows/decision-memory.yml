@@ -1,0 +1,29 @@
+name: Decision memory checks
+on:
+  pull_request:
+    paths:
+      - 'src/pi/decision-memory.ts'
+      - 'src/pi/compaction-policy.ts'
+      - 'src/pi/session-factory.ts'
+      - 'src/pi/summary-budget.ts'
+      - 'src/extension/workers.ts'
+      - 'test/pi/decision-memory.test.ts'
+      - 'test/pi/compaction-policy.test.ts'
+      - 'test/extension/worker-compaction-pool.test.ts'
+      - '.github/workflows/decision-memory.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - run: npm ci --legacy-peer-deps
+      - run: npm run typecheck
+      - run: npx vitest run test/pi/decision-memory.test.ts test/pi/compaction-policy.test.ts test/extension/worker-compaction-pool.test.ts
