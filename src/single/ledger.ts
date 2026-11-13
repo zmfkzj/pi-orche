@@ -1,8 +1,8 @@
 /**
  * Task ledger of the single workflow (Phase 1 of docs/specialist-orchestration.md).
  *
- * LLM sessions are caches: a worker compacts at 50% and disappears on reload, idle expiry or pool
- * eviction. The ledger is the task state that must survive all of that, kept outside every LLM
+ * LLM sessions are caches: a worker compacts at 50% and disappears on reload, /orche stop or a
+ * replacement (capability or mode change). The ledger is the task state that must survive all of that, kept outside every LLM
  * context: the user's original requests, each assignment's requirements with the status the
  * worker last reported, the readings it chose for ambiguous requirements, and a short history.
  * Workers see a rendered projection when they compact; the main session sees a short summary;
@@ -440,13 +440,13 @@ export function renderLedgerSummary(ledgers: readonly TaskLedger[], maxChars: nu
 
 /** The briefing a worker gets when it takes over a task from another worker (gone, or replaced by a new one). */
 export function renderResumeBriefing(ledger: TaskLedger, previous: { worker: string; sessionFile?: string; live: boolean }): string {
-  const why = previous.live ? `${previous.worker} handed it over to you` : `${previous.worker} is no longer live (its session ended: a reload, idle expiry or pool eviction)`;
+  const why = previous.live ? `${previous.worker} handed it over to you` : `${previous.worker} is no longer live (its session ended: /orche stop, a reload or session switch, or a capability or mode change replaced it)`;
   const last = ledger.history.at(-1);
   const stopped = last && last.status === "timeout" ? ` Its last assignment a${last.assignment} was stopped by the time limit, not by an unmet result.` : "";
   const resume = ledger.plan ? " Resume from the last recorded Task DAG in the ledger below: keep finished nodes whose checkpoint still holds (re-check them cheaply) and continue with the ones not done." : "";
   return [
     `## Continuing task ${ledger.taskId}`,
-    `Task ${ledger.taskId} was worked on by ${previous.worker}; ${why}.${stopped} You take it over without its context: rely on this ledger and re-read the workspace.${previous.sessionFile ? ` Its transcript is ${previous.sessionFile} (read it only for a specific detail).` : ""}${resume}`,
+    `Task ${ledger.taskId} was worked on by ${previous.worker}; ${why}.${stopped} You take it over without its context: rely on this ledger and re-read the workspace. The assignment below may be a concise follow-up written for ${previous.worker}'s context: the earlier original requests, requirements and decisions it builds on are in this ledger.${previous.sessionFile ? ` Its transcript is ${previous.sessionFile} (read it only for a specific detail, e.g. a constraint the ledger does not hold).` : " Its transcript was not persisted: what the ledger lacks is not recoverable, so state such gaps as ambiguities instead of guessing."}${resume}`,
     renderLedgerForWorker(ledger),
     "",
   ].join("\n");

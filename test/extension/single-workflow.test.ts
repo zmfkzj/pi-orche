@@ -333,7 +333,7 @@ describe("single task compaction with a real AgentSession", () => {
       const messages = JSON.stringify(context.messages);
       expect(messages).toContain("Assignment in progress at compaction time (superseded by any later Assignment message)");
       expect(messages).not.toContain("Current assignment");
-      expect(messages).toContain("This Assignment message supersedes earlier requirement ids and plans");
+      expect(messages).toContain("This Assignment is a follow-up that continues from your retained context. Its R-ids are this round's checklist and Task DAG: earlier requirement ids and plans, including any assignment preserved at compaction time, are closed unless this message restates or revises them.");
       expect(messages).toContain("R1: BETA acceptance");
       return report();
     }]);
@@ -343,6 +343,23 @@ describe("single task compaction with a real AgentSession", () => {
     expect(await eventsOf(next.details.record!)).not.toContain('"type":"task_plan"');
     expect(await readFile(join(next.details.record!, "run.json"), "utf8")).not.toContain('"plan":');
     expect(pool.list()[0]?.id).toBe("W1");
+    // A concise follow-up that compacts: the essentials keep the earlier hand-offs it builds on (ALPHA's self-contained one, BETA).
+    let gammaStep = 0;
+    let compacted = "";
+    faux.setResponses(Array(12).fill(((context => {
+      if (JSON.stringify(context.messages.find(message => message.role === "system")).includes("You are a context summarization assistant")) return reply("COMPACTION_SUMMARY");
+      if (gammaStep++ === 0) return tool("task_plan", { nodes: [{ id: "gamma", title: "Gamma", dependsOn: [], covers: ["R2"], status: "pending" }] });
+      if (gammaStep <= 4) return tool("read", { path: "large.txt", offset: gammaStep });
+      compacted = JSON.stringify(context.messages);
+      return tool("report_result", { kind: "implement", summary: "Gamma", data: { status: "done", checklist: [{ id: "R2", status: "met", evidence: "greeting.txt:1", verifiedBy: "cat greeting.txt" }] } });
+    }) satisfies FauxResponseStep)));
+    const gamma = await execute({ worker: "W1", model: faux.getModel(), request: "R2: GAMMA keeps the greeting\nOriginal request\nGAMMA" });
+    expect(gamma.details.compactions?.count).toBeGreaterThan(0);
+    expect(compacted).toContain("Earlier hand-offs to this worker (the current request above builds on them; it takes precedence, and their R-ids are closed unless it restates them), oldest first, verbatim:");
+    expect(compacted).toContain("[assignment 1]\\nIntent/Purpose: improve greeting");
+    expect(compacted).toContain("원문 그대로: 인사말을 고쳐줘.");
+    expect(compacted).toContain("[assignment 2]\\nR1: BETA acceptance");
+    expect(compacted).toContain("R2: GAMMA keeps the greeting");
   });
   it("repeated compaction labels historical essentials and never accumulates them as current assignments", async () => {
     const { h } = await fixture([]);
@@ -361,5 +378,22 @@ describe("single task compaction with a real AgentSession", () => {
       expect(JSON.stringify(essentials)).toContain(name);
       expect(JSON.stringify(essentials)).not.toContain("Current assignment");
     }
+  });
+});
+
+describe("earlier hand-offs in a reused worker's compaction essentials", () => {
+  it("keeps the first hand-off and the most recent follow-ups within the budget, oldest first", async () => {
+    const { renderEarlierRequests } = await import("../../src/extension/workers.js");
+    expect(renderEarlierRequests([])).toBe("");
+    const text = renderEarlierRequests(["FIRST " + "a".repeat(100), "SECOND", "THIRD " + "b".repeat(300), "FOURTH"], 600);
+    expect(text).toContain("[assignment 1]\nFIRST");
+    expect(text).toContain("[assignment 4]\nFOURTH");
+    expect(text.indexOf("[assignment 1]")).toBeLessThan(text.indexOf("[assignment 4]"));
+    // The first hand-off is clipped to half the budget; older follow-ups that do not fit are named, not dropped silently.
+    const clipped = renderEarlierRequests(["X".repeat(2_000), "Y".repeat(400), "Z".repeat(400)], 1_000);
+    expect(clipped).toContain("characters omitted]");
+    expect(clipped).toContain("[assignment 3]");
+    expect(clipped).toMatch(/\[1 earlier follow-up omitted; they are in this worker's transcript\]|\[assignment 2\]/);
+    expect(clipped.length).toBeLessThan(1_000 + 400);
   });
 });

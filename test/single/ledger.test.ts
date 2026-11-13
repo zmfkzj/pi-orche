@@ -145,7 +145,7 @@ describe("task ledger", () => {
     recordHandoff(ledger, { request: handoff("R1: keep going"), primary });
     const gone = renderResumeBriefing(ledger, { worker: "W4", sessionFile: "/records/workers/W4.jsonl", live: false });
     expect(gone).toContain("## Continuing task T3");
-    expect(gone).toContain("Task T3 was worked on by W4; W4 is no longer live (its session ended: a reload, idle expiry or pool eviction).");
+    expect(gone).toContain("Task T3 was worked on by W4; W4 is no longer live (its session ended: /orche stop, a reload or session switch, or a capability or mode change replaced it).");
     expect(gone).toContain("/records/workers/W4.jsonl");
     expect(gone).toContain("- R1 [open] keep going");
     expect(renderResumeBriefing(ledger, { worker: "W4", live: true })).toContain("W4 handed it over to you.");

@@ -162,20 +162,20 @@ describe("completion wait: orche_task assignments", () => {
     expect(workerFaux.getPendingResponseCount()).toBe(1);
   });
 
-  it("opt-in: no idle-expiry retirement between assignments (the default retires an idle worker)", async () => {
+  it("no idle-expiry retirement between assignments, with or without the completion wait (workers live for the session)", async () => {
     const run = async (completionWait?: () => CompletionWait) => {
       const h = await createHarness({ mainSteps: [], orcheSteps: [explored()] });
       opened.push(h);
       execFileSync("git", ["init", "-q"], { cwd: h.cwd });
       const controller = new OrcheController({ agentDir: h.agentDir, createRuntime: async () => h.runtime });
-      const pool = new WorkerPool({ controller, agentDir: h.agentDir, idleTtlMs: 100, ...(completionWait ? { completionWait } : {}) });
+      const pool = new WorkerPool({ controller, agentDir: h.agentDir, ...(completionWait ? { completionWait } : {}) });
       opened.push(pool);
       await pool.execute({ role: "explore", request: "Find the evidence", cwd: h.cwd, projectTrusted: false });
       await sleep(400);
       return pool.list().map(worker => worker.id);
     };
     expect(await run(() => "unbounded")).toEqual(["W1"]);
-    expect(await run()).toEqual([]);
+    expect(await run()).toEqual(["W1"]);
   });
 });
 

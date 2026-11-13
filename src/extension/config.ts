@@ -183,7 +183,7 @@ export function parseContextWarningConfig(value: unknown): ContextWarningSetting
 /**
  * `single` in orche.config.json: options of the single workflow. `ledger` keeps a per-task ledger outside every LLM context (original
  * requests, requirement statuses, chosen readings, history): workers get it back when they compact, the main session after its own
- * compaction, and a task whose worker is gone (reload, idle expiry, eviction) continues with a new worker briefed from it. Off by
+ * compaction, and a task whose worker is gone (reload, /orche stop, replacement) continues with a new worker briefed from it. Off by
  * default (docs/specialist-orchestration.md, gate G-L).
  *
  * `spawn` (default true, docs/orchestrator.md): the implement/answer worker is an orchestrator that may start sub-workers with
@@ -198,8 +198,8 @@ export function parseContextWarningConfig(value: unknown): ContextWarningSetting
  * `maxSubWorkers` (default 4 = MAX_SUB_WORKERS, an integer from SUB_WORKER_CAP_MIN 2 to SUB_WORKER_CAP_MAX 8): how many
  * sub-workers one `orche_spawn` call may start; they run at the same time, so this is the orchestrator's parallel sub-worker cap (the
  * single, strong and ultra modes; ultra's exploration and candidates need 2, hence the minimum). It is fixed when an orchestrator
- * worker session starts (its tool schema carries it); a reused worker keeps its value. Not the session's job queue or the idle
- * worker pool (pool cap 3).
+ * worker session starts (its tool schema carries it); a reused worker keeps its value. Not the session's job queue or the pool of
+ * idle workers (no cap: they live as long as the session).
  *
  * `strongReflection` (experiment, off when unset; docs/strong-reflection.md): in strong mode only, the implement/answer worker gets
  * one fixed reflection prompt right before its self-review (the first integration node it starts, else its first report_result,

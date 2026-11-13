@@ -23,7 +23,7 @@ const KEPT = [
   "passing its reported items and evidence unchanged, without a diagnosis of your own",
   "When a requirement remains unmet or partial in 2 consecutive REPORTED results of that worker, hand ONLY the unmet items to a NEW worker",
   "A timeout is not an unmet result and never counts towards that rule: continue a timed-out assignment with the SAME worker and task",
-  "a worker that is gone (idle expiry, eviction, reload) is continued by a NEW worker briefed from its transcript",
+  "a worker that is gone (/orche stop, a reload or session switch, a capability or mode change) is continued by a NEW worker briefed from its transcript",
   "Send a separate verify assignment only when the user",
 ];
 /** The earlier main review that the user said was not intended. */

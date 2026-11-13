@@ -203,7 +203,7 @@ describe("mainMode: shell guard diagnostics", () => {
   });
   // Exact wording for mode "single"; the suggestion is only ever appended after it.
   const SINGLE_ADVICE = "Use read with offset/limit, grep, simple static Bash inspection commands, or delegate with orche_task. Supported tests and linters are trusted project checks that may create generated files and execute project configuration, not guaranteed read-only.";
-  const SINGLE_DELEGATE = "Do not retry it directly: delegate the change with the orche_task tool (a self-contained request: goal, decisions so far, relevant files and findings, constraints, acceptance criteria).";
+  const SINGLE_DELEGATE = "Do not retry it directly: delegate the change with the orche_task tool (a self-contained request for a new worker: goal, decisions so far, relevant files and findings, constraints, acceptance criteria; for a live worker that already holds the task, only what is new).";
   it("leaves a block without a hint exactly as before", () => {
     expect(guardToolCall("single", "bash", { command: "curl http://x" })).toBe(
       `Blocked by orche mode "single": this shell command could not be verified (command curl); unsupported does not mean mutating. ${SINGLE_ADVICE}`,
@@ -564,7 +564,7 @@ describe("single-worker mode and one-turn override", () => {
 
   it("single policy keeps reuse and supervision explicit", () => {
     const rules = delegationRules("single");
-    for (const criterion of ["Never claim a reuse that did not happen", "a worker that is gone (idle expiry, eviction, reload) is continued by a NEW worker", "never poll orche_task_status", "call orche_task_attach to wait for the result again", "Results: the worker owns acceptance.", "its unresolved, unverified and blocked items as such", "Intent/Purpose; numbered requirements checklist R1..Rn", "Original request section containing the user's ORIGINAL request text verbatim"])
+    for (const criterion of ["Never claim a reuse that did not happen", "a worker that is gone (/orche stop, a reload or session switch, a capability or mode change) is continued by a NEW worker", "never poll orche_task_status", "call orche_task_attach to wait for the result again", "Results: the worker owns acceptance.", "its unresolved, unverified and blocked items as such", "Intent/Purpose; numbered requirements checklist R1..Rn", "Original request section containing the user's ORIGINAL request text verbatim"])
       expect(rules).toContain(criterion);
   });
 });

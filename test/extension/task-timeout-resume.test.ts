@@ -75,11 +75,11 @@ describe("orche_task timeout: resume with the same worker and the persisted chec
     expect(lines).toContain("Checkpoint at the timeout: Task DAG 1/2 nodes done; not done: verify (running); every accepted task_plan of it is persisted in task ledger T1. Only what task_plan recorded survives a worker that is gone; nothing after its last accepted call.");
     const resume = lines.find(line => line.startsWith("Resume:"))!;
     expect(resume).toContain("a timeout is not an unmet result and does not count towards the 2-consecutive-unmet rule");
-    expect(resume).toMatch(/W1 stays idle with its context until about \d{4}-\d{2}-\d{2} \d{2}:\d{2}Z \(idle expiry 30 min\), unless it is retired earlier/);
+    expect(resume).toContain("W1 stays idle with its context for the rest of this pi session (no idle expiry), unless /orche stop or the end of this pi session retires it earlier.");
+    expect(resume).not.toMatch(/until about|idle expiry \d|pool cap/);
     expect(resume).toContain('Continue with orche_task worker "W1" and task "T1"');
     expect(resume).toContain('Once W1 is gone, pass task "T1": a new worker is briefed from the task ledger and its last recorded Task DAG');
-    expect(error.details.resume).toEqual({ worker: "W1", task: "T1", retainedUntil: expect.any(Number), checkpoint: { assignment: 1, worker: "W1", done: 1, total: 2, remaining: ["verify (running)"] } });
-    expect(error.details.resume!.retainedUntil - Date.now()).toBeLessThanOrEqual(30 * 60_000);
+    expect(error.details.resume).toEqual({ worker: "W1", task: "T1", checkpoint: { assignment: 1, worker: "W1", done: 1, total: 2, remaining: ["verify (running)"] } });
     expect(pool.list()).toMatchObject([{ id: "W1", status: "idle" }]);
     expect(pool.ledgerSummary()).toContain("Task DAG a1 (W1): 1/2 done");
 

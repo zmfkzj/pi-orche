@@ -113,7 +113,8 @@ so they never leak into a later assignment. An undelivered message has to be re-
 in a session branch, also across reloads. A session shutdown (reload, exit, switch) ends a running job as `interrupted` in its
 `orche-job` entry and its `run.json`, without a message. A job found running at the next session start (the process crashed) is
 closed then and announced once. `run.json` records left `running` by a process that no longer exists (`owner.pid`) are closed as
-`interrupted` at session start. Naming a worker that is gone (idle expiry, eviction, `/orche stop`, reload, crash) starts a new
+`interrupted` at session start. Workers have no idle expiry and no pool cap: they live until `/orche stop`, the session's end or a
+replacement their changed tool set requires. Naming a worker that is gone (`/orche stop`, reload, replacement, crash) starts a new
 worker briefed with the gone worker's transcript path, last record and summary; unknown ids are still errors.
 
 **`writeRoots` and scratch.** Every worker gets a private scratch directory `<os.tmpdir()>/pi-orche/<session>/<worker>` (mode
@@ -143,7 +144,7 @@ an unconverged review never reads as a clean pass.
 
 ## Delegation recovery and small changes
 
-In extension `auto` mode, a failed `orche_run` (not a user/signal cancellation) transfers live implementer/verifier/explorer sessions to the `orche_task` pool as implement/verify/explore. Its **Handover** section lists usable `worker` ids, last tasks and remaining issues. Reuse those ids with `orche_task` for fixes and re-checks; do not repeat `orche_run` for the same failed request. `/orche workers`, idle expiry and `/orche stop` apply normally. Context stays intact, without task-output projection on transferred run sessions. Multi mode skips handover and says so; successful/cancelled runs and SDK calls without `RunOptions.onFailedHandover` keep normal disposal.
+In extension `auto` mode, a failed `orche_run` (not a user/signal cancellation) transfers live implementer/verifier/explorer sessions to the `orche_task` pool as implement/verify/explore. Its **Handover** section lists usable `worker` ids, last tasks and remaining issues. Reuse those ids with `orche_task` for fixes and re-checks; do not repeat `orche_run` for the same failed request. `/orche workers` and `/orche stop` apply normally (no idle expiry). Context stays intact, without task-output projection on transferred run sessions. Multi mode skips handover and says so; successful/cancelled runs and SDK calls without `RunOptions.onFailedHandover` keep normal disposal.
 
 A `change` classified with `workerCount: 1` makes only that classification coordinator request. It deterministically assigns repository-wide ownership, executes and uses the usual independent V1 verification/audits. Pass summaries combine implementation and verification evidence. Failed verification reuses the implementer for fixes within `maxFixRounds` (default 1); exhausted issues or a blocked implementer fail immediately. Other task classes and worker counts keep their existing planning.
 

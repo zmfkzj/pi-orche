@@ -18,12 +18,12 @@ const report = (status: "met" | "partial" = "met", ambiguities?: (typeof ambigui
 });
 const state = (events: LedgerEvent[]) => replayLedgerEvents(JSON.parse(JSON.stringify(events)) as LedgerEvent[]);
 
-async function fixture(steps: FauxResponseStep[], ledger: boolean, poolOptions: { idleTtlMs?: number } = {}) {
+async function fixture(steps: FauxResponseStep[], ledger: boolean) {
   const h = await createHarness({ mainSteps: [], orcheSteps: steps, taskContext: { minClearTokens: 0 }, ...(ledger ? { single: { ledger: true } } : {}) });
   opened.push(h);
   const controller = new OrcheController({ agentDir: h.agentDir, createRuntime: async () => h.runtime });
   const newPool = (saved: LedgerEvent[]) => {
-    const pool = new WorkerPool({ controller, agentDir: h.agentDir, onLedgerEvent: event => saved.push(event), ...poolOptions });
+    const pool = new WorkerPool({ controller, agentDir: h.agentDir, onLedgerEvent: event => saved.push(event) });
     opened.push(pool);
     return pool;
   };
@@ -128,19 +128,23 @@ describe("single-workflow task ledger", () => {
     expect(handed.text).toContain("Note: W2 took task T1 over from W1, briefed from its task ledger.");
   });
 
-  it("continues a task after its idle worker expired, and not once the ledger is off", async () => {
-    const { h, pool, run } = await fixture([report(), report(), report()], true, { idleTtlMs: 5 });
+  it("continues a task after its worker was stopped, and not once the ledger is off", async () => {
+    const { h, pool, run } = await fixture([report(), report(), report()], true);
     await run(pool);
-    await vi.waitFor(() => expect(pool.list()).toEqual([]), { timeout: 2000 });
-    const continued = await run(pool, { worker: "W1", task: "T1" });
+    await pool.stop("W1");
+    // A concise follow-up written for W1's context: the successor is told to recover what it builds on from the ledger.
+    const continued = await run(pool, { worker: "W1", task: "T1", request: "R1: also greet in Korean\nOriginal request\n한국어로도" });
     expect(continued.details).toMatchObject({ worker: "W2", task: "T1", continuedFrom: "W1" });
-    await vi.waitFor(() => expect(pool.list()).toEqual([]), { timeout: 2000 });
+    const briefing = JSON.stringify(pool.session("W2").messages);
+    expect(briefing).toContain("W1 is no longer live (its session ended: /orche stop, a reload or session switch, or a capability or mode change replaced it)");
+    expect(briefing).toContain("The assignment below may be a concise follow-up written for W1's context: the earlier original requests, requirements and decisions it builds on are in this ledger.");
+    await pool.stop("W2");
     await writeConfig(h);
     // Without the ledger the gone worker is still known to the pool: a new worker continues, briefed from its transcript.
     const handed = await run(pool, { worker: "W2", task: "T1" });
     expect(handed.details).toMatchObject({ worker: "W3", continuedFrom: "W2" });
     expect(handed.text).toContain("Note: task T1 ignored");
-    expect(handed.text).toContain("W2 was gone (idle expiry");
+    expect(handed.text).toContain("W2 was gone (stopped with /orche stop)");
   });
 
   it("names the task in failed results, so the main session can retry the same task", async () => {

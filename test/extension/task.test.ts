@@ -34,10 +34,10 @@ function capturePool() {
     return execute.call(this, args);
   });
 }
-async function fixture(steps: FauxResponseStep[], idleTtlMs?: number, controllerOptions: Partial<OrcheControllerOptions> = {}) {
+async function fixture(steps: FauxResponseStep[], controllerOptions: Partial<OrcheControllerOptions> = {}) {
   const h = await harness({ mainSteps: [], orcheSteps: steps });
   const controller = new OrcheController({ agentDir: h.agentDir, createRuntime: async () => h.runtime, ...controllerOptions });
-  const pool = new WorkerPool({ controller, agentDir: h.agentDir, idleTtlMs });
+  const pool = new WorkerPool({ controller, agentDir: h.agentDir });
   pools.add(pool);
   const execute = (args: Partial<TaskParameters & Pick<OrcheRunArgs, "onProgress" | "currentSession">> = {}, signal?: AbortSignal) => pool.execute({ role: "explore", request: "Find the evidence", cwd: h.cwd, projectTrusted: false, ...args, signal });
   return { h, pool, controller, execute };
@@ -265,16 +265,18 @@ describe("orche_task persistent session workers", () => {
     expect(briefing).toContain("Handover: you (W3) continue the work of worker W1");
   });
 
-  it("evicts the least-recently-used idle worker at cap three; ids are monotonic", async () => {
-    const { pool, execute } = await fixture([result(), result(), result(), result(), result()]);
-    await execute(); await execute(); await execute();
-    await execute({ worker: "W1" });
-    const fourth = await execute();
-    expect(fourth.details.worker).toBe("W4");
-    expect(fourth.details.retired).toEqual(["W2"]);
-    expect(fourth.text).toContain("W2 retired: least-recently-used");
-    expect(pool.list().map(worker => worker.id)).toEqual(["W1", "W3", "W4"]);
-    expect(pool.formatWorkers().split("\n")).toHaveLength(3);
+  it("keeps every idle worker for the session: no pool cap, no eviction; ids are monotonic", async () => {
+    const { pool, execute } = await fixture([result(), result(), result(), result(), result(), result()]);
+    for (let index = 0; index < 5; index++) expect((await execute()).details.retired ?? []).toEqual([]);
+    expect(pool.list().map(worker => worker.id)).toEqual(["W1", "W2", "W3", "W4", "W5"]);
+    expect(pool.formatWorkers().split("\n")).toHaveLength(5);
+    // The oldest one is still the same live session, not a briefed successor.
+    const first = pool.session("W1");
+    const reused = await execute({ worker: "W1", request: "FOLLOW_UP" });
+    expect(reused.details.worker).toBe("W1");
+    expect(reused.details).not.toHaveProperty("continuedFrom");
+    expect(pool.session("W1")).toBe(first);
+    expect(pool.goneWorker("W1")).toBeUndefined();
   });
 
   it("retires context-full workers after their assignment and rejects later reuse", async () => {
@@ -297,16 +299,47 @@ describe("orche_task persistent session workers", () => {
     expect(handed.text).toContain("W1 was gone (retired: context nearly full)");
   });
 
-  it("expires idle workers with an injectable TTL", async () => {
-    const { pool, execute } = await fixture([result(), result()], 20);
-    await execute();
-    await vi.waitFor(() => expect(pool.list()).toEqual([]));
-    expect(pool.goneWorker("W1")?.reason).toMatch(/^idle expiry/);
-    const handed = await execute({ worker: "W1" });
-    expect(handed.details).toMatchObject({ worker: "W2", continuedFrom: "W1" });
-    await expect(execute({ worker: "W7" })).rejects.toThrow("Unknown worker W7");
+  it("never expires an idle worker: after a day without an assignment it is reused with its context", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const { pool, execute } = await fixture([result(), result()]);
+      await execute({ request: "FIRST_PROMPT" });
+      const session = pool.session("W1");
+      // Any idle timer would fire here (the former default was 30 minutes).
+      await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
+      expect(pool.list()).toMatchObject([{ id: "W1", status: "idle" }]);
+      expect(pool.goneWorker("W1")).toBeUndefined();
+      const follow = await execute({ worker: "W1", request: "SECOND_PROMPT" });
+      expect(follow.details.worker).toBe("W1");
+      expect(follow.text).not.toContain("was gone");
+      expect(pool.session("W1")).toBe(session);
+      const messages = JSON.stringify(session.messages);
+      expect(messages).toContain("FIRST_PROMPT");
+      expect(messages).not.toContain("Handover: you");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
+  it("session end disposes idle and running workers and records each as gone", async () => {
+    const entered = deferred();
+    const h = await harness({ mainSteps: [], orcheSteps: [result(), blocked(entered)] });
+    const gone: string[] = [];
+    const pool = new WorkerPool({ controller: new OrcheController({ agentDir: h.agentDir, createRuntime: async () => h.runtime }), agentDir: h.agentDir, onWorkerGone: worker => gone.push(`${worker.id}: ${worker.reason}`) });
+    pools.add(pool);
+    const run = (args: Partial<TaskParameters> = {}) => pool.execute({ role: "explore", request: "Find the evidence", cwd: h.cwd, projectTrusted: false, ...args });
+    await run();
+    const running = run().catch((error: unknown) => error);
+    await entered.promise;
+    expect(pool.list().map(worker => `${worker.id} ${worker.status}`)).toEqual(["W1 idle", "W2 running"]);
+    await pool.dispose();
+    expect(gone).toEqual([
+      "W1: the pi session that owned it ended (reload, exit or session switch)",
+      "W2: the pi session that owned it ended (reload, exit or session switch)",
+    ]);
+    expect(pool.list()).toEqual([]);
+    expect(await running).toBeInstanceOf(Error);
+  });
 
   it("/orche cancel during a task leaves its worker reusable", async () => {
     capturePool();
@@ -452,7 +485,7 @@ describe("orche_task persistent session workers", () => {
       const { h, execute } = await fixture([
         tool("write", { path: "allowed.txt", content: "allowed" }),
         result("implement", "Scoped change", { status: "done" }),
-      ], undefined, { detectConcurrentSessions: detect });
+      ], { detectConcurrentSessions: detect });
       const updates: string[][] = [];
       const outcome = await execute({ role: "implement", files: ["allowed.txt"], onProgress: lines => updates.push([...lines]), currentSession: { file: "/s/me.jsonl", id: "me" } });
 
@@ -475,7 +508,7 @@ describe("orche_task persistent session workers", () => {
 
     it("adds nothing when no session is detected, or when detection is disabled or fails", async () => {
       const none = stub([]);
-      const quiet = await fixture([result(), result()], undefined, { detectConcurrentSessions: none });
+      const quiet = await fixture([result(), result()], { detectConcurrentSessions: none });
       const updates: string[][] = [];
       const outcome = await quiet.execute({ onProgress: lines => updates.push([...lines]) });
       expect(none).toHaveBeenCalledTimes(1);
@@ -484,19 +517,19 @@ describe("orche_task persistent session workers", () => {
       expect(updates.flat().filter(line => line.includes("pi session"))).toEqual([]);
 
       const off = stub([other("/work/repo")]);
-      const disabled = await fixture([result()], undefined, { detectConcurrentSessions: off });
+      const disabled = await fixture([result()], { detectConcurrentSessions: off });
       await writeFile(join(disabled.h.agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: disabled.h.orche.route.model }, concurrentSessions: { enabled: false } }));
       expect((await disabled.execute()).text).not.toContain("other pi session");
       expect(off).not.toHaveBeenCalled();
 
-      const broken = await fixture([result()], undefined, { detectConcurrentSessions: async () => { throw new Error("detector exploded"); } });
+      const broken = await fixture([result()], { detectConcurrentSessions: async () => { throw new Error("detector exploded"); } });
       const survived = await broken.execute();
       expect(survived.text).toContain("Evidence found");
       expect(survived.text).not.toContain("other pi session");
     });
 
     it("prefixes a failed task's error with the warning", async () => {
-      const { execute } = await fixture([reply("I will not report")], undefined, { detectConcurrentSessions: stub([other("/work/repo")]) });
+      const { execute } = await fixture([reply("I will not report")], { detectConcurrentSessions: stub([other("/work/repo")]) });
       const error = await execute().catch((caught: unknown) => caught as Error);
       expect(error).toBeInstanceOf(Error);
       const lines = (error as Error).message.split("\n");

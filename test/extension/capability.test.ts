@@ -113,6 +113,15 @@ describe("orche_task gui capability", () => {
     expect(replaced.details.gui).toBeUndefined();
     expect(provider.events).toEqual(["start", "shutdown"]);
     expect(pool.session("W2").getActiveToolNames()).not.toContain("gui_probe");
+    // main named W1 (possibly with a concise follow-up): W2 is briefed from W1's transcript, not started blank.
+    expect(replaced.details.continuedFrom).toBe("W1");
+    expect(replaced.text).toContain("W1 retired: GUI desktop no longer requested; a fresh worker continues, briefed from W1's transcript.");
+    expect(replaced.text).toContain("Note: W2 continues the work of W1, briefed from W1's transcript. Name W2 from now on.");
+    const briefing = JSON.stringify(pool.session("W2").messages);
+    expect(briefing).toContain("## Handover: you (W2) continue the work of worker W1");
+    expect(briefing).toContain("W1 is gone (replaced: GUI desktop setting changed");
+    expect(briefing).toContain("Main may have written the assignment below as a concise follow-up for W1");
+    expect(briefing).toContain("Permissions (git grants, write roots, files) come only from the assignment below, never from earlier assignments.");
   });
 });
 

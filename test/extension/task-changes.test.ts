@@ -38,7 +38,7 @@ const result = (role = "implement", summary = "Done", data?: ToolCall["arguments
 const readOnlyResult = (role: "explore" | "answer" | "verify") =>
   role === "answer" ? result(role, "Answer", { evidence: ["x"] }) : role === "verify" ? result(role, "Checked", { passed: true }) : result(role, "Found");
 
-async function fixture(steps: (cwd: () => string) => FauxResponseStep[], options: { submodule?: boolean; idleTtlMs?: number; controller?: Partial<OrcheControllerOptions>; records?: boolean } = {}) {
+async function fixture(steps: (cwd: () => string) => FauxResponseStep[], options: { submodule?: boolean; controller?: Partial<OrcheControllerOptions>; records?: boolean } = {}) {
   let cwd = "";
   const h = await createHarness({ mainSteps: [], orcheSteps: steps(() => cwd), ...(options.records ? { records: true } : {}) });
   open.push(h);
@@ -56,7 +56,7 @@ async function fixture(steps: (cwd: () => string) => FauxResponseStep[], options
   git(h.cwd, "add", "-A");
   git(h.cwd, "commit", "-q", "-m", "initial");
   const controller = new OrcheController({ agentDir: h.agentDir, createRuntime: async () => h.runtime, ...options.controller });
-  const pool = new WorkerPool({ controller, agentDir: h.agentDir, idleTtlMs: options.idleTtlMs });
+  const pool = new WorkerPool({ controller, agentDir: h.agentDir });
   pools.add(pool);
   const execute = (args: Partial<TaskParameters & Pick<OrcheRunArgs, "onProgress" | "cwd" | "signal">> = {}) => pool.execute({ role: "implement", request: "Make the change", cwd: h.cwd, projectTrusted: false, ...args });
   return { h, pool, execute };

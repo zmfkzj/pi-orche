@@ -1,4 +1,4 @@
-/** Session API: construct WorkerPool({controller, agentDir?, idleTtlMs?}), register
+/** Session API: construct WorkerPool({controller, agentDir?}), register
  * orcheTaskParameters with execute(args), and call dispose() on session_shutdown.
  * execute accepts OrcheRunArgs plus task parameters; onProgress feeds tool updates/UI. A task whose worker ran but failed, timed
  * out or was cancelled rejects with TaskFailedError (the message a plain Error would have had, plus structured details);
@@ -71,7 +71,7 @@ import { flat, peerLabel, peerNoteContent, type PeerNote } from "./peer-notes.js
 
 export const orcheTaskParameters = Type.Object({
   role: Type.Union([Type.Literal("explore"), Type.Literal("answer"), Type.Literal("implement"), Type.Literal("verify"), Type.Literal("game-asset"), Type.Literal("video")]),
-  request: Type.String({ minLength: 1, description: "Self-contained goal, decisions, constraints and acceptance checks; the worker does not see the conversation. In the single workflow include Intent/Purpose, a testable R1..Rn requirements checklist, Constraints and non-goals, explicit Assumptions and a final Original request section with the user's text verbatim. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Only short decisive irreproducible snippets inline; never whole files, diffs or long logs." }),
+  request: Type.String({ minLength: 1, description: "Goal, decisions, constraints and acceptance checks; the worker does not see the conversation. A NEW worker (worker omitted) needs a self-contained request: in the single workflow Intent/Purpose, a testable R1..Rn requirements checklist, Constraints and non-goals, explicit Assumptions and a final Original request section with the user's text verbatim. A follow-up for a LIVE worker (worker set) keeps its earlier context: send only the new or revised R-lines, changed constraints or decisions, new evidence and a final Original request section with the user's new message verbatim; do not restate what it already has. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Only short decisive irreproducible snippets inline; never whole files, diffs or long logs." }),
   context: Type.Optional(Type.String({ maxLength: 30_000, description: "Background findings and decisions, appended to request. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs." })),
   worker: Type.Optional(Type.String()),
   files: Type.Optional(Type.Array(Type.String())),
@@ -223,8 +223,8 @@ export interface TaskDetails {
   notExtended?: { reason: "idle" | "budget" | "stalled"; message: string };
   /** The periodic observations of the assignment (limits.observeMs): how many ran, and the last one (liveness and recorded progress kept apart). */
   observations?: { count: number; everyMs: number; last: WaitObservation };
-  /** A timed-out assignment: how to continue it (the same worker while it is retained, else the task ledger), and the checkpoint it left. */
-  resume?: { worker: string; task?: string; retainedUntil: number; checkpoint?: { assignment: number; worker: string; done: number; total: number; remaining: string[] } };
+  /** A timed-out assignment: how to continue it (the same worker, retained for the rest of the session; else the task ledger), and the checkpoint it left. */
+  resume?: { worker: string; task?: string; checkpoint?: { assignment: number; worker: string; done: number; total: number; remaining: string[] } };
   /** The task ledger this assignment belongs to (single workflow with `single.ledger`, and every ultra implement/answer assignment; see src/single/ledger.ts). */
   task?: string;
   /** Present when the named worker was gone and the task continued with this new worker, briefed from its ledger. */
@@ -317,6 +317,8 @@ interface Worker {
   requirementDefinitions?: Map<string, string>;
   requirementIds?: string[];
   request?: string;
+  /** The requests of this worker's earlier assignments, oldest first: what a concise follow-up builds on (kept for compaction). */
+  earlierRequests?: string[];
   plan?: TaskPlan;
   unmetStreak?: Map<string, number>;
   compactions?: CompactionStats[];
@@ -348,7 +350,6 @@ interface Worker {
   skillCache?: string;
   /** Context size of the latest request: input + cache reads + cache writes (providers count cache writes outside `input`). */
   latestInput: number;
-  timer?: ReturnType<typeof setTimeout>;
   /** The task ledger of this worker's task (single workflow with `single.ledger`; ultra implement/answer always), read when the worker compacts. */
   taskId?: string;
   ledger?: () => TaskLedger | undefined;
@@ -507,6 +508,32 @@ function readDetails(manager: AgentManager, worker: string): { rereads?: ReadTel
   }
 }
 
+/** Characters of earlier hand-offs kept in a compaction's essentials: the first (the self-contained one) and the most recent follow-ups. */
+export const EARLIER_REQUESTS_BUDGET = 12_000;
+/**
+ * A reused worker's earlier hand-offs for its compaction essentials. Main sends a live worker concise follow-ups (only what is
+ * new or revised), so the intent, constraints and decisions they build on live in the earlier requests: the first one (usually
+ * the self-contained hand-off, at most half the budget) and the most recent ones that fit, verbatim, oldest first.
+ */
+export function renderEarlierRequests(requests: readonly string[], budget = EARLIER_REQUESTS_BUDGET): string {
+  if (!requests.length) return "";
+  const clip = (text: string, max: number) => text.length > max ? `${text.slice(0, Math.max(0, max - 40))}\n… [${text.length - max + 40} characters omitted]` : text;
+  const first = clip(requests[0]!, Math.floor(budget / 2));
+  let left = budget - first.length;
+  const recent: string[] = [];
+  for (let index = requests.length - 1; index > 0 && left > 200; index--) {
+    const text = clip(requests[index]!, left);
+    recent.unshift(`[assignment ${index + 1}]\n${text}`);
+    left -= text.length;
+  }
+  const omitted = requests.length - 1 - recent.length;
+  return [
+    "Earlier hand-offs to this worker (the current request above builds on them; it takes precedence, and their R-ids are closed unless it restates them), oldest first, verbatim:",
+    `[assignment 1]\n${first}`,
+    ...(omitted ? [`[${omitted} earlier follow-up${omitted === 1 ? "" : "s"} omitted; they are in this worker's transcript]`] : []),
+    ...recent,
+  ].join("\n\n");
+}
 function taskCompactionFor(worker: Worker): TaskCompaction {
   const settings = worker.compaction ?? DEFAULT_WORKER_COMPACTION;
   const extended = settings.essentials === "extended";
@@ -516,11 +543,13 @@ function taskCompactionFor(worker: Worker): TaskCompaction {
       const ledger = worker.ledger?.();
       // The live plan of this assignment is shown verbatim; the ledger's copy is shown only when it is an earlier assignment's (the resume checkpoint).
       const request = `Requirements checklist and original request, verbatim:\n${worker.request ?? ""}`;
+      const earlier = renderEarlierRequests(worker.earlierRequests ?? []);
       const plan = `Task DAG at compaction time:\n${worker.plan ? renderTaskPlan(worker.plan) : "No Task DAG recorded in this assignment."}`;
       const ledgerText = ledger ? renderLedgerForWorker(ledger, undefined, worker.plan ? { skipPlanOf: ledger.assignments } : {}) : "";
-      if (!extended) return `${request}\n\n${plan}${ledgerText ? `\n\n${ledgerText}` : ""}`;
+      if (!extended) return `${request}${earlier ? `\n\n${earlier}` : ""}\n\n${plan}${ledgerText ? `\n\n${ledgerText}` : ""}`;
       return composeEssentials([
         { name: "request", text: worker.request ? request : "", required: true },
+        { name: "earlier-requests", text: earlier },
         { name: "main-messages", text: renderMainMessages(worker.injected?.() ?? []) },
         { name: "plan", text: plan },
         { name: "ledger", text: ledgerText },
@@ -538,14 +567,13 @@ function taskCompactionFor(worker: Worker): TaskCompaction {
 export interface WorkerPoolOptions {
   controller: OrcheController;
   agentDir?: string;
-  idleTtlMs?: number;
   /** Upper bound for a cooperative SDK abort (test seam). */
   stopTimeoutMs?: number;
   /** Receives every task-ledger event (the extension persists each as a session entry). Best effort: a throwing callback is ignored. */
   onLedgerEvent?: (event: LedgerEvent) => void;
   /** Ask the session's extensions for an opt-in worker capability (the extension wires it to `pi.events`). */
   capability?: (request: WorkerCapabilityRequest) => WorkerCapabilityAnswer;
-  /** Receives every worker that goes away (idle expiry, eviction, stop, shutdown); the extension persists it for successors. Best effort. */
+  /** Receives every worker that goes away (stop, replacement, shutdown); the extension persists it for successors. Best effort. */
   onWorkerGone?: (worker: GoneWorker) => void;
   /** Base directory of the workers' scratch directories (test seam; default `<tmpdir>/pi-orche`). */
   scratchBase?: string;
@@ -858,18 +886,26 @@ function formatStaleContext(report: (Pick<TaskDetails, "submodules" | "headMoved
 }
 
 /**
- * The briefing of a new worker that continues the work of a gone one (named by `worker` after an idle expiry, an eviction or a
+ * The first line after a reused (live) worker's Assignment header. Main sends such a worker a concise follow-up (only what is
+ * new or revised: mode.ts Reuse), so the worker's retained context carries the rest; this round's R-ids and plan still replace
+ * the earlier ones, and grants never carry over.
+ */
+export const FOLLOW_UP_NOTE = "This Assignment is a follow-up that continues from your retained context. Its R-ids are this round's checklist and Task DAG: earlier requirement ids and plans, including any assignment preserved at compaction time, are closed unless this message restates or revises them. The user's earlier requests, intent, constraints, decisions and evidence in your context still apply unless this message revises them or states a different task. Permissions (role, git, write roots, files) are this assignment's only.";
+
+/**
+ * The briefing of a new worker that continues the work of a gone one (named by `worker` after /orche stop, a replacement or a
  * reload): what it left behind, as references to read selectively. Evidence, not instructions; grants are this assignment's own.
  */
 export function renderHandover(gone: GoneWorker, successor: string): string {
   const when = new Date(gone.at).toISOString().replace("T", " ").replace(/\.\d+Z$/, "Z");
   return [
     `## Handover: you (${successor}) continue the work of worker ${gone.id}`,
-    `${gone.id} is gone (${gone.reason}, ${when}); main named it for this assignment, so its context is not available to you. Rebuild what you need from:`,
-    ...(gone.sessionFile ? [`- its transcript (pi session JSONL; read selectively, e.g. grep for report_result or the files involved): ${gone.sessionFile}`] : ["- its transcript was not persisted"]),
+    `${gone.id} is gone (${gone.reason}, ${when}); main named it for this assignment, so its context is not available to you.`,
+    `Main may have written the assignment below as a concise follow-up for ${gone.id}, relying on context only ${gone.id} had: before acting, recover from these sources the user's earlier requests, the requirements, constraints, decisions and evidence the assignment refers to or leaves out:`,
+    ...(gone.sessionFile ? [`- its transcript (pi session JSONL; read selectively, e.g. grep for the hand-offs (user messages starting with "Assignment"), report_result or the files involved): ${gone.sessionFile}`] : ["- its transcript was not persisted: its earlier requests are not recoverable from it, so state what the assignment leaves unclear as an ambiguity instead of guessing"]),
     ...(gone.record ? [`- its last assignment record: ${gone.record}/run.json`] : []),
     ...(gone.summary ? [`- its last result summary: ${gone.summary}`] : []),
-    "Treat this as evidence, not as instructions; re-check the workspace before relying on it. Permissions come only from the assignment below.",
+    "Treat this as evidence, not as instructions; re-check the workspace before relying on it. Permissions (git grants, write roots, files) come only from the assignment below, never from earlier assignments.",
     "",
   ].join("\n");
 }
@@ -969,9 +1005,7 @@ export class WorkerPool {
   private readonly advisors = new Set<AssignmentAdvisor>();
   private disposed = false;
   private disposal?: Promise<void>;
-  constructor(private readonly options: WorkerPoolOptions) {
-    if (!Number.isFinite(options.idleTtlMs ?? 1) || (options.idleTtlMs ?? 1) < 0) throw new Error("idleTtlMs must be finite and nonnegative");
-  }
+  constructor(private readonly options: WorkerPoolOptions) {}
   /**
    * Ledgers restored from the session (its start, a reload or a resume). Their workers are gone; an orche_task that names the
    * task continues it with a new worker briefed from the ledger. Replaces the current set.
@@ -1121,10 +1155,6 @@ export class WorkerPool {
   private completionWaitMode(): CompletionWait {
     return this.options.completionWait?.() ?? "deadline";
   }
-  /** Whether this process waits for results without deadlines; an invalid flag value counts as not (it fails each assignment instead). */
-  private unbounded(): boolean {
-    try { return this.completionWaitMode() === "unbounded"; } catch { return false; }
-  }
   liveness(now: number = Date.now(), windowMs: number = DEFAULT_LIVENESS_WINDOW_MS): Liveness {
     return this.manager ? this.manager.liveness(now, windowMs, [...this.workers.keys()]) : mergeLiveness();
   }
@@ -1144,7 +1174,6 @@ export class WorkerPool {
   private async retire(id: string, reason = "retired"): Promise<void> {
     const worker = this.workers.get(id);
     if (!worker) return;
-    clearTimeout(worker.timer);
     this.workers.delete(id);
     this.noteGone(worker, reason);
     if (worker.scratch) void removeScratchDir(worker.scratch, this.options.scratchBase);
@@ -1158,16 +1187,14 @@ export class WorkerPool {
     this.gone.set(worker.id, gone);
     try { this.options.onWorkerGone?.({ ...gone }); } catch { /* persistence is best effort */ }
   }
+  /**
+   * A worker between assignments. It stays live, with its context, for the lifetime of the pi session that owns this pool:
+   * there is no idle expiry and no capacity eviction. It goes away only by /orche stop, the session's end (dispose: reload,
+   * exit or session switch), a replacement its changed tool set needs (capability or mode change: the successor is briefed
+   * from its transcript), a non-compacting specialist's full context, or a failure that disposed its session.
+   */
   private idle(worker: Worker): void {
-    clearTimeout(worker.timer);
     worker.lastUsed = Date.now();
-    if (this.disposed || !this.workers.has(worker.id)) return;
-    // Completion wait: no idle expiry (a research turn may come back to the same worker after a long step of its own).
-    if (this.unbounded()) return;
-    worker.timer = setTimeout(() => {
-      if (this.manager?.get(worker.id).status === "idle") void this.retire(worker.id, `idle expiry after ${Math.round((this.options.idleTtlMs ?? 30 * 60_000) / 60_000)} min without an assignment`).catch(() => undefined);
-    }, this.options.idleTtlMs ?? 30 * 60_000);
-    worker.timer.unref();
   }
   async stop(id: string): Promise<string> {
     const ids = id === "all" ? [...this.workers.keys()] : this.workers.has(id) ? [id] : [];
@@ -1185,7 +1212,6 @@ export class WorkerPool {
     // Their advisor sessions stop with them (each is disposed by its own run; the assignment's finish records it as cancelled).
     for (const advisor of this.advisors) advisor.cancel();
     for (const worker of this.workers.values()) {
-      clearTimeout(worker.timer);
       this.noteGone(worker, "the pi session that owned it ended (reload, exit or session switch)");
       if (worker.scratch) void removeScratchDir(worker.scratch, this.options.scratchBase);
     }
@@ -1246,7 +1272,6 @@ export class WorkerPool {
     let ran: TaskDetails | undefined;
     return this.options.controller.task(args.signal, async signal => {
       const reused = args.worker ? this.workers.get(args.worker) : undefined;
-      if (reused) clearTimeout(reused.timer);
       try {
         const result = await this.executeAssignment(args, signal);
         ran = result.details;
@@ -1319,7 +1344,7 @@ export class WorkerPool {
       const hint = last ? ` ${args.worker} last worked on task ${last.taskId}: pass task "${last.taskId}" (and omit worker) to continue it with a new worker briefed from its ledger.` : "";
       return new Error(`Unknown worker ${args.worker}; live workers: ${live}. Omit worker to start a new one.${hint}`);
     };
-    // A gone worker (reload, idle expiry, pool eviction) that this session knows continues with a NEW worker briefed from its transcript
+    // A gone worker (reload, /orche stop, replacement) that this session knows continues with a NEW worker briefed from its transcript
     // and last record (`handover`); the new worker gets only this assignment's grants. An id never seen stays an error.
     const handover = gone ? this.gone.get(args.worker!) : undefined;
     if (gone && !handover && !(singleWorkflow && args.task)) throw unknownWorker();
@@ -1435,35 +1460,42 @@ export class WorkerPool {
     const codeGraph = codeGraphCapability(this.options.capability, capabilityRequest);
     const skillCache = skillCacheCapability(this.options.capability, capabilityRequest);
     // Tools cannot be unregistered from a session. Recreate only when this optional
-    // capability changes, so neither tool registration nor old instructions leak roles.
+    // capability changes, so neither tool registration nor old instructions leak roles. Main named the worker (and may have
+    // sent a concise follow-up), so the fresh worker is briefed from the replaced one's transcript, like a gone worker.
+    let capabilityHandover: GoneWorker | undefined;
     if (worker && worker.imageConfig !== imageConfig) {
       await this.retire(worker.id, "replaced: image tool configuration changed");
       retired.push(worker.id);
-      retirementLines.push(`${worker.id} retired: image tool configuration changed; starting a fresh worker.`);
+      retirementLines.push(`${worker.id} retired: image tool configuration changed; a fresh worker continues, briefed from ${worker.id}'s transcript.`);
+      capabilityHandover = this.gone.get(worker.id);
       worker = undefined;
     }
     if (worker && worker.gui !== gui?.key) {
       await this.retire(worker.id, "replaced: GUI desktop setting changed");
       retired.push(worker.id);
-      retirementLines.push(`${worker.id} retired: GUI desktop ${gui ? (worker.gui ? "configuration changed" : "requested") : "no longer requested"}; starting a fresh worker.`);
+      retirementLines.push(`${worker.id} retired: GUI desktop ${gui ? (worker.gui ? "configuration changed" : "requested") : "no longer requested"}; a fresh worker continues, briefed from ${worker.id}'s transcript.`);
+      capabilityHandover = this.gone.get(worker.id);
       worker = undefined;
     }
     if (worker && worker.webFetch !== webFetch.provider?.key) {
       await this.retire(worker.id, "replaced: web fetch capability changed");
       retired.push(worker.id);
-      retirementLines.push(`${worker.id} retired: browser_fetch ${webFetch.provider ? (worker.webFetch ? "configuration changed" : "became available") : "is no longer available"}; starting a fresh worker.`);
+      retirementLines.push(`${worker.id} retired: browser_fetch ${webFetch.provider ? (worker.webFetch ? "configuration changed" : "became available") : "is no longer available"}; a fresh worker continues, briefed from ${worker.id}'s transcript.`);
+      capabilityHandover = this.gone.get(worker.id);
       worker = undefined;
     }
     if (worker && worker.codeGraph !== codeGraph.provider?.key) {
       await this.retire(worker.id, "replaced: code graph capability changed");
       retired.push(worker.id);
-      retirementLines.push(`${worker.id} retired: CodeGraph tools ${codeGraph.provider ? (worker.codeGraph ? "configuration changed" : "became available") : "are no longer available"}; starting a fresh worker.`);
+      retirementLines.push(`${worker.id} retired: CodeGraph tools ${codeGraph.provider ? (worker.codeGraph ? "configuration changed" : "became available") : "are no longer available"}; a fresh worker continues, briefed from ${worker.id}'s transcript.`);
+      capabilityHandover = this.gone.get(worker.id);
       worker = undefined;
     }
     if (worker && worker.skillCache !== skillCache.provider?.key) {
       await this.retire(worker.id, "replaced: SkillCache capability changed");
       retired.push(worker.id);
-      retirementLines.push(`${worker.id} retired: SkillCache configuration changed; starting a fresh worker.`);
+      retirementLines.push(`${worker.id} retired: SkillCache configuration changed; a fresh worker continues, briefed from ${worker.id}'s transcript.`);
+      capabilityHandover = this.gone.get(worker.id);
       worker = undefined;
     }
     // The ultra tool set (orche_spawn with the ultra reasons, orche_adopt) is installed when a session is created and cannot be
@@ -1550,13 +1582,8 @@ export class WorkerPool {
       } catch (error) { throw new Error(`Cannot switch model/thinking for ${worker.id}: ${String(error)}. Omit worker to start a new worker.`); }
     }
     if (!worker) {
-      if (this.workers.size >= 3) {
-        const oldest = [...this.workers.values()].filter(item => this.manager!.get(item.id).status === "idle").sort((a, b) => a.lastUsed - b.lastUsed)[0];
-        if (!oldest) throw new Error("All three workers are busy; wait for an idle worker.");
-        await this.retire(oldest.id, "evicted: least-recently-used idle worker (pool cap 3)");
-        retired.push(oldest.id);
-        retirementLines.push(`${oldest.id} retired: least-recently-used idle worker (pool cap 3).`);
-      }
+      // No pool cap: idle workers are never evicted, they live as long as this session. What runs is bounded elsewhere: one
+      // orche task at a time per session (OrcheController.task), whose sub-workers are capped by single.maxSubWorkers.
       const id = `W${this.nextId++}`;
       // The worker's one transcript, for all of its assignments: <records>/<session>/workers/<id>-<spawn time>.jsonl.
       const sessionFile = workerSessionFile(resolved, { ...(args.currentSession?.id ? { parentSessionId: args.currentSession.id } : {}), workerId: id, spawnedAt: Date.now() });
@@ -1644,7 +1671,6 @@ export class WorkerPool {
     /** The level the --effort runs at on this worker's model (B after Pi's clamp). */
     const effortApplied = effort ? meta.thinking : undefined;
     meta.contextWindow = activeSession.model?.contextWindow ?? meta.contextWindow;
-    clearTimeout(meta.timer);
     meta.role = args.role;
     meta.files = files;
     meta.latestInput = 0;
@@ -1731,6 +1757,7 @@ export class WorkerPool {
     meta.unmetStreak = new Map(singleWorkflow ? [...meta.unmetStreak ?? []].filter(([id]) => definitions.has(id) && definitions.get(id) === meta.requirementDefinitions?.get(id)) : []);
     meta.requirementDefinitions = definitions;
     meta.requirementIds = requirementIds(handoffRequest);
+    if (reusedContext && meta.request) (meta.earlierRequests ??= []).push(meta.request);
     meta.request = args.context ? `${handoffRequest}\n\nContext:\n${args.context}` : handoffRequest;
     meta.compactions = [];
     // This assignment's record. The worker's entry is read from the manager, so `sessionFile` is there only when the transcript really is persisted.
@@ -1769,12 +1796,15 @@ export class WorkerPool {
     if (handover && !handedFrom) briefing = renderHandover(handover, meta.id);
     // A worker replaced at the ultra boundary: its successor is briefed from it (unless the task ledger briefs it already).
     else if (modeHandover && !handedFrom) briefing = renderHandover(modeHandover, meta.id);
-    const continuedFrom = handedFrom?.worker ?? handover?.id ?? modeHandover?.id;
+    // A worker replaced because its tool set changed (capabilities above): the same briefing.
+    else if (capabilityHandover && !handedFrom) briefing = renderHandover(capabilityHandover, meta.id);
+    const continuedFrom = handedFrom?.worker ?? handover?.id ?? modeHandover?.id ?? capabilityHandover?.id;
     const ledgerDetails = (): Pick<TaskDetails, "task" | "continuedFrom"> => ({ ...(ledger ? { task: ledger.taskId } : {}), ...(continuedFrom ? { continuedFrom } : {}) });
     const taskLines = (): string[] => [
       ...(ledger ? [`Task ledger ${ledger.taskId}, assignment ${ledger.assignments}: pass task "${ledger.taskId}" for a follow-up of this task (also when another or a new worker takes it over); omit it for a different task.`] : []),
       ...(ledger && handedFrom ? [`Note: ${meta.id} took task ${ledger.taskId} over from ${handedFrom.worker}${handedFrom.live ? "" : " (not live)"}, briefed from its task ledger.`] : []),
       ...(modeHandover && !handedFrom ? [`Note: ${meta.id} continues the work of ${modeHandover.id} in ${args.mainMode} mode, briefed from ${modeHandover.id}'s transcript. Name ${meta.id} from now on.`] : []),
+      ...(capabilityHandover && !handedFrom ? [`Note: ${meta.id} continues the work of ${capabilityHandover.id}, briefed from ${capabilityHandover.id}'s transcript. Name ${meta.id} from now on.`] : []),
       ...(previousMode ? [`Note: ${meta.id} switched from ${previousMode} to ${args.mainMode} mode for this assignment: it runs on ${meta.model ?? "its model"}${tierKey ? ` (models.${tierKey})` : ""}.`] : []),
       ...(handover && !handedFrom ? [`Note: ${handover.id} was gone (${handover.reason}); ${meta.id} continued its work, briefed from ${handover.id}'s transcript${handover.record ? " and last record" : ""}. Name ${meta.id} from now on.`] : []),
       ...ledgerNotes,
@@ -1926,14 +1956,13 @@ export class WorkerPool {
       const ownPart: Liveness | undefined = own ? { active: own.active, reasons: own.active ? [`${own.id} ${own.detail}`] : [], sessions: [own] } : undefined;
       return mergeLiveness(ownPart, ...[...subTrackers.values()].map(tracker => tracker.liveness(now, windowMs)));
     };
-    /** How a timed-out assignment continues: the retained worker (idle expiry), the task ledger, and the checkpoint it left. */
-    const idleTtlMs = this.options.idleTtlMs ?? 30 * 60_000;
+    /** How a timed-out assignment continues: the retained worker (live for the rest of this session), the task ledger, and the checkpoint it left. */
     const resumeInfo = (): NonNullable<TaskDetails["resume"]> => {
       const plan = meta.plan;
       const nodes = plan?.nodes ?? [];
       const remaining = nodes.filter(node => node.status !== "done" && node.status !== "skipped");
       return {
-        worker: meta.id, ...(ledger ? { task: ledger.taskId } : {}), retainedUntil: Date.now() + idleTtlMs,
+        worker: meta.id, ...(ledger ? { task: ledger.taskId } : {}),
         ...(plan ? { checkpoint: { assignment: ledger?.assignments ?? 0, worker: meta.id, done: nodes.length - remaining.length, total: nodes.length, remaining: remaining.map(node => `${node.id} (${node.status})`) } } : {}),
       };
     };
@@ -1942,15 +1971,14 @@ export class WorkerPool {
       ? `Ultra resume: the exploration, the protected basis, the candidates with their workspace copies (in ${meta.id}'s scratch directory) and the adoptions of task ${ledger.taskId} continue in ${meta.id}'s next ultra assignment of that task (worker "${meta.id}", task "${ledger.taskId}"), with or without single.ledger; evidence refs are per assignment, so the checks are run again. Without task it is a new task, and a new worker starts the stages afresh.`
       : `Ultra resume: without a task ledger the next assignment starts the stages afresh; the workspace keeps what was adopted.`;
     const resumeLines = (info: NonNullable<TaskDetails["resume"]>): string[] => {
-      const until = new Date(info.retainedUntil).toISOString().replace("T", " ").replace(/:\d{2}\.\d+Z$/, "Z");
       const checkpoint = info.checkpoint;
       return [
         `Checkpoint at the timeout: ${checkpoint ? `Task DAG ${checkpoint.done}/${checkpoint.total} nodes done${checkpoint.remaining.length ? `; not done: ${checkpoint.remaining.join(", ")}` : ""}${ledger ? `; every accepted task_plan of it is persisted in task ledger ${ledger.taskId}` : "; no task ledger, so it is kept only in this result, the record and the worker's context"}` : "no Task DAG was recorded in this assignment"}. Only what task_plan recorded survives a worker that is gone; nothing after its last accepted call.`,
-        `Resume: a timeout is not an unmet result and does not count towards the 2-consecutive-unmet rule. ${meta.id} stays idle with its context until about ${until} (idle expiry ${Math.round(idleTtlMs / 60_000)} min), unless it is retired earlier: a new worker needing its slot (pool cap 3, least-recently-used idle first), /orche stop, or the end of this pi session. Continue with orche_task worker "${meta.id}"${ledger ? ` and task "${ledger.taskId}"` : ""}, handing over only the remaining work. Once ${meta.id} is gone, ${ledger ? `pass task "${ledger.taskId}": a new worker is briefed from the task ledger and its last recorded Task DAG` : `pass worker "${meta.id}": a new worker is briefed from its transcript and last record`}; its unrecorded context is lost.`,
+        `Resume: a timeout is not an unmet result and does not count towards the 2-consecutive-unmet rule. ${meta.id} stays idle with its context for the rest of this pi session (no idle expiry), unless /orche stop or the end of this pi session retires it earlier. Continue with orche_task worker "${meta.id}"${ledger ? ` and task "${ledger.taskId}"` : ""}, handing over only the remaining work. Once ${meta.id} is gone, ${ledger ? `pass task "${ledger.taskId}": a new worker is briefed from the task ledger and its last recorded Task DAG` : `pass worker "${meta.id}": a new worker is briefed from its transcript and last record`}; its unrecorded context is lost.`,
       ];
     };
     // Every accepted task_plan: progress evidence (a node finished, or the plan changed) and, with a task ledger, the resume
-    // checkpoint persisted at once, so a timeout, an eviction or a reload keeps what was recorded.
+    // checkpoint persisted at once, so a timeout, a replacement or a reload keeps what was recorded.
     meta.onPlan = plan => {
       const newlyDone = plan.nodes.filter(node => node.status === "done" && !tally.done.has(node.id));
       for (const node of plan.nodes) if (node.status === "done") tally.done.add(node.id); else tally.done.delete(node.id);
@@ -2205,7 +2233,7 @@ export class WorkerPool {
         singleWorkflow ? READ_NODE_INSTRUCTIONS : "",
       ].filter(Boolean).join("\n");
       const prompt = `${assignmentPrompt({ ...args, request: handoffRequest, orchestrate: orchestrating, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant, orchestrating ? (ultraRun ? ultraSection(readOnly, maxSubWorkers) : mdsdRun ? mdsdSection(readOnly, maxSubWorkers, config.mdsd ?? DEFAULT_MDSD) : orchestratorSection(undefined, maxSubWorkers)) : "")}${rootsLine ? `\n${rootsLine}` : ""}`;
-      const handoff = reusedContext && workflowMode ? prompt.replace(/^(Assignment[^\n]*\n)/, "$1This Assignment message supersedes earlier requirement ids and plans, including any assignment preserved at compaction time. Use only this round's requirements and Task DAG.\n") : prompt;
+      const handoff = reusedContext && workflowMode ? prompt.replace(/^(Assignment[^\n]*\n)/, `$1${FOLLOW_UP_NOTE}\n`) : prompt;
       // The plan advisor (single.advisor): armed before the hand-off, started by the worker's first accepted task_plan (or first edit).
       if (advisorRoute) {
         const manager = this.manager;
@@ -2411,7 +2439,7 @@ export class WorkerPool {
     } catch (error) {
       const timedOut = error instanceof TaskFailedError && error.failure?.status === "timeout";
       if (worker) { if (!timedOut) worker.unmetStreak = new Map(); worker.roundCheck = undefined; }
-      // Failed before its assignment started (e.g. cancelled during startup): an idle worker still gets its idle expiry.
+      // Failed before its assignment started (e.g. cancelled during startup): the idle worker stays live for the session.
       if (worker && this.workers.has(worker.id) && this.manager?.get(worker.id).status === "idle") this.idle(worker);
       throw error;
     } finally {
@@ -2419,7 +2447,6 @@ export class WorkerPool {
       signal.removeEventListener("abort", abort);
       await stopPromise;
       if (worker && this.manager?.list().some(item => item.id === worker?.id && item.status === "disposed")) {
-        clearTimeout(worker.timer);
         this.workers.delete(worker.id);
       }
     }
