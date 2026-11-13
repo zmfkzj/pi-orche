@@ -8,7 +8,7 @@ import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import type { FauxResponseStep } from "@earendil-works/pi-ai";
 import { AgentManager } from "../../src/agent/agent-manager.js";
 import { OrcheController } from "../../src/extension/controller.js";
-import { codeGraphCapability, mergeCapabilities, WorkerPool, webFetchCapability, type WorkerCapabilityAnswer, type WorkerCapabilityRequest } from "../../src/extension/workers.js";
+import { codeGraphCapability, mergeCapabilities, skillCacheCapability, WorkerPool, webFetchCapability, type WorkerCapabilityAnswer, type WorkerCapabilityRequest } from "../../src/extension/workers.js";
 import { createSubWorkerRunner } from "../../src/orchestrator/sub-worker.js";
 import { planSpawn } from "../../src/orchestrator/spawn.js";
 import { createHarness, tool, type Harness } from "./harness.js";
@@ -63,6 +63,7 @@ describe("orche_task gui capability", () => {
       { capability: "gui", cwd: expect.any(String), workerId: "W1", role: "explore", readOnly: true },
       { capability: "web-fetch", cwd: expect.any(String), workerId: "W1", role: "explore", readOnly: true },
       { capability: "codegraph", cwd: expect.any(String), workerId: "W1", role: "explore", readOnly: true },
+      { capability: "skillcache", cwd: expect.any(String), workerId: "W1", role: "explore", readOnly: true },
     ]);
     const options = spawned.mock.calls[0]![0];
     expect(options.tools).toContain("gui_probe");
@@ -83,8 +84,8 @@ describe("orche_task gui capability", () => {
     const { pool, execute } = await fixture([report], provider.capability);
     const result = await execute();
     expect(result.details.gui).toBeUndefined();
-    // Only the always-asked web-fetch and codegraph capabilities (nobody provides them here), never the GUI.
-    expect(provider.requests.map(request => request.capability)).toEqual(["web-fetch", "codegraph"]);
+    // Always-asked optional capabilities (nobody provides them here), never the GUI.
+    expect(provider.requests.map(request => request.capability)).toEqual(["web-fetch", "codegraph", "skillcache"]);
     expect(spawned.mock.calls[0]![0].extensionFactories).toBeUndefined();
     expect(pool.session("W1").getActiveToolNames()).not.toContain("gui_probe");
   });
@@ -148,6 +149,7 @@ describe("web-fetch capability (every worker)", () => {
     expect(provider.requests).toEqual([
       { capability: "web-fetch", cwd: expect.any(String), workerId: "W1", role: "answer", readOnly: true },
       { capability: "codegraph", cwd: expect.any(String), workerId: "W1", role: "answer", readOnly: true },
+      { capability: "skillcache", cwd: expect.any(String), workerId: "W1", role: "answer", readOnly: true },
     ]);
     const options = spawned.mock.calls[0]![0];
     expect(options.tools).toContain("web_probe");
@@ -183,7 +185,7 @@ describe("web-fetch capability (every worker)", () => {
     const implementReport = tool("report_result", { kind: "implement", summary: "Done", data: { status: "done", reason: "ok", evidence: [] } });
     const { pool, execute } = await fixture([implementReport, implementReport], provider.capability);
     await execute({ role: "implement", gui: true }).catch(() => undefined);
-    expect(provider.requests.map(request => [request.capability, request.role, request.readOnly])).toEqual([["gui", "implement", false], ["web-fetch", "implement", false], ["codegraph", "implement", false]]);
+    expect(provider.requests.map(request => [request.capability, request.role, request.readOnly])).toEqual([["gui", "implement", false], ["web-fetch", "implement", false], ["codegraph", "implement", false], ["skillcache", "implement", false]]);
     const options = spawned.mock.calls[0]![0];
     expect(options.tools).toEqual(expect.arrayContaining(["gui_probe", "web_probe"]));
     expect(options.extensionFactories).toHaveLength(2);
@@ -330,5 +332,48 @@ describe("codegraph capability (every worker)", () => {
     expect(outcome.status).toBe("done");
     expect(provider.requests).toEqual([{ capability: "codegraph", cwd: h.cwd, workerId: "W1.1", role: "answer", readOnly: true }]);
     expect(provider.events).toEqual(["shared:start", "shared:shutdown"]);
+  });
+});
+
+describe("skillcache capability (workers and worker reconfiguration)", () => {
+  it("loads an opt-in factory without new tools and retires a worker if the capability disappears", async () => {
+    const events: string[] = [];
+    const state = { enabled: true };
+    const factory: ExtensionFactory = pi => {
+      pi.on("session_start", () => { events.push("start"); });
+      pi.on("session_shutdown", () => { events.push("shutdown"); });
+    };
+    const capability = (request: WorkerCapabilityRequest): WorkerCapabilityAnswer =>
+      request.capability === "skillcache" && state.enabled
+        ? { key: "skillcache-v1", tools: [], extensionFactories: [factory], instructions: "READONLY-CACHE" }
+        : undefined;
+    const { pool, execute } = await fixture([report, report, report], capability);
+    await execute();
+    expect(pool.session("W1").systemPrompt).toContain("READONLY-CACHE");
+    expect(events).toEqual(["start"]);
+    await execute({ worker: "W1" });
+    expect(events).toEqual(["start"]);
+    state.enabled = false;
+    const switched = await execute({ worker: "W1" });
+    expect(switched.details.worker).toBe("W2");
+    expect(switched.details.retired).toEqual(["W1"]);
+    expect(events).toEqual(["start", "shutdown"]);
+  });
+  it("provides an isolated sub-worker factory with no extra tools", async () => {
+    const events: string[] = [];
+    const provider = (request: WorkerCapabilityRequest): WorkerCapabilityAnswer => request.capability === "skillcache"
+      ? { key: "skillcache-v1", tools: [], extensionFactories: [pi => { pi.on("session_start", () => { events.push("start"); }); }] }
+      : undefined;
+    const h = await createHarness({ mainSteps: [], orcheSteps: [tool("report_result", { kind: "answer", summary: "Done", data: {} })] });
+    open.push({ h, pool: new WorkerPool({ controller: new OrcheController({ agentDir: h.agentDir, createRuntime: async () => h.runtime }), agentDir: h.agentDir }) });
+    const run = createSubWorkerRunner({
+      orchestrator: "W1", cwd: h.cwd, runtime: h.runtime, route: h.orche.route, routeSource: "orchestrator", thinkingSource: "orchestrator",
+      specialistRoute: () => h.orche.route, prompt: worker => worker.request, timeoutMs: 30_000, maxTurns: 5,
+      skillCache: planned => skillCacheCapability(provider, { cwd: h.cwd, workerId: planned.id, role: planned.role, readOnly: true }),
+    });
+    const { workers } = planSpawn({ reason: "isolation", workers: [{ name: "cache", role: "answer", request: "Read cached data" }] }, { nextId: () => "W1.1" });
+    const outcome = await run(workers[0]!, workers, new AbortController().signal, () => undefined);
+    expect(outcome.status).toBe("done");
+    expect(events).toEqual(["start"]);
   });
 });
