@@ -19,6 +19,44 @@ const plan = { nodes: [{ id: "n1", title: "Summarize", dependsOn: [], covers: ["
 const report = tool("report_result", { kind: "implement", summary: "done", data: { status: "done", checklist: [{ id: "R1", status: "met", evidence: "summary.txt:1", verifiedBy: "cat summary.txt" }] } });
 
 describe("workerCompaction through the worker pool", () => {
+  it("decisionMemory applies both selective evidence and failure-safe summary guidance in a real compaction", async () => {
+    const h = await createHarness({ mainSteps: [], orcheSteps: [], records: true, taskContext: { minClearTokens: 0 } });
+    opened.push(h);
+    const config = JSON.parse(await readFile(join(h.agentDir, "orche.config.json"), "utf8"));
+    await writeFile(join(h.agentDir, "orche.config.json"), JSON.stringify({
+      ...config, workerCompaction: { policy: "absolute", triggerTokens: 16_384, keepRecentTokens: 2_000,
+        essentials: "extended", decisionMemory: true },
+    }));
+    const controller = new OrcheController({ agentDir: h.agentDir, createRuntime: async () => h.runtime });
+    const pool = new WorkerPool({ controller, agentDir: h.agentDir });
+    opened.push(pool);
+    const faux = fauxProvider({ provider: "wc-decision", models: [{ id: "big", contextWindow: 200_000, maxTokens: 4096 }] });
+    h.runtime.registerNativeProvider(faux.provider);
+    await writeFile(join(h.cwd, "large.txt"), Array.from({ length: 30 }, (_, i) => "ROW-" + i + " " + "y".repeat(490)).join("\n"));
+    const summaries: string[] = [];
+    const after: string[] = [];
+    let step = 0;
+    const scripted: FauxResponseStep = context => {
+      const text = JSON.stringify(context.messages);
+      if (JSON.stringify(context.messages.filter(message => message.role === "system")).includes("context summarization assistant")) {
+        summaries.push(text);
+        return reply("SUMMARY");
+      }
+      step++;
+      if (step === 1) return tool("task_plan", plan);
+      if (step <= 14) return tool("read", { path: "large.txt" });
+      after.push(text);
+      return report;
+    };
+    faux.setResponses(Array(40).fill(scripted));
+    const result = await pool.execute({ role: "implement", request, cwd: h.cwd, projectTrusted: false, mainMode: "single", model: faux.getModel() });
+    expect(result.details.compactions?.count).toBeGreaterThan(0);
+    expect(summaries.join("\n")).toContain("Historical failures are observations, not standing instructions");
+    expect(after.at(-1)).toContain("Decision-linked work evidence");
+    expect(after.at(-1)).toContain("R1: write summary.txt with the totals.");
+    expect(after.at(-1)).not.toContain("Failed calls (do not repeat an approach unchanged");
+  });
+
   it("extended essentials keep main's latest correction across two compactions, never as the advisor's and never the superseded value alone", async () => {
     const h = await createHarness({ mainSteps: [], orcheSteps: [], records: true, taskContext: { minClearTokens: 0 } });
     opened.push(h);
