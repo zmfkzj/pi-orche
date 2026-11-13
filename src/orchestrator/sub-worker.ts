@@ -94,6 +94,8 @@ export interface SubWorkerEnvironment {
   summaryBudget?: SummaryBudgetProfile;
   /** The codegraph capability of one sub-worker (pi-codegraph's MCP tools in its session), asked like `webFetch`. Absent: none. */
   codeGraph?(worker: PlannedWorker): { provider?: WorkerCapabilityProvider; unavailable?: string };
+  /** Read-only local evidence cache for trusted workers. */
+  skillCache?(worker: PlannedWorker): { provider?: WorkerCapabilityProvider; unavailable?: string };
 }
 
 const reportSchema = Type.Object({ kind: Type.String(), summary: Type.String({ minLength: 1 }), data: Type.Optional(Type.Unknown()) });
@@ -181,7 +183,8 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
     const guard = subWorkerGuard(worker, siblings, env.cwd);
     const webFetch = env.webFetch?.(worker) ?? {};
     const codeGraph = env.codeGraph?.(worker) ?? {};
-    const capabilities = mergeCapabilities([webFetch.provider, codeGraph.provider]);
+    const skillCache = env.skillCache?.(worker) ?? {};
+    const capabilities = mergeCapabilities([webFetch.provider, codeGraph.provider, skillCache.provider]);
     const cwd = worker.workspace ?? env.cwd;
     const sessionFile = env.sessionFile?.(worker.id);
     const ownThinking = specialist || (!!cellRoute && worker.route?.thinking !== undefined);

@@ -28,6 +28,8 @@ export const WORKER_CAPABILITY_CHANNEL = "orche:worker-capability";
 export const WEB_FETCH_CAPABILITY = "web-fetch";
 /** The project's CodeGraph code graph (pi-codegraph's MCP tools in the worker's own session), asked for every worker and sub-worker. */
 export const CODEGRAPH_CAPABILITY = "codegraph";
+/** Optional read-only trace cache for explicitly trusted project workers. */
+export const SKILLCACHE_CAPABILITY = "skillcache";
 /**
  * The capabilities of one worker session, merged: their tools, factories, instructions and tool timeouts. Factories are
  * merged by identity: providers that need the same shared factory (Pi's MCP extension for the worker, see pi-gui and
@@ -55,4 +57,8 @@ export function webFetchCapability(ask: ((request: WorkerCapabilityRequest) => W
 /** Ask for the codegraph capability (absent: no pi-codegraph, or the user turned CodeGraph off). */
 export function codeGraphCapability(ask: ((request: WorkerCapabilityRequest) => WorkerCapabilityAnswer) | undefined, request: Omit<WorkerCapabilityRequest, "capability">): { provider?: WorkerCapabilityProvider; unavailable?: string } {
   return askCapability(CODEGRAPH_CAPABILITY, ask, request);
+}
+/** Optional cache extension factory; no new tools or shared mutable state. */
+export function skillCacheCapability(ask: ((request: WorkerCapabilityRequest) => WorkerCapabilityAnswer) | undefined, request: Omit<WorkerCapabilityRequest, "capability">): { provider?: WorkerCapabilityProvider; unavailable?: string } {
+  return askCapability(SKILLCACHE_CAPABILITY, ask, request);
 }

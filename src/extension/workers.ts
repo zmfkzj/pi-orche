@@ -271,8 +271,8 @@ export type SpawnedWorker = Omit<SubWorkerOutcome, "data" | "summary"> & { summa
 /** The workspace/git part of a task's details. */
 type ChangeReport = Pick<TaskDetails, "changes" | "otherChanges" | "unaudited" | "submodules" | "headMoved">;
 
-import { codeGraphCapability, mergeCapabilities, webFetchCapability, type WorkerCapabilityAnswer, type WorkerCapabilityProvider, type WorkerCapabilityRequest } from "./capabilities.js";
-export { CODEGRAPH_CAPABILITY, codeGraphCapability, mergeCapabilities, WEB_FETCH_CAPABILITY, webFetchCapability, WORKER_CAPABILITY_CHANNEL, type WorkerCapabilityAnswer, type WorkerCapabilityProvider, type WorkerCapabilityRequest } from "./capabilities.js";
+import { codeGraphCapability, mergeCapabilities, skillCacheCapability, webFetchCapability, type WorkerCapabilityAnswer, type WorkerCapabilityProvider, type WorkerCapabilityRequest } from "./capabilities.js";
+export { CODEGRAPH_CAPABILITY, codeGraphCapability, mergeCapabilities, SKILLCACHE_CAPABILITY, skillCacheCapability, WEB_FETCH_CAPABILITY, webFetchCapability, WORKER_CAPABILITY_CHANNEL, type WorkerCapabilityAnswer, type WorkerCapabilityProvider, type WorkerCapabilityRequest } from "./capabilities.js";
 
 /**
  * A task whose worker ran but did not complete its assignment: the worker failed or ended without a result, the
@@ -343,6 +343,8 @@ interface Worker {
   webFetch?: string;
   /** {@link WorkerCapabilityProvider.key} of the worker's codegraph capability; absent without one. */
   codeGraph?: string;
+  /** Optional read-only SkillCache extension factory. */
+  skillCache?: string;
   /** Context size of the latest request: input + cache reads + cache writes (providers count cache writes outside `input`). */
   latestInput: number;
   timer?: ReturnType<typeof setTimeout>;
@@ -1428,6 +1430,7 @@ export class WorkerPool {
     // The project's code graph for every worker (pi-codegraph): its own MCP connection in its own session; unavailable (e.g. no
     // index) is told to the worker, like browser_fetch.
     const codeGraph = codeGraphCapability(this.options.capability, capabilityRequest);
+    const skillCache = skillCacheCapability(this.options.capability, capabilityRequest);
     // Tools cannot be unregistered from a session. Recreate only when this optional
     // capability changes, so neither tool registration nor old instructions leak roles.
     if (worker && worker.imageConfig !== imageConfig) {
@@ -1452,6 +1455,12 @@ export class WorkerPool {
       await this.retire(worker.id, "replaced: code graph capability changed");
       retired.push(worker.id);
       retirementLines.push(`${worker.id} retired: CodeGraph tools ${codeGraph.provider ? (worker.codeGraph ? "configuration changed" : "became available") : "are no longer available"}; starting a fresh worker.`);
+      worker = undefined;
+    }
+    if (worker && worker.skillCache !== skillCache.provider?.key) {
+      await this.retire(worker.id, "replaced: SkillCache capability changed");
+      retired.push(worker.id);
+      retirementLines.push(`${worker.id} retired: SkillCache configuration changed; starting a fresh worker.`);
       worker = undefined;
     }
     // The ultra tool set (orche_spawn with the ultra reasons, orche_adopt) is installed when a session is created and cannot be
@@ -1551,7 +1560,7 @@ export class WorkerPool {
       // orche_spawn only with `single.spawn` on: `single.spawn: false` keeps the earlier single worker's tool set exactly.
       // Ultra workers get the ultra tool set (orche_spawn with the ultra reasons, orche_adopt) whatever single.spawn says.
       const spawnTool = singleWorkflow && (config.single.spawn || ultraMode || mdsdMode);
-      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool, ...(spawnTool ? { maxSubWorkers: config.single.maxSubWorkers } : {}), ...(singleWorkflow && ultraMode ? { ultraTools: true } : {}), ...(singleWorkflow && mdsdMode ? { mdsdTools: true } : {}), ...(gui ? { gui: gui.key } : {}), ...(webFetch.provider ? { webFetch: webFetch.provider.key } : {}), ...(codeGraph.provider ? { codeGraph: codeGraph.provider.key } : {}) };
+      worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool, ...(spawnTool ? { maxSubWorkers: config.single.maxSubWorkers } : {}), ...(singleWorkflow && ultraMode ? { ultraTools: true } : {}), ...(singleWorkflow && mdsdMode ? { mdsdTools: true } : {}), ...(gui ? { gui: gui.key } : {}), ...(webFetch.provider ? { webFetch: webFetch.provider.key } : {}), ...(codeGraph.provider ? { codeGraph: codeGraph.provider.key } : {}), ...(skillCache.provider ? { skillCache: skillCache.provider.key } : {}) };
       const meta = worker;
       this.setCompaction(meta, config.workerCompaction, resolved);
       meta.model = route.model;
@@ -1565,7 +1574,7 @@ export class WorkerPool {
       ...(meta.ultraTools ? [createAdoptTool(() => meta.ultra ?? ADOPT_UNAVAILABLE)] : [])];
       // generate_image has its own timeout (images.timeoutMs, 180 s by default): liveness bounds a silent call by it, not by the generic tool bound.
       // Capability tools likewise (the first GUI call of a desktop starts it).
-      const capabilities = mergeCapabilities([gui, webFetch.provider, codeGraph.provider]);
+      const capabilities = mergeCapabilities([gui, webFetch.provider, codeGraph.provider, skillCache.provider]);
       const toolTimeoutsMs = { ...(images ? { generate_image: images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } : {}), ...capabilities.toolTimeoutsMs };
       await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, signal: startupSignal, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name), ...capabilities.tools], customTools, peerMessaging: false, ...(sessionFile ? { sessionFile } : {}),
         skills: this.options.skills?.() ?? [],
@@ -2144,6 +2153,7 @@ export class WorkerPool {
             webFetch: planned => webFetchCapability(this.options.capability, { cwd: planned.workspace ?? args.cwd, workerId: planned.id, role: planned.role, readOnly: !WRITING_KINDS.has(planned.role) }),
             // And its own CodeGraph MCP connection (pi-codegraph), for the code graph of its workspace.
             codeGraph: planned => codeGraphCapability(this.options.capability, { cwd: planned.workspace ?? args.cwd, workerId: planned.id, role: planned.role, readOnly: !WRITING_KINDS.has(planned.role) }),
+            skillCache: planned => skillCacheCapability(this.options.capability, { cwd: planned.workspace ?? args.cwd, workerId: planned.id, role: planned.role, readOnly: !WRITING_KINDS.has(planned.role) }),
             ...(standardSubRoute !== subRoute ? { verifyRoute: subRoute, verifyThinkingSource: subThinkingSource } : {}),
             ...(thinkingPolicy.mode === "phase" ? { lengthLadder: thinkingPolicy.lengthRecovery } : {}),
             ...(summaryBudget ? { summaryBudget } : {}),
