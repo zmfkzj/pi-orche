@@ -4,6 +4,26 @@
 하네스 `experiments/stage-eval/`, 결과 `results/stage-eval/`. 비용은 사용자 카탈로그(`~/.pi/agent/cliproxyapi-models.json`) 단가로 계산한
 추정치이며 구독 청구액이 아니다. 성공은 모두 **primary success** = terminal `done` ∧ 독립 grader 통과 ∧ 기존 테스트 무결성 위반 없음.
 
+## 0. 현재 제품 상태 (2026-11-13)
+
+평가 후 사용자가 **#2와 #6만 유지**하기로 했다. 현재 제품(`src/`)에 남은 것:
+
+- #2 이미지 일괄 정리: `src/pi/image-context.ts`, `docs/request-size.md`, 테스트 `test/pi/image-context.test.ts`·`test/pi/image-context-session.test.ts`.
+- #6 테스트 출력 축소(진단 보존): `src/tools/output-filter.ts`, `docs/tools.md` Tests 항목, 테스트 `test/tools/output-filter.test.ts`.
+
+**제거됨**(실험 전용, 현재 제품 동작 아님):
+
+- #5 `regression_check` 도구·`REGRESSION_RULE`·시작 상태 캡처(S7b 수정본 포함). `src/tools/regression-check.ts`와 그 테스트, `src/extension/workers.ts`의 등록·guard·record 필드를 지웠다.
+- #7 `AMBIGUITY_RULE`(편집 전 수락 기준·material ambiguity 기록)과 main의 인계 전 material ambiguity 규칙(`src/extension/mode.ts`). 평가 이전부터 있던 모호성 처리(Original request와 지정 출처로 결정, `data.ambiguities`/`data.unresolved`), 요구별 확인과 worker의 acceptance 소유는 그대로다.
+
+제거된 코드는 동결된 runtime(`results/stage-eval/main/runtimes/<label>/src/`와 `product.diff`: #5는 S5·S6·S7·S7b, #7은 S7·S7b)과 커밋 `a1b21cc`에만 남는다.
+아래 §1–§8은 2026-11-12 평가 기록이며 당시 상태를 그대로 보존한다(실패·음성 run 포함). §3의 "최종 누적"(S7b)과 §5의 현재형 설명은
+당시 평가 runtime의 동작이다. S5–S7b plan을 다시 돌리면 이 동결 runtime을
+쓰므로(`experiments/stage-eval/env.ts` `frozenRuntime`, 다른 tree에서 같은 label 재동결은 거부) 제거된 동작을 재현할 뿐 현재 제품을 측정하지 않는다.
+`driver.ts freeze <out> <label>`은 **현재 작업 트리**를 동결하므로 지금 새 label로 동결하면 #5·#7이 없는 제품이 된다. 과거 단계의 재현에는
+반드시 기존 동결본(`results/stage-eval/main/runtimes/*`)을 쓴다. 현재 제품(#2+#6)을 하나의 단계로 평가한 run은 없다.
+S6(= #2+#5+#6)이 가장 가깝지만 #5를 포함한다.
+
 ## 1. 결론
 
 - **기준선(4 arm × 8 과제 × 3회 = 96 run, $69.61)**: 성공률은 A 순수 Pi 11/24, B direct 13/24, C single(advisor off) 10/24,
@@ -132,7 +152,7 @@ history: … reload, … rebase", "drops reasoning after the earliest omitted im
 (요청 104개 중 76개), 성공률 천장(8/8)이라 시각 맥락 손실의 영향은 이 과제로 판별되지 않는다. 실제 GUI(데스크톱 조작) 과제의
 성공률 효과는 측정하지 않았다.
 
-### #5 시작 상태 대비 회귀 비교 (`src/tools/regression-check.ts`, `docs/tools.md`)
+### #5 시작 상태 대비 회귀 비교 (제거됨 2026-11-13; 당시 `src/tools/regression-check.ts`, `docs/tools.md`)
 single implement worker에 `regression_check` 도구와 `REGRESSION_RULE`이 붙는다. 할당 시작 시 workspace를 private index로 git tree에
 캡처하고, 같은 명령·환경·상대 디렉터리로 시작 상태 사본과 현재 workspace에서 테스트를 돌려 테스트 identity 단위로 새 실패, 시작에
 없던 실패 테스트, 기존 실패, 고쳐진 테스트, 사라진 테스트, 새로 skip된 테스트를 나눈다. 삭제·skip·미수집은 통과로 세지 않는다.
@@ -152,7 +172,7 @@ live 결과와 수정:
   stravalib 11건 clean, tox 7건·pypa 1건 regressions→inconclusive, 나머지 clean 유지. 그 run들은 grader의 기존 테스트(p2p)가 모두 통과였다.
 - S7b live: 34회 호출 중 regressions 4, inconclusive 1, clean 29.
 
-테스트: `test/tools/regression-check.test.ts`(파서, 분류, 부분 실행, 한쪽 파싱, 시간값·줄번호 재파라미터화, 다대다·skip, 대형 출력,
+테스트(제품과 함께 제거, 커밋 `a1b21cc`에 있음): `test/tools/regression-check.test.ts`(파서, 분류, 부분 실행, 한쪽 파싱, 시간값·줄번호 재파라미터화, 다대다·skip, 대형 출력,
 실제 git work tree에서 사용자 git 상태를 건드리지 않는 end-to-end), `test/extension/regression-rule.test.ts`.
 
 ### #6 테스트 출력 축소 (`src/tools/output-filter.ts`, `docs/tools.md`)
@@ -165,12 +185,13 @@ live 결과와 수정:
 388/15,161 → 13,136/15,161, 재읽기가 여전히 필요한 사례 116 → 11, 출력+재읽기 문자 612,802 → 602,497(추정). 상한: 최대 inline 출력
 3,420 → 10,935자로 기존 출력 상한 안이다. live: 축소 후 artifact 재읽기 C 2, D 3, S5 4 → S6 0, S7 0, S7b 0(작은 수).
 
-### #7 조기 모호성·수락 기준 (`src/extension/workers.ts` `AMBIGUITY_RULE`, `src/extension/mode.ts`, `docs/orchestrator.md`)
+### #7 조기 모호성·수락 기준 (제거됨 2026-11-13; 당시 `src/extension/workers.ts` `AMBIGUITY_RULE`, `src/extension/mode.ts`, `docs/orchestrator.md`)
 implement 지시: 편집 전에 요구별 테스트 가능한 수락 기준과 material ambiguity를 task_plan node note에 적고, 작업 대부분이나 되돌리기
 어려운 변경을 좌우하는 모호성만 사용자에게 묻는다(요청에 clarification policy가 있으면 그것을 따른다). main 규칙: 인계 전 material
 ambiguity를 이름 붙이고 필요할 때만 한 번에 묻는다. 벤치는 질문이 불가능하므로 모든 arm에 같은 고정 policy를 프롬프트에 넣었고,
 그 문장은 baseline 첫 run부터 바뀌지 않았다(hidden answer 없음). 측정: S7·S7b worker plan note에 수락 기준 48·62건, 모호성 16·33건
-(S5·S6 0건), blocked 보고 0건. 성공률 효과는 측정되지 않았다(S6→S7 0pp). 테스트: `test/extension/ambiguity-rule.test.ts`.
+(S5·S6 0건), blocked 보고 0건. 성공률 효과는 측정되지 않았다(S6→S7 0pp). 테스트(제품과 함께 제거, 커밋 `a1b21cc`에 있음): `test/extension/ambiguity-rule.test.ts`.
+제거 후 부재와 기존 모호성 계약 유지는 `test/extension/stage-eval-removed.test.ts`가 확인한다.
 
 ## 6. 실행 기록과 회계
 
@@ -219,7 +240,8 @@ npx tsx experiments/stage-eval/analyze.ts results/stage-eval/main --exclude-task
   --arms A,B,C,D,S5,S6,S7,S7b --pairs A:B,A:C,A:D,C:D,C:S5,S5:S6,S6:S7,S7:S7b,C:S7b,A:S7b --md summary-final.md
 python3 experiments/stage-eval/extra-metrics.py results/stage-eval/main --exclude-tasks img-console-recording
 ADVISOR_BENCH_SWE_CACHE=<cache> npx tsx experiments/stage-eval/regression-replay.ts results/stage-eval/main \
-  results/stage-eval/main/runtimes/s5/src/tools/regression-check.ts src/tools/regression-check.ts <out.json> --tasks <ids>
+  results/stage-eval/main/runtimes/s5/src/tools/regression-check.ts results/stage-eval/main/runtimes/s7b/src/tools/regression-check.ts <out.json> --tasks <ids>
+# (제거된 #5 도구는 현재 src/에 없다: 재생은 동결 runtime 사본끼리 비교한다. 당시는 두 번째 인자가 작업 트리의 src/tools/regression-check.ts였다)
 npx tsx experiments/stage-eval/image-replay.ts <out.json> --sample 60 stage-eval-replay-2026-11-12 ~/.pi/agent/orche/records
 ```
 

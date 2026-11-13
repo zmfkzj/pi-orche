@@ -6,6 +6,8 @@ primary runs (runs/<task>/<arm>/r<n>; kept infra/interrupted attempts are exclud
   their usage and cost are NOT in the wire accounting);
 - task_plan nodes and how many carry a note naming acceptance criteria or an ambiguity (change #7 compliance);
 - assignments reported blocked, and test-integrity violations found by the grader.
+Changes #5 and #7 were removed from the product on 2026-11-13 (docs/stage-eval.md §0); their metrics describe the frozen S5-S7b
+runtimes of that study, not the current product.
 
     python3 experiments/stage-eval/extra-metrics.py results/stage-eval/main [--exclude-tasks img-console-recording] > out.json
 """

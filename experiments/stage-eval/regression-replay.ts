@@ -3,6 +3,8 @@
  * SWE task, a fresh workspace at the task's starting state is captured as the starting state, the run's final diff is applied, and
  * the SAME command is checked with an old and a new src/tools/regression-check.ts. The final workspace stands in for the state at
  * the time of the call (the call itself happened mid-assignment), so this measures the tool's classification, not the worker.
+ * Historical: change #5 was removed from the product on 2026-11-13 (docs/stage-eval.md §0); src/tools/regression-check.ts no longer
+ * exists, so pass the frozen copies under results/stage-eval/main/runtimes/<label>/src/tools/regression-check.ts.
  *
  *   ADVISOR_BENCH_SWE_CACHE=<cache> npx tsx experiments/stage-eval/regression-replay.ts <study dir> <old regression-check.ts> <new regression-check.ts> <out.json> [--tasks a,b] [--limit n]
  */
