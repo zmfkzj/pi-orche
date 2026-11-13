@@ -326,3 +326,25 @@ to be briefs for future work (verbatim task, current occupation and next steps, 
 artifacts). orche already restored the verbatim task, plan and requirements; this option adds the work log with failed attempts,
 main's later instructions, validated pointers to the original transcript, and short absolute thresholds as an experiment. SAC is
 not implemented. The paper's results are its own measurements on other harnesses and do not establish an effect for orche.
+
+
+## Decision-linked memory (opt-in; failure-contamination guard)
+
+Enable in the worker's existing compaction policy:
+
+```json
+{
+  "workerCompaction": {
+    "essentials": "extended",
+    "decisionMemory": true
+  }
+}
+```
+
+This is a **FOCUS-inspired adapter, not FOCUS-O or FOCUS-D as published**. It does not sample future plans using a separate LLM. The worker's explicit Task DAG is a lower-cost future-decision proxy: the work log after compaction retains a bounded selection of successful calls for unfinished nodes, recent successful checks, and calls referenced in checkpoints. All original results stay in Pi's persisted JSONL transcript, referenced by provider tool-call IDs. This option requires `essentials: "extended"` so that the original transcript can be checked and re-read.
+
+Failure knowledge is **conditional**. A failed call appears in a separate "CURRENT unresolved tool errors" section only when all conditions hold: it occurred within the last 12 non-bookkeeping calls, no newer call of the same tool and target superseded the failure, and its Task DAG node is unfinished (or unspecified). Up to four such failures are shown, with source call IDs. They are observations, never instructions or generalized lessons. The summary prompt omits historical resolved failures from durable guidance. The user's original requirements, amendments, Task DAG, task ledger, and original transcript reference are preserved through the existing mechanism.
+
+Limitations: Pi may still retain past error content in its most recent uncompacted tokens or previous summaries; this feature therefore **does not guarantee zero failure contamination**. The tool+target error-resolution heuristic is approximate, and the selected work log contains references, not proof that any tool observation is correct. This is not a reproduction of FOCUS's multiple sampled future plans, Sentry's learning/recovery/playbook system, or WikiTrace's independent evidence verification. No improvement in task quality is claimed without an independent evaluation. Default behavior remains unchanged when `decisionMemory` is absent or false.
+
+References: [FOCUS](https://arxiv.org/abs/2609.37590), [Sentry](https://arxiv.org/abs/2610.02994).

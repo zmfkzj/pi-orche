@@ -41,6 +41,8 @@ export interface WorkerCompactionSettings extends CompactionTarget {
    * to the original transcript for selective re-reading (src/pi/compaction-state.ts).
    */
   essentials: EssentialsMode;
+  /** Select plan-linked observations and conditionally expose only active errors. Opt-in; requires extended essentials. */
+  decisionMemory?: boolean;
   /** orche_spawn standard sub-workers compact with this policy and get their own essentials (default false: compaction off). */
   subWorkers: boolean;
 }
@@ -163,7 +165,7 @@ export function parseWorkerCompaction(value: unknown): WorkerCompactionSettings 
   if (typeof value === "number") return { ...DEFAULT_WORKER_COMPACTION, usageRatio: parseUsageRatio(value, "config.workerCompaction") };
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error('config.workerCompaction: expected "window-ratio", a usage ratio or an object');
   const settings = value as Record<string, unknown>;
-  const known = new Set(["policy", "triggerTokens", "keepRecentTokens", "usageRatio", "roles", "models", "essentials", "subWorkers"]);
+  const known = new Set(["policy", "triggerTokens", "keepRecentTokens", "usageRatio", "roles", "models", "essentials", "decisionMemory", "subWorkers"]);
   const unknown = Object.keys(settings).filter(key => !known.has(key));
   if (unknown.length) throw new Error(`config.workerCompaction: unknown field ${unknown.join(", ")}`);
   const policy = settings.policy ?? "window-ratio";
@@ -171,6 +173,8 @@ export function parseWorkerCompaction(value: unknown): WorkerCompactionSettings 
   const essentials = settings.essentials ?? "basic";
   if (essentials !== "basic" && essentials !== "extended") throw new Error('config.workerCompaction.essentials: expected "basic" or "extended"');
   if (settings.subWorkers !== undefined && typeof settings.subWorkers !== "boolean") throw new Error("config.workerCompaction.subWorkers: expected boolean");
+  if (settings.decisionMemory !== undefined && typeof settings.decisionMemory !== "boolean") throw new Error("config.workerCompaction.decisionMemory: expected boolean");
+  if (settings.decisionMemory === true && essentials !== "extended") throw new Error("config.workerCompaction.decisionMemory: requires essentials extended");
   const base = parseTarget(Object.fromEntries(Object.entries(settings).filter(([key]) => key === "triggerTokens" || key === "keepRecentTokens" || key === "usageRatio")), "config.workerCompaction");
   let roles: Record<string, CompactionTarget> | undefined;
   if (settings.roles !== undefined) {
@@ -192,5 +196,5 @@ export function parseWorkerCompaction(value: unknown): WorkerCompactionSettings 
     });
   }
   if (policy === "absolute" && base.triggerTokens === undefined && !roles && !models) throw new Error("config.workerCompaction: policy absolute needs triggerTokens (or roles/models with triggerTokens)");
-  return { policy, essentials, subWorkers: settings.subWorkers === true, ...base, ...(roles ? { roles } : {}), ...(models ? { models } : {}) };
+  return { policy, essentials, subWorkers: settings.subWorkers === true, ...(settings.decisionMemory === true ? { decisionMemory: true } : {}), ...base, ...(roles ? { roles } : {}), ...(models ? { models } : {}) };
 }
