@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Liveness } from "../../src/agent/liveness.js";
+import { LivenessTracker, TOOL_TIMEOUT_GRACE_MS, type Liveness } from "../../src/agent/liveness.js";
 import { resolveRunLimits } from "../../src/orchestration/limits.js";
 import {
   ExtendableDeadline, describeProgress, formatExtensionSummary, formatObservation, waitExtendable,
@@ -149,5 +149,53 @@ describe("observer of waitExtendable: fixed period, independent of the extension
     expect(describeProgress(undefined, undefined, 0)).toEqual({ state: "unknown", detail: "no probe" });
     expect(describeProgress({ evidence: 3, lastEvidenceAt: 0, last: "node a done" }, undefined, 40_000)).toEqual({ state: "evidence", detail: "3 new so far (last: node a done, 40s ago)" });
     expect(describeProgress({ evidence: 3, lastEvidenceAt: 0, last: "node a done" }, 3, 25 * MIN)).toEqual({ state: "none", detail: "none recorded for 25m (last: node a done, 25m ago); not a stop reason" });
+  });
+});
+
+/**
+ * Replay of a real stop (records 01a1d4ab…/2026-11-13T11-47-00-581Z_task-007330bc): at 37m23s into the assignment W1 started a
+ * silent non-bash tool with `timeoutSeconds: 2400` that ran a test suite for 17 minutes with its output kept in memory (no tool
+ * updates). The runtime then loaded predated the declared-wait rule, so the call counted as working for only the generic 10 minutes:
+ * the checks at 50 and 55 minutes found no activity and the observer stopped the assignment during extension 2/10 (granted at 40m
+ * up to 60m) although the suite was still running. With the declared wait honoured the same timeline is alive at every check; once
+ * the declaration plus its grace has passed, the consecutive-inactivity stop still applies.
+ */
+describe("declared non-bash wait through the observer (replay of the 55-minute stall stop)", () => {
+  const TOOL_START = 37 * MIN + 23_000;
+  const replay = (args: Record<string, unknown>, horizonMs: number) => {
+    const tracker = new LivenessTracker({ id: "W1", role: "implement" });
+    tracker.observe({ type: "agent_start" }, 0);
+    tracker.observe({ type: "message_update" }, 0);
+    // Model output keeps the worker active until the tool call; afterwards nothing but the silent call itself.
+    const chatter = setInterval(() => { if (Date.now() < TOOL_START) tracker.observe({ type: "message_update" }); }, 30_000);
+    setTimeout(() => tracker.observe({ type: "tool_execution_start", toolCallId: "r2", toolName: "regression_check", args }), TOOL_START);
+    const deadline = ExtendableDeadline.fromLimits(resolveRunLimits(), { baseMs: 30 * MIN });
+    const observations: WaitObservation[] = [];
+    const result = runFor(waitExtendable<Wait>({
+      deadline, wait: timerWait, liveness: (now, windowMs) => tracker.liveness(now, windowMs), stage: "W1 implement", observeEveryMs: 5 * MIN,
+      onObservation: observation => observations.push(observation),
+    }), horizonMs).finally(() => clearInterval(chatter));
+    return { result, observations, deadline };
+  };
+
+  it("without a usable declaration the 50- and 55-minute checks find no activity and the stall stop fires (the recorded outcome)", async () => {
+    const { result, observations } = replay({ command: "npx vitest run test/integration" }, 120 * MIN);
+    expect(await result).toMatchObject({ type: "timeout", notExtended: { reason: "stalled", n: 2, message: "stopped during extension 2/10: no activity in 2 consecutive checks 5m apart" } });
+    expect(observations.filter(observation => !observation.alive).map(observation => observation.at / MIN)).toEqual([50, 55]);
+    expect(Date.now()).toBe(55 * MIN);
+  });
+
+  it("with timeoutSeconds 2400 the same timeline stays alive through 55 minutes; after the declared wait plus grace the stall stop still applies", async () => {
+    const { result, observations, deadline } = replay({ command: "npx vitest run test/integration", timeoutSeconds: 2400 }, 200 * MIN);
+    const settled = await result;
+    const at55 = observations.find(observation => observation.at === 55 * MIN);
+    expect(at55).toMatchObject({ alive: true, inExtension: true, inactiveStreak: 0 });
+    expect(at55!.reasons[0]).toBe("W1 regression_check running 17m, no updates, declared wait up to 40m");
+    // The declared wait ends at 37m23s + 40m + 30s grace = 77m53s: the checks at 80 and 85 minutes find no activity.
+    expect(TOOL_START + 2_400_000 + TOOL_TIMEOUT_GRACE_MS).toBeLessThan(80 * MIN);
+    expect(observations.filter(observation => !observation.alive).map(observation => observation.at / MIN)).toEqual([80, 85]);
+    expect(settled).toMatchObject({ type: "timeout", notExtended: { reason: "stalled", checks: 2 } });
+    expect(Date.now()).toBe(85 * MIN);
+    expect(deadline.used).toBeLessThanOrEqual(deadline.maxExtensions);
   });
 });
