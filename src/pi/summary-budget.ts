@@ -67,13 +67,18 @@ export interface SummaryLengthStop {
 
 /** Summary requests since the last {@link takeSummaryRequests}: count, re-sends, summed request time and output tokens. */
 export interface SummaryRequests { requests: number; retries: number; ms: number; outputTokens: number }
-interface BudgetState { level: number; profile: SummaryBudgetProfile; last?: SummaryBudgetUse; window?: SummaryRequests; onEvent?: (event: SummaryLengthStop) => void }
+interface BudgetState { level: number; profile: SummaryBudgetProfile; decisionMemory?: boolean; last?: SummaryBudgetUse; window?: SummaryRequests; onEvent?: (event: SummaryLengthStop) => void }
 const states = new WeakMap<object, BudgetState>();
 const stateOf = (session: object): BudgetState => {
   let state = states.get(session);
   if (!state) states.set(session, state = { level: 0, profile: "standard" });
   return state;
 };
+
+/** Opt-in worker memory policy, reset at every assignment boundary by session-factory. */
+export function setSummaryDecisionMemory(session: object, enabled: boolean): void {
+  stateOf(session).decisionMemory = enabled;
+}
 
 /**
  * An assignment start: the observer of the session's output-limit stops and the profile of this assignment (omitted: standard, so an
@@ -123,16 +128,20 @@ export function summaryBudgetTokens(model: { maxTokens?: number } | undefined, l
 }
 
 /** The instruction block appended to a summary request. `restoredLabel`: the heading of the essentials orche restores verbatim. */
-export function summaryBudgetNote(tokens: number, options: { retry?: boolean; restoredLabel?: string; profile?: SummaryBudgetProfile } = {}): string {
+export function summaryBudgetNote(tokens: number, options: { retry?: boolean; restoredLabel?: string; profile?: SummaryBudgetProfile; decisionMemory?: boolean } = {}): string {
   const lines = [
     "orche summary budget (takes precedence over any instruction to preserve everything):",
     ...(options.retry ? ["- The previous attempt at this summary stopped at the response limit and was discarded. Write a much shorter summary now."] : []),
     `- Keep the whole summary under about ${tokens.toLocaleString("en-US")} tokens (about ${(tokens * 3).toLocaleString("en-US")} characters). It must fit well within one response, and the next compaction folds it into the next summary.`,
     "- If the previous summary or the new messages are larger, condense: merge finished work into short lines, drop superseded, repeated or already-resolved detail, and keep the exact paths, identifiers, numbers and error messages the next steps need.",
     "- Keep the current state, open problems, blockers and next steps complete.",
+    ...(options.decisionMemory ? [
+      "- Historical failures are observations, not standing instructions: retain only unresolved failures relevant to unfinished work. Never generalize a past failure into a global prohibition.",
+      "- If an unresolved failure matters, cite the source call ID and re-check the raw transcript; do not invent or copy a full recovery playbook.",
+    ] : []),
     ...(options.restoredLabel ? [`- A message that starts with "${options.restoredLabel}" is restored verbatim after this summary from the task's own records: do not copy its content; one line that points to it is enough.`] : []),
     ...(options.profile === "compact" ? [
-      "- Compact summary. Never drop: decisions made and their rationale; unresolved questions, open hypotheses, blockers and failed attempts with their cause; constraints and acceptance criteria from the user or main; findings with their evidence (exact paths, identifiers, numbers, commands and outcomes); what is done, what is in progress and the next steps.",
+      "- Compact summary. Never drop: decisions made and their rationale; unresolved questions, open hypotheses, blockers and " + (options.decisionMemory ? "unresolved failures with source call IDs" : "failed attempts with their cause") + "; constraints and acceptance criteria from the user or main; findings with their evidence (exact paths, identifiers, numbers, commands and outcomes); what is done, what is in progress and the next steps.",
       "- Drop first: content of files, documents and tool output that can be read again (keep the path and what to look for), narration of how the work went, and detail that a later step superseded.",
     ] : []),
   ];
@@ -163,7 +172,7 @@ export function budgetedSummary(session: object, model: { provider?: string; id?
     const budget = summaryBudgetTokens(model, state.level, state.profile);
     state.last = { profile: state.profile, tokens: budget, level: state.level };
     const startedAt = Date.now();
-    const stream = send(withSummaryNote(context, summaryBudgetNote(budget, { retry, profile: state.profile, ...(options.restoredLabel ? { restoredLabel: options.restoredLabel } : {}) })));
+    const stream = send(withSummaryNote(context, summaryBudgetNote(budget, { retry, profile: state.profile, ...(state.decisionMemory ? { decisionMemory: true } : {}), ...(options.restoredLabel ? { restoredLabel: options.restoredLabel } : {}) })));
     let terminal: Extract<AssistantMessageEvent, { type: "done" | "error" }> | undefined;
     for await (const event of stream) {
       if (event.type === "done" || event.type === "error") { terminal = event; break; }
