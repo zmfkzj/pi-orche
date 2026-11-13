@@ -24,6 +24,7 @@ import { createTaskPlanTool, renderTaskPlan, type TaskPlan } from "../tools/task
 import { configureTaskWorkflow, enableTaskWorkflow, type CompactionStats, type TaskCompaction } from "../pi/session-factory.js";
 import { DEFAULT_WORKER_COMPACTION, resolveCompaction, type WorkerCompactionSettings } from "../pi/compaction-policy.js";
 import { composeEssentials, renderReference, renderWorkLog } from "../pi/compaction-state.js";
+import { renderDecisionWorkLog } from "../pi/decision-memory.js";
 import { withExtendedContext } from "../pi/extended-context.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { advisorTiers, inheritsMain, inheritsMainThinking, isDelegatingMode, modeTiers, type DelegatingMode, resolveRoute, resolveSpecialistRoute, tierThinking, usesStrongTiers, type AssignmentModelSource, type AssignmentThinkingSource, type MainMode, type ModelRoute, type ModelTier, type SubWorkerModelSource, type SubWorkerThinkingSource, type TierCandidate, type TierSettings } from "../orchestration/routing.js";
@@ -509,6 +510,7 @@ function readDetails(manager: AgentManager, worker: string): { rereads?: ReadTel
 function taskCompactionFor(worker: Worker): TaskCompaction {
   const settings = worker.compaction ?? DEFAULT_WORKER_COMPACTION;
   const extended = settings.essentials === "extended";
+  const decisionMemory = extended && settings.decisionMemory === true;
   return {
     essentials: ({ session, reference }) => {
       const ledger = worker.ledger?.();
@@ -522,7 +524,7 @@ function taskCompactionFor(worker: Worker): TaskCompaction {
         { name: "main-messages", text: renderMainMessages(worker.injected?.() ?? []) },
         { name: "plan", text: plan },
         { name: "ledger", text: ledgerText },
-        { name: "work-log", text: renderWorkLog(evidenceLedgerOf(session)) },
+        { name: "work-log", text: decisionMemory ? renderDecisionWorkLog(evidenceLedgerOf(session), worker.plan) : renderWorkLog(evidenceLedgerOf(session)) },
         { name: "reference", text: renderReference(reference, worker.retention), required: true },
       ]);
     },
@@ -530,6 +532,7 @@ function taskCompactionFor(worker: Worker): TaskCompaction {
     onEvent: event => worker.recordEvent?.({ ...event, timestamp: Date.now(), worker: worker.id }),
     policy: model => resolveCompaction(settings, { contextWindow: model.contextWindow, model: `${model.provider}/${model.id}`, role: worker.role }),
     retrieval: extended,
+    decisionMemory,
   };
 }
 export interface WorkerPoolOptions {
