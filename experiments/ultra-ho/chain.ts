@@ -45,6 +45,7 @@ import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SWE_CACHE, SWE_DIR } from "../advisor-reviewer/tasks.js";
 import { loadTask } from "../ultra-ab/env.js";
 import { isTestFile } from "../ultra-ab/protocol.js";
 import { jsonlFiles, readJsonl } from "../ultra-ab/run-one.js";
@@ -502,14 +503,24 @@ export interface UnitChain {
 }
 export interface TaskSource { kind: string; source: string; dir: string }
 
+/** A canonical SWE task for analysis: validated, with its snapshot in SWE_CACHE; its venv is not needed. */
+function canonicalSwe(id: string): TaskSource {
+  const dir = join(SWE_DIR, id), source = join(SWE_CACHE, id, "src");
+  if (!readJson(join(dir, "task.json"))?.validation?.valid) throw new Error(`${id}: not validated`);
+  if (!existsSync(source) || !lstatSync(source).isDirectory()) throw new Error(`${id}: no source snapshot at ${source}`);
+  return { kind: "swe", dir, source };
+}
+
 /**
  * The task a unit ran, from its own fixture root: meta.fixtureRoot (run-one.ts) and, for SWE, the snapshot in the cache its
- * environment was staged from (meta.sweCacheSource, else the canonical cache). A unit without a recorded root: ultra-ab loadTask
- * (the canonical fixture roots).
+ * environment was staged from (meta.sweCacheSource, else the canonical cache). A unit without a recorded root: the canonical
+ * fixture roots of ultra-ab (an SWE task in SWE_DIR with its snapshot in SWE_CACHE, else ultra-ab loadTask for a suite task). An
+ * analysis reads only the fixture and the snapshot: it does not need the task's prepared venv, which loadTask requires for a run
+ * (the task must still be validated and its snapshot present, so a missing snapshot is an error, not a unit without findings).
  */
 export async function unitTask(meta: any, repo = REPO): Promise<TaskSource> {
   const id = String(meta?.task ?? "");
-  if (!isString(meta?.fixtureRoot)) return loadTask(id);
+  if (!isString(meta?.fixtureRoot)) return existsSync(join(SWE_DIR, id, "task.json")) ? canonicalSwe(id) : loadTask(id);
   const dir = join(meta.fixtureRoot, id);
   if (meta.kind === "swe" || meta.kind === undefined && existsSync(join(dir, "hidden/test.patch"))) return { kind: "swe", dir, source: join(isString(meta.sweCacheSource) ? meta.sweCacheSource : resolve(repo, DEFAULT_SWE_CACHE_SOURCE), id, "src") };
   return { kind: String(meta.kind ?? "suite"), dir, source: join(dir, "repo") };

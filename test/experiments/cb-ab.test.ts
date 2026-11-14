@@ -384,15 +384,21 @@ describe("unit refusals and the toy case", () => {
   });
 
   it("toy case: case.json in the case format, the prompt from diagnosisPrompt, one planted defect (even-length median), the isort venv", async () => {
-    const caseDir = join(await temp(), "toy-case");
-    writeToyCase(caseDir);
-    const loaded = loadCase(caseDir);
+    // A stand-in repository root with the isort venv's interpreter: the toy's wiring is checked without the machine-local SWE cache
+    // (results/ is not versioned; the live venv is exercised by the python-wrapper and sandbox tests above when it is present).
+    const root = await temp(), caseDir = join(root, "toy-case"), venv = join(root, "results/advisor-reviewer/cache/swe/pycqa__isort-2491/venv");
+    const spec = writeToyCase(caseDir, root);
+    expect(spec).toMatchObject({ source: "toy-case/src", venv: "results/advisor-reviewer/cache/swe/pycqa__isort-2491/venv" });
+    // Without that interpreter the case is refused, as for any case whose venv is missing.
+    expect(() => loadCase(caseDir, root)).toThrow(/no virtualenv at .*pycqa__isort-2491\/venv/);
+    mkdirSync(join(venv, "bin"), { recursive: true }); writeFileSync(join(venv, "bin/python"), "");
+    const loaded = loadCase(caseDir, root);
     expect(Object.keys(JSON.parse(readFileSync(join(caseDir, "case.json"), "utf8")))).toEqual(["id", "order", "task", "repo", "baseCommit", "projectDir", "pythonPath", "prompt", "promptSha256", "source", "venv"]);
-    expect(loaded).toMatchObject({ id: "toy", order: 1, projectDir: "tinystats", pythonPath: ".", sourceDir: join(caseDir, "src"), venvDir: ISORT_VENV });
+    expect(loaded).toMatchObject({ id: "toy", order: 1, projectDir: "tinystats", pythonPath: ".", sourceDir: join(caseDir, "src"), venvDir: venv });
     expect(loaded.prompt).toContain("median() returns the wrong value for lists with an even number of elements");
     expect(loaded.prompt.startsWith("Read-only investigation of a bug report")).toBe(true);
     expect(readFileSync(join(caseDir, "src/tinystats/core.py"), "utf8")).toContain("return ordered[middle]");
-    expect(() => writeToyCase(caseDir)).toThrow(/written once/);
+    expect(() => writeToyCase(caseDir, root)).toThrow(/written once/);
   });
 });
 
