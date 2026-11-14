@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { schemaErrors } from "../orchestration/schema-errors.js";
+import { reportData, reportDataHint } from "../orchestration/result-schemas.js";
 import type {
   AgentSession,
   ToolDefinition,
@@ -207,9 +208,7 @@ export class AgentManager {
         if (rewrite) return owner.rewriteResult(worker, rewrite);
         let payload = args as ResultPayload;
         // Models sometimes send `data` as a JSON string of the object: parse it (validation still runs on the parsed value).
-        if (typeof payload.data === "string" && /^\s*[{[]/.test(payload.data)) {
-          try { payload = { ...payload, data: JSON.parse(payload.data) as unknown }; } catch { /* left as is; validation reports it */ }
-        }
+        if (payload.data !== undefined) payload = { ...payload, data: reportData(payload.data) };
         const contract = owner.resultSchemas[worker.snapshot.currentAssignment.kind];
         if (payload.kind !== worker.snapshot.currentAssignment.kind)
           return owner.rejectResult(worker, `Expected RESULT kind "${worker.snapshot.currentAssignment.kind}"; received "${payload.kind}"`, contract);
@@ -1071,5 +1070,5 @@ function resultDataErrors(contract: ResultDataSchema, data: unknown): string | u
   if ((data === undefined || data === null) && contract.optional) return undefined;
   if (Value.Check(contract.schema, data)) return undefined;
   const errors = schemaErrors(contract.schema, data);
-  return errors.length ? errors.join("; ") : "invalid data";
+  return `${errors.length ? errors.join("; ") : "invalid data"}${reportDataHint(data, contract.schema)}`;
 }

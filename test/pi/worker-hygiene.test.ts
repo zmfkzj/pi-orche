@@ -58,6 +58,19 @@ describe("report_result data and unknown tools in a worker session", () => {
     await m.wait("W1", 5000);
     expect(rejection).toContain("Result rejected: /status");
   });
+  it("missing required data and a non-JSON string say what to fix beyond the schema path", async () => {
+    const seen: string[] = [];
+    const { m } = await worker([
+      reply([call("report_result", { kind: "verify", summary: "no data" })], { stopReason: "toolUse" }),
+      context => { seen.push(JSON.stringify(context.messages.at(-1))); return reply([call("report_result", { kind: "verify", summary: "text", data: "{passed: true}" })], { stopReason: "toolUse" }); },
+      context => { seen.push(JSON.stringify(context.messages.at(-1))); return reply([call("report_result", { kind: "verify", summary: "ok", data: "{\"passed\": true}" })], { stopReason: "toolUse" }); },
+    ]);
+    m.assign("W1", "verify", "go");
+    const waited = await m.wait("W1", 5000);
+    expect(seen[0]).toContain("data is missing");
+    expect(seen[1]).toContain("arrived as a string");
+    expect(waited).toMatchObject({ type: "outcome", outcome: { status: "completed", result: { data: { passed: true } } } });
+  });
   it("suggests the real tool for a made-up prefixed name and never runs it", async () => {
     let seen = "";
     const { m } = await worker([

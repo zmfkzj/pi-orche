@@ -26,6 +26,8 @@ export interface SpecialistReport<S extends TSchema> {
   parameters: S;
   /** A semantic check after the schema check; a returned string is sent back to the model as the error to fix. */
   check?: (value: Static<S>) => string | undefined;
+  /** Normalizes the arguments after the schema check, before `check` and capture (e.g. `data` sent as a JSON string). */
+  normalize?: (value: Static<S>) => Static<S>;
 }
 export interface SpecialistRun<S extends TSchema> {
   /** Actor id for records and errors, e.g. `framer:T1#2`. */
@@ -184,10 +186,11 @@ function reportTool<S extends TSchema>(report: SpecialistReport<S>, capture: (va
     execute: async (_id, args) => {
       if (accepted) return { content: [{ type: "text", text: "Report already recorded." }], details: {}, isError: true, terminate: true };
       if (!Value.Check(report.parameters, args)) return { content: [{ type: "text", text: `Invalid ${report.name} arguments: ${errorsOf(report.parameters, args)}. Fix them and call ${report.name} again.` }], details: {}, isError: true };
-      const problem = report.check?.(args as Static<S>);
+      const value = report.normalize ? report.normalize(args as Static<S>) : args as Static<S>;
+      const problem = report.check?.(value);
       if (problem) return { content: [{ type: "text", text: `${problem} Call ${report.name} again with the fix.` }], details: {}, isError: true };
       accepted = true;
-      capture(args as Static<S>);
+      capture(value);
       return { content: [{ type: "text", text: "Report recorded." }], details: {}, terminate: true };
     },
   };

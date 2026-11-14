@@ -1,4 +1,4 @@
-import { Type } from "typebox";
+import { Type, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { formatSchemaErrors } from "./schema-errors.js";
 import type { ResultDataSchema } from "../agent/agent-handle.js";
@@ -109,6 +109,28 @@ export const verifyResultSchema = Type.Object({
   evidence,
   issues: Type.Optional(Type.Unknown()),
 });
+
+/**
+ * `data` of a report_result as its contract sees it. The tool schema leaves `data` untyped, and models sometimes send the object as
+ * a JSON string of it (seen from orche_task workers and orche_spawn sub-workers): a string holding a JSON object or array is parsed;
+ * anything else, malformed JSON included, is returned unchanged so validation still reports it.
+ */
+export function reportData(data: unknown): unknown {
+  if (typeof data !== "string" || !/^\s*[{[]/.test(data)) return data;
+  try { return JSON.parse(data) as unknown; } catch { return data; }
+}
+
+/**
+ * What to fix beyond the schema paths when rejected `data` (after reportData) is missing or null, or is still a string where the
+ * contract expects a JSON object or array; empty otherwise (other contracts keep only their schema errors).
+ */
+export function reportDataHint(data: unknown, schema: TSchema): string {
+  if (data === undefined) return " (data is missing; this report requires it)";
+  if (data === null) return " (data is null; this report requires it)";
+  const type = (schema as { type?: unknown }).type;
+  if (typeof data === "string" && (type === "object" || type === "array")) return ` (data arrived as a string that is not valid JSON of an ${type}; send data as a JSON ${type}, not a quoted string)`;
+  return "";
+}
 
 /**
  * RESULT `data` contracts per assignment kind, checked inside `report_result` so a

@@ -15,7 +15,7 @@ import type { TaskItem } from "../orchestration/backlog.js";
 import { relative, resolve, sep } from "node:path";
 import { checkWriteRealPath, WRITE_TOOLS } from "../orchestration/ownership.js";
 import { checkBashWrites } from "../orchestration/bash-writes.js";
-import { orchestrationResultSchemas } from "../orchestration/result-schemas.js";
+import { orchestrationResultSchemas, reportData, reportDataHint } from "../orchestration/result-schemas.js";
 import { WORKER_TOOL_NAMES } from "../tools/index.js";
 import { mergeCapabilities, type WorkerCapabilityProvider } from "../extension/capabilities.js";
 import { runSpecialistSession, SpecialistError, type SpecialistDeadline, type SpecialistReport, type SpecialistStats } from "../specialists/session.js";
@@ -108,12 +108,14 @@ function reportFor(role: SubWorkerRole, extra?: (data: unknown) => string | unde
     label: "Report result",
     description: "Complete the current assignment with your result. Call alone, not alongside other tools.",
     parameters: reportSchema,
+    // `data` sent as a JSON string of the object is parsed before the contract check, as for orche_task workers (agent-manager).
+    normalize: value => value.data === undefined ? value : { ...value, data: reportData(value.data) },
     check: value => {
       if (value.kind !== role) return `Expected report kind "${role}"; received "${value.kind}".`;
       const contract = orchestrationResultSchemas[role];
       // An extra contract (an MDSD search worker's output fields) applies after the role's own, also to absent data.
       if (contract && !((value.data === undefined || value.data === null) && contract.optional) && !Value.Check(contract.schema, value.data))
-        return `Invalid data: ${formatSchemaErrors(contract.schema, value.data, 6)}. Expected data: ${JSON.stringify(contract.schema)}.`;
+        return `Invalid data: ${formatSchemaErrors(contract.schema, value.data, 6)}${reportDataHint(value.data, contract.schema)}. Expected data: ${JSON.stringify(contract.schema)}.`;
       return extra?.(value.data);
     },
   };
