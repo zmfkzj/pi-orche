@@ -42,15 +42,16 @@ const started = Date.now();
 // Decision memory: fixtures, the summary-prompt delta, then the replay of real worker transcripts.
 const scenarios = runScenarios();
 const note = summaryNoteDelta();
-let replay: { files: number; cuts: number; aggregate: ReturnType<typeof aggregateCuts>; failedFiles: number } | undefined;
+let replay: { files: number; cuts: number; aggregate: ReturnType<typeof aggregateCuts>; failedFiles: number; refCheck: { refAgree: number; refDisagree: number } } | undefined;
 const workerFiles = has("--skip-records") ? [] : listJsonl(recordsDir, isWorkerTranscript).sort().slice(0, limit);
 if (workerFiles.length) {
   const cuts: CutMetrics[] = [];
   let failedFiles = 0;
+  const refCheck = { refAgree: 0, refDisagree: 0 };
   for (const file of workerFiles) {
-    try { cuts.push(...await replayTranscript(file)); } catch { failedFiles++; }
+    try { cuts.push(...await replayTranscript(file, { stats: refCheck })); } catch { failedFiles++; }
   }
-  replay = { files: workerFiles.length, cuts: cuts.length, aggregate: aggregateCuts(cuts), failedFiles };
+  replay = { files: workerFiles.length, cuts: cuts.length, aggregate: aggregateCuts(cuts), failedFiles, refCheck };
 }
 write("decision-memory.json", { scenarios, summaryNote: note, replay });
 

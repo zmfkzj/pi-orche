@@ -38,7 +38,7 @@ export function shownFailureIds(text: string): Set<string> {
 }
 
 /** Facts derived from the ledger alone (independent of either renderer). */
-export function ledgerFacts(ledger: EvidenceLedger) {
+export function ledgerFacts(ledger: EvidenceLedger, plan?: TaskPlan) {
   const calls = ledger.calls.filter(call => !BOOKKEEPING_TOOLS.has(call.name));
   const key = (call: ToolRecord) => `${call.name}::${call.target ?? ""}`;
   const latest = new Map<string, ToolRecord>();
@@ -47,8 +47,10 @@ export function ledgerFacts(ledger: EvidenceLedger) {
   const unresolved = failures.filter(call => latest.get(key(call)) === call);
   const resolved = failures.filter(call => latest.get(key(call)) !== call && !latest.get(key(call))!.isError);
   const files = [...new Set(calls.filter(call => !call.isError && ["edit", "write", "ast_rewrite"].includes(call.name) && call.target).map(call => call.target!))];
-  const position = new Map(calls.map((call, index) => [call.toolCallId, calls.length - index]));
-  return { calls, unresolved, resolved, files, position };
+  // Unresolved failures of unfinished work (no node, or a node not done/skipped): decision memory's own criterion without its window.
+  const finished = new Set((plan?.nodes ?? []).filter(n => n.status === "done" || n.status === "skipped").map(n => n.id));
+  const unresolvedOpen = unresolved.filter(call => !call.node || !finished.has(call.node));
+  return { calls, unresolved, unresolvedOpen, resolved, files };
 }
 
 export interface ArmMetrics {
@@ -58,6 +60,9 @@ export interface ArmMetrics {
   neededTotal: number;
   unresolvedShown: number;
   unresolvedTotal: number;
+  /** Unresolved failures of unfinished nodes (or without a node). */
+  unresolvedOpenShown: number;
+  unresolvedOpenTotal: number;
   /** Failures already superseded by a later success of the same tool and target that are still shown as FAILED. */
   staleFailuresShown: number;
   filesShown: number;
@@ -66,8 +71,8 @@ export interface ArmMetrics {
   unneededShown: number;
 }
 
-export function measure(text: string, ledger: EvidenceLedger, needed: readonly string[]): ArmMetrics {
-  const facts = ledgerFacts(ledger);
+export function measure(text: string, ledger: EvidenceLedger, needed: readonly string[], plan?: TaskPlan): ArmMetrics {
+  const facts = ledgerFacts(ledger, plan);
   const shown = shownCallIds(text);
   const failed = shownFailureIds(text);
   const fileLine = text.split("\n").find(line => line.startsWith("Files changed")) ?? "";
@@ -78,6 +83,8 @@ export function measure(text: string, ledger: EvidenceLedger, needed: readonly s
     neededTotal: needed.length,
     unresolvedShown: facts.unresolved.filter(call => failed.has(call.toolCallId)).length,
     unresolvedTotal: facts.unresolved.length,
+    unresolvedOpenShown: facts.unresolvedOpen.filter(call => failed.has(call.toolCallId)).length,
+    unresolvedOpenTotal: facts.unresolvedOpen.length,
     staleFailuresShown: facts.resolved.filter(call => failed.has(call.toolCallId)).length,
     filesShown: facts.files.filter(file => fileLine.includes(file)).length,
     filesTotal: facts.files.length,
@@ -96,7 +103,7 @@ export interface Scenario {
   expectation: "decision-better" | "basic-better" | "mixed";
   steps: Step[];
   plan?: TaskPlan;
-  /** Call ids the next step after the compaction needs (cited checkpoint evidence, unresolved failures, edited files, the last check). */
+  /** Call ids the next step after the compaction needs (cited checkpoint evidence, unresolved failures, the last check); edited files are measured separately. */
   needed: string[];
 }
 
@@ -115,7 +122,7 @@ export const SCENARIOS: Scenario[] = [
     steps: [read("spec", "docs/spec.md", "inspect"), bash("baseline", "npm test", "inspect"), edit("fix", "src/a.ts", "implement"),
       ...range(14, i => read(`r${i}`, `src/m${i}.ts`, "implement")), ...range(13, i => bash(`b${i}`, `npx vitest run case${i}`, "implement"))],
     plan: plan(node("inspect", "done", ["T1 read docs/spec.md", "T2 npm test -> 120 pass"]), node("implement", "running"), node("verify", "pending")),
-    needed: ["spec", "baseline", "fix", "b12"],
+    needed: ["spec", "baseline", "b12"],
   },
   {
     name: "old-unresolved-failure",
@@ -131,14 +138,14 @@ export const SCENARIOS: Scenario[] = [
     expectation: "decision-better",
     steps: [bash("t1", "npm test", "implement", true), edit("fix", "src/a.ts", "implement"), bash("t2", "npm test", "implement"), read("r1", "src/b.ts", "implement")],
     plan: plan(node("implement", "running"), node("verify", "pending")),
-    needed: ["fix", "t2"],
+    needed: ["t2"],
   },
   {
     name: "no-task-dag",
     probe: "NEGATIVE: no Task DAG, so decision memory falls back to the newest 4 successful calls",
     expectation: "basic-better",
     steps: [read("spec", "docs/spec.md"), ...range(9, i => read(`r${i}`, `src/m${i}.ts`)), edit("fix", "src/a.ts"), ...range(6, i => bash(`b${i}`, `npx vitest run case${i}`))],
-    needed: ["spec", "fix", "b5"],
+    needed: ["spec", "b5"],
   },
   {
     name: "active-node-flood",
@@ -164,7 +171,7 @@ export interface ScenarioResult { name: string; probe: string; expectation: Scen
 export function runScenarios(scenarios: readonly Scenario[] = SCENARIOS): ScenarioResult[] {
   return scenarios.map(scenario => {
     const ledger = buildLedger(scenario.steps);
-    const arms = Object.fromEntries(ARMS.map(arm => [arm, measure(render(arm, ledger, scenario.plan), ledger, scenario.needed)])) as Record<Arm, ArmMetrics>;
+    const arms = Object.fromEntries(ARMS.map(arm => [arm, measure(render(arm, ledger, scenario.plan), ledger, scenario.needed, scenario.plan)])) as Record<Arm, ArmMetrics>;
     return { name: scenario.name, probe: scenario.probe, expectation: scenario.expectation, arms };
   });
 }
@@ -190,6 +197,8 @@ export interface CutMetrics {
   nodeLinkedShare: number;
   /** Evidence items written after the cut (task_plan checkpoints, report_result) that resolve to pre-cut calls. */
   laterItems: number;
+  /** Later items resolvable from the newest k calls, k = the number of calls decision memory showed (size-matched recency baseline). */
+  recencyMatchedResolvable: number;
   arms: Record<Arm, ArmMetrics & { laterItemsResolvable: number }>;
 }
 
@@ -213,7 +222,7 @@ interface Snapshot { kind: CutMetrics["kind"]; ledger: EvidenceLedger; plan?: Ta
  * recorded with orche's recordToolCall, the running node taken from the latest successful task_plan call; a cut is taken at each
  * real compaction entry and at the middle (by call count) of every assignment with at least `minCallsForMid` calls.
  */
-export async function replayTranscript(file: string, options: { minCallsForMid?: number } = {}): Promise<CutMetrics[]> {
+export async function replayTranscript(file: string, options: { minCallsForMid?: number; stats?: { refAgree: number; refDisagree: number } } = {}): Promise<CutMetrics[]> {
   const minMid = options.minCallsForMid ?? 24;
   const out: CutMetrics[] = [];
   type Assignment = { session: object; plan?: TaskPlan; snapshots: Snapshot[]; later: { snapshotIndex: number; items: string[] }[]; checks: number };
@@ -288,6 +297,12 @@ export async function replayTranscript(file: string, options: { minCallsForMid?:
       const record = recordToolCall(current.session, { toolCallId: message.toolCallId, toolName: name, ...(input ? { input } : {}), isError: message.isError === true },
         { request: ++current.checks, atBaseline: true, ...(running ? { node: running } : {}) });
       plans.get(current)!.set(record.toolCallId, current.plan ? (JSON.parse(JSON.stringify(current.plan)) as TaskPlan) : undefined);
+      // Where the transcript carries orche's own `[orche ref T<n>]`, check that the reconstructed ref is the one the worker saw.
+      if (options.stats && Array.isArray(message.content)) {
+        const parts = message.content as Array<{ type?: string; text?: string }>;
+        const tag = (parts[parts.length - 1]?.text ?? "").match(/^\[orche ref (T\d+)(?:, failed)?\]$/);
+        if (tag) tag[1] === record.ref ? options.stats.refAgree++ : options.stats.refDisagree++;
+      }
       const evidence = message.isError ? [] : evidenceStrings(name, input);
       if (evidence.length) {
         items.get(current)!.push({ afterCall: record.toolCallId, items: evidence });
@@ -313,14 +328,18 @@ function evaluateCut(snap: Snapshot, laterItems: string[]): CutMetrics {
   const arms = Object.fromEntries(ARMS.map(arm => {
     const text = render(arm, pre, snap.plan);
     const shown = shownCallIds(text);
-    return [arm, { ...measure(text, pre, neededIds), laterItemsResolvable: resolvedItems.filter(check => check.calls.some(call => shown.has(call.toolCallId))).length }];
+    return [arm, { ...measure(text, pre, neededIds, snap.plan), laterItemsResolvable: resolvedItems.filter(check => check.calls.some(call => shown.has(call.toolCallId))).length }];
   })) as CutMetrics["arms"];
+  // Size-matched recency baseline: the newest k calls, k = what decision memory showed. Separates "smarter selection" from "fewer calls".
+  const recent = new Set(checks.slice(-arms.decision.shownCalls).map(call => call.toolCallId));
+  const recencyMatchedResolvable = resolvedItems.filter(check => check.calls.some(call => recent.has(call.toolCallId))).length;
   return {
     kind: snap.kind,
     preCutCalls: checks.length,
     hasPlan: !!snap.plan?.nodes?.length,
     nodeLinkedShare: checks.length ? checks.filter(call => call.node).length / checks.length : 0,
     laterItems: resolvedItems.length,
+    recencyMatchedResolvable,
     arms,
   };
 }
@@ -348,6 +367,7 @@ export function aggregateCuts(cuts: readonly CutMetrics[]) {
         laterItemRecall: ratio(sum(m => m.laterItemsResolvable), list.reduce((total, cut) => total + cut.laterItems, 0)),
         neededCallRecall: ratio(sum(m => m.neededRetained), sum(m => m.neededTotal)),
         unresolvedFailureRecall: ratio(sum(m => m.unresolvedShown), sum(m => m.unresolvedTotal)),
+        unresolvedOpenFailureRecall: ratio(sum(m => m.unresolvedOpenShown), sum(m => m.unresolvedOpenTotal)),
         staleFailuresShown: sum(m => m.staleFailuresShown),
         fileRecall: ratio(sum(m => m.filesShown), sum(m => m.filesTotal)),
       };
@@ -361,6 +381,8 @@ export function aggregateCuts(cuts: readonly CutMetrics[]) {
       cutsWithLaterEvidence: paired.length,
       laterItems: list.reduce((total, cut) => total + cut.laterItems, 0),
       unresolvedFailures: list.reduce((total, cut) => total + cut.arms.basic.unresolvedTotal, 0),
+      unresolvedOpenFailures: list.reduce((total, cut) => total + cut.arms.basic.unresolvedOpenTotal, 0),
+      recencyMatchedLaterItemRecall: ratio(list.reduce((total, cut) => total + cut.recencyMatchedResolvable, 0), list.reduce((total, cut) => total + cut.laterItems, 0)),
       // Paired per cut: how often each arm resolves more of the later-cited items.
       pairedLaterRecall: {
         decisionMore: paired.filter(cut => cut.arms.decision.laterItemsResolvable > cut.arms.basic.laterItemsResolvable).length,
