@@ -269,13 +269,13 @@ describe("Pi 1.3 builtin transports in inherited worker sessions (loopback, not 
     expect(settled(h)).toHaveLength(1);
     expect(h.events.filter(event => event.type === "auto_retry_start")).toHaveLength(0);
     expect(h.executions()).toBe(0);
-    // Pi 1.3 lazyStream classifies pre-request aborts as error, not aborted; inheritance must match the host, without HTTP.
+    // Pi 1.5.1+ lazyStream classifies pre-request aborts as aborted (Pi 1.3-1.5.0: error); inheritance must match the host, without HTTP.
     const abort = new AbortController();
     abort.abort();
     const stream = h.runtime.streamSimple(h.session.model!, { messages: [] }, { signal: abort.signal });
     const events: AssistantMessageEvent[] = [];
     for await (const event of stream) events.push(event);
-    expect(events.filter(event => event.type === "done" || event.type === "error")).toMatchObject([{ type: "error", reason: "error" }]);
+    expect(events.filter(event => event.type === "done" || event.type === "error")).toMatchObject([{ type: "error", reason: "aborted" }]);
     const cancelled = await stream.result();
     const hostCancelled = await h.host.completeSimple(h.session.model!, { messages: [] }, { signal: abort.signal });
     expect(cancelled.stopReason).toBe(hostCancelled.stopReason);
