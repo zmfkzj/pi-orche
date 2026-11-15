@@ -47,7 +47,8 @@ import { createRunRecord, pruneRecordsOnce, resolveRecords, workerSessionFile, t
 import type { InjectedMessage, Outcome, SteerReceipt } from "../agent/agent-handle.js";
 import { ExtendableDeadline, extensionEvent, formatExtensionProgress, formatExtensionSummary, formatObservation, waitExtendable, withNotExtended, type DeadlineExtension, type ProgressSample, type WaitObservation } from "../orchestration/run/extension.js";
 import { createAssignmentProjector, type ContextClearedStats } from "../pi/context-projection.js";
-import { planProgress, recordFailure, recordHandoff, recordPlan, recordResult, renderLedgerForWorker, renderLedgerSummary, renderResumeBriefing, renderTimeoutResume, startLedger, type LedgerEvent, type TaskLedger } from "../single/ledger.js";
+import { originalRequestOf, planProgress, recordFailure, recordHandoff, recordPlan, recordResult, renderLedgerForWorker, renderLedgerSummary, renderResumeBriefing, renderTimeoutResume, startLedger, type LedgerEvent, type TaskLedger } from "../single/ledger.js";
+import { verifierOriginalBlock } from "../orchestration/handoff-evidence.js";
 import { appendSplitLog } from "../orchestrator/split-log.js";
 import { ORCHESTRATOR_TEAM_LINE, orchestratorSection, SPLIT_FORMAT, splitError, splitOf, unresolvedError, MAX_SUB_WORKERS, MAX_VERIFICATION_ROUNDS, type SplitDecision } from "../orchestrator/instructions.js";
 import { createSpawnTool, outcomeModelUse, OWNED_PATHS_SYNTAX, scopePaths, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnReason, type SubWorkerOutcome } from "../orchestrator/spawn.js";
@@ -968,10 +969,13 @@ export function workerSystemInstructions(spawn: boolean): string {
 /**
  * The prompt of one orche_spawn sub-worker: its role text, who spawned it and why, and (verification) that it has not seen the work.
  * An MDSD explorer with a private scratch directory (mdsd.explorerScratch) ends with the same scratch sentence as an orche_task prompt.
+ * `original`: the Original request of the orchestrator's assignment; a verify sub-worker of a verification round whose request does
+ * not carry it verbatim gets it appended as evidence (verifierOriginalBlock; not in ultra, whose stages brief their verifiers).
  */
-export function subWorkerPrompt(worker: PlannedWorker, orchestrator: string, commands: readonly string[], imagesAvailable: boolean, ultra = false): string {
+export function subWorkerPrompt(worker: PlannedWorker, orchestrator: string, commands: readonly string[], imagesAvailable: boolean, ultra = false, original?: string): string {
   const preface = `You are sub-worker ${worker.id} ("${worker.name}") of orchestrator ${orchestrator}, spawned for ${worker.reason}. You cannot spawn workers.${worker.reason === "verification" ? " You have not seen how the work was done: judge only from the request below, the repository and your own checks." : ""}${ultra ? ` ${ultraPreface(worker)}` : ""}${worker.brief ? `\n\n${worker.brief}` : ""}`;
-  const prompt = assignmentPrompt({ role: worker.role, request: `${preface}\n\n${worker.request}`, ...(worker.files ? { files: worker.files } : {}) }, commands, imagesAvailable)
+  const evidence = !ultra && worker.reason === "verification" && worker.role === "verify" ? verifierOriginalBlock(worker.request, original) : "";
+  const prompt = assignmentPrompt({ role: worker.role, request: `${preface}\n\n${worker.request}${evidence ? `\n\n${evidence}` : ""}`, ...(worker.files ? { files: worker.files } : {}) }, commands, imagesAvailable)
     .replace("You work alone; there are no peers or backlog.", "You work alone on this assignment.");
   return worker.scratch ? `${prompt}\n${formatWriteRoots([{ path: worker.scratch, kind: "scratch" }], worker.role)}` : prompt;
 }
@@ -2191,7 +2195,8 @@ export class WorkerPool {
             ...(summaryBudget ? { summaryBudget } : {}),
             specialistRoute: role => resolveSpecialistRoute(config.routes, role, (provider, id) => !!runtime.getModel(provider, id)),
             imageTool: () => config.routes.images ? createGenerateImageTool({ cwd: args.cwd, runtime, images: config.routes.images }) : undefined,
-            prompt: (planned, imagesAvailable) => subWorkerPrompt(planned, meta.id, config.routes.verifyCommands ?? [], imagesAvailable, !!ultraRun),
+            // A verifier without the user's own words gets this assignment's Original request appended (docs/handoff-evidence.md).
+            prompt: (planned, imagesAvailable) => subWorkerPrompt(planned, meta.id, config.routes.verifyCommands ?? [], imagesAvailable, !!ultraRun, originalRequestOf(handoffRequest)),
             // No turn cap: the request count is only a progress checkpoint (limits.assignmentRequests, 0: none), never a stop.
             timeoutMs: limits.assignmentMs, requestCheckpoint: limits.assignmentRequests, ...(unbounded ? { unbounded: true } : {}),
             // Every sub-worker gets the same activity-aware deadline as this assignment (the resolved limits: base, linear or fixed
