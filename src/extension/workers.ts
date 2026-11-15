@@ -50,7 +50,7 @@ import { createAssignmentProjector, type ContextClearedStats } from "../pi/conte
 import { planProgress, recordFailure, recordHandoff, recordPlan, recordResult, renderLedgerForWorker, renderLedgerSummary, renderResumeBriefing, renderTimeoutResume, startLedger, type LedgerEvent, type TaskLedger } from "../single/ledger.js";
 import { appendSplitLog } from "../orchestrator/split-log.js";
 import { ORCHESTRATOR_TEAM_LINE, orchestratorSection, SPLIT_FORMAT, splitError, splitOf, unresolvedError, MAX_SUB_WORKERS, MAX_VERIFICATION_ROUNDS, type SplitDecision } from "../orchestrator/instructions.js";
-import { createSpawnTool, outcomeModelUse, scopePaths, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnReason, type SubWorkerOutcome } from "../orchestrator/spawn.js";
+import { createSpawnTool, outcomeModelUse, OWNED_PATHS_SYNTAX, scopePaths, SPAWN_TOOL, type PlannedWorker, type SpawnContext, type SpawnReason, type SubWorkerOutcome } from "../orchestrator/spawn.js";
 import { createSubWorkerRunner } from "../orchestrator/sub-worker.js";
 import { ADOPT_UNAVAILABLE, createAdoptTool, subWorkerFloor, ultraSection, UltraRun, type UltraState, type UltraSummary } from "../orchestrator/ultra.js";
 import { MdsdRun, mdsdSection, type MdsdSummary } from "../orchestrator/mdsd.js";
@@ -74,7 +74,7 @@ export const orcheTaskParameters = Type.Object({
   request: Type.String({ minLength: 1, description: "Goal, decisions, constraints and acceptance checks; the worker does not see the conversation. A NEW worker (worker omitted) needs a self-contained request: in the single workflow Intent/Purpose, a testable R1..Rn requirements checklist, Constraints and non-goals, explicit Assumptions and a final Original request section with the user's text verbatim. A follow-up for a LIVE worker (worker set) keeps its earlier context: send only the new or revised R-lines, changed constraints or decisions, new evidence and a final Original request section with the user's new message verbatim; do not restate what it already has. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Only short decisive irreproducible snippets inline; never whole files, diffs or long logs." }),
   context: Type.Optional(Type.String({ maxLength: 30_000, description: "Background findings and decisions, appended to request. Pass references, not copies: repository paths with line ranges/symbols, reproduction commands, artifact/run-record paths. Only short decisive irreproducible snippets (exact errors or user text); never whole files, diffs or long logs." })),
   worker: Type.Optional(Type.String()),
-  files: Type.Optional(Type.Array(Type.String())),
+  files: Type.Optional(Type.Array(Type.String(), { description: `Write scope of an implement, game-asset or video assignment (ignored for read-only roles). Omitted: anywhere inside the workspace; []: no write scope. ${OWNED_PATHS_SYNTAX}` })),
   writeRoots: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: 10, description: "Directories OUTSIDE the workspace that this implement/game-asset/video assignment may also write (absolute, or relative to the cwd), e.g. a sibling repository. Set it only when the user explicitly asked to change that location; it applies to this assignment only and is ignored for read-only roles. Every worker already has a private scratch directory for temporary files." })),
   wait: Type.Optional(Type.Boolean({ description: "Omit (default): the task starts in the background, this call returns its job id at once, and the result arrives later as an orche-task-result message; keep talking with the user meanwhile and do not poll. true: block until the worker finishes and return its result (only when you cannot continue without it)." })),
   verificationRounds: Type.Optional(Type.Integer({ minimum: 1, maximum: 5, description: "Fresh-verifier rounds (orche_spawn verification) the orchestrator may start in this assignment; default 2. Raise it only when the user explicitly asked for more independent review rounds. Rounds past the cap are refused and the result lists what stays unresolved." })),
@@ -1335,7 +1335,8 @@ export class WorkerPool {
     const modelWarnings: string[] = [];
     const retired: string[] = [];
     const retirementLines: string[] = [];
-    const files = WRITING_KINDS.has(args.role) && args.files !== undefined ? scopePaths(args.files) : undefined;
+    // Before any worker is touched: an existing directory named without / would own only that path and block every write inside.
+    const files = WRITING_KINDS.has(args.role) && args.files !== undefined ? scopePaths(args.files, args.cwd) : undefined;
     let worker = args.worker ? this.workers.get(args.worker) : undefined;
     const gone = !!args.worker && !worker;
     const unknownWorker = () => {
@@ -2166,7 +2167,7 @@ export class WorkerPool {
           evidenceLedgerOf(session).tag = true;
         }
         meta.spawn = {
-          orchestrator: meta.id, maxSubWorkers, ...(files ? { scope: files } : {}), ...(readOnly ? { readOnly: true } : {}), ...(ultraRun ? { ultra: ultraRun } : {}), ...(mdsdRun ? { mdsd: mdsdRun } : {}), signal: AbortSignal.any([signal, assignmentEnd.signal]),
+          orchestrator: meta.id, cwd: args.cwd, maxSubWorkers, ...(files ? { scope: files } : {}), ...(readOnly ? { readOnly: true } : {}), ...(ultraRun ? { ultra: ultraRun } : {}), ...(mdsdRun ? { mdsd: mdsdRun } : {}), signal: AbortSignal.any([signal, assignmentEnd.signal]),
           // Sub-worker ids are unique within the assignment; in ultra within the whole task: a continuation numbers after the carried
           // high-water mark, so a new candidate never takes (and replaces) an earlier one's id or copy.
           nextId: () => {

@@ -56,6 +56,18 @@ export function ownsPath(owned: string, file: string): boolean {
   return file === path;
 }
 
+/**
+ * The correction for a write blocked under an owned path without a trailing / (`src` owns `src` only, not `src/a.ts`): purely
+ * lexical, so it names the directory syntax whether or not that directory exists; "" when no owned path is a parent of `file`.
+ */
+export function exactPathHint(owned: readonly string[], file: string): string {
+  const parents = owned.map(normalizeOwnedPath).filter(path => !path.endsWith("/") && file.startsWith(`${path}/`));
+  if (!parents.length) return "";
+  const named = parents.join(", ");
+  const fixed = parents.map(path => JSON.stringify(`${path}/`)).join(", ");
+  return `Your owned path ${named} has no trailing /, so it owns only that exact path, not the files under it; a directory and everything under it is owned as ${fixed} (or with /**). Do not widen your scope yourself: ask main to re-assign with files [${fixed}] or the concrete files. `;
+}
+
 /** Tasks whose ownership covers `file`. */
 export function coveringTasks(tasks: readonly TaskItem[], file: string): readonly TaskItem[] {
   return tasks.filter(task => task.files.some(owned => ownsPath(owned, file)));
@@ -113,7 +125,7 @@ export function checkWrite(check: WriteCheck, real?: RealWritePaths): BlockedWri
     return { file, reason: `Blocked: assignment ${check.assignmentKind ?? "(none)"} is read-only; only implement/fix/game-asset/video assignments may write files.` };
   }
   if (!owned.some(path => ownsPath(path, file))) {
-    return { file, reason: `Blocked: ${file} is outside your owned files (${ownedText}); other workers own their files. ${advice}` };
+    return { file, reason: `Blocked: ${file} is outside your owned files (${ownedText}); other workers own their files. ${exactPathHint(owned, file)}${advice}` };
   }
   if (coveringTasks(check.tasks, file).some(task => task.owner && task.owner !== check.agentId)) {
     return { file, reason: `Blocked: ${file} is owned by another worker. ${advice}` };

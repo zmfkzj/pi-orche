@@ -10,7 +10,8 @@
  */
 import { Type, type Static, type TLiteral } from "typebox";
 import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { isAbsolute } from "node:path";
+import { lstatSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { normalizeOwnedPath, validateBacklog, type TaskItem } from "../orchestration/backlog.js";
 import { ownsPath, WRITING_KINDS } from "../orchestration/ownership.js";
 import type { RouteSettings, SubWorkerModelSource, SubWorkerThinkingSource } from "../orchestration/routing.js";
@@ -45,6 +46,13 @@ export const DEPTH_LIMIT_MESSAGE = "Blocked: sub-workers cannot spawn workers (o
 /** One `Type.Literal` per value, typed as a tuple so TypeBox 1.x `Static` yields the literal union (a plain array maps to `never`). */
 const literals = <const T extends readonly string[]>(values: T) => values.map(value => Type.Literal(value)) as unknown as { -readonly [K in keyof T]: TLiteral<T[K]> };
 
+/**
+ * The owned-path syntax of orche_task's and ultra orche_spawn's `files` (docs/pi-package.md says the same). The strong/single and
+ * MDSD orche_spawn schemas keep their text, byte for byte the frozen study runtime's (test/orchestrator/ultra-handoff.test.ts);
+ * {@link scopePaths} refuses an existing directory named without / there too, with the same correction.
+ */
+export const OWNED_PATHS_SYNTAX = "Workspace-relative owned paths: a path without a trailing / owns exactly that one path (a file, e.g. src/a.ts); a directory and everything under it is dir/ (dir/** and dir/**/* mean the same), also for a directory that does not exist yet. An existing directory named without / is refused; other globs, absolute and outside paths too.";
+
 /** orche_spawn's parameters with the session's per-call cap (`single.maxSubWorkers`). */
 export function spawnParametersFor(maxSubWorkers: number) {
   return Type.Object({
@@ -67,7 +75,7 @@ export function ultraSpawnParametersFor(maxSubWorkers: number) {
       name: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$", description: "Short unit name, unique in this call (e.g. basis, cause, cand-a, verify)." }),
       role: Type.Union(literals(SUB_WORKER_ROLES), { description: "implement (writes its own files; a candidate writes only in its workspace copy), answer (read-only), verify (read-only independent verification), game-asset or video (specialists)." }),
       request: Type.String({ minLength: 1, description: "Self-contained request: the sub-worker sees nothing else. Goal, acceptance criteria, constraints, file references and the user's wording where it matters; not your reasoning and, for exploration and first-round candidates, never another worker's conclusions." }),
-      files: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Owned files or directories of a writing role (for a candidate: inside its own workspace copy; candidates may own the same paths)." })),
+      files: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: `Owned files or directories of a writing role (for a candidate: inside its own workspace copy; candidates may own the same paths). ${OWNED_PATHS_SYNTAX}` })),
       from: Type.Optional(Type.String({ minLength: 1, description: "candidates only: id of an earlier candidate (e.g. W1.3) whose workspace this fix candidate starts from; the earlier one stays unchanged." })),
     }, { additionalProperties: false }), { minItems: 1, maxItems: maxSubWorkers }),
     // The analysts' hand-off (ultra.ts, docs/orchestrator.md 14.2): a reported file no candidate gets, left out with its grounds.
@@ -103,14 +111,32 @@ export function mdsdSpawnParametersFor(maxSubWorkers: number) {
 /** One orche_spawn call of any tool variant. */
 export interface SpawnCall { reason: SpawnReason; workers: { name: string; role: SubWorkerRole; request: string; files?: string[]; from?: string; strategy?: unknown }[]; plan?: unknown; adapt?: unknown; excluded?: { path: string; reason: string; evidence: string[] }[]; reference?: { path: string; reason: string; evidence: string[] }[] }
 
-/** Canonical ownership paths: concrete files or directory prefixes (`dir/`, `dir/**`, `dir/**\/*` → `dir/`); globs, absolute and outside paths are errors. */
-export function scopePaths(files: readonly string[]): string[] {
-  return [...new Set(files.map(file => {
+/**
+ * Canonical ownership paths: concrete files or directory prefixes (`dir/`, `dir/**`, `dir/**\/*` → `dir/`); globs, absolute and outside paths are errors.
+ * With `cwd`, an entry without a trailing / that names an existing directory there (lstat: a symlink is not followed) is an error
+ * too: it would own only that exact path, never the files inside, so the worker would be blocked on every write there. It is
+ * refused with the directory syntax instead of being widened silently; a missing path stays an exact path (a new file).
+ */
+export function scopePaths(files: readonly string[], cwd?: string): string[] {
+  const paths = [...new Set(files.map(file => {
     const path = normalizeOwnedPath(file.replaceAll("\\", "/").replace(/\/\*\*(?:\/\*)?$/, "/"));
     if (!path || /[*?\[\]{}]/.test(path) || isAbsolute(file) || /^[A-Za-z]:/.test(file) || path.split("/")[0] === "..")
       throw new Error(`Unsupported ownership path ${JSON.stringify(file)}; use concrete files, directory prefixes ending /, or directory/**`);
     return path;
   }))];
+  if (cwd === undefined) return paths;
+  const directories = paths.filter(path => !path.endsWith("/") && isDirectory(join(cwd, path)));
+  if (directories.length) {
+    const named = directories.map(path => JSON.stringify(path)).join(", ");
+    const fixed = directories.map(path => JSON.stringify(`${path}/`)).join(", ");
+    throw new Error(`Owned path ${named} ${directories.length > 1 ? "are existing directories" : "is an existing directory"}, but a path without a trailing / owns only that exact path, not the files inside it. Use ${fixed} (or the same with /**) to own the directory and everything under it, or name the concrete files.`);
+  }
+  return paths;
+}
+
+/** Whether `path` is a real directory (not a symlink to one); any lstat error (missing path) counts as no. */
+function isDirectory(path: string): boolean {
+  try { return lstatSync(path).isDirectory(); } catch { return false; }
 }
 
 /**
@@ -136,7 +162,7 @@ export interface PlannedWorker {
  * Validate one call and give the workers their ids (only after it is valid, so a refused call uses none). Throws an Error whose
  * message tells the orchestrator what to change. `maxSubWorkers`: the session's per-call cap (default MAX_SUB_WORKERS).
  */
-export function planSpawn(params: SpawnCall, options: { scope?: readonly string[]; readOnly?: boolean; ultra?: boolean; mdsd?: boolean; maxSubWorkers?: number; nextId: () => string }): { workers: PlannedWorker[]; notes: string[] } {
+export function planSpawn(params: SpawnCall, options: { scope?: readonly string[]; cwd?: string; readOnly?: boolean; ultra?: boolean; mdsd?: boolean; maxSubWorkers?: number; nextId: () => string }): { workers: PlannedWorker[]; notes: string[] } {
   const { reason, workers } = params;
   const notes: string[] = [];
   const max = options.maxSubWorkers ?? MAX_SUB_WORKERS;
@@ -182,7 +208,7 @@ export function planSpawn(params: SpawnCall, options: { scope?: readonly string[
     }
     if (options.readOnly) throw new Error(`${worker.name} (${worker.role}) would write files, but this assignment is read-only: spawn answer or verify workers only.`);
     if (!worker.files?.length) throw new Error(`${worker.name} (${worker.role}) must name the files or directories it owns in files.`);
-    const files = scopePaths(worker.files);
+    const files = scopePaths(worker.files, options.cwd);
     if (options.scope) {
       const outside = files.filter(path => !options.scope!.some(owned => ownsPath(owned, path.replace(/\/$/, ""))));
       if (outside.length) throw new Error(`${worker.name} would own ${outside.join(", ")} outside your own write scope (${options.scope.join(", ")}).`);
@@ -297,6 +323,8 @@ export interface SpawnContext {
   orchestrator: string;
   /** The orchestrator's own write scope (normalized); undefined: the whole workspace. */
   scope?: readonly string[];
+  /** The workspace: an owned path without a trailing / that names an existing directory there is refused ({@link scopePaths}). */
+  cwd?: string;
   /** A read-only assignment (answer): only read-only sub-workers. */
   readOnly?: boolean;
   /** The orchestrator assignment's own cancellation, next to the tool call's. */
@@ -381,7 +409,7 @@ export async function executeSpawn(context: SpawnContext, submitted: SpawnCall, 
   const stage = context.ultra ?? context.mdsd;
   const params = stage?.resolve ? stage.resolve(submitted) : submitted;
   stage?.validate(params.reason, params.workers, params);
-  const planned = planSpawn(params, { ...(context.scope ? { scope: context.scope } : {}), ...(context.readOnly ? { readOnly: true } : {}), ...(context.ultra ? { ultra: true } : {}), ...(context.mdsd ? { mdsd: true } : {}), ...(context.maxSubWorkers !== undefined ? { maxSubWorkers: context.maxSubWorkers } : {}), nextId: () => context.nextId() });
+  const planned = planSpawn(params, { ...(context.scope ? { scope: context.scope } : {}), ...(context.cwd !== undefined ? { cwd: context.cwd } : {}), ...(context.readOnly ? { readOnly: true } : {}), ...(context.ultra ? { ultra: true } : {}), ...(context.mdsd ? { mdsd: true } : {}), ...(context.maxSubWorkers !== undefined ? { maxSubWorkers: context.maxSubWorkers } : {}), nextId: () => context.nextId() });
   const notes = planned.notes;
   const started = Date.now();
   const signals = [signal, context.signal].filter((item): item is AbortSignal => !!item);
