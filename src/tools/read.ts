@@ -49,7 +49,11 @@ export function createReadTool(cwd: string, registry = new AnchorRegistry()): To
     outputSchema: pi.outputSchema,
     // Models sometimes send offset/limit as strings ("290"); pi validates after this hook.
     prepareArguments: coerceIntegerArguments(["offset", "limit"]),
-    async execute(toolCallId, params: Static<typeof readSchema>, signal, onUpdate, ctx) {
+    async execute(toolCallId, input: Static<typeof readSchema>, signal, onUpdate, ctx) {
+      // Models that fill every optional field send a blank symbol beside offset/limit for a plain range read: drop it then.
+      const { symbol: _blank, ...range } = input;
+      const params: Static<typeof readSchema> = input.symbol !== undefined && !input.symbol.trim() && input.outline !== true
+        && (input.offset !== undefined || input.limit !== undefined) ? range : input;
       const root = ctx?.cwd || cwd;
       if (params.symbol !== undefined && !params.symbol.trim())
         throw new Error("symbol must be a non-empty name or heading (not whitespace)");

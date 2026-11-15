@@ -143,6 +143,19 @@ describe("read declaration validation and caps", () => {
     const s = await setup();
     await expect(s.read({ symbol })).rejects.toThrow("symbol must be a non-empty name or heading");
   });
+  it.each([
+    { symbol: "", outline: false, offset: 1, limit: 2 }, { symbol: " ", offset: 2 }, { symbol: "\t", limit: 1 },
+  ])("treats a blank symbol next to offset/limit as unset (a plain range read): %j", async args => {
+    const s = await setup();
+    const { symbol: _blank, ...range } = args;
+    const output = await s.read(args);
+    expect(output).toMatch(/^\d+#[0-9a-f]{4}\|/);
+    expect(output).toBe(await s.read(range));
+  });
+  it("still rejects a blank symbol with outline:true and offset/limit", async () => {
+    const s = await setup();
+    await expect(s.read({ symbol: "", outline: true, offset: 1 })).rejects.toThrow();
+  });
   it.each(["a.json", "a.py", "a.png"])("suggests offset/limit or grep for unsupported %s", async path => {
     const s = await setup("text", path);
     await expect(s.read({ outline: true })).rejects.toThrow("offset/limit or grep");
