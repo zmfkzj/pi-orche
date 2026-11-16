@@ -82,7 +82,10 @@ export function guardedThinkingLevel(session: object, model: CacheEffortModel | 
   return lock.effort;
 }
 
-export function lockedEffort(session: object, model: CacheEffortModel | undefined): string | undefined {
+export function lockedEffort(session: object, model: CacheEffortModel | undefined, requested?: string): string | undefined {
+  const native = claudeTurns.get(session);
+  if (native?.model === modelKey(model) && requested !== undefined &&
+      requested !== native.effort && (requested === "off" || native.effort === "off")) return native.effort;
   const lock = locks.get(session);
   return lock?.model === modelKey(model) ? lock.effort : undefined;
 }
