@@ -3,6 +3,43 @@
 Status: implemented 2026-10-08, **off by default** (`"fixed"`). Opt in with `"thinkingPolicy": "phase"`. Real-model quality is
 **not measured yet** (see Evaluation). Read nodes (below) are on in every mode and policy.
 
+## Cache-safe effort and model transitions (2026-11-16)
+
+The **actual provider protocol**, not a flag invented by orche, determines whether the model can change effort without
+invalidating the existing prompt prefix.
+
+- **GPT-6 Responses (including 6.1 Sol via CLIProxyAPI):** if the model metadata advertises
+  `compat.supportsMidConvoEffort: true`, Pi / `pi-cliproxyapi-provider` already pins the request-level effort and sends
+  `configuration_update` input items. Orche leaves that provider-owned mechanism alone to avoid duplicate items.
+  The CPA catalog derives the flag from `supports_reasoning_effort_updates`; update CPA/provider and refresh the model catalog
+  if the flag is absent.
+- **Native Claude Messages:** a compatible model and `supportsMidConvoEffort: true` let Pi use effort-only system messages.
+  This is available only where the transport supports them; it is not enabled by a model name alone.
+- **Claude via `cliproxyapi-codex-responses`:** the currently verified Responses -> Claude translation sends
+  top-level `output_config.effort`. It does not preserve Anthropic effort-only system messages. Until a compatible route
+  exists, after the first worker provider request orche **pins the previously sent effort** for that model/session.
+  Attempts to switch B/S/R and one-shot effort on a reused worker remain at the pinned effort with a warning for one-shot
+  overrides. To actually switch effort, start a fresh worker at the new level (cold prefix), or use a native Anthropic
+  Messages provider with verified per-message support. The main direct one-shot refuses an unsupported effort switch.
+- **Other cache-bearing Responses paths lacking the flag:** the same fail-closed, per-session effort pin applies.
+  Noncache-targeted backends such as Gemini are unaffected.
+- **Model changes on an already reused worker:** only an implicit main-model inheritance is eligible for economic
+  arbitration. With fresh measured `cacheRead` tokens and positive per-model catalog prices, compare one estimated
+  warm request on the current model against a cold request on the target. Keep the current model *for that assignment*
+  only when the warm request is strictly cheaper; explicitly configured model tiers always win. Missing/zero prices,
+  missing cache reads, stale usage (more than four minutes) or unfamiliar routes do not justify overriding a model switch.
+  The estimate uses the prior request's input/output counts and is not a forecast of an entire future task.
+
+The lock starts when the first provider request is about to be sent, resets for a different model identity, and is
+scoped to the worker session (not process-global). Compaction, transcript changes, routing, cache eviction, TTL and
+minimum cacheable prefix size can still yield a Cache Miss. **No client code can guarantee upstream Cache Hit.**
+For actual evidence inspect the provider's `cacheRead` / `cacheWrite` token counts in the worker's run record and session
+JSONL. Dynamic effort controls apply to the next request, not a streaming response already in flight.
+
+Code: `src/pi/cache-effort.ts`, `src/orchestration/cache-cost.ts`, `src/pi/session-factory.ts`,
+`src/pi/thinking-state.ts`, `src/extension/workers.ts`; tests `test/pi/cache-effort.test.ts`,
+`test/orchestration/cache-cost.test.ts`. The cache outcomes and money saved require live provider measurements.
+
 ## Read nodes (every mode, every policy; implemented 2026-11-12)
 
 User decision 2026-11-12: the calling workflow splits the work mechanically. Orche only tells simple reading apart and runs it at
@@ -286,6 +323,5 @@ Every level change is a `thinking_change` event in the record.
 - An answer worker without a DAG runs at B throughout.
 - Whether the step level really shortens reasoning is not monotonic: pi#9718 reports medium overrunning where high and low did not.
   Neither is it guaranteed: effort is a soft signal to the model.
-- Changing the top-level effort between requests may invalidate the provider's prompt cache (Anthropic documents this for
-  top-level effort changes). Per-message effort, which keeps the cache, is not available on the cliproxyapi path. This is a cost,
-  not a quality, concern.
+- Not all transports can use per-message effort. Supported ones delegate cache-safe updates to Pi; unsupported cache-bearing
+  paths keep their first sent effort until the next model/session instead of invalidating a warm prefix (see Cache-safe effort above).
