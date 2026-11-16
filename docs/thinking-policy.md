@@ -14,7 +14,10 @@ invalidating the existing prompt prefix.
   The CPA catalog derives the flag from `supports_reasoning_effort_updates`; update CPA/provider and refresh the model catalog
   if the flag is absent.
 - **Native Claude Messages:** a compatible model and `supportsMidConvoEffort: true` let Pi use effort-only system messages.
-  This is available only where the transport supports them; it is not enabled by a model name alone.
+  Anthropic does not accept a changed effort marker on a `tool_result`-only turn, so orche keeps the prior marker until a
+  genuine user message arrives. It never changes previous conversation items. Switching adaptive thinking **off/on**
+  changes a cache-bearing top-level field and is therefore blocked in a warm native session.
+  This is available only where the transport supports the feature; it is not enabled by a model name alone.
 - **Claude via `cliproxyapi-codex-responses`:** the currently verified Responses -> Claude translation sends
   top-level `output_config.effort`. It does not preserve Anthropic effort-only system messages. Until a compatible route
   exists, after the first worker provider request orche **pins the previously sent effort** for that model/session.
