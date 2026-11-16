@@ -22,4 +22,4 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
       - name: Cache regression tests
-        run: npx vitest run test/pi/cache-effort.test.ts test/orchestration/cache-cost.test.ts test/pi/thinking-state.test.ts test/pi/thinking-policy.test.ts test/pi/worker-hygiene.test.ts test/extension/one-shot-effort.test.ts test/extension/thinking-policy.test.ts
+        run: npx vitest run test/pi/cache-effort.test.ts test/orchestration/cache-cost.test.ts test/pi/claude-native.test.ts test/extension/claude-native-config.test.ts test/pi/thinking-state.test.ts test/pi/thinking-policy.test.ts test/pi/worker-hygiene.test.ts test/extension/one-shot-effort.test.ts test/extension/thinking-policy.test.ts
