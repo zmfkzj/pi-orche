@@ -34,6 +34,8 @@ export interface SpecialistRun<S extends TSchema> {
   actor: string;
   route: ModelRoute;
   runtime: ModelRuntime;
+  /** Route eligible CPA Claude models through Anthropic Messages (default true). */
+  claudeNative?: boolean;
   cwd: string;
   instructions: string;
   prompt: string;
@@ -224,7 +226,7 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
   const budget = run.budget;
   try {
     const creation = createSession({
-      cwd: run.cwd, route: run.route, modelRuntime: run.runtime,
+      cwd: run.cwd, route: run.route, modelRuntime: run.runtime, claudeNative: run.claudeNative,
       tools: [...run.tools, run.report.name],
       customTools: [...(run.customTools ?? []), reportTool(run.report, value => { if (!controller.signal.aborted) captured.value ??= value; })],
       instructions: run.instructions,
