@@ -76,11 +76,19 @@ export function observeEffortRequest(session: object, model: CacheEffortModel | 
   if (!locks.has(session)) locks.set(session, { model: key, effort: sentEffort });
 }
 
-export function guardedThinkingLevel(session: object, model: CacheEffortModel | undefined, requested: string): string {
+export function guardedThinkingLevel(session: object, model: CacheEffortModel | undefined, requested: string, reason?: string): string {
   const native = claudeTurns.get(session);
-  // Enabled/disabled thinking has a different cache fingerprint even with
-  // Anthropic's effort-only beta. Do not switch it in a warm conversation.
-  if (native && native.model === modelKey(model) && (requested === "off" || native.effort === "off")) return native.effort;
+  if (native && native.model === modelKey(model)) {
+    // Switching between disabled and adaptive thinking changes a top-level
+    // cache key, so never do it in an existing conversation.
+    if (requested !== native.effort && (requested === "off" || native.effort === "off")) return native.effort;
+    // Anthropic per-message effort markers can follow tool results, but do
+    // NOT affect that tool-only response. Pi would otherwise record the lower
+    // requested level as the response's actual level and later replay a wrong
+    // historical marker. A new assignment supplies an actual user input and
+    // is the safe boundary for an effective effort change.
+    if (reason !== "assignment start") return native.effort;
+  }
   const lock = locks.get(session);
   if (!lock || lock.model !== modelKey(model)) return requested;
   return lock.effort;
