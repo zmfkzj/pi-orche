@@ -45,10 +45,17 @@ export function compareCachedModelSwitch(
   // The previous response's cache-read tokens are the only prefix known to be
   // warm. The next target call must write that prefix afresh.
   const warm = observation.cacheRead;
-  const fresh = observation.input + observation.cacheWrite;
-  const keepUSD = (warm * a.cacheRead + fresh * a.input + observation.output * a.output) / 1_000_000;
-  const coldRate = validPrice(b.cacheWrite) ? Math.max(b.input, b.cacheWrite) : b.input;
-  const switchUSD = ((warm + fresh) * coldRate + observation.output * b.output) / 1_000_000;
+  const fresh = observation.input;
+  const writes = observation.cacheWrite;
+  // Cache-write tokens are billed separately by providers such as Anthropic.
+  // The new model must establish the previously cached prefix at its cold/writing
+  // rate, whereas the current model reads that prefix at the discounted rate.
+  const currentWriteRate = validPrice(a.cacheWrite) ? a.cacheWrite : a.input;
+  const targetWriteRate = validPrice(b.cacheWrite) ? b.cacheWrite : b.input;
+  const keepUSD = (warm * a.cacheRead + fresh * a.input + writes * currentWriteRate +
+    observation.output * a.output) / 1_000_000;
+  const switchUSD = ((warm + writes) * targetWriteRate + fresh * b.input +
+    observation.output * b.output) / 1_000_000;
   if (keepUSD < switchUSD) return { action: "keep", reason: "measured warm prefix is cheaper for the next call", keepUSD, switchUSD };
   return { action: "switch", reason: "candidate costs no more than retaining the warm prefix", keepUSD, switchUSD };
 }
