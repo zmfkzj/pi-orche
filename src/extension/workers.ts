@@ -65,6 +65,8 @@ import { configureOutputCap } from "../pi/output-cap.js";
 import { configureSummaryBudget, SUMMARY_BUDGET_PROFILES, type SummaryBudgetProfile } from "../pi/summary-budget.js";
 import { beginReadTelemetry, readTelemetry, type ReadTelemetry } from "../pi/read-telemetry.js";
 import { nextBaseline, READ_LEVEL, setThinkingPhase, stepDownLevel, thinkingStateOf } from "../pi/thinking-state.js";
+import { compareCachedModelSwitch, type CacheObservation } from "../orchestration/cache-cost.js";
+import { guardedThinkingLevel, lockedEffort } from "../pi/cache-effort.js";
 import { THINKING_LEVELS } from "../pi/thinking-levels.js";
 import { ADVISOR_TIMEOUT_MS, advisorLines, AssignmentAdvisor, type AdvisorDetails, type AdvisorSource } from "../single/advisor.js";
 import { StrongReflection, type ReflectionSummary } from "../single/reflection.js";
@@ -351,6 +353,8 @@ interface Worker {
   skillCache?: string;
   /** Context size of the latest request: input + cache reads + cache writes (providers count cache writes outside `input`). */
   latestInput: number;
+  /** Last real provider usage: used for one-request model-switch price comparison; not fabricated from context length. */
+  cacheObservation?: CacheObservation;
   /** The task ledger of this worker's task (single workflow with `single.ledger`; ultra implement/answer always), read when the worker compacts. */
   taskId?: string;
   ledger?: () => TaskLedger | undefined;
@@ -1546,7 +1550,7 @@ export class WorkerPool {
     const tierExtended = configured?.extendedContext ?? config.routes.extendedContext;
     // A tier that names main's thinking takes it exactly; an implicit inheritance does not go below main's session-start floor.
     const implicitThinking = args.inheritedThinking ?? args.thinking;
-    const route = configured
+    let route: ModelRoute = configured
       ? { role: routeRole, model: configured.model, thinking: tierLevel ?? (inheritsMainThinking(tier) ? args.thinking : implicitThinking) ?? "off", ...(tierExtended !== undefined ? { extendedContext: tierExtended } : {}) }
       : mainModel
       ? { role: routeRole, model: sessionModel!, thinking: (tierMain ? tierLevel ?? args.thinking : implicitThinking) ?? "off", extendedContext: false }
@@ -1575,11 +1579,30 @@ export class WorkerPool {
       const catalog = runtime.getModel(route.model.slice(0, route.model.indexOf("/")), route.model.slice(route.model.indexOf("/") + 1));
       if (!catalog) throw new Error(`Cannot switch ${worker.id}: model ${route.model} is unavailable; omit worker to start a new worker.`);
       const resolvedModel = withExtendedContext(catalog, route.extendedContext).model;
-      const effective = mainModel && mainWindow > resolvedModel.contextWindow ? { ...resolvedModel, contextWindow: mainWindow } : resolvedModel;
+      let effective = mainModel && mainWindow > resolvedModel.contextWindow ? { ...resolvedModel, contextWindow: mainWindow } : resolvedModel;
+      const previous = session.model;
+      const previousName = previous ? previous.provider + "/" + previous.id : "";
+      const changingModel = !!previous && (previous.provider !== effective.provider || previous.id !== effective.id);
+      // Only an implicit inheritance from main is economically optional.
+      // Never veto an explicit configured tier, a new worker, or a context-window-only update.
+      if (changingModel && modelSource === "main" && worker.cacheObservation?.model === previousName) {
+        const decision = compareCachedModelSwitch(previous, effective, worker.cacheObservation);
+        if (decision.action === "keep") {
+          modelWarnings.push("Cache cost: retained warm " + previousName + " instead of " + effective.provider + "/" + effective.id +
+            " for this assignment (estimated next call $" + decision.keepUSD.toFixed(5) + " vs $" + decision.switchUSD.toFixed(5) +
+            "). Will re-evaluate at the next hand-off.");
+          effective = previous;
+          route = { ...route, model: previousName, extendedContext: false };
+        }
+      }
       try {
-        if (session.model?.provider !== effective.provider || session.model?.id !== effective.id || session.model?.contextWindow !== effective.contextWindow) await session.setModel(effective);
-        if (session.thinkingLevel !== (route.thinking ?? "off")) session.setThinkingLevel(route.thinking ?? "off");
-        baselineLevel = route.thinking ?? "off";
+        if (session.model?.provider !== effective.provider || session.model?.id !== effective.id || session.model?.contextWindow !== effective.contextWindow) {
+          await session.setModel(effective);
+          worker.cacheObservation = undefined;
+        }
+        const level = guardedThinkingLevel(session, effective, route.thinking ?? "off");
+        if (session.thinkingLevel !== level) session.setThinkingLevel(level as ThinkingLevel);
+        baselineLevel = level;
         worker.model = `${session.model!.provider}/${session.model!.id}`;
         worker.thinking = session.thinkingLevel;
         worker.contextWindow = session.model!.contextWindow;
@@ -1662,6 +1685,11 @@ export class WorkerPool {
       meta.ownBaseline = undefined;
     }
     beginThinkingPolicy(activeSession, thinkingPolicy, baselineLevel, args.role);
+    const pinnedEffort = effort ? lockedEffort(activeSession, activeSession.model, effort) : undefined;
+    if (effort && pinnedEffort && pinnedEffort !== effort) modelWarnings.push(
+      "Cache protection: " + (activeSession.model?.provider ?? "") + "/" + (activeSession.model?.id ?? "") +
+      " has no advertised cache-preserving effort update protocol. Retained " + pinnedEffort +
+      " instead of requested " + effort + " in this warm session; use a new worker for that level.");
     // Explicit output budget for Claude via CLIProxyAPI (src/pi/output-cap.ts; orche.config.json `outputCap`).
     configureOutputCap(activeSession, config.outputCap, decision => meta.recordEvent?.({ type: "output_cap", timestamp: Date.now(), worker: meta.id, ...decision }));
     // Summary output-limit stops (src/pi/summary-budget.ts); the session's budget level outlives the assignment, like its summary. The
@@ -2020,7 +2048,7 @@ export class WorkerPool {
         const peer = this.manager!.injected(meta.id).some(message => message.id === event.id && message.source === "peer");
         requireReplan(this.manager!.session(meta.id), advisor?.messageId === event.id ? "advisor notes" : peer ? "session-bus note" : "message from main");
       }
-      if (event.type === "usage") { requests++; answered[event.model] = (answered[event.model] ?? 0) + 1; meta.latestInput = event.input + event.cacheRead + event.cacheWrite; if (event.costUSD !== undefined) ownCostUSD = (ownCostUSD ?? 0) + event.costUSD; const run = mdsdRun; if (run) { run.observeOrchestrator({ input: event.input, output: event.output, cacheRead: event.cacheRead, ...(event.costUSD !== undefined ? { cost: { total: event.costUSD } } : {}) }); run.enforceOrchestrator((action, text) => this.manager?.budgetAction(meta.id, action, text, "MDSD total budget") ?? false); } }
+      if (event.type === "usage") { requests++; answered[event.model] = (answered[event.model] ?? 0) + 1; meta.latestInput = event.input + event.cacheRead + event.cacheWrite; meta.cacheObservation = { model: event.model, at: Date.now(), input: event.input, cacheRead: event.cacheRead, cacheWrite: event.cacheWrite, output: event.output }; if (event.costUSD !== undefined) ownCostUSD = (ownCostUSD ?? 0) + event.costUSD; const run = mdsdRun; if (run) { run.observeOrchestrator({ input: event.input, output: event.output, cacheRead: event.cacheRead, ...(event.costUSD !== undefined ? { cost: { total: event.costUSD } } : {}) }); run.enforceOrchestrator((action, text) => this.manager?.budgetAction(meta.id, action, text, "MDSD total budget") ?? false); } }
       if (event.type === "tool_started") { tally.tools++; if (WRITE_TOOLS.has(event.toolName)) noteEvidence(`${event.toolName} started`); }
       progress();
     });
