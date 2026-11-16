@@ -73,6 +73,23 @@ describe("prompt-cache-preserving effort capability", () => {
     expect(delayed.messages.at(-1)).toEqual(marker("low"));
   });
 
+  it("records actual high effort through a native Claude tool loop and changes at a fresh assignment", () => {
+    const session = {
+      model: nativeClaude,
+      thinkingLevel: "high",
+      getAvailableThinkingLevels: () => ["low", "medium", "high"],
+      setThinkingLevel(level: never) { session.thinkingLevel = level; },
+    };
+    beginThinking(session);
+    observeEffortRequest(session, nativeClaude, "high");
+    setThinkingPhase(session, "read", "read node");
+    expect(session.thinkingLevel).toBe("high"); // tool_result-only request is still high
+    setThinkingPhase(session, "step", "ordinary node");
+    expect(session.thinkingLevel).toBe("high");
+    beginThinking(session, "low"); // the next assignment will send real user input
+    expect(session.thinkingLevel).toBe("low");
+  });
+
   it("prevents switching between disabled and adaptive thinking in a warm native Claude session", () => {
     const active = {};
     observeEffortRequest(active, nativeClaude, "high");
