@@ -20,6 +20,7 @@
  */
 
 import { effectiveRank, effortMappingFor, type EffortAliasRule, type EffortMapping, type EffortModel } from "./effort-mapping.js";
+import { guardedThinkingLevel } from "./cache-effort.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
 
 export { THINKING_LEVELS, type ThinkingLevelName } from "./thinking-levels.js";
@@ -151,9 +152,12 @@ export function hasLowerStep(state: ThinkingState): boolean {
 
 function apply(session: ThinkingSession, state: ThinkingState, level: string | undefined, reason: string, node?: string): void {
   if (level === undefined) return;
+  // An older/translated transport cannot change its top-level effort without losing the cache.
+  // Keep the last sent effort until this session switches models or is disposed.
+  const safe = guardedThinkingLevel(session, session.model, level);
   const from = session.thinkingLevel ?? "off";
-  if (from !== level) {
-    try { session.setThinkingLevel(level as never); } catch { /* the level stays; recorded below as it is */ }
+  if (from !== safe) {
+    try { session.setThinkingLevel(safe as never); } catch { /* the level stays; recorded below as it is */ }
   }
   const to = session.thinkingLevel ?? level;
   state.applied = to;
