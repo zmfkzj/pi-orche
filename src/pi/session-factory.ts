@@ -36,6 +36,7 @@ import { markCompaction, recordToolResult } from "./read-telemetry.js";
 import { readNodeRefusal } from "./read-node-guard.js";
 import { thinkingPolicyOf } from "./thinking-policy.js";
 import { observeEffortRequest, preserveAnthropicToolLoopEffort } from "./cache-effort.js";
+import { nativeClaudeRouteModel } from "./claude-native.js";
 import { atEffectiveBaseline, thinkingStateOf } from "./thinking-state.js";
 import { BOOKKEEPING_TOOLS, evidenceLedgerOf, recordToolCall, refText } from "./tool-evidence.js";
 import { unknownToolHandler } from "./unknown-tool.js";
@@ -64,6 +65,8 @@ export interface SessionOptions {
    */
   sessionFile?: string;
   modelRuntime?: ModelRuntime;
+  /** Automatically use CPA Anthropic Messages for supported Claude models (default true). */
+  claudeNative?: boolean;
   /** Called once with the effective context window of the session's model. */
   onContextWindow?: (info: ContextWindowInfo) => void;
   /**
@@ -471,11 +474,12 @@ export async function createSession(
 ): Promise<AgentSession> {
   const runtime = options.modelRuntime ?? await (defaultRuntime ??= ModelRuntime.create());
   const slash = options.route.model.indexOf("/");
-  const catalogModel = runtime.getModel(
+  const selected = runtime.getModel(
     options.route.model.slice(0, slash),
     options.route.model.slice(slash + 1),
   );
-  if (!catalogModel) throw new Error(`Unknown model: ${options.route.model}`);
+  if (!selected) throw new Error(`Unknown model: ${options.route.model}`);
+  const catalogModel = nativeClaudeRouteModel(runtime, selected, options.claudeNative !== false);
   const resolved = withExtendedContext(catalogModel, options.route.extendedContext);
   const model = options.inheritedContextWindow && options.inheritedContextWindow > resolved.model.contextWindow
     ? { ...resolved.model, contextWindow: options.inheritedContextWindow } : resolved.model;
