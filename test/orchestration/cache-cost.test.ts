@@ -22,6 +22,22 @@ describe("model switch versus cache reuse", () => {
     expect(d.keepUSD).toBeGreaterThan(d.switchUSD ?? 0);
   });
 
+  it("uses long-context catalog price tiers instead of a misleading base rate", () => {
+    const tiered: CacheCostModel = { cost: {
+      input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0,
+      tiers: [{ inputTokensAbove: 50_000, input: 40, output: 60, cacheRead: 10, cacheWrite: 42 }],
+    } };
+    const d = compareCachedModelSwitch(tiered, cheap, warm, now);
+    expect(d.action).toBe("switch");
+  });
+
+  it("uses the observed cache-write usage at the current model's write price", () => {
+    const a: CacheCostModel = { cost: { input: 1, output: 1, cacheRead: 0.1, cacheWrite: 100 } };
+    const b: CacheCostModel = { cost: { input: 1, output: 1, cacheRead: 0.1, cacheWrite: 1 } };
+    const d = compareCachedModelSwitch(a, b, { ...warm, cacheRead: 10, cacheWrite: 100_000, input: 50 }, now);
+    expect(d.action).toBe("switch");
+  });
+
   it("does not claim a cache discount without observed cached input", () => {
     expect(compareCachedModelSwitch(current, cheap, { ...warm, cacheRead: 0 }, now).action).toBe("switch");
     expect(compareCachedModelSwitch(current, cheap, undefined, now).action).toBe("switch");
