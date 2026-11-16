@@ -34,6 +34,7 @@ import { registerDependencyProvider } from "./dependencies.js";
 import { createOrcheDependencyProvider, runDependencyCommand, type OrcheDependencyOptions } from "./doctor.js";
 import { parseRouteRequest, PEER_NOTE_MAX, peerLabel, SESSION_BUS_ROUTE_EVENT } from "./peer-notes.js";
 import { THINKING_LEVELS } from "../pi/thinking-levels.js";
+import { needsCacheEffortProtection, supportsCachePreservingEffort } from "../pi/cache-effort.js";
 import { SUMMARY_BUDGET_PROFILES, type SummaryBudgetProfile } from "../pi/summary-budget.js";
 
 export const RESULT_MESSAGE_TYPE = "orche-result";
@@ -528,9 +529,19 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
      * `pi.setThinkingLevel` (clamped to main's model, recorded in the session like `/thinking`, never in Pi's settings), and
      * {@link restoreMainThinking} sets the level main had back when the request ends.
      */
-    const applyEffort = (request: OneShotRequest, effort: ThinkingLevel, ui: ExtensionContext["ui"]) => {
+    const applyEffort = (request: OneShotRequest, effort: ThinkingLevel, ui: ExtensionContext["ui"], model?: ExtensionContext["model"]) => {
       if (request.mode !== "direct") {
         ui.notify(`orche ${request.mode}: this request's orche_task assignments start at effort ${effort} (each worker's model may clamp it; the result shows the level used). Main keeps its own thinking (${pi.getThinkingLevel()}); later requests use the usual levels.`, "info");
+        return;
+      }
+      // Main's native Pi session is outside orche's worker payload hook. The CLIProxyAPI
+      // Claude bridge cannot replay message-level effort changes, so do not silently
+      // invalidate its warm prefix with a one-shot direct request.
+      if (needsCacheEffortProtection(model) && !supportsCachePreservingEffort(model) && effort !== pi.getThinkingLevel()) {
+        request.effort = undefined;
+        ui.notify("orche direct: effort " + effort +
+          " was NOT applied. This provider has no advertised cache-preserving effort switch; retained " +
+          pi.getThinkingLevel() + ". Start a fresh session at the desired effort, or use a compatible native provider.", "warning");
         return;
       }
       const before = pi.getThinkingLevel();
@@ -1112,7 +1123,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           const request: OneShotRequest = { mode: parsed.mode, jobs: new Set<string>(), answering: false, ...(parsed.effort ? { effort: parsed.effort } : {}), ...(parsed.summaryBudget ? { summaryBudget: parsed.summaryBudget } : {}) };
           oneShot = request;
           state.setOverride(parsed.mode);
-          if (parsed.effort) applyEffort(request, parsed.effort, ctx.ui);
+          if (parsed.effort) applyEffort(request, parsed.effort, ctx.ui, ctx.model);
           if (parsed.summaryBudget) ctx.ui.notify(`orche ${parsed.mode}: this request's orche_task assignments compact with the ${parsed.summaryBudget} summary budget; later requests use the standard one.`, "info");
           showMode(ctx);
           // Keep the command pending until the turn it started has settled: one-shot modes (--print / --mode json)
