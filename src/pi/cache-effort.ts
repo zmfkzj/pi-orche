@@ -38,13 +38,22 @@ export function supportsCachePreservingEffort(model: CacheEffortModel | undefine
   return false;
 }
 
+/** Limit the lock to provider paths where an effort change can invalidate a prompt cache.
+ * Gemini and local backends must retain their normal thinking controls. */
+export function needsCacheEffortProtection(model: CacheEffortModel | undefined): boolean {
+  return !!model && [
+    "cliproxyapi-codex-responses", "openai-responses",
+    "openai-codex-responses", "azure-openai-responses", "anthropic-messages",
+  ].includes(model.api ?? "");
+}
+
 export function observeEffortRequest(session: object, model: CacheEffortModel | undefined, sentEffort: string | undefined): void {
   if (!model || !sentEffort) return;
   const key = modelKey(model);
   const previous = locks.get(session);
   if (previous && previous.model !== key) locks.delete(session); // model switch: new cache namespace
-  if (supportsCachePreservingEffort(model)) {
-    locks.delete(session); // the provider, not orche, owns the effort history
+  if (supportsCachePreservingEffort(model) || !needsCacheEffortProtection(model)) {
+    locks.delete(session); // the provider owns effort history, or caching is out of scope
     return;
   }
   if (!locks.has(session)) locks.set(session, { model: key, effort: sentEffort });
