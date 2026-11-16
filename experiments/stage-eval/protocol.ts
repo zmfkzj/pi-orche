@@ -21,7 +21,11 @@ export const ADVISOR_MODEL_REF = `${ADVISOR_MODEL.provider}/${ADVISOR_MODEL.id}`
 export const THINKING = "high";
 
 export type Kind = "pure" | "direct" | "single" | "single-advisor";
-export interface Arm { name: string; kind: Kind; runtime?: string }
+/**
+ * `config`: orche.config.json overrides of an orche arm (experiments/synergy factorial arms), merged over {@link orcheConfig}: a
+ * `single` object is merged key by key, every other key replaces the base value. Absent in every stage-eval plan.
+ */
+export interface Arm { name: string; kind: Kind; runtime?: string; config?: Record<string, unknown> }
 
 export const BASELINE_ARMS: readonly Arm[] = [
   { name: "A", kind: "pure" },
@@ -42,7 +46,17 @@ export const LIMITS = {
  * advisor route gpt-6-astra with main's thinking) with every solver tier pinned to the evaluation model. Product defaults
  * everywhere else (limits, thinking policy, compaction, read nodes). Specialist routes and images are not exercised and omitted.
  */
-export function orcheConfig(kind: Exclude<Kind, "pure">): Record<string, unknown> {
+export function orcheConfig(kind: Exclude<Kind, "pure">, overrides?: Record<string, unknown>): Record<string, unknown> {
+  const base = baseOrcheConfig(kind);
+  if (!overrides) return base;
+  const { single, ...rest } = overrides;
+  return { ...base, ...rest, ...(single && typeof single === "object" ? { single: { ...(base.single as object), ...(single as object) } } : {}) };
+}
+
+/** Whether an arm runs the plan advisor (its kind, or a `single.advisor` override). */
+export const armHasAdvisor = (arm: Pick<Arm, "kind" | "config">): boolean => arm.kind !== "pure" && ((orcheConfig(arm.kind, arm.config).single as { advisor?: boolean }).advisor === true);
+
+function baseOrcheConfig(kind: Exclude<Kind, "pure">): Record<string, unknown> {
   return {
     mainMode: kind === "direct" ? "direct" : "single",
     // Required by the route-config parser (an object); no role route is exercised.
@@ -144,24 +158,24 @@ export function primaryPass(run: { terminal: Terminal; gradePassed?: boolean; in
 
 export interface WireEntry {
   id: number; at: string; endAt?: string; method?: string; path?: string; model?: string; effort?: string; session?: string;
-  status?: number; respModel?: string; usage?: { input?: number; cached?: number; output?: number; reasoning?: number };
+  status?: number; respModel?: string; usage?: { input?: number; cached?: number; cacheWrite?: number; output?: number; reasoning?: number };
   worker?: boolean; tools?: string[]; orcheMarker?: boolean; bytes?: number; error?: string; final?: string; clientClosed?: boolean; upgrade?: boolean;
 }
 
 export type Role = "main" | "worker" | "sub-worker" | "advisor" | "other";
-export interface Rates { input: number; output: number; cacheRead: number; tiers?: { input: number; output: number; cacheRead: number; inputTokensAbove: number }[] }
+export interface Rates { input: number; output: number; cacheRead: number; cacheWrite?: number; tiers?: { input: number; output: number; cacheRead: number; cacheWrite?: number; inputTokensAbove: number }[] }
 
 /**
  * Catalog rates per million tokens (~/.pi/agent/cliproxyapi-models.json at freeze time; an API-equivalent estimate, not the
  * subscription bill). Above a tier's input threshold the whole request is priced at the tier. Cache writes are not reported
  * by the Responses stream and are not priced (a lower bound for Claude cache-write premiums).
  */
-export function requestCost(usage: { uncached: number; cached: number; output: number }, rates: Rates | undefined): number {
+export function requestCost(usage: { uncached: number; cached: number; output: number; cacheWrite?: number }, rates: Rates | undefined): number {
   if (!rates) return 0;
   const total = usage.uncached + usage.cached;
   const tier = (rates.tiers ?? []).filter(item => total > item.inputTokensAbove).sort((a, b) => b.inputTokensAbove - a.inputTokensAbove)[0];
   const r = tier ?? rates;
-  return (usage.uncached * r.input + usage.cached * r.cacheRead + usage.output * r.output) / 1e6;
+  return (usage.uncached * r.input + usage.cached * r.cacheRead + usage.output * r.output + (usage.cacheWrite ?? 0) * ((r as { cacheWrite?: number }).cacheWrite ?? r.input)) / 1e6;
 }
 
 export interface Bucket { requests: number; uncached: number; cached: number; output: number; reasoning: number; costUsd: number; usageMissing: number; errors: number; latencyMs: number }
@@ -191,11 +205,12 @@ export function summarizeWire(entries: readonly WireEntry[], options: { roles: R
     const role: Role = (entry.session && options.roles.get(entry.session)) || "other";
     const bucket = emptyBucket();
     bucket.requests = 1;
-    if (entry.error || (entry.status !== undefined && entry.status !== 200) || (entry.status === 200 && entry.final !== "response.completed")) bucket.errors = 1;
+    if (entry.error || (entry.status !== undefined && entry.status !== 200) || (entry.status === 200 && entry.final !== "response.completed" && entry.final !== "message_stop")) bucket.errors = 1;
     if (entry.usage && typeof entry.usage.output === "number") {
-      const input = entry.usage.input ?? 0, cached = Math.min(entry.usage.cached ?? 0, input);
-      bucket.uncached = input - cached; bucket.cached = cached; bucket.output = entry.usage.output; bucket.reasoning = entry.usage.reasoning ?? 0;
-      bucket.costUsd = requestCost({ uncached: bucket.uncached, cached, output: bucket.output }, options.rates[entry.model]);
+      // Anthropic Messages streams also report cache writes (priced at the catalog's cacheWrite rate; experiments/synergy README §6).
+      const input = entry.usage.input ?? 0, cached = Math.min(entry.usage.cached ?? 0, input), cacheWrite = Math.min(entry.usage.cacheWrite ?? 0, input - cached);
+      bucket.uncached = input - cached - cacheWrite; bucket.cached = cached; bucket.output = entry.usage.output; bucket.reasoning = entry.usage.reasoning ?? 0;
+      bucket.costUsd = requestCost({ uncached: bucket.uncached, cached, output: bucket.output, cacheWrite }, options.rates[entry.model]);
       if (input >= 20_000 && cached < input / 2) { out.missRequests++; out.missUncached += input - cached; }
     } else bucket.usageMissing = 1;
     if (entry.endAt) bucket.latencyMs = Date.parse(entry.endAt) - Date.parse(entry.at);

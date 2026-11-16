@@ -1,0 +1,10 @@
+{
+  "id": "e2-changed-default-ko",
+  "title": "Configurable timeout with a changed default",
+  "category": "feature",
+  "language": "ko",
+  "instruction": "createClient에 timeoutMs 옵션을 추가해 주세요. 지난번에는 기본 타임아웃을 지금처럼 30초로 유지하자고 했는데, 그 결정을 바꿉니다. 옵션을 주지 않으면 기본 타임아웃은 10초(10000ms)여야 합니다. timeoutMs가 양의 유한한 숫자가 아니면 TypeError를 던져 주세요. README의 기본값 안내도 새 기본값에 맞게 고쳐 주시고, 기존 baseUrl 동작은 그대로 유지하고, 테스트도 추가해 주세요.",
+  "expectsChanges": true,
+  "timeoutSec": 900,
+  "grading": { "visibleTests": true, "hiddenTests": true, "rubric": false, "mustNotModify": false, "custom": false }
+}

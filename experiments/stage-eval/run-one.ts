@@ -11,10 +11,10 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { appendFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { UPSTREAM, catalogRates, gradeWorkspace, loadTask, overlay, piArgs, piEnv, prepareWorkspace, pythonWrappers, textFiles, type Task } from "./env.js";
+import { UPSTREAM, catalogRates, gradeWorkspace, loadTask, overlay, piArgs, seedProviderCatalog, piEnv, prepareWorkspace, pythonWrappers, textFiles, type Task } from "./env.js";
 import { readable } from "../advisor-reviewer/tasks.js";
 import {
-  LIMITS, leakHits, primaryPass, redact, roleOfTranscript, sessionToolCalls, summarizeWire, terminalOf, toolEventStats, transcriptSessionId,
+  LIMITS, armHasAdvisor, leakHits, primaryPass, redact, roleOfTranscript, sessionToolCalls, summarizeWire, terminalOf, toolEventStats, transcriptSessionId,
   transcriptStats, userPrompt, type Arm, type Role, type TranscriptStats, type WireEntry,
 } from "./protocol.js";
 
@@ -151,7 +151,7 @@ export async function collect(input: RunInput, task: Task, workspace: string, pa
   meta.transcripts = transcripts;
   meta.leakAudit = { hits: leaks };
   const wire = readJsonl<WireEntry>(join(out, "wire.jsonl"));
-  meta.wire = summarizeWire(wire, { roles, rates: meta.rates, expectAdvisor: input.arm.kind === "single-advisor" });
+  meta.wire = summarizeWire(wire, { roles, rates: meta.rates, expectAdvisor: armHasAdvisor(input.arm) });
   meta.toolEvents = toolEventStats(readJsonl<any>(join(out, "tool-events.jsonl")));
   const ok = wire.filter(entry => entry.method === "POST" && entry.model && entry.status === 200).length;
   if (!meta.infra && ok === 0) meta.infra = `no successful model request (pi exit ${meta.pi?.code}${meta.pi?.signal ? ` ${meta.pi.signal}` : ""})`;
@@ -179,9 +179,13 @@ async function main(input: RunInput): Promise<void> {
   if (task.kind === "swe") { pathPrefix = join(input.temp, "pybin"); await pythonWrappers(task, workspace, pathPrefix); }
   let secrets: string[] = [];
   let proxy: { url: string; child: ChildProcess } | undefined;
+  let seeded: string | undefined;
   try {
     proxy = await startProxy(join(out, "wire.jsonl"));
-    const { apiKey, secrets: overlaySecrets } = await overlay(agentDir, proxy.url, input.arm.kind);
+    seeded = await seedProviderCatalog(proxy.url);
+    meta.providerCatalogSeeded = seeded !== undefined;
+    const { apiKey, secrets: overlaySecrets } = await overlay(agentDir, proxy.url, input.arm.kind, input.arm.config);
+    if (input.arm.kind !== "pure") meta.orcheConfig = JSON.parse(await readFile(join(agentDir, "orche.config.json"), "utf8"));
     secrets = overlaySecrets;
     await mkdir(sessionDir, { recursive: true });
     const prompt = userPrompt(task);
@@ -199,6 +203,7 @@ async function main(input: RunInput): Promise<void> {
     meta.infra = `harness: ${String(error instanceof Error ? error.stack ?? error.message : error).slice(0, 2000)}`;
   } finally {
     proxy?.child.kill("SIGTERM");
+    if (seeded) await rm(seeded, { recursive: true, force: true }).catch(() => undefined);
   }
   meta.solverFinishedAt = now();
   meta.wallMs = meta.solverFinishedAt - meta.startedAt;

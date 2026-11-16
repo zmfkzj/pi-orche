@@ -17,7 +17,9 @@ const HEAD = 65536, TAIL = 8 * 1024 * 1024;
  * Usage of a Responses API SSE stream: the `response.usage` of its final `response.completed` / `response.incomplete` /
  * `response.failed` event (top-level counts; the nested per-item attribution is ignored). Chat-completions style `usage` as fallback.
  */
-export function usageFrom(text) {
+export function usageFrom(text, head = "") {
+  const anthropic = anthropicUsage(head, text);
+  if (anthropic) return anthropic;
   let found;
   for (const line of text.split("\n")) {
     if (!line.startsWith("data: ") || !/"response\.(completed|incomplete|failed)"/.test(line)) continue;
@@ -28,6 +30,29 @@ export function usageFrom(text) {
     } catch { /* cut line */ }
   }
   return found;
+}
+
+/**
+ * Usage of an Anthropic Messages SSE stream (CLIProxyAPI /v1/messages; the bundled provider routes Claude models there since
+ * 2026-11-12): `message_start` (in the stream's head) carries input, cache-read and cache-creation tokens; the last
+ * `message_delta` carries the output tokens (and may restate the cache counts); `message_stop` marks a complete response.
+ * `input` is reported INCLUDING cache reads and writes, as for the Responses API, so uncached = input − cached − cacheWrite.
+ */
+export function anthropicUsage(head, tail) {
+  let start, delta, stopped = false, model;
+  for (const line of `${head}\n${tail}`.split("\n")) {
+    if (!line.startsWith("data: ") || !/"type"\s*:\s*"message_(start|delta|stop)"/.test(line)) continue;
+    try {
+      const event = JSON.parse(line.slice(6));
+      if (event.type === "message_start" && event.message?.usage) { start = event.message.usage; model = event.message.model; }
+      else if (event.type === "message_delta" && event.usage) delta = event.usage;
+      else if (event.type === "message_stop") stopped = true;
+    } catch { /* cut line */ }
+  }
+  if (!start && !delta) return undefined;
+  const pick = key => delta?.[key] ?? start?.[key] ?? 0;
+  const input = pick("input_tokens"), cached = pick("cache_read_input_tokens"), cacheWrite = pick("cache_creation_input_tokens");
+  return { input: input + cached + cacheWrite, cached, cacheWrite, output: delta?.output_tokens ?? start?.output_tokens ?? 0, reasoning: 0, final: stopped ? "message_stop" : "message_incomplete", ...(model ? { respModel: model } : {}) };
 }
 
 const server = http.createServer((req, res) => {
@@ -41,7 +66,7 @@ const server = http.createServer((req, res) => {
         const j = JSON.parse(decode(req.headers["content-encoding"], body).toString("utf8"));
         const text = JSON.stringify(j);
         Object.assign(entry, {
-          model: j.model, effort: j.reasoning?.effort ?? j.reasoning_effort, session: j.prompt_cache_key,
+          model: j.model, effort: j.reasoning?.effort ?? j.reasoning_effort ?? j.output_config?.effort, session: j.prompt_cache_key ?? j.metadata?.user_id,
           worker: text.includes("persistent coding worker"), bytes: body.length,
           // Isolation evidence without bodies: the offered tool NAMES, whether any orche text reached the request, the size of
           // the instructions (system prompt) and how many input items the request carried.
@@ -75,7 +100,7 @@ const server = http.createServer((req, res) => {
             const m = /"model"\s*:\s*"([^"]+)"/.exec(first); if (m) entry.respModel = m[1];
             const last = enc ? first : Buffer.concat(tailChunks).toString("utf8");
             if (process.env.PROXY_DUMP_DIR) appendFileSync(`${process.env.PROXY_DUMP_DIR}/tail-${entry.id}.txt`, last.slice(-20000));
-            const usage = usageFrom(last);
+            const usage = usageFrom(last, first);
             if (usage) { const { final, respModel, ...counts } = usage; entry.usage = counts; entry.final = final; if (respModel) entry.finalModel = respModel; }
             else entry.noFinalEvent = true;
             if (/"type"\s*:\s*"(response\.failed|error)"/.test(last)) entry.errorEvent = true;

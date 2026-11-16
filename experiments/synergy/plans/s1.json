@@ -1,0 +1,68 @@
+{
+  "out": "results/synergy/s1",
+  "phase": "s1",
+  "tasks": [
+    "d8-build-graph",
+    "d1-transactional-outbox",
+    "sqlfluff__sqlfluff-7615",
+    "scientific-python__docstub-123",
+    "tox-dev__tox-3904",
+    "pypa__build-1027",
+    "youssofal__mtplx-21",
+    "stravalib__stravalib-709_interface",
+    "e1-retracted-cap-ko",
+    "e2-changed-default-ko"
+  ],
+  "arms": [
+    {
+      "name": "C",
+      "kind": "single",
+      "runtime": "syn",
+      "config": {
+        "single": {
+          "advisor": false
+        }
+      }
+    },
+    {
+      "name": "A",
+      "kind": "single",
+      "runtime": "syn",
+      "config": {
+        "single": {
+          "advisor": true
+        }
+      }
+    },
+    {
+      "name": "P",
+      "kind": "single",
+      "runtime": "syn",
+      "config": {
+        "single": {
+          "advisor": false
+        },
+        "thinkingPolicy": "phase"
+      }
+    },
+    {
+      "name": "AP",
+      "kind": "single",
+      "runtime": "syn",
+      "config": {
+        "single": {
+          "advisor": true
+        },
+        "thinkingPolicy": "phase"
+      }
+    }
+  ],
+  "repeats": 3,
+  "concurrency": 8,
+  "maxRuns": 135,
+  "budgetUsd": 150,
+  "seed": "synergy-2026-11-15",
+  "scratch": "/var/tmp/pi-arthur/pi-orche/01a1df36-c9c4-72a4-8645-390d5b513adf/W1/synergy-scratch",
+  "sweCache": "/var/tmp/pi-arthur/pi-orche/01a1cdc1-73e0-7158-af61-a2b9df812464/W2/swe-cache",
+  "piBin": "/home/arthur/.bun/bin/pi"
+}

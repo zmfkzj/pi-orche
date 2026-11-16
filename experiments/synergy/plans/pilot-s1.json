@@ -1,0 +1,60 @@
+{
+  "out": "results/synergy/pilot",
+  "phase": "pilot-s1",
+  "tasks": [
+    "e2-changed-default-ko",
+    "d8-build-graph"
+  ],
+  "arms": [
+    {
+      "name": "C",
+      "kind": "single",
+      "runtime": "syn",
+      "config": {
+        "single": {
+          "advisor": false
+        }
+      }
+    },
+    {
+      "name": "A",
+      "kind": "single",
+      "runtime": "syn",
+      "config": {
+        "single": {
+          "advisor": true
+        }
+      }
+    },
+    {
+      "name": "P",
+      "kind": "single",
+      "runtime": "syn",
+      "config": {
+        "single": {
+          "advisor": false
+        },
+        "thinkingPolicy": "phase"
+      }
+    },
+    {
+      "name": "AP",
+      "kind": "single",
+      "runtime": "syn",
+      "config": {
+        "single": {
+          "advisor": true
+        },
+        "thinkingPolicy": "phase"
+      }
+    }
+  ],
+  "repeats": 1,
+  "concurrency": 8,
+  "maxRuns": 10,
+  "budgetUsd": 15,
+  "seed": "synergy-2026-11-15",
+  "scratch": "/var/tmp/pi-arthur/pi-orche/01a1df36-c9c4-72a4-8645-390d5b513adf/W1/synergy-scratch",
+  "sweCache": "/var/tmp/pi-arthur/pi-orche/01a1cdc1-73e0-7158-af61-a2b9df812464/W2/swe-cache",
+  "piBin": "/home/arthur/.bun/bin/pi"
+}

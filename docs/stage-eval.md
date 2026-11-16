@@ -247,3 +247,11 @@ npx tsx experiments/stage-eval/image-replay.ts <out.json> --sample 60 stage-eval
 
 plan 파일의 `scratch`/`sweCache`는 이 실험의 scratch 경로다. 다른 곳에서 재현하려면 바꿔야 하고, 그러면 plan hash가 달라지므로 새 phase나
 새 out 디렉터리를 쓴다.
+
+**2026-11-15 harness 갱신 (experiments/synergy).** 2026-11-12에 cliproxyapi bundle이 provider 패키지를 바꾼 뒤로 이 harness는
+`/v1` 없는 base URL에서 404를 받았고, 모델 목록 cache도 찾지 못했다. 다음을 고쳤다. product 코드는 바꾸지 않았다.
+- `env.ts`가 `<proxy>/v1`을 넘긴다.
+- `seedProviderCatalog`가 run별 proxy key에 사용자의 모델 id cache를 복사하고, run이 끝나면 지운다.
+- `proxy.mjs`와 `protocol.ts`가 Anthropic Messages의 usage와 cache write 단가를 읽는다.
+
+이 갱신 전의 결과(§4)는 옛 provider로 측정한 값이다. 자세한 내용은 `experiments/synergy/README.md` §6에 있다.

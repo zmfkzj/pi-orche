@@ -1,0 +1,95 @@
+{
+  "out": "results/synergy/pilot-s2",
+  "phase": "pilot-s2",
+  "tasks": [
+    "pypa__build-1027"
+  ],
+  "arms": [
+    {
+      "name": "K",
+      "kind": "single",
+      "runtime": "syn",
+      "config": {
+        "single": {
+          "advisor": false
+        },
+        "thinkingPolicy": "fixed",
+        "workerCompaction": {
+          "policy": "absolute",
+          "triggerTokens": 48000,
+          "keepRecentTokens": 3000,
+          "essentials": "extended",
+          "decisionMemory": false
+        }
+      }
+    },
+    {
+      "name": "M",
+      "kind": "single",
+      "runtime": "syn",
+      "config": {
+        "single": {
+          "advisor": false
+        },
+        "thinkingPolicy": "fixed",
+        "workerCompaction": {
+          "policy": "absolute",
+          "triggerTokens": 48000,
+          "keepRecentTokens": 3000,
+          "essentials": "extended",
+          "decisionMemory": true
+        }
+      }
+    },
+    {
+      "name": "L",
+      "kind": "single",
+      "runtime": "syn",
+      "config": {
+        "single": {
+          "advisor": false
+        },
+        "thinkingPolicy": {
+          "mode": "fixed",
+          "evidence": "warn"
+        },
+        "workerCompaction": {
+          "policy": "absolute",
+          "triggerTokens": 48000,
+          "keepRecentTokens": 3000,
+          "essentials": "extended",
+          "decisionMemory": false
+        }
+      }
+    },
+    {
+      "name": "ML",
+      "kind": "single",
+      "runtime": "syn",
+      "config": {
+        "single": {
+          "advisor": false
+        },
+        "thinkingPolicy": {
+          "mode": "fixed",
+          "evidence": "warn"
+        },
+        "workerCompaction": {
+          "policy": "absolute",
+          "triggerTokens": 48000,
+          "keepRecentTokens": 3000,
+          "essentials": "extended",
+          "decisionMemory": true
+        }
+      }
+    }
+  ],
+  "repeats": 1,
+  "concurrency": 4,
+  "maxRuns": 6,
+  "budgetUsd": 10,
+  "seed": "synergy-2026-11-15",
+  "scratch": "/var/tmp/pi-arthur/pi-orche/01a1df36-c9c4-72a4-8645-390d5b513adf/W1/synergy-scratch",
+  "sweCache": "/var/tmp/pi-arthur/pi-orche/01a1cdc1-73e0-7158-af61-a2b9df812464/W2/swe-cache",
+  "piBin": "/home/arthur/.bun/bin/pi"
+}

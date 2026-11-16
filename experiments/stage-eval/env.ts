@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { copyFile, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { MODEL, THINKING, orcheConfig, type Kind, type Rates } from "./protocol.js";
 
 import { gradeWorkspace as gradeCode, loadTask as loadCode, type Task } from "../ultra-ab/env.js";
@@ -46,12 +46,12 @@ const git = (cwd: string, args: string[]) => execFileSync("git", args, { cwd, st
 export function catalogRates(file = join(AGENT, "cliproxyapi-models.json")): Record<string, Rates> {
   const catalog = JSON.parse(readFileSync(file, "utf8"));
   const out: Record<string, Rates> = {};
-  for (const model of catalog.models ?? []) if (model?.id && model.cost) out[model.id] = { input: model.cost.input, output: model.cost.output, cacheRead: model.cost.cacheRead, ...(model.cost.tiers ? { tiers: model.cost.tiers } : {}) };
+  for (const model of catalog.models ?? []) if (model?.id && model.cost) out[model.id] = { input: model.cost.input, output: model.cost.output, cacheRead: model.cost.cacheRead, ...(model.cost.cacheWrite !== undefined ? { cacheWrite: model.cost.cacheWrite } : {}), ...(model.cost.tiers ? { tiers: model.cost.tiers } : {}) };
   return out;
 }
 
 /** The private agent dir of one run: provider catalog and connection (base URL = this run's proxy), settings, orche config. */
-export async function overlay(dir: string, proxyUrl: string, kind: Kind): Promise<{ apiKey: string; secrets: string[] }> {
+export async function overlay(dir: string, proxyUrl: string, kind: Kind, config?: Record<string, unknown>): Promise<{ apiKey: string; secrets: string[] }> {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   for (const name of ["cliproxyapi-models.json", "models.json"]) if (existsSync(join(AGENT, name))) await copyFile(join(AGENT, name), join(dir, name));
   const connection = JSON.parse(await readFile(join(AGENT, "cliproxyapi.json"), "utf8"));
@@ -59,7 +59,7 @@ export async function overlay(dir: string, proxyUrl: string, kind: Kind): Promis
   await writeFile(join(dir, "settings.json"), JSON.stringify({ defaultProvider: MODEL.provider, defaultModel: MODEL.id, defaultThinkingLevel: THINKING, quietStartup: true, transport: "sse" }, null, 2));
   const secrets: string[] = [String(connection.apiKey ?? "")];
   if (kind !== "pure") {
-    await writeFile(join(dir, "orche.config.json"), JSON.stringify(orcheConfig(kind), null, 2));
+    await writeFile(join(dir, "orche.config.json"), JSON.stringify(orcheConfig(kind, config), null, 2));
     // orche's Bash safety review (product default on) asks the Jev classifier (typesafe/jev-latest) before mutating commands; the
     // user's setup has that credential. Only the typesafe entry is copied (0600, removed with the run's temp dir). Pure Pi has no
     // such review, so it gets no classifier credential.
@@ -67,6 +67,25 @@ export async function overlay(dir: string, proxyUrl: string, kind: Kind): Promis
     if (auth.typesafe) { await writeFile(join(dir, "auth.json"), JSON.stringify({ typesafe: auth.typesafe }), { mode: 0o600 }); secrets.push(String(auth.typesafe.key ?? "")); }
   }
   return { apiKey: String(connection.apiKey ?? ""), secrets };
+}
+
+/**
+ * Experiment-only adaptation (experiments/synergy README §6): the bundled provider (pi-cliproxyapi-provider since 2026-11-12) reads
+ * its model list only from a disk cache keyed by provider name + base URL (`~/.cache/pi-cliproxyapi-provider/<base64url>/`); Pi
+ * never fetches it at startup. A run's proxy has its own port, so its key has no cache: Claude models then go to Chat Completions
+ * without usage and orche cannot resolve any worker model. This copies the user's cached list (model ids only) to this run's key
+ * and returns the directory to remove after the run. The user's own entry is only read.
+ */
+export async function seedProviderCatalog(proxyUrl: string, providerName = MODEL.provider): Promise<string | undefined> {
+  const root = join(homedir(), ".cache", "pi-cliproxyapi-provider");
+  const key = (url: string) => Buffer.from(`${providerName}\n${url}`).toString("base64url");
+  const source = join(root, key(`${UPSTREAM}/v1`), "cpa-models.json");
+  if (!existsSync(source)) return undefined;
+  const dir = join(root, key(`${proxyUrl}/v1`));
+  if (dir === dirname(source)) return undefined;
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await copyFile(source, join(dir, "cpa-models.json"));
+  return dir;
 }
 
 /** Environment of a Pi child process: private agent/session/temp dirs, this run's proxy, no inherited Pi/orche session variables. */
@@ -77,7 +96,9 @@ export function piEnv(base: NodeJS.ProcessEnv, options: { agentDir: string; sess
   const path = (base.PATH ?? "").split(":").filter(dir => dir && !dir.includes("/node_modules/.bin")).join(":");
   return {
     ...env, PI_CODING_AGENT_DIR: options.agentDir, PI_CODING_AGENT_SESSION_DIR: options.sessionDir, TMPDIR: options.temp, PI_SKIP_VERSION_CHECK: "1", PI_TELEMETRY: "0",
-    PI_CLIPROXYAPI_BUNDLED: "on", CLIPROXYAPI_BASE_URL: options.proxyUrl, CLIPROXYAPI_API_KEY: options.apiKey, CLIPROXYAPI_FAST: "0",
+    // The bundled provider (pi-cliproxyapi-provider since 2026-11-12) takes the CLIProxyAPI /v1 address; the proxy forwards the
+    // path unchanged, so requests reach the upstream's /v1/... routes.
+    PI_CLIPROXYAPI_BUNDLED: "on", CLIPROXYAPI_BASE_URL: `${options.proxyUrl}/v1`, CLIPROXYAPI_API_KEY: options.apiKey, CLIPROXYAPI_FAST: "0",
     ...(options.toolEvents ? { PI_ORCHE_TOOL_EVENTS: options.toolEvents } : {}),
     PATH: options.pathPrefix ? `${options.pathPrefix}:${path}` : path,
   };
