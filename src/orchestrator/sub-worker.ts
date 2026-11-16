@@ -33,6 +33,8 @@ export interface SubWorkerEnvironment {
   orchestrator: string;
   cwd: string;
   runtime: ModelRuntime;
+  /** Project/user claudeNative routing setting, inherited by every sub-worker. */
+  claudeNative?: boolean;
   /** The Bash safety review of every sub-worker (the orchestrator assignment's `bashReview`; src/extension/bash-review.ts), on `runtime`. Absent: none. */
   bashReview?: BashReviewSettings;
   /** The route standard roles run on: `models.worker` when configured, else the orchestrator's current route. */
@@ -199,7 +201,7 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
     const fromStats = (stats: SpecialistStats) => ({ model: stats.model, ...(stats.thinking ? { thinking: stats.thinking } : {}), ...(started ? {} : { notStarted: true as const }), requests: stats.requests, models: { ...stats.models }, startedAt: stats.startedAt, durationMs: stats.durationMs, costUSD: stats.usage.cost, ...(stats.requests ? { usage: { input: stats.usage.input, output: stats.usage.output, cacheRead: stats.usage.cacheRead, cacheWrite: stats.usage.cacheWrite } } : {}), ...(stats.budget ? { budget: { ...stats.budget } } : {}), ...(stats.sessionFile ? { sessionFile: stats.sessionFile } : {}), ...(stats.deadline ? { deadline: subWorkerDeadline(stats.deadline) } : {}) });
     try {
       const { value, stats } = await runSpecialistSession({
-        actor: worker.id, route, runtime: env.runtime, cwd, prompt,
+        actor: worker.id, route, runtime: env.runtime, claudeNative: env.claudeNative, cwd, prompt,
         instructions: [SUB_WORKER_INSTRUCTIONS, ...capabilities.instructions, ...(webFetch.unavailable ? [webFetch.unavailable] : []), ...(codeGraph.unavailable ? [codeGraph.unavailable] : [])].join("\n"),
         tools: [...WORKER_TOOL_NAMES, ...(image ? [image.name] : []), ...capabilities.tools], ...(image ? { customTools: [image] } : {}), report: reportFor(worker.role, worker.check),
         ...(capabilities.extensionFactories.length ? { extensionFactories: capabilities.extensionFactories } : {}),
