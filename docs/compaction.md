@@ -347,4 +347,16 @@ Failure knowledge is **conditional**. A failed call appears in a separate "CURRE
 
 Limitations: Pi may still retain past error content in its most recent uncompacted tokens or previous summaries; this feature therefore **does not guarantee zero failure contamination**. The tool+target error-resolution heuristic is approximate, and the selected work log contains references, not proof that any tool observation is correct. This is not a reproduction of FOCUS's multiple sampled future plans, Sentry's learning/recovery/playbook system, or WikiTrace's independent evidence verification. No improvement in task quality is claimed without an independent evaluation. Default behavior remains unchanged when `decisionMemory` is absent or false.
 
+Evaluation status (experiments only; the default is unchanged):
+- `experiments/decision-memory-ab` (2026-11-14): success was 10/10 and 6/6 in both arms. In the main study (n = 6) the paired cost difference was −$0.47 (p 0.69). Decision memory showed far fewer unresolved failures in the restored work log.
+- `experiments/decision-memory-b` (2026-11-15/16) re-tested decision memory × evidence linkage (`thinkingPolicy.evidence: "warn"`) as a 2×2. The tasks depend on decisions that exist only in a one-shot feed, plus an impossible check. Results:
+  - **No synergy and no quality gain.** On Haiku (40 instances) the score interaction was +0.006 [−0.086, +0.106], and the combination was −0.003 versus the baseline.
+  - **A cost reduction.** It came mainly from decision memory: −$0.046/run on Haiku (CI excludes 0), and the combination cost about 0.6× the baseline in a 6-instance Opus study.
+  - **Failures hidden from the log.** Decision memory again left most unresolved failures out of the work log (9–13% shown against 45%). No run claimed the impossible check met.
+- `experiments/memory-opus` (2026-11-16) tested decision memory alone on Opus: OFF against ON, linkage off, forced compaction at 28k, 40 fresh paired instances.
+  - **Cost:** −$0.86/run [−1.39, −0.32], an 18.5% saving. On pairs where both arms succeeded the saving was −$0.72 [−1.25, −0.19]. Cost per success was 0.84×.
+  - **Quality: non-inferiority not established.** Task success was 38/40 with ON and 39/40 with OFF; the difference was −0.025 [−0.143, +0.086] against a −0.10 margin.
+  - **The losses were timeouts.** Two ON runs timed out while grepping their own transcript JSONL with a bounded-repetition regex (long transcript lookups: ON 3/40 runs, OFF 0/40).
+  - **The saving does not carry over to the live setting.** There, workers compact far later (`usageRatio` 0.5 of a 1M window).
+
 References: [FOCUS](https://arxiv.org/abs/2609.37590), [Sentry](https://arxiv.org/abs/2610.02994).

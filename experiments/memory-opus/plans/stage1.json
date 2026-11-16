@@ -1,0 +1,40 @@
+{
+  "concurrency": 8,
+  "scratch": "/var/tmp/pi-arthur/pi-orche/01a1df36-c9c4-72a4-8645-390d5b513adf/W1/memory-opus-scratch",
+  "model": "opus",
+  "arms": [
+    "K",
+    "M"
+  ],
+  "reservePerRunUsd": 7.5,
+  "out": "../../../results/memory-opus/scored",
+  "seeds": [
+    201,
+    202,
+    203,
+    204,
+    205,
+    206,
+    207,
+    208,
+    209,
+    210,
+    211,
+    212,
+    213,
+    214,
+    215,
+    216,
+    217,
+    218,
+    219,
+    220,
+    221,
+    222,
+    223,
+    224
+  ],
+  "seed": 2026111611,
+  "phase": "stage1",
+  "budgetUsd": 250
+}
