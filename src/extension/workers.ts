@@ -1685,7 +1685,7 @@ export class WorkerPool {
       meta.ownBaseline = undefined;
     }
     beginThinkingPolicy(activeSession, thinkingPolicy, baselineLevel, args.role);
-    const pinnedEffort = lockedEffort(activeSession, activeSession.model);
+    const pinnedEffort = effort ? lockedEffort(activeSession, activeSession.model, effort) : undefined;
     if (effort && pinnedEffort && pinnedEffort !== effort) modelWarnings.push(
       "Cache protection: " + (activeSession.model?.provider ?? "") + "/" + (activeSession.model?.id ?? "") +
       " has no advertised cache-preserving effort update protocol. Retained " + pinnedEffort +
