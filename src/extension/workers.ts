@@ -967,10 +967,19 @@ export function workerSystemInstructions(spawn: boolean): string {
 }
 
 /**
+ * The Original request a sub-worker prompt may append as evidence: the assignment's own section when `single.verifierOriginal` is on,
+ * none when it is off (the default). Off disables only the automatic supplement; a request that already quotes the user is unchanged.
+ */
+export function verifierEvidenceOriginal(enabled: boolean, handoffRequest: string): string | undefined {
+  return enabled ? originalRequestOf(handoffRequest) : undefined;
+}
+
+/**
  * The prompt of one orche_spawn sub-worker: its role text, who spawned it and why, and (verification) that it has not seen the work.
  * An MDSD explorer with a private scratch directory (mdsd.explorerScratch) ends with the same scratch sentence as an orche_task prompt.
  * `original`: the Original request of the orchestrator's assignment; a verify sub-worker of a verification round whose request does
- * not carry it verbatim gets it appended as evidence (verifierOriginalBlock; not in ultra, whose stages brief their verifiers).
+ * not carry it verbatim gets it appended as evidence (verifierOriginalBlock; not in ultra, whose stages brief their verifiers). The
+ * runtime passes it only with `single.verifierOriginal` on ({@link verifierEvidenceOriginal}); without it the request is sent as written.
  */
 export function subWorkerPrompt(worker: PlannedWorker, orchestrator: string, commands: readonly string[], imagesAvailable: boolean, ultra = false, original?: string): string {
   const preface = `You are sub-worker ${worker.id} ("${worker.name}") of orchestrator ${orchestrator}, spawned for ${worker.reason}. You cannot spawn workers.${worker.reason === "verification" ? " You have not seen how the work was done: judge only from the request below, the repository and your own checks." : ""}${ultra ? ` ${ultraPreface(worker)}` : ""}${worker.brief ? `\n\n${worker.brief}` : ""}`;
@@ -2195,8 +2204,9 @@ export class WorkerPool {
             ...(summaryBudget ? { summaryBudget } : {}),
             specialistRoute: role => resolveSpecialistRoute(config.routes, role, (provider, id) => !!runtime.getModel(provider, id)),
             imageTool: () => config.routes.images ? createGenerateImageTool({ cwd: args.cwd, runtime, images: config.routes.images }) : undefined,
-            // A verifier without the user's own words gets this assignment's Original request appended (docs/handoff-evidence.md).
-            prompt: (planned, imagesAvailable) => subWorkerPrompt(planned, meta.id, config.routes.verifyCommands ?? [], imagesAvailable, !!ultraRun, originalRequestOf(handoffRequest)),
+            // With single.verifierOriginal (default off), a verifier without the user's own words gets this assignment's Original
+            // request appended (docs/handoff-evidence.md); off, every sub-worker gets its request exactly as the orchestrator wrote it.
+            prompt: (planned, imagesAvailable) => subWorkerPrompt(planned, meta.id, config.routes.verifyCommands ?? [], imagesAvailable, !!ultraRun, verifierEvidenceOriginal(config.single.verifierOriginal, handoffRequest)),
             // No turn cap: the request count is only a progress checkpoint (limits.assignmentRequests, 0: none), never a stop.
             timeoutMs: limits.assignmentMs, requestCheckpoint: limits.assignmentRequests, ...(unbounded ? { unbounded: true } : {}),
             // Every sub-worker gets the same activity-aware deadline as this assignment (the resolved limits: base, linear or fixed
@@ -2238,7 +2248,7 @@ export class WorkerPool {
         singleWorkflow && args.role === "implement" ? thinkingPolicyInstructions(thinkingPolicy) : "",
         singleWorkflow ? READ_NODE_INSTRUCTIONS : "",
       ].filter(Boolean).join("\n");
-      const prompt = `${assignmentPrompt({ ...args, request: handoffRequest, orchestrate: orchestrating, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant, orchestrating ? (ultraRun ? ultraSection(readOnly, maxSubWorkers) : mdsdRun ? mdsdSection(readOnly, maxSubWorkers, config.mdsd ?? DEFAULT_MDSD) : orchestratorSection(undefined, maxSubWorkers)) : "")}${rootsLine ? `\n${rootsLine}` : ""}`;
+      const prompt = `${assignmentPrompt({ ...args, request: handoffRequest, orchestrate: orchestrating, ...(files ? { files: [...files] } : {}) }, config.routes.verifyCommands ?? [], !!images, grant, orchestrating ? (ultraRun ? ultraSection(readOnly, maxSubWorkers) : mdsdRun ? mdsdSection(readOnly, maxSubWorkers, config.mdsd ?? DEFAULT_MDSD) : orchestratorSection(undefined, maxSubWorkers, config.single.verifierOriginal)) : "")}${rootsLine ? `\n${rootsLine}` : ""}`;
       const handoff = reusedContext && workflowMode ? prompt.replace(/^(Assignment[^\n]*\n)/, `$1${FOLLOW_UP_NOTE}\n`) : prompt;
       // The plan advisor (single.advisor): armed before the hand-off, started by the worker's first accepted task_plan (or first edit).
       if (advisorRoute) {

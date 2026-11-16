@@ -8,7 +8,7 @@
   - 결과까지 따라간 영향은 판정하지 않았다.
   - 교체·ledger 인수 사례는 기록에 없다.
   - worker compaction이 무엇을 복원했는지는 기록에 남지 않는다.
-- **구현 (§4).** 측정에서 지시와 실제가 어긋난 곳은 하나뿐이다. orchestrator 지시문은 새 verifier에게 "original request"를 주라고 하는데, 대화형 verify sub-worker 요청 116건 중 사용자 원문을 그대로 담은 것은 32건이었다. 그래서 verification 라운드의 verify sub-worker 요청에 orchestrator assignment의 Original request가 원문 그대로 없으면, orche가 그 섹션을 근거로 덧붙인다(`verifierOriginalBlock`).
+- **구현 (§4, 실험 옵션, 기본 꺼짐).** 측정에서 지시와 실제가 어긋난 곳은 하나뿐이다. orchestrator 지시문은 새 verifier에게 "original request"를 주라고 하는데, 대화형 verify sub-worker 요청 116건 중 사용자 원문을 그대로 담은 것은 32건이었다. 그래서 `"single": { "verifierOriginal": true }`를 켜면, verification 라운드의 verify sub-worker 요청에 orchestrator assignment의 Original request가 원문 그대로 없을 때 orche가 그 섹션을 근거로 덧붙인다(`verifierOriginalBlock`). 실제 모델 A/B에서 정확도 개선이 확인되지 않아(§4) 기본값은 꺼짐(`false`)이다.
   - 요청 본문은 바꾸지 않는다.
   - 수락 기준은 orchestrator의 것으로 그대로 남는다.
   - 덧붙인 원문은 권한을 주지 않는다.
@@ -137,13 +137,19 @@ npx tsx experiments/handoff-audit/cli.ts \
 - **교체와 ledger 인수.** 기록에 0건이다. ledger는 기본 꺼짐이다.
 - **worker compaction이 복원한 내용.** worker transcript에 compaction이 827번 있었다. 하지만 그 essentials(현재·이전 인계, `workers.ts` `taskCompactionFor`)는 context를 다시 만들 때 생성되고 transcript에 저장되지 않는다. 그래서 잘렸는지, 빠졌는지 셀 수 없다.
 
-## 4. 구현: verifier 원문 전달
+## 4. 구현: verifier 원문 전달 (opt-in, 기본 꺼짐)
 
+- **켜는 법.** `orche.config.json`(신뢰된 프로젝트 파일, 없으면 사용자 파일)에 `"single": { "verifierOriginal": true }`를 둔다.
+  - 기본값은 `false`다. 키가 없거나, `single`이 없거나, 설정 파일이 없어도 꺼져 있다.
+  - 불리언이 아닌 값을 넣으면 설정 로드가 실패한다(`config.single.verifierOriginal: expected boolean`).
+  - 값은 assignment가 시작될 때 읽는다.
+- **꺼져 있을 때.** sub-worker는 orchestrator가 쓴 요청을 그대로 받는다. orchestrator 지시문에도 자동 보충 문장이 들어가지 않는다. 요청에 사용자 원문을 넣는 것은 지시문대로 orchestrator가 한다. 꺼짐은 자동 보충만 끄고, 요청에 이미 들어 있는 사용자 글은 지우지 않는다.
 - **위치.**
+  - `src/extension/config.ts`: `SingleSettings.verifierOriginal`, `parseSingleConfig`
   - `src/orchestration/handoff-evidence.ts`: `verifierOriginalBlock`
-  - `src/extension/workers.ts`: `subWorkerPrompt`와 그 호출부
-  - `src/orchestrator/instructions.ts`: `spawnUsage` 문구
-- **적용 조건.** 다음이 모두 맞을 때만 덧붙인다.
+  - `src/extension/workers.ts`: `verifierEvidenceOriginal`, `subWorkerPrompt`와 그 호출부
+  - `src/orchestrator/instructions.ts`: `spawnUsage`·`orchestratorSection` 문구(켜졌을 때만)
+- **적용 조건 (켜졌을 때).** 다음이 모두 맞을 때만 덧붙인다.
   - `orche_spawn` reason이 `verification`이고 역할이 `verify`다.
   - ultra가 아니다. ultra는 단계별로 verifier에게 따로 브리핑한다.
   - orchestrator assignment에 Original request 섹션이 있다.
@@ -157,7 +163,13 @@ npx tsx experiments/handoff-audit/cli.ts \
   - main → worker 인계.
   - 간결한 후속 인계와 worker 재사용.
 - **후속 assignment에서 덧붙는 것.** 후속 assignment의 Original request는 그 회차의 새 사용자 메시지다. 그래서 verifier에게 덧붙는 것도 그 메시지뿐이다. 이전 회차 원문은 orchestrator가 요청에 직접 담아야 한다.
-- **효과는 측정하지 않았다.** verifier 판정이나 최종 성공률이 나아지는지는 모른다. 확인하려면 §6의 비교가 필요하다.
+- **효과 측정 (2026-11-15, 실제 모델 A/B, `experiments/verifier-original-ab/README.md`).** 합성 통제 사례 72개(시나리오 44개)를 사용자의 verifier 모델(`cliproxyapi/claude-opus-5-5`, high)과 실제 sub-worker runner로 돌렸다. 두 arm은 이 보충의 유무만 다르다.
+  - **판정 정확도가 의미 있게 개선되지 않았다.** balanced accuracy는 +1.4%p(98% CI −6.2~+9.6)이고, 모두 맞게 판정한 횟수는 OFF 152/176, ON 151/176이다.
+  - **verifier가 더 엄격해진다.** 놓친 위반은 8/74에서 2/74로 줄고, 정상 작업을 잘못 불합격시킨 경우는 16/102에서 23/102로 늘었다. 둘 다 98%에서 유의하지 않다.
+  - **사전등록 규칙의 최종 판정은 INCONCLUSIVE다.** 오불합격 증가를 최대 16.7%p까지 배제하지 못했기 때문이다.
+  - **효과가 나타난 곳.** 도움이 된 것은 사용자 말에만 있던 조건을 새 코드가 어긴 경우다. 해가 된 것은 사용자가 도중에 철회한 조건을 다시 요구한 경우와, 사용자 표현을 지나치게 엄격하게 읽은 경우다.
+  - **일반화 범위.** 이 결과는 통제 벤치마크다. 실제 배포에서의 작업 성공률을 측정한 것이 아니다.
+  - **결정 (2026-11-15).** 이 결과에 따라 보충을 opt-in 실험 옵션(`single.verifierOriginal`)으로 바꾸고 기본값을 껐다. 켜는 경우의 동작은 A/B에서 측정한 것과 같다. 블록 제목의 "verbatim" 표기 문제(main의 섹션이 발췌일 수 있음)는 고치지 않았다.
 
 ## 5. 보류한 것과 다시 볼 조건
 
@@ -205,7 +217,7 @@ npx tsx experiments/handoff-audit/cli.ts \
     - 해로운 수정률(철회된 제약을 되살린 경우 포함)
     - 판정 불가 비율
     - 인계당 비용
-  - 이 작업에서는 모델을 쓰는 실험을 돌리지 않았다.
+  - 이 작업(2026-11-15 첫 번째)에서는 모델을 쓰는 실험을 돌리지 않았다. 이후 verifier 보충 자체의 효과는 `experiments/verifier-original-ab/`에서 실제 모델로 측정했다(§4). 탐지 정책에 대한 위 비교는 여전히 실행하지 않았다.
 
 ## 7. 재현
 

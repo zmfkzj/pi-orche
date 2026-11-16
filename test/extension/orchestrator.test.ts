@@ -292,6 +292,43 @@ describe("orchestrator: independent verification", () => {
     expect(result.text).toMatch(/W1\.1 check \(verify, verification; [^ ]+\/[^ ]+ · thinking off\): passed/);
   });
 
+  // single.verifierOriginal (default off; docs/handoff-evidence.md): the loaded config decides, through the real sub-worker prompt path.
+  describe.each([
+    { name: "omitted (default)", single: undefined, appended: false },
+    { name: "explicit false", single: { verifierOriginal: false }, appended: false },
+    { name: "explicit true", single: { verifierOriginal: true }, appended: true },
+  ])("single.verifierOriginal $name", ({ single, appended }) => {
+    const marker = "## The user's original request (verbatim, appended by orche)";
+    const sentence = "gets that section appended by orche as evidence";
+    const run = async (verifierRequest: string) => {
+      const seen = { orchestrator: "", verifier: "" };
+      const steps = scripted(4, {
+        orchestrator: (turn, context) => {
+          if (turn === 0) { seen.orchestrator = firstUser(context); return tool(SPAWN_TOOL, { reason: "verification", workers: [{ name: "check", role: "verify", request: verifierRequest }] }); }
+          return tool("report_result", { kind: "implement", summary: "Done and verified", data: { status: "done", checklist, split: { decision: "split", criteria: ["verification"], reason: "the user asked for an independent review" } } });
+        },
+        check: (_turn, context) => { seen.verifier = firstUser(context); return tool("report_result", { kind: "verify", summary: "ok", data: { passed: true, evidence: ["checked"], issues: [] } }); },
+      });
+      const { execute } = await fixture(steps, single ? { single } : {});
+      const result = await execute({ request: `${request}\nThe user asks for an independent review.` });
+      expect(result.details.spawned?.map(worker => worker.status)).toEqual(["passed"]);
+      return seen;
+    };
+
+    it(appended ? "appends the user's Original request to a verifier request that lacks it" : "sends the verifier request as written, with no supplement", async () => {
+      const seen = await run("Check greeting files. Run your own checks.");
+      expect(seen.verifier.includes(marker)).toBe(appended);
+      expect(seen.verifier.includes("인사 파일 두 개를 만들어줘.")).toBe(appended);
+      expect(seen.orchestrator.includes(sentence)).toBe(appended);
+    });
+
+    it("keeps a verifier request that already quotes the user unchanged and adds nothing", async () => {
+      const seen = await run("Check greeting files. The user said: 인사 파일 두 개를 만들어줘. The user asks for an independent review.");
+      expect(seen.verifier).toContain("The user said: 인사 파일 두 개를 만들어줘.");
+      expect(seen.verifier).not.toContain(marker);
+    });
+  });
+
   it("refuses a verification round past the cap, requires data.unresolved, and says so in the result; main can raise the cap", async () => {
     const verify = () => tool(SPAWN_TOOL, { reason: "verification", workers: [{ name: "check", role: "verify", request: "Original request: greeting.txt says hello. Run your own checks." }] });
     const split = { decision: "split", criteria: ["verification"], reason: "the user asked for review rounds" };

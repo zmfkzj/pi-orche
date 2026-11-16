@@ -77,9 +77,9 @@ async function fixture(single: Record<string, unknown> | undefined) {
 
 describe("single.strongReflection config", () => {
   it("is absent unless set, accepts only booleans, and leaves the other single settings as they were", () => {
-    expect(parseSingleConfig({})).toEqual({ ledger: false, spawn: true, advisor: false, maxSubWorkers: 4 });
+    expect(parseSingleConfig({})).toEqual({ ledger: false, spawn: true, advisor: false, maxSubWorkers: 4, verifierOriginal: false });
     expect("strongReflection" in parseSingleConfig({})).toBe(false);
-    expect(parseSingleConfig({ strongReflection: true })).toEqual({ ledger: false, spawn: true, advisor: false, maxSubWorkers: 4, strongReflection: true });
+    expect(parseSingleConfig({ strongReflection: true })).toEqual({ ledger: false, spawn: true, advisor: false, maxSubWorkers: 4, strongReflection: true, verifierOriginal: false });
     expect(parseSingleConfig({ strongReflection: false }).strongReflection).toBe(false);
     expect(() => parseSingleConfig({ strongReflection: "yes" })).toThrow("config.single.strongReflection: expected boolean");
   });

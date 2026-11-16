@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { duplicateRequirementIds, evidenceText, handoffSignals, userTextCarry, verifierOriginalBlock, VERIFIER_ORIGINAL_LIMIT } from "../../src/orchestration/handoff-evidence.js";
 import { requirementDefinitions, requirementIds } from "../../src/orchestration/result-schemas.js";
-import { subWorkerPrompt } from "../../src/extension/workers.js";
+import { subWorkerPrompt, verifierEvidenceOriginal } from "../../src/extension/workers.js";
+import { orchestratorSection, spawnUsage } from "../../src/orchestrator/instructions.js";
+import { DEFAULT_SINGLE, parseSingleConfig } from "../../src/extension/config.js";
 
 describe("userTextCarry", () => {
   it("finds a message carried verbatim, also re-wrapped or quoted line by line", () => {
@@ -88,5 +90,66 @@ describe("subWorkerPrompt verifier evidence", () => {
     expect(subWorkerPrompt(carried, "W1", [], false, false, original)).toBe(subWorkerPrompt(carried, "W1", [], false));
     expect(subWorkerPrompt(verifier, "W1", [], false, false, undefined)).toBe(subWorkerPrompt(verifier, "W1", [], false));
     expect(subWorkerPrompt(verifier, "W1", [], false, true, original)).not.toContain("## The user's original request");
+  });
+});
+
+describe("single.verifierOriginal (default off)", () => {
+  type Planned = Parameters<typeof subWorkerPrompt>[0];
+  const assignment = "Intent: raise recall.\nR1: Recall improves.\n\nOriginal request:\nImprove recall. Keep precision at least 50%.";
+  const original = "Improve recall. Keep precision at least 50%.";
+  const verifier = { id: "W1.1", name: "verify", role: "verify", reason: "verification", request: "Check that recall improved." } as Planned;
+  const runtimePrompt = (planned: Planned, enabled: boolean, ultra = false) => subWorkerPrompt(planned, "W1", [], false, ultra, verifierEvidenceOriginal(enabled, assignment));
+  const marker = "## The user's original request (verbatim, appended by orche)";
+
+  it("passes the assignment's Original request only when the option is on", () => {
+    expect(verifierEvidenceOriginal(DEFAULT_SINGLE.verifierOriginal, assignment)).toBeUndefined();
+    expect(verifierEvidenceOriginal(parseSingleConfig({}).verifierOriginal, assignment)).toBeUndefined();
+    expect(verifierEvidenceOriginal(false, assignment)).toBeUndefined();
+    expect(verifierEvidenceOriginal(true, assignment)).toBe(original);
+    expect(verifierEvidenceOriginal(true, "R1: no original section")).toBeUndefined();
+  });
+
+  it("off (default or explicit): the verifier gets its request exactly as written, with no supplement", () => {
+    const off = runtimePrompt(verifier, DEFAULT_SINGLE.verifierOriginal);
+    expect(off).toBe(subWorkerPrompt(verifier, "W1", [], false));
+    expect(off).not.toContain(marker);
+    expect(off).not.toContain(original);
+    expect(runtimePrompt(verifier, false)).toBe(off);
+  });
+
+  it("off removes nothing the orchestrator wrote: a request quoting the user, even under the same heading, reaches the verifier intact", () => {
+    const quoting = { ...verifier, request: `Check it.\n${marker}\n${original}` } as Planned;
+    const off = runtimePrompt(quoting, false);
+    expect(off).toContain(`Check it.\n${marker}\n${original}`);
+    expect(off.split(marker)).toHaveLength(2);
+  });
+
+  it("on: appends the original to a verifier that lacks it, also partly; not to one that has it; never outside verification/verify or in ultra", () => {
+    const on = runtimePrompt(verifier, true);
+    expect(on).toContain(marker);
+    expect(on.indexOf("Check that recall improved.")).toBeLessThan(on.indexOf(marker));
+    const partial = { ...verifier, request: "Check it. Improve recall." } as Planned;
+    expect(runtimePrompt(partial, true)).toContain(marker);
+    const carried = { ...verifier, request: `Check it. The user asked: ${original}` } as Planned;
+    expect(runtimePrompt(carried, true)).toBe(runtimePrompt(carried, false));
+    const outOfScope = [
+      { ...verifier, reason: "parallelism" },
+      { ...verifier, reason: "isolation" },
+      { ...verifier, role: "answer" },
+      { id: "W1.2", name: "part", role: "implement", reason: "parallelism", request: "Do the part.", files: ["a.ts"] },
+    ] as Planned[];
+    for (const planned of outOfScope) expect(runtimePrompt(planned, true)).toBe(runtimePrompt(planned, false));
+    expect(runtimePrompt(verifier, true, true)).toBe(runtimePrompt(verifier, false, true));
+  });
+
+  it("tells the orchestrator about the supplement only when it is on", () => {
+    const sentence = "gets that section appended by orche as evidence";
+    expect(spawnUsage()).not.toContain(sentence);
+    expect(spawnUsage(4, false)).not.toContain(sentence);
+    expect(spawnUsage(4, true)).toContain(sentence);
+    expect(orchestratorSection()).not.toContain(sentence);
+    expect(orchestratorSection(undefined, 4, true)).toContain(sentence);
+    // The rest of the verification guidance is the same either way.
+    expect(spawnUsage(4, true).replace(` (a verifier request without your Original request verbatim ${sentence})`, "")).toBe(spawnUsage(4, false));
   });
 });

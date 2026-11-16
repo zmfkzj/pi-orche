@@ -251,8 +251,8 @@ describe("orche config discovery", () => {
     await expect(discoverOrcheConfig({ ...files, projectTrusted: false, session })).rejects.toThrow("config.taskContext");
   });
 
-  it("defaults single to {ledger:false, spawn:true, advisor:false, maxSubWorkers:4} and reads it from the selected file", async () => {
-    const defaults = { ledger: false, spawn: true, advisor: false, maxSubWorkers: 4 };
+  it("defaults single to {ledger:false, spawn:true, advisor:false, maxSubWorkers:4, verifierOriginal:false} and reads it from the selected file", async () => {
+    const defaults = { ledger: false, spawn: true, advisor: false, maxSubWorkers: 4, verifierOriginal: false };
     expect(DEFAULT_SINGLE).toEqual(defaults);
     expect(parseSingleConfig({})).toEqual(defaults);
     expect(parseSingleConfig({ ledger: true })).toEqual({ ...defaults, ledger: true });
@@ -288,26 +288,26 @@ describe("orche config discovery", () => {
   });
   it.each([{ pipeline: "v2" }, { pipeline: "v3" }, { frame: "spec" }, { checker: { gate: "always" } }, { nav: false }, { mainReview: "evidence" }, { investigation: { critic: "auto" } }, { creation: { divergence: "always", candidates: 2 } }])("ignores the removed single setting %j with a warning", async value => {
     const warnings: string[] = [];
-    expect(parseSingleConfig({ ...value, ledger: true }, warnings)).toEqual({ ledger: true, spawn: true, advisor: false, maxSubWorkers: 4 });
+    expect(parseSingleConfig({ ...value, ledger: true }, warnings)).toEqual({ ledger: true, spawn: true, advisor: false, maxSubWorkers: 4, verifierOriginal: false });
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain(Object.keys(value)[0]);
     const files = await layout({ user: { ...cfg("u/user"), single: value } });
     const path = join(files.agentDir, "orche.config.json");
     const loaded = await loadOrcheConfigFile(path);
-    expect(loaded.single).toEqual({ ledger: false, spawn: true, advisor: false, maxSubWorkers: 4 });
+    expect(loaded.single).toEqual({ ledger: false, spawn: true, advisor: false, maxSubWorkers: 4, verifierOriginal: false });
     expect(loaded.warnings.join("\n")).toContain(Object.keys(value)[0]);
     const found = await discoverOrcheConfig({ ...files, projectTrusted: false, session });
-    expect(found.single).toEqual({ ledger: false, spawn: true, advisor: false, maxSubWorkers: 4 });
+    expect(found.single).toEqual({ ledger: false, spawn: true, advisor: false, maxSubWorkers: 4, verifierOriginal: false });
     expect(found.warnings?.join("\n")).toContain(Object.keys(value)[0]);
   });
 
   // single.maxSubWorkers: orche_spawn's per-call cap (default 4, integers 2-8); invalid values fail the config load with an actionable error.
   it("reads single.maxSubWorkers within 2-8 next to the other single settings", async () => {
-    expect(parseSingleConfig({ maxSubWorkers: 2 })).toEqual({ ledger: false, spawn: true, advisor: false, maxSubWorkers: 2 });
+    expect(parseSingleConfig({ maxSubWorkers: 2 })).toEqual({ ledger: false, spawn: true, advisor: false, maxSubWorkers: 2, verifierOriginal: false });
     expect(parseSingleConfig({ maxSubWorkers: 8, spawn: false }).maxSubWorkers).toBe(8);
     const files = await layout({ user: { ...cfg("u/user"), single: { maxSubWorkers: 3 } } });
     const found = await discoverOrcheConfig({ ...files, projectTrusted: false, session });
-    expect(found.single).toEqual({ ledger: false, spawn: true, advisor: false, maxSubWorkers: 3 });
+    expect(found.single).toEqual({ ledger: false, spawn: true, advisor: false, maxSubWorkers: 3, verifierOriginal: false });
     expect(found.warnings ?? []).toEqual([]);
   });
   it.each([1, 9, 0, -4, 2.5, "4", null, true, Number.NaN, Infinity])("rejects single.maxSubWorkers %j with the supported range", async value => {
@@ -348,6 +348,25 @@ describe("orche config discovery", () => {
     expect((await discoverOrcheConfig({ ...bare, projectTrusted: false, session })).single.advisor).toBe(false);
     const invalid = await layout({ user: { ...cfg("u/user"), single: { advisor: "yes" } } });
     await expect(discoverOrcheConfig({ ...invalid, projectTrusted: false, session })).rejects.toThrow("config.single.advisor: expected boolean");
+  });
+
+  // single.verifierOriginal (docs/handoff-evidence.md, experiments/verifier-original-ab): an opt-in boolean, off when absent.
+  it.each([{ verifierOriginal: "true" }, { verifierOriginal: "false" }, { verifierOriginal: null }, { verifierOriginal: 1 }])("rejects invalid single.verifierOriginal %j", value => {
+    expect(() => parseSingleConfig(value)).toThrow("config.single.verifierOriginal: expected boolean");
+  });
+  it("keeps single.verifierOriginal off unless the selected file sets it true", async () => {
+    expect(DEFAULT_SINGLE.verifierOriginal).toBe(false);
+    expect(parseSingleConfig({}).verifierOriginal).toBe(false);
+    expect(parseSingleConfig({ verifierOriginal: false }).verifierOriginal).toBe(false);
+    expect(parseSingleConfig({ verifierOriginal: true })).toEqual({ ...DEFAULT_SINGLE, verifierOriginal: true });
+    const read = async (files: Awaited<ReturnType<typeof layout>>) => (await discoverOrcheConfig({ ...files, projectTrusted: false, session })).single.verifierOriginal;
+    expect(await read(await layout({}))).toBe(false); // no config file: the session fallback
+    expect(await read(await layout({ user: cfg("u/user") }))).toBe(false); // a file without single
+    expect(await read(await layout({ user: { ...cfg("u/user"), single: {} } }))).toBe(false);
+    expect(await read(await layout({ user: { ...cfg("u/user"), single: { verifierOriginal: false } } }))).toBe(false);
+    expect(await read(await layout({ user: { ...cfg("u/user"), single: { verifierOriginal: true } } }))).toBe(true);
+    const invalid = await layout({ user: { ...cfg("u/user"), single: { verifierOriginal: "yes" } } });
+    await expect(discoverOrcheConfig({ ...invalid, projectTrusted: false, session })).rejects.toThrow("config.single.verifierOriginal: expected boolean");
   });
 
   it.each([null, [], true, { unknown: true }, { ledger: "true" }, { ledger: 1 }, { ledger: null }])("rejects invalid single %j without fallback", async value => {

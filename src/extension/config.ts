@@ -205,6 +205,11 @@ export function parseContextWarningConfig(value: unknown): ContextWarningSetting
  * one fixed reflection prompt right before its self-review (the first integration node it starts, else its first report_result,
  * which is held once). Single, ultra, mdsd and direct are unchanged whatever its value.
  *
+ * `verifierOriginal` (experiment, default false; docs/handoff-evidence.md, experiments/verifier-original-ab): when true, a `verify`
+ * sub-worker of an `orche_spawn` verification round (not ultra) whose request lacks the orchestrator assignment's Original request
+ * verbatim gets that section appended as labelled evidence (verifierOriginalBlock). Off (absent or false): no automatic supplement;
+ * whatever the orchestrator writes into a request, the user's words included, reaches the sub-worker unchanged.
+ *
  * The keys of the removed v2 pipeline and workflow policies (`pipeline`, `frame`, `checker`, `nav`, `mainReview`, `investigation`,
  * `creation`) are ignored with a warning, whatever their value, so an old config still loads.
  */
@@ -215,9 +220,11 @@ export interface SingleSettings {
   maxSubWorkers: number;
   /** Experiment (src/single/reflection.ts): absent unless the config sets it; only `true` turns it on, and only in strong mode. */
   strongReflection?: boolean;
+  /** Append the assignment's Original request to a verification round's verify sub-worker that lacks it (default false). */
+  verifierOriginal: boolean;
 }
-export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false, spawn: true, advisor: false, maxSubWorkers: MAX_SUB_WORKERS };
-const SINGLE_KEYS = new Set(["ledger", "spawn", "advisor", "maxSubWorkers", "strongReflection"]);
+export const DEFAULT_SINGLE: Readonly<SingleSettings> = { ledger: false, spawn: true, advisor: false, maxSubWorkers: MAX_SUB_WORKERS, verifierOriginal: false };
+const SINGLE_KEYS = new Set(["ledger", "spawn", "advisor", "maxSubWorkers", "strongReflection", "verifierOriginal"]);
 /** Keys of the removed single pipeline v2, `mainReview` and workflow policies (docs/orchestrator.md 4): ignored with a warning. */
 export const LEGACY_SINGLE_KEYS: ReadonlySet<string> = new Set(["pipeline", "frame", "checker", "nav", "mainReview", "investigation", "creation"]);
 export function legacySingleWarning(keys: readonly string[]): string {
@@ -233,6 +240,7 @@ export function parseSingleConfig(value: unknown, warnings?: string[]): SingleSe
   if (settings.spawn !== undefined && typeof settings.spawn !== "boolean") throw new RouteConfigError("config.single.spawn: expected boolean");
   if (settings.advisor !== undefined && typeof settings.advisor !== "boolean") throw new RouteConfigError("config.single.advisor: expected boolean");
   if (settings.strongReflection !== undefined && typeof settings.strongReflection !== "boolean") throw new RouteConfigError("config.single.strongReflection: expected boolean");
+  if (settings.verifierOriginal !== undefined && typeof settings.verifierOriginal !== "boolean") throw new RouteConfigError("config.single.verifierOriginal: expected boolean");
   const max = settings.maxSubWorkers;
   if (max !== undefined && (typeof max !== "number" || !Number.isInteger(max) || max < SUB_WORKER_CAP_MIN || max > SUB_WORKER_CAP_MAX))
     throw new RouteConfigError(`config.single.maxSubWorkers: expected an integer from ${SUB_WORKER_CAP_MIN} to ${SUB_WORKER_CAP_MAX} (sub-workers per orche_spawn call; default ${MAX_SUB_WORKERS}); got ${JSON.stringify(max)}`);
@@ -243,6 +251,7 @@ export function parseSingleConfig(value: unknown, warnings?: string[]): SingleSe
     advisor: (settings.advisor as boolean | undefined) ?? DEFAULT_SINGLE.advisor,
     maxSubWorkers: (max as number | undefined) ?? DEFAULT_SINGLE.maxSubWorkers,
     ...(settings.strongReflection !== undefined ? { strongReflection: settings.strongReflection as boolean } : {}),
+    verifierOriginal: (settings.verifierOriginal as boolean | undefined) ?? DEFAULT_SINGLE.verifierOriginal,
   };
 }
 
