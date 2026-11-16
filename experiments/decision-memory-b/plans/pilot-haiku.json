@@ -1,0 +1,1 @@
+{ "out": "../../../results/decision-memory-b/pilot-haiku", "seeds": [906, 907], "concurrency": 8, "seed": 2026111605, "scratch": "/var/tmp/pi-arthur/pi-orche/01a1df36-c9c4-72a4-8645-390d5b513adf/W1/dmb-scratch", "phase": "pilot-haiku", "budgetUsd": 8, "model": "haiku" }

@@ -1,0 +1,1 @@
+{ "out": "../../../results/decision-memory-b/pilot2", "seeds": [903, 904], "concurrency": 8, "seed": 2026111603, "scratch": "/var/tmp/pi-arthur/pi-orche/01a1df36-c9c4-72a4-8645-390d5b513adf/W1/dmb-scratch", "phase": "pilot2", "budgetUsd": 30 }

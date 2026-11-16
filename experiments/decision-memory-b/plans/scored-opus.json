@@ -1,0 +1,1 @@
+{ "out": "../../../results/decision-memory-b/scored-opus", "seeds": [1, 2, 3, 4, 5, 6], "concurrency": 8, "seed": 2026111607, "scratch": "/var/tmp/pi-arthur/pi-orche/01a1df36-c9c4-72a4-8645-390d5b513adf/W1/dmb-scratch", "phase": "scored-opus", "budgetUsd": 110, "model": "opus" }
