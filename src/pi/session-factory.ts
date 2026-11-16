@@ -35,7 +35,7 @@ import { setSummaryDecisionMemory, summaryBudgetUse, takeSummaryRequests, type S
 import { markCompaction, recordToolResult } from "./read-telemetry.js";
 import { readNodeRefusal } from "./read-node-guard.js";
 import { thinkingPolicyOf } from "./thinking-policy.js";
-import { observeEffortRequest } from "./cache-effort.js";
+import { observeEffortRequest, preserveAnthropicToolLoopEffort } from "./cache-effort.js";
 import { atEffectiveBaseline, thinkingStateOf } from "./thinking-state.js";
 import { BOOKKEEPING_TOOLS, evidenceLedgerOf, recordToolCall, refText } from "./tool-evidence.js";
 import { unknownToolHandler } from "./unknown-tool.js";
@@ -333,8 +333,10 @@ function createWorkerHygieneExtension(options: SessionOptions, getSession: () =>
   const outputCap = outputCapHandler(getSession);
   const beforeProviderRequest = (event: { payload: unknown }) => {
     const session = getSession();
-    if (session) observeEffortRequest(session, session.model, session.thinkingLevel);
-    return outputCap(event);
+    if (!session) return outputCap(event);
+    observeEffortRequest(session, session.model, session.thinkingLevel);
+    const safe = preserveAnthropicToolLoopEffort(session, session.model, event.payload);
+    return outputCap({ payload: safe ?? event.payload }) ?? safe;
   };
   const messageEnd = (event: { message: AgentMessage }) => {
     length.message_end(event as never);
