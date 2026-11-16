@@ -66,7 +66,7 @@ import { configureSummaryBudget, SUMMARY_BUDGET_PROFILES, type SummaryBudgetProf
 import { beginReadTelemetry, readTelemetry, type ReadTelemetry } from "../pi/read-telemetry.js";
 import { nextBaseline, READ_LEVEL, setThinkingPhase, stepDownLevel, thinkingStateOf } from "../pi/thinking-state.js";
 import { compareCachedModelSwitch, type CacheObservation } from "../orchestration/cache-cost.js";
-import { lockedEffort } from "../pi/cache-effort.js";
+import { guardedThinkingLevel, lockedEffort } from "../pi/cache-effort.js";
 import { THINKING_LEVELS } from "../pi/thinking-levels.js";
 import { ADVISOR_TIMEOUT_MS, advisorLines, AssignmentAdvisor, type AdvisorDetails, type AdvisorSource } from "../single/advisor.js";
 import { StrongReflection, type ReflectionSummary } from "../single/reflection.js";
@@ -1600,8 +1600,9 @@ export class WorkerPool {
           await session.setModel(effective);
           worker.cacheObservation = undefined;
         }
-        if (session.thinkingLevel !== (route.thinking ?? "off")) session.setThinkingLevel(route.thinking ?? "off");
-        baselineLevel = route.thinking ?? "off";
+        const level = guardedThinkingLevel(session, effective, route.thinking ?? "off");
+        if (session.thinkingLevel !== level) session.setThinkingLevel(level as ThinkingLevel);
+        baselineLevel = level;
         worker.model = `${session.model!.provider}/${session.model!.id}`;
         worker.thinking = session.thinkingLevel;
         worker.contextWindow = session.model!.contextWindow;
