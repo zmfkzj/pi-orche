@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   guardedThinkingLevel, lockedEffort, needsCacheEffortProtection,
-  observeEffortRequest, supportsCachePreservingEffort,
+  observeEffortRequest, preserveAnthropicToolLoopEffort, supportsCachePreservingEffort,
 } from "../../src/pi/cache-effort.js";
 import { beginThinking, setThinkingPhase } from "../../src/pi/thinking-state.js";
 
@@ -51,6 +51,36 @@ describe("prompt-cache-preserving effort capability", () => {
     observeEffortRequest(b, proxyClaude, "low");
     expect(guardedThinkingLevel(a, proxyClaude, "low")).toBe("high");
     expect(guardedThinkingLevel(b, proxyClaude, "high")).toBe("low");
+  });
+
+  it("defers native Claude effort-only markers across tool_result-only turns without editing history", () => {
+    const session = {};
+    const user = { role: "user", content: "initial question" };
+    const marker = (effort: string) => ({ role: "system", content: [], output_config: { effort } });
+    const toolResult = { role: "user", content: [{ type: "tool_result", tool_use_id: "tool_1", content: "result" }] };
+    observeEffortRequest(session, nativeClaude, "high");
+    const first = { messages: [user, marker("high")], output_config: { effort: "low" } };
+    expect(preserveAnthropicToolLoopEffort(session, nativeClaude, first)).toBeUndefined();
+    const later = { messages: [user, { role: "assistant", content: [{ type: "tool_use", id: "tool_1" }] }, toolResult, marker("low")], output_config: { effort: "low" } };
+    const safe = preserveAnthropicToolLoopEffort(session, nativeClaude, later) as typeof later;
+    expect(safe.messages.at(-1)).toEqual(marker("high"));
+    expect(safe.output_config).toEqual({ effort: "low" });
+    expect(later.messages.at(-1)).toEqual(marker("low")); // no mutation
+    const realUser = { messages: [...later.messages.slice(0, -1), { role: "user", content: "follow-up" }, marker("low")] };
+    expect(preserveAnthropicToolLoopEffort(session, nativeClaude, realUser)).toBeUndefined();
+    const anotherTool = { messages: [...realUser.messages.slice(0, -1), toolResult, marker("high")] };
+    const delayed = preserveAnthropicToolLoopEffort(session, nativeClaude, anotherTool) as typeof anotherTool;
+    expect(delayed.messages.at(-1)).toEqual(marker("low"));
+  });
+
+  it("prevents switching between disabled and adaptive thinking in a warm native Claude session", () => {
+    const active = {};
+    observeEffortRequest(active, nativeClaude, "high");
+    expect(guardedThinkingLevel(active, nativeClaude, "off")).toBe("high");
+    expect(lockedEffort(active, nativeClaude, "off")).toBe("high");
+    const disabled = {};
+    observeEffortRequest(disabled, nativeClaude, "off");
+    expect(guardedThinkingLevel(disabled, nativeClaude, "high")).toBe("off");
   });
 
   it("retains a warm Claude proxy prefix through read-node / phase effort changes", () => {
