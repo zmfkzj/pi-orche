@@ -35,6 +35,7 @@ import { setSummaryDecisionMemory, summaryBudgetUse, takeSummaryRequests, type S
 import { markCompaction, recordToolResult } from "./read-telemetry.js";
 import { readNodeRefusal } from "./read-node-guard.js";
 import { thinkingPolicyOf } from "./thinking-policy.js";
+import { observeEffortRequest } from "./cache-effort.js";
 import { atEffectiveBaseline, thinkingStateOf } from "./thinking-state.js";
 import { BOOKKEEPING_TOOLS, evidenceLedgerOf, recordToolCall, refText } from "./tool-evidence.js";
 import { unknownToolHandler } from "./unknown-tool.js";
@@ -330,6 +331,11 @@ function createWorkerHygieneExtension(options: SessionOptions, getSession: () =>
   const length = lengthRecoveryHandlers(getSession, options.lengthRecovery);
   const unknownTool = unknownToolHandler(() => getSession()?.getActiveToolNames() ?? []);
   const outputCap = outputCapHandler(getSession);
+  const beforeProviderRequest = (event: { payload: unknown }) => {
+    const session = getSession();
+    if (session) observeEffortRequest(session, session.model, session.thinkingLevel);
+    return outputCap(event);
+  };
   const messageEnd = (event: { message: AgentMessage }) => {
     length.message_end(event as never);
     return unknownTool(event as never);
@@ -359,7 +365,7 @@ function createWorkerHygieneExtension(options: SessionOptions, getSession: () =>
       ["tool_call", [toolCall as never]],
       ["session_before_compact", [length.session_before_compact as never]],
       ["agent_before_settle", [length.agent_before_settle as never]],
-      ["before_provider_request", [outputCap as never]],
+      ["before_provider_request", [beforeProviderRequest as never]],
       ["tool_result", [toolResult as never]],
     ]),
     tools: new Map(), messageRenderers: new Map(), entryRenderers: new Map(),
