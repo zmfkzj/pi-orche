@@ -16,7 +16,9 @@
 import type { EffortModel } from "./effort-mapping.js";
 
 export interface CacheEffortModel extends EffortModel {
-  compat?: { supportsMidConvoEffort?: boolean };
+  /** Pi uses a discriminated union of API compat schemas, not all of which
+   * declare this optional capability. Treat it as unknown until checked. */
+  compat?: unknown;
 }
 
 type Lock = { model: string; effort: string };
@@ -34,7 +36,9 @@ const modelKey = (model: CacheEffortModel | undefined) =>
   model ? [model.provider ?? "", model.id ?? "", model.api ?? ""].join("/") : "";
 
 export function supportsCachePreservingEffort(model: CacheEffortModel | undefined): boolean {
-  if (!model || model.compat?.supportsMidConvoEffort !== true) return false;
+  const compat = model?.compat;
+  if (!model || !compat || typeof compat !== "object" ||
+      !("supportsMidConvoEffort" in compat) || compat.supportsMidConvoEffort !== true) return false;
   const id = (model.id ?? "").toLowerCase();
   // CPA advertises this flag from its /v1/models catalog only when the
   // upstream supports configuration_update; its Codex adapter owns the wire.
