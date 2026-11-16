@@ -23,9 +23,9 @@ export interface CacheEffortModel extends EffortModel {
 
 type Lock = { model: string; effort: string };
 const locks = new WeakMap<object, Lock>();
-/** Native Anthropic effort-only markers are legal only on genuine user turns.
- * Keep the previous marker during tool-result-only turns and apply a requested
- * level on the next new user message. */
+/** Native Anthropic effort-only markers may appear after tool results, but
+ * affect replies only after a genuine user turn. Keep the ACTUAL level during
+ * a tool-only loop and defer the requested level to the next assignment. */
 interface ClaudeTurn { model: string; effort: string; userTurns: number }
 const claudeTurns = new WeakMap<object, ClaudeTurn>();
 const nativeClaude = (model: CacheEffortModel | undefined) =>
@@ -116,10 +116,10 @@ function realUserMessage(value: unknown): boolean {
 /**
  * Preserve the cached Anthropic prefix through tool-result-only turns.
  * Pi emits per-message effort markers when compat.supportsMidConvoEffort is
- * true, but the Anthropic beta permits a NEW marker only after a real user
- * input. After a tool result, replace the trailing marker's value with the
- * last actually sent effort (do not rewrite old messages). The requested
- * effort can take effect at the next genuine user turn.
+ * true, but the Anthropic beta applies a changed effort only after a real
+ * user input. Defensive fallback: after a tool result, keep the current
+ * marker's effective value (do not rewrite old messages). The requested
+ * effort takes effect at the next genuine user turn.
  *
  * Returns an adjusted payload, or undefined when no change is needed.
  * The provider owns both the beta header and the historic effort markers.
