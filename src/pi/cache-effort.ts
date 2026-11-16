@@ -21,6 +21,14 @@ export interface CacheEffortModel extends EffortModel {
 
 type Lock = { model: string; effort: string };
 const locks = new WeakMap<object, Lock>();
+/** Native Anthropic effort-only markers are legal only on genuine user turns.
+ * Keep the previous marker during tool-result-only turns and apply a requested
+ * level on the next new user message. */
+interface ClaudeTurn { model: string; effort: string; userTurns: number }
+const claudeTurns = new WeakMap<object, ClaudeTurn>();
+const nativeClaude = (model: CacheEffortModel | undefined) =>
+  model?.api === "anthropic-messages" && supportsCachePreservingEffort(model);
+
 
 const modelKey = (model: CacheEffortModel | undefined) =>
   model ? [model.provider ?? "", model.id ?? "", model.api ?? ""].join("/") : "";
@@ -54,12 +62,21 @@ export function observeEffortRequest(session: object, model: CacheEffortModel | 
   if (previous && previous.model !== key) locks.delete(session); // model switch: new cache namespace
   if (supportsCachePreservingEffort(model) || !needsCacheEffortProtection(model)) {
     locks.delete(session); // the provider owns effort history, or caching is out of scope
+    if (nativeClaude(model)) {
+      const saved = claudeTurns.get(session);
+      if (!saved || saved.model !== key) claudeTurns.set(session, { model: key, effort: sentEffort, userTurns: 0 });
+    } else claudeTurns.delete(session);
     return;
   }
+  claudeTurns.delete(session);
   if (!locks.has(session)) locks.set(session, { model: key, effort: sentEffort });
 }
 
 export function guardedThinkingLevel(session: object, model: CacheEffortModel | undefined, requested: string): string {
+  const native = claudeTurns.get(session);
+  // Enabled/disabled thinking has a different cache fingerprint even with
+  // Anthropic's effort-only beta. Do not switch it in a warm conversation.
+  if (native && native.model === modelKey(model) && (requested === "off" || native.effort === "off")) return native.effort;
   const lock = locks.get(session);
   if (!lock || lock.model !== modelKey(model)) return requested;
   return lock.effort;
@@ -68,4 +85,60 @@ export function guardedThinkingLevel(session: object, model: CacheEffortModel | 
 export function lockedEffort(session: object, model: CacheEffortModel | undefined): string | undefined {
   const lock = locks.get(session);
   return lock?.model === modelKey(model) ? lock.effort : undefined;
+}
+
+
+/** True only for an ordinary user message carrying actual user content, not tool_result-only output. */
+function realUserMessage(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const msg = value as { role?: unknown; content?: unknown };
+  if (msg.role !== "user") return false;
+  if (typeof msg.content === "string") return msg.content.length > 0;
+  if (!Array.isArray(msg.content)) return false;
+  return msg.content.some(part => !part || typeof part !== "object" || (part as { type?: unknown }).type !== "tool_result");
+}
+
+/**
+ * Preserve the cached Anthropic prefix through tool-result-only turns.
+ * Pi emits per-message effort markers when compat.supportsMidConvoEffort is
+ * true, but the Anthropic beta permits a NEW marker only after a real user
+ * input. After a tool result, replace the trailing marker's value with the
+ * last actually sent effort (do not rewrite old messages). The requested
+ * effort can take effect at the next genuine user turn.
+ *
+ * Returns an adjusted payload, or undefined when no change is needed.
+ * The provider owns both the beta header and the historic effort markers.
+ */
+export function preserveAnthropicToolLoopEffort(
+  session: object, model: CacheEffortModel | undefined, payload: unknown,
+): unknown {
+  if (!nativeClaude(model) || !payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+  const body = payload as { messages?: unknown };
+  if (!Array.isArray(body.messages) || !body.messages.length) return undefined;
+  const count = body.messages.filter(realUserMessage).length;
+  const tail = body.messages.at(-1);
+  if (!tail || typeof tail !== "object") return undefined;
+  const last = tail as { role?: unknown; output_config?: unknown };
+  if (last.role !== "system" || !last.output_config || typeof last.output_config !== "object") return undefined;
+  const config = last.output_config as { effort?: unknown };
+  const requested = config.effort;
+  if (typeof requested !== "string" || !requested) return undefined;
+  const key = modelKey(model);
+  const state = claudeTurns.get(session);
+  if (!state || state.model !== key || count < state.userTurns) {
+    claudeTurns.set(session, { model: key, effort: requested, userTurns: count });
+    return undefined;
+  }
+  if (requested === state.effort || count > state.userTurns) {
+    state.effort = requested;
+    state.userTurns = count;
+    return undefined;
+  }
+  return {
+    ...body,
+    messages: [
+      ...body.messages.slice(0, -1),
+      { ...last, output_config: { ...config, effort: state.effort } },
+    ],
+  };
 }
