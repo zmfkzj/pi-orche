@@ -38,6 +38,8 @@ export interface DiscoveredConfig {
   single: SingleSettings;
   /** `thinkingPolicy` of the selected file with defaults applied (fixed: the assignment's level throughout; docs/thinking-policy.md). */
   thinkingPolicy: ThinkingPolicySettings;
+  /** Auto-select CPA Anthropic Messages for known Claude effort-capable worker models; default true. */
+  claudeNative: boolean;
   /** `outputCap` of the selected file with defaults applied (auto: explicit max_output_tokens for Claude via CLIProxyAPI; src/pi/output-cap.ts). */
   outputCap?: OutputCapSettings;
   /** `writeRoots` of the selected file as written (absolute, `~/...` or relative to the task cwd; see {@link resolveWriteRoots}); default []. */
@@ -378,7 +380,7 @@ export function parseBashReviewConfig(value: unknown): BashReviewSettings {
  * `concurrentSessions`, `records`, `taskContext`, `contextWarning`, `mainCompaction`, `single`, `thinkingPolicy`, `writeRoots`, `bashReview`, `mdsd` and `workerCompaction` settings, validated here and removed before the route parser sees the file.
  * `warnings` lists settings that were ignored (removed `single` keys, keys of the removed coordinator); the file still loads.
  */
-export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; mainCompaction: MainCompactionSettings; single: SingleSettings; thinkingPolicy: ThinkingPolicySettings; outputCap: OutputCapSettings; writeRoots: string[]; bashReview: BashReviewSettings; mdsd?: MdsdSettings; workerCompaction?: WorkerCompactionSettings; warnings: string[] }> {
+export async function loadOrcheConfigFile(path: string): Promise<{ routes: RouteConfig; concurrentSessions: ConcurrentSessionsSettings; records: RecordsSettings; taskContext: TaskContextSettings; contextWarning: ContextWarningSettings; mainCompaction: MainCompactionSettings; single: SingleSettings; thinkingPolicy: ThinkingPolicySettings; claudeNative: boolean; outputCap: OutputCapSettings; writeRoots: string[]; bashReview: BashReviewSettings; mdsd?: MdsdSettings; workerCompaction?: WorkerCompactionSettings; warnings: string[] }> {
   let value: unknown;
   try { value = JSON.parse(await readFile(path, "utf8")); }
   catch (error) { throw new RouteConfigError(`Cannot load route config ${path}: ${error instanceof Error ? error.message : String(error)}`); }
@@ -390,6 +392,7 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
   let mainCompaction: MainCompactionSettings = { ...DEFAULT_MAIN_COMPACTION };
   let single: SingleSettings = { ...DEFAULT_SINGLE };
   let thinkingPolicy: ThinkingPolicySettings = { ...DEFAULT_THINKING_POLICY };
+  let claudeNative = true;
   let outputCap: OutputCapSettings = { ...DEFAULT_OUTPUT_CAP };
   let writeRoots: string[] = [];
   let bashReview: BashReviewSettings = { ...DEFAULT_BASH_REVIEW };
@@ -397,7 +400,7 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
   let workerCompaction: WorkerCompactionSettings | undefined;
   const warnings: string[] = [];
   if (value && typeof value === "object" && !Array.isArray(value)) {
-    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, mainCompaction: mainCompactionValue, single: singleValue, thinkingPolicy: thinkingPolicyValue, outputCap: outputCapValue, writeRoots: writeRootsValue, bashReview: bashReviewValue, mdsd: mdsdValue, workerCompaction: workerCompactionValue, ...rest } = value as Record<string, unknown>;
+    const { concurrentSessions, records: recordsValue, taskContext: taskContextValue, contextWarning: contextWarningValue, mainCompaction: mainCompactionValue, single: singleValue, thinkingPolicy: thinkingPolicyValue, claudeNative: claudeNativeValue, outputCap: outputCapValue, writeRoots: writeRootsValue, bashReview: bashReviewValue, mdsd: mdsdValue, workerCompaction: workerCompactionValue, ...rest } = value as Record<string, unknown>;
     if (Object.hasOwn(value, "concurrentSessions")) concurrent = parseConcurrentSessionsConfig(concurrentSessions);
     if (Object.hasOwn(value, "records")) records = parseRecordsConfig(recordsValue);
     if (Object.hasOwn(value, "taskContext")) taskContext = parseTaskContextConfig(taskContextValue);
@@ -407,6 +410,10 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
     }
     if (Object.hasOwn(value, "single")) single = parseSingleConfig(singleValue, warnings);
     if (Object.hasOwn(value, "thinkingPolicy")) thinkingPolicy = parseThinkingPolicyConfig(thinkingPolicyValue);
+    if (Object.hasOwn(value, "claudeNative")) {
+      if (typeof claudeNativeValue !== "boolean") throw new RouteConfigError("config.claudeNative: expected a boolean");
+      claudeNative = claudeNativeValue;
+    }
     if (Object.hasOwn(value, "outputCap")) outputCap = parseOutputCapConfig(outputCapValue);
     if (Object.hasOwn(value, "writeRoots")) writeRoots = parseWriteRootsConfig(writeRootsValue);
     if (Object.hasOwn(value, "bashReview")) bashReview = parseBashReviewConfig(bashReviewValue);
@@ -416,7 +423,7 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
     }
     routeValue = rest;
   }
-  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, mainCompaction, single, thinkingPolicy, outputCap, writeRoots, bashReview, ...(mdsd ? { mdsd } : {}), ...(workerCompaction ? { workerCompaction } : {}), warnings: warnings.map(warning => `${warning} (${path})`) };
+  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, mainCompaction, single, thinkingPolicy, claudeNative, outputCap, writeRoots, bashReview, ...(mdsd ? { mdsd } : {}), ...(workerCompaction ? { workerCompaction } : {}), warnings: warnings.map(warning => `${warning} (${path})`) };
 }
 export class NoRouteError extends Error {
   override readonly name = "NoRouteError";
@@ -469,6 +476,7 @@ export async function discoverOrcheConfig(options: {
     taskContext: { ...DEFAULT_TASK_CONTEXT },
     single: { ...DEFAULT_SINGLE },
     thinkingPolicy: { ...DEFAULT_THINKING_POLICY },
+    claudeNative: true,
     outputCap: { ...DEFAULT_OUTPUT_CAP },
     writeRoots: [],
     bashReview: { ...DEFAULT_BASH_REVIEW },

@@ -36,6 +36,7 @@ import { DEFAULT_LIVENESS_WINDOW_MS, KNOWN_TOOL_TIMEOUTS_MS, LivenessTracker, me
 import { createGenerateImageTool } from "../tools/generate-image.js";
 import { loadProviderExtensions, type ProviderExtensionHost } from "../pi/provider-extensions.js";
 import { InheritedProviders } from "../pi/inherit-providers.js";
+import { nativeClaudeRouteModel, registerClaudeNativeProvider } from "../pi/claude-native.js";
 import { ensureBundledImageProvider } from "../pi/register-bundled-image-provider.js";
 import { describeSource, discoverOrcheConfig, NoRouteError, resolveWriteRoots } from "./config.js";
 import { DEFAULT_BASH_REVIEW, guardBashReview, runtimeAccess, type BashReviewSettings } from "./bash-review.js";
@@ -1446,6 +1447,9 @@ export class WorkerPool {
     }
     const images = args.role === "game-asset" || args.role === "video" ? config.routes.images : undefined;
     const imageConfig = images ? JSON.stringify(images) : undefined;
+    // Native Claude is an isolated worker-only provider, authenticated through the existing CPA login.
+    // It does not replace the CPA provider used by GPT or the interactive Pi main session.
+    if (config.claudeNative) registerClaudeNativeProvider(runtime);
     // The bundled cliproxyapi-images provider is registered lazily: only for game-asset/video with images configured,
     // after providerExtensions (which may already provide it); otherwise no provider config or credential file is read.
     ensureBundledImageProvider({ runtime, images, agentDir: this.options.agentDir ?? getAgentDir() });
@@ -1578,7 +1582,8 @@ export class WorkerPool {
       const session = this.manager.session(worker.id);
       const catalog = runtime.getModel(route.model.slice(0, route.model.indexOf("/")), route.model.slice(route.model.indexOf("/") + 1));
       if (!catalog) throw new Error(`Cannot switch ${worker.id}: model ${route.model} is unavailable; omit worker to start a new worker.`);
-      const resolvedModel = withExtendedContext(catalog, route.extendedContext).model;
+      const routedCatalog = nativeClaudeRouteModel(runtime, catalog, config.claudeNative);
+      const resolvedModel = withExtendedContext(routedCatalog, route.extendedContext).model;
       let effective = mainModel && mainWindow > resolvedModel.contextWindow ? { ...resolvedModel, contextWindow: mainWindow } : resolvedModel;
       const previous = session.model;
       const previousName = previous ? previous.provider + "/" + previous.id : "";
@@ -1641,6 +1646,7 @@ export class WorkerPool {
         ...(capabilities.extensionFactories.length ? { extensionFactories: capabilities.extensionFactories } : {}),
         contextProjection: createAssignmentProjector(),
         ...(mainModel ? { inheritedContextWindow: mainWindow } : {}),
+        claudeNative: config.claudeNative,
         ...(singleWorkflow ? { taskCompaction: taskCompactionFor(meta) } : {}),
         instructions: [workerSystemInstructions(!!spawnTool), ...capabilities.instructions, ...(webFetch.unavailable ? [webFetch.unavailable] : []), ...(codeGraph.unavailable ? [codeGraph.unavailable] : [])].join("\n"),
         ...this.callbacks(meta),
@@ -2207,7 +2213,7 @@ export class WorkerPool {
             return `${meta.id}.${++sub}`;
           },
           runWorker: createSubWorkerRunner({
-            orchestrator: meta.id, cwd: args.cwd, runtime, route: standardSubRoute, routeSource: subSource, thinkingSource: standardSubRoute === subRoute ? subThinkingSource : "orchestrator:step", ...(subWindow ? { inheritedContextWindow: subWindow } : {}),
+            orchestrator: meta.id, cwd: args.cwd, runtime, claudeNative: config.claudeNative, route: standardSubRoute, routeSource: subSource, thinkingSource: standardSubRoute === subRoute ? subThinkingSource : "orchestrator:step", ...(subWindow ? { inheritedContextWindow: subWindow } : {}),
             // Every sub-worker's Bash goes through the same safety review as this assignment's own (once per call, in the sub-worker's guard).
             bashReview: config.bashReview,
             // workerCompaction.subWorkers: standard sub-workers compact by the same policy with their own essentials (off by default).
@@ -2273,7 +2279,7 @@ export class WorkerPool {
         const manager = this.manager;
         const advisorFile = workerSessionFile(resolved, { ...(args.currentSession?.id ? { parentSessionId: args.currentSession.id } : {}), workerId: `${meta.id}.advisor`, spawnedAt: Date.now() });
         advisor = new AssignmentAdvisor({
-          worker: meta.id, role: args.role, cwd: args.cwd, runtime, route: advisorRoute.route, modelSource: advisorRoute.source, thinkingSource: advisorRoute.thinkingSource,
+          worker: meta.id, role: args.role, cwd: args.cwd, runtime, claudeNative: config.claudeNative, route: advisorRoute.route, modelSource: advisorRoute.source, thinkingSource: advisorRoute.thinkingSource,
           // At most half the assignment's base cap: a report held for the advisor leaves the worker time to process its notes.
           request: meta.request ?? handoffRequest, timeoutMs: Math.min(ADVISOR_TIMEOUT_MS, Math.max(1000, Math.floor(limits.assignmentMs / 2))), signal, ...(unbounded ? { unbounded: true } : {}),
           ...(advisorFile ? { sessionFile: advisorFile } : {}), ...(advisorWindow ? { inheritedContextWindow: advisorWindow } : {}),

@@ -18,12 +18,20 @@ invalidating the existing prompt prefix.
   genuine user message arrives. It never changes previous conversation items. Switching adaptive thinking **off/on**
   changes a cache-bearing top-level field and is therefore blocked in a warm native session.
   This is available only where the transport supports the feature; it is not enabled by a model name alone.
-- **Claude via `cliproxyapi-codex-responses`:** the currently verified Responses -> Claude translation sends
-  top-level `output_config.effort`. It does not preserve Anthropic effort-only system messages. Until a compatible route
-  exists, after the first worker provider request orche **pins the previously sent effort** for that model/session.
-  Attempts to switch B/S/R and one-shot effort on a reused worker remain at the pinned effort with a warning for one-shot
-  overrides. To actually switch effort, start a fresh worker at the new level (cold prefix), or use a native Anthropic
-  Messages provider with verified per-message support. The main direct one-shot refuses an unsupported effort switch.
+- **Claude through CLIProxyAPI (new worker-native route, default enabled):** `src/pi/claude-native.ts`
+  creates a worker-runtime-only provider `cliproxyapi-claude-native` when the `cliproxyapi` catalog includes known
+  per-message-effort-capable Claude models served at `/backend-api`. It keeps each model's id, limits, thinking levels
+  and catalog prices, changes the API to `anthropic-messages`, and obtains the original CLIProxyAPI credential
+  through Pi's existing provider on each request. No credentials are persisted or echoed. Pi's Anthropic adapter sends
+  effort-only system messages and their beta header; CLIProxyAPI exposes `/v1/messages` on the corresponding root.
+  This applies to primary, reused, specialist and advisor worker sessions but **not** the interactive main session.
+  Disable with top-level `"claudeNative": false` in a trusted `orche.config.json` to retain the original Codex
+  route. Unknown models, invalid proxy URL shapes, absent native provider and missing catalog entries are not
+  force-routed. A provider rejecting native Messages is an error: do not silently retry on Codex, which would hide
+  cache loss and could duplicate tool actions.
+- **Claude via the original `cliproxyapi-codex-responses` transport** (opt-out or unsupported models):
+  the translator still sends top-level `output_config.effort`. Orche pins the previously sent effort within the
+  reused worker's session rather than invalidating its prompt cache.
 - **Other cache-bearing Responses paths lacking the flag:** the same fail-closed, per-session effort pin applies.
   Noncache-targeted backends such as Gemini are unaffected.
 - **Model changes on an already reused worker:** only an implicit main-model inheritance is eligible for economic
@@ -34,7 +42,11 @@ invalidating the existing prompt prefix.
   The estimate uses the prior request's input/output counts and is not a forecast of an entire future task.
 
 The lock starts when the first provider request is about to be sent, resets for a different model identity, and is
-scoped to the worker session (not process-global). Compaction, transcript changes, routing, cache eviction, TTL and
+scoped to the worker session (not process-global).
+**Native Claude effort semantics:** an effort-only system message can be appended after a tool result, but the
+requested effort does **not** apply to a tool-result-only turn; it takes effect on the next actual user-input turn.
+Never invent an extra user message to force the switch. Pi/orche must keep the effective level distinct from the
+level planned by a Task DAG stage. Compaction, transcript changes, routing, cache eviction, TTL and
 minimum cacheable prefix size can still yield a Cache Miss. **No client code can guarantee upstream Cache Hit.**
 For actual evidence inspect the provider's `cacheRead` / `cacheWrite` token counts in the worker's run record and session
 JSONL. Dynamic effort controls apply to the next request, not a streaming response already in flight.

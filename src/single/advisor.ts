@@ -176,6 +176,8 @@ export interface AdvisorOptions {
   role?: string;
   cwd: string;
   runtime: ModelRuntime;
+  /** Project/user native Claude routing setting. */
+  claudeNative?: boolean;
   route: ModelRoute;
   modelSource: AdvisorSource;
   thinkingSource: AdvisorSource;
@@ -305,7 +307,7 @@ export class AssignmentAdvisor {
   private async execute(plan: TaskPlan | undefined): Promise<void> {
     try {
       const { value, stats } = await runSpecialistSession({
-        actor: this.id, route: this.options.route, runtime: this.options.runtime, cwd: this.options.cwd,
+        actor: this.id, route: this.options.route, runtime: this.options.runtime, claudeNative: this.options.claudeNative, cwd: this.options.cwd,
         instructions: ADVISOR_INSTRUCTIONS, prompt: advisorPrompt({ worker: this.options.worker, ...(this.options.role ? { role: this.options.role } : {}), request: this.options.request, ...(plan ? { plan } : {}), trigger: this.trig! }),
         tools: ADVISOR_TOOL_NAMES, report: adviceReport, toolGuard: advisorToolGuard,
         maxTurns: this.options.maxTurns ?? ADVISOR_MAX_TURNS, timeoutMs: this.options.timeoutMs, ...(this.options.unbounded ? { unbounded: true } : {}),

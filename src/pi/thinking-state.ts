@@ -154,7 +154,7 @@ function apply(session: ThinkingSession, state: ThinkingState, level: string | u
   if (level === undefined) return;
   // An older/translated transport cannot change its top-level effort without losing the cache.
   // Keep the last sent effort until this session switches models or is disposed.
-  const safe = guardedThinkingLevel(session, session.model, level);
+  const safe = guardedThinkingLevel(session, session.model, level, reason);
   const from = session.thinkingLevel ?? "off";
   if (from !== safe) {
     try { session.setThinkingLevel(safe as never); } catch { /* the level stays; recorded below as it is */ }
