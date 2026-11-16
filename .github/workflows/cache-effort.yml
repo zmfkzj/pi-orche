@@ -1,0 +1,25 @@
+name: Cache-safe effort regression checks
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cache-effort:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install
+        run: npm install --legacy-peer-deps
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Cache regression tests
+        run: npx vitest run test/pi/cache-effort.test.ts test/orchestration/cache-cost.test.ts
