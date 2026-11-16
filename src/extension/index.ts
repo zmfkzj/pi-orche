@@ -537,7 +537,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       // Main's native Pi session is outside orche's worker payload hook. The CLIProxyAPI
       // Claude bridge cannot replay message-level effort changes, so do not silently
       // invalidate its warm prefix with a one-shot direct request.
-      if (needsCacheEffortProtection(model) && !supportsCachePreservingEffort(model) && effort !== pi.getThinkingLevel()) {
+      if (needsCacheEffortProtection(model) && (!supportsCachePreservingEffort(model) || (model?.api === "anthropic-messages" && (effort === "off" || pi.getThinkingLevel() === "off"))) && effort !== pi.getThinkingLevel()) {
         request.effort = undefined;
         ui.notify("orche direct: effort " + effort +
           " was NOT applied. This provider has no advertised cache-preserving effort switch; retained " +
