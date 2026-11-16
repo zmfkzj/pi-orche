@@ -5,7 +5,10 @@
  * a requested model change.
  */
 export interface CacheCostModel {
-  cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  cost?: {
+    input?: number; output?: number; cacheRead?: number; cacheWrite?: number;
+    tiers?: Array<{ inputTokensAbove: number; input: number; output: number; cacheRead: number; cacheWrite: number }>;
+  };
 }
 export interface CacheObservation {
   model: string;
@@ -21,6 +24,20 @@ export type SwitchDecision =
 
 const validPrice = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value > 0;
 const validTokens = (value: number) => Number.isFinite(value) && value >= 0;
+
+/** Select a catalog's long-context pricing for the observed input token count.
+ * Invalid tiers fail closed instead of assuming base pricing is authoritative. */
+function rateAt(model: CacheCostModel, tokens: number) {
+  const base = model.cost;
+  if (!base) return undefined;
+  let rate: NonNullable<CacheCostModel["cost"]> = base;
+  for (const tier of base.tiers ?? []) {
+    if (!validTokens(tier.inputTokensAbove) || !validPrice(tier.input) ||
+        !validPrice(tier.output) || !validPrice(tier.cacheRead) || tier.cacheWrite < 0 || !Number.isFinite(tier.cacheWrite)) return undefined;
+    if (tokens > tier.inputTokensAbove && (!("inputTokensAbove" in rate) || tier.inputTokensAbove > (rate as { inputTokensAbove: number }).inputTokensAbove)) rate = tier;
+  }
+  return rate;
+}
 /** A stale cache isn't a discount. Claude's short TTL is generally about five minutes. */
 export const MAX_CACHE_AGE_MS = 4 * 60 * 1000;
 
@@ -36,7 +53,8 @@ export function compareCachedModelSwitch(
       observation.at > now || now - observation.at > MAX_CACHE_AGE_MS) {
     return { action: "switch", reason: "invalid or stale cache observation" };
   }
-  const a = current.cost, b = target.cost;
+  const tokens = observation.input + observation.cacheRead + observation.cacheWrite;
+  const a = rateAt(current, tokens), b = rateAt(target, tokens);
   if (!a || !b || !validPrice(a.input) || !validPrice(a.cacheRead) ||
       !validPrice(a.output) || !validPrice(b.input) || !validPrice(b.output) ||
       a.cacheRead >= a.input) {
