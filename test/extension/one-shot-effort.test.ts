@@ -41,30 +41,32 @@ const ONE_SHOT = { session: "single" as const };
 describe("--effort: grammar and feedback", () => {
   it("parses --effort LEVEL and --effort=LEVEL right after the mode word for every mode and level; the prompt after ONE delimiter stays verbatim", () => {
     for (const mode of MAIN_MODES) for (const effort of EFFORT_LEVELS) {
-      expect(parseOrcheCommand(`${mode} --effort ${effort} fix the bug`)).toEqual({ mode, prompt: "fix the bug", effort });
-      expect(parseOrcheCommand(`${mode} --effort=${effort} fix the bug`)).toEqual({ mode, prompt: "fix the bug", effort });
+      // --profile is omitted: its default, "default", in every delegating mode (direct runs no workers and has none).
+      const profile = mode === "direct" ? {} : { profile: "default" };
+      expect(parseOrcheCommand(`${mode} --effort ${effort} fix the bug`)).toEqual({ mode, prompt: "fix the bug", effort, ...profile });
+      expect(parseOrcheCommand(`${mode} --effort=${effort} fix the bug`)).toEqual({ mode, prompt: "fix the bug", effort, ...profile });
     }
     const prompt = '  fix "src/a b.ts"\n\t- keep \'quotes\' / slashes --effort low\n trailing \t\n';
-    expect(parseOrcheCommand(`ultra --effort xhigh ${prompt}`)).toEqual({ mode: "ultra", prompt, effort: "xhigh" });
-    expect(parseOrcheCommand(`strong --effort max\n${prompt}`)).toEqual({ mode: "strong", prompt, effort: "max" });
+    expect(parseOrcheCommand(`ultra --effort xhigh ${prompt}`)).toEqual({ mode: "ultra", prompt, effort: "xhigh", profile: "default" });
+    expect(parseOrcheCommand(`strong --effort max\n${prompt}`)).toEqual({ mode: "single", prompt, effort: "max", profile: "default", legacyStrong: true });
     // Whitespace before the option (and between it and its level) only separates; after the level one character delimits as after the mode word.
-    expect(parseOrcheCommand("  single   --effort\tlow  two spaces")).toEqual({ mode: "single", prompt: " two spaces", effort: "low" });
+    expect(parseOrcheCommand("  single   --effort\tlow  two spaces")).toEqual({ mode: "single", prompt: " two spaces", effort: "low", profile: "default" });
     expect(parseOrcheCommand("direct\n--effort off\nline one\nline two")).toEqual({ mode: "direct", prompt: "line one\nline two", effort: "off" });
   });
 
   it("without a leading --effort the prompt is exactly what it was before: dash text, mid-prompt options and look-alikes are prompt text", () => {
     for (const rest of ["explain --effort high", "-- fix it", "--efforts are fine", "--effort-level high", "--effortless", "  -x --effort low", "/orche single --effort low"]) {
-      expect(parseOrcheCommand(`single ${rest}`)).toEqual({ mode: "single", prompt: rest });
+      expect(parseOrcheCommand(`single ${rest}`)).toEqual({ mode: "single", prompt: rest, profile: "default" });
       expect(parseOrcheCommand(`single ${rest}`)).not.toHaveProperty("effort");
     }
-    expect(parseOrcheCommand("single fix the bug")).toEqual({ mode: "single", prompt: "fix the bug" });
+    expect(parseOrcheCommand("single fix the bug")).toEqual({ mode: "single", prompt: "fix the bug", profile: "default" });
   });
 
   it("-- after the level ends the options, so the prompt itself may start with --effort or --", () => {
-    expect(parseOrcheCommand("single --effort low -- --effort is a CLI flag")).toEqual({ mode: "single", prompt: "--effort is a CLI flag", effort: "low" });
-    expect(parseOrcheCommand("single --effort=low --\n-- keep  this")).toEqual({ mode: "single", prompt: "-- keep  this", effort: "low" });
-    expect(parseOrcheCommand("single --effort low --  two")).toEqual({ mode: "single", prompt: " two", effort: "low" });
-    expect(parseOrcheCommand("single --effort low   -- --x")).toEqual({ mode: "single", prompt: "--x", effort: "low" });
+    expect(parseOrcheCommand("single --effort low -- --effort is a CLI flag")).toEqual({ mode: "single", prompt: "--effort is a CLI flag", effort: "low", profile: "default" });
+    expect(parseOrcheCommand("single --effort=low --\n-- keep  this")).toEqual({ mode: "single", prompt: "-- keep  this", effort: "low", profile: "default" });
+    expect(parseOrcheCommand("single --effort low --  two")).toEqual({ mode: "single", prompt: " two", effort: "low", profile: "default" });
+    expect(parseOrcheCommand("single --effort low   -- --x")).toEqual({ mode: "single", prompt: "--x", effort: "low", profile: "default" });
   });
 
   it("an unusable --effort starts nothing and says what is wrong and what to type; other failures keep their usage", () => {
@@ -78,7 +80,7 @@ describe("--effort: grammar and feedback", () => {
       ["mdsd --effort=max \n\t ", "orche mdsd: no prompt after --effort max."],
       ["direct --effort low --", "orche direct: no prompt after --effort low."],
       ["single --effort high --effort low fix", 'orche single: --effort is given more than once; give it once. To start the prompt itself with "--effort", put -- before the prompt: /orche single --effort high -- <PROMPT>.'],
-      ["--effort high single fix", "orche: --effort belongs to a one-shot request, right after its mode word: /orche single|strong|ultra|mdsd|direct --effort <LEVEL> <PROMPT>"],
+      ["--effort high single fix", "orche: --effort belongs to a one-shot request, right after its mode word: /orche single|ultra|mdsd|direct --effort <LEVEL> <PROMPT>"],
       ["mode ultra --effort high", "/orche mode and the other subcommands do not take it."],
       ["workers --effort=low", "orche: --effort belongs to a one-shot request"],
     ];
@@ -93,15 +95,17 @@ describe("--effort: grammar and feedback", () => {
   });
 
   it("help texts name the option: the usage line, the one-shot usage and the command description", () => {
-    expect(ORCHE_USAGE).toContain("Usage: /orche single|strong|ultra|mdsd|direct [--effort LEVEL] <PROMPT> |");
-    expect(oneShotUsage("ultra")).toContain("Usage: /orche ultra [--effort LEVEL] <PROMPT>:");
+    expect(ORCHE_USAGE).toContain("Usage: /orche single|ultra|mdsd|direct [--effort LEVEL] [--summary-budget BUDGET] [--profile NAME] <PROMPT> |");
+    expect(oneShotUsage("ultra")).toContain("Usage: /orche ultra [--effort LEVEL] [--profile NAME] <PROMPT>:");
     expect(oneShotUsage("ultra")).toContain("--effort off|minimal|low|medium|high|xhigh|max sets the reasoning effort its workers start at");
   });
 
   it("completions: <mode> -- offers <mode> --effort <level> for every level; a plain <mode> stays a free prompt; each candidate parses with a prompt", () => {
     const values = (prefix: string) => completeOrcheArguments(prefix)?.map(item => item.value) ?? null;
-    expect(values("single --")).toEqual(EFFORT_LEVELS.map(level => `single --effort ${level} `));
-    expect(values("strong --effort h")).toEqual(["strong --effort high "]);
+    expect(values("single --")).toEqual([...EFFORT_LEVELS.map(level => `single --effort ${level} `), "single --profile default "]);
+    expect(values("direct --")).toEqual(EFFORT_LEVELS.map(level => `direct --effort ${level} `));
+    expect(values("ultra --effort h")).toEqual(["ultra --effort high "]);
+    expect(values("strong --effort h")).toBeNull(); // strong is no mode any more (it is /orche single --profile strong)
     expect(values("ultra --effort=")).toBeNull();
     expect(values("single ")).toBeNull();
     expect(values("single --effort high ")).toBeNull();
@@ -113,17 +117,17 @@ describe("--effort: grammar and feedback", () => {
 
 describe("--summary-budget: grammar", () => {
   it("parses with or without --effort, in any order, each once; -- ends the options; the old --thinking-policy is prompt text", () => {
-    expect(parseOrcheCommand("strong --summary-budget compact fix it")).toEqual({ mode: "strong", prompt: "fix it", summaryBudget: "compact" });
-    expect(parseOrcheCommand("strong --effort=max --summary-budget=compact fix it")).toEqual({ mode: "strong", prompt: "fix it", effort: "max", summaryBudget: "compact" });
-    expect(parseOrcheCommand("ultra --summary-budget standard\t--effort low -- --effort is text")).toEqual({ mode: "ultra", prompt: "--effort is text", effort: "low", summaryBudget: "standard" });
-    expect(parseOrcheCommand("strong --thinking-policy=phase fix")).toEqual({ mode: "strong", prompt: "--thinking-policy=phase fix" });
+    expect(parseOrcheCommand("single --summary-budget compact fix it")).toEqual({ mode: "single", prompt: "fix it", summaryBudget: "compact", profile: "default" });
+    expect(parseOrcheCommand("single --effort=max --summary-budget=compact --profile fast fix it")).toEqual({ mode: "single", prompt: "fix it", effort: "max", summaryBudget: "compact", profile: "fast" });
+    expect(parseOrcheCommand("ultra --summary-budget standard\t--effort low -- --effort is text")).toEqual({ mode: "ultra", prompt: "--effort is text", effort: "low", summaryBudget: "standard", profile: "default" });
+    expect(parseOrcheCommand("single --thinking-policy=phase fix")).toEqual({ mode: "single", prompt: "--thinking-policy=phase fix", profile: "default" });
     const cases: [string, string][] = [
-      ["strong --summary-budget tiny fix", 'orche strong: invalid --summary-budget "tiny". Valid values: standard, compact'],
-      ["strong --summary-budget", "orche strong: --summary-budget needs a value."],
-      ["strong --summary-budget compact --summary-budget standard x", "orche strong: --summary-budget is given more than once; give it once."],
-      ["strong --effort max --summary-budget compact", "orche strong: no prompt after --effort max --summary-budget compact."],
+      ["single --summary-budget tiny fix", 'orche single: invalid --summary-budget "tiny". Valid values: standard, compact'],
+      ["single --summary-budget", "orche single: --summary-budget needs a value."],
+      ["single --summary-budget compact --summary-budget standard x", "orche single: --summary-budget is given more than once; give it once."],
+      ["single --effort max --summary-budget compact", "orche single: no prompt after --effort max --summary-budget compact."],
       ["direct --summary-budget compact fix", "orche direct: --summary-budget applies to orche_task workers and direct mode runs none"],
-      ["mode strong --summary-budget compact", "orche: --summary-budget belongs to a one-shot request"],
+      ["mode single --summary-budget compact", "orche: --summary-budget belongs to a one-shot request"],
     ];
     for (const [input, message] of cases) {
       expect(parseOrcheCommand(input), input).toBeUndefined();
@@ -134,13 +138,13 @@ describe("--summary-budget: grammar", () => {
 });
 
 /** A WorkerPool on a real Pi model runtime (faux providers), its config written as given. */
-async function fixture(config: { models?: Record<string, unknown>; routes?: Record<string, unknown>; single?: Record<string, unknown>; default?: Record<string, unknown>; records?: boolean } = {}) {
+async function fixture(config: { models?: Record<string, unknown>; profiles?: Record<string, unknown>; routes?: Record<string, unknown>; single?: Record<string, unknown>; default?: Record<string, unknown>; records?: boolean } = {}) {
   const h = await createHarness({ mainSteps: [], orcheSteps: [], records: config.records ?? false });
   opened.push(h);
   execFileSync("git", ["init", "-q"], { cwd: h.cwd });
   await writeFile(join(h.agentDir, "orche.config.json"), JSON.stringify({
     routes: config.routes ?? {}, default: config.default ?? { model: h.orche.route.model }, records: config.records ? {} : { enabled: false }, mainMode: "single",
-    ...(config.models ? { models: config.models } : {}), ...(config.single ? { single: config.single } : {}),
+    ...(config.models ? { models: config.models } : {}), ...(config.profiles ? { profiles: config.profiles } : {}), ...(config.single ? { single: config.single } : {}),
   }));
   const pool = new WorkerPool({ controller: new OrcheController({ agentDir: h.agentDir, createRuntime: async () => h.runtime }), agentDir: h.agentDir });
   opened.push(pool);
@@ -217,15 +221,15 @@ describe("--effort: the request's orche_task assignments", () => {
     }
   });
 
-  it("the plan advisor: thinking \"main\" takes the effort, its own level stays (strong mode on the strong tiers)", async () => {
+  it("the plan advisor: thinking \"main\" takes the effort, its own level stays (a profile's tiers)", async () => {
     for (const [advisor, expected] of [[{ model: "tier-adv/a1", thinking: "main" }, "minimal"], [{ model: "tier-adv/a1", thinking: "max" }, "max"]] as const) {
       const orchestrator = tierProvider("tier-orch", "o1");
       const adv = tierProvider("tier-adv", "a1");
-      const { execute, register } = await fixture({ records: true, single: { advisor: true }, models: { "strong-orchestrator": { model: "tier-orch/o1", thinking: "max" }, "strong-advisor": advisor } });
+      const { execute, register } = await fixture({ records: true, single: { advisor: true }, profiles: { deep: { orchestrator: { model: "tier-orch/o1", thinking: "max" }, advisor } } });
       register(orchestrator, adv);
       orchestrator.setResponses([implemented(false)]);
-      const result = await execute({ mainMode: "strong", oneShot: { ...ONE_SHOT, effort: "minimal" } });
-      expect(result.details).toMatchObject({ mode: "strong", thinking: "minimal", thinkingSource: "effort" });
+      const result = await execute({ profile: "deep", oneShot: { ...ONE_SHOT, effort: "minimal" } });
+      expect(result.details).toMatchObject({ profile: "deep", thinking: "minimal", thinkingSource: "effort" });
       expect((await runJson(result.details.record!)).assignment).toMatchObject({ advisor: { model: "tier-adv/a1", thinking: expected } });
     }
   });
@@ -378,8 +382,8 @@ describe("--effort through the extension", () => {
 
   it("an unusable --effort through the command: the message, no turn, no mode or thinking change", async () => {
     const { h } = await session({ mainSteps: [reply("MUST NOT RUN")] });
-    for (const input of ["/orche single --effort turbo fix", "/orche ultra --effort high", "/orche --effort high single fix", "/orche mode strong --effort low"]) await h.session.prompt(input);
-    expect(notes(h)).toEqual([effortUsage("single --effort turbo fix"), effortUsage("ultra --effort high"), effortUsage("--effort high single fix"), effortUsage("mode strong --effort low")]);
+    for (const input of ["/orche single --effort turbo fix", "/orche ultra --effort high", "/orche --effort high single fix", "/orche mode single --effort low"]) await h.session.prompt(input);
+    expect(notes(h)).toEqual([effortUsage("single --effort turbo fix"), effortUsage("ultra --effort high"), effortUsage("--effort high single fix"), effortUsage("mode single --effort low")]);
     expect(h.main.faux.state.callCount).toBe(0);
     expect(modeEntries(h)).toEqual([]);
     expect(h.session.thinkingLevel).toBe("off");
@@ -394,8 +398,8 @@ describe("--effort through the extension", () => {
     const { h } = await session({ mainSteps: [async () => { entered.resolve(); await gate.promise; return reply("first done"); }] });
     const first = h.session.prompt("first");
     await entered.promise;
-    await h.session.prompt("/orche strong --effort max second");
-    expect(notes(h).at(-1)).toBe(busyRefusal("strong", "single"));
+    await h.session.prompt("/orche ultra --effort max second");
+    expect(notes(h).at(-1)).toBe(busyRefusal("ultra", "single"));
     gate.resolve();
     await first;
     await h.session.agent.waitForIdle();

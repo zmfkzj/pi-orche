@@ -1,5 +1,5 @@
 /**
- * Ultra mode (docs/orchestrator.md 14): the quality-first orchestration of an implement/answer assignment, on the strong model tiers.
+ * Ultra mode (docs/orchestrator.md 14): the quality-first orchestration of an implement/answer assignment, on the selected model profile (default unless --profile).
  *
  * The flow: requirements and acceptance criteria → (independent verification basis ∥ cause/approach hypotheses) → diverse independent
  * candidates → execution-based evaluation of every candidate (bounded fix round, incumbent kept) → evidence-based selection and

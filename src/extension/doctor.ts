@@ -225,6 +225,11 @@ export function createOrcheDependencyProvider(options: OrcheDependencyOptions = 
     if (routes.default) add(routes.default.model, "default");
     for (const [role, route] of Object.entries(routes.routes)) add(route.model, `routes.${role}`);
     for (const [tier, route] of Object.entries(routes.models ?? {})) if (route && !inheritsMain(route)) add(route.model, `models.${tier}`);
+    // Every profile's tiers and routes (profiles.<name>; the legacy strong tiers are listed as profiles.strong).
+    for (const [name, profile] of Object.entries(routes.profiles ?? {})) {
+      for (const tier of ["orchestrator", "worker", "advisor"] as const) { const route = profile[tier]; if (route && !inheritsMain(route)) add(route.model, `profiles.${name}.${tier}`); }
+      for (const [role, route] of Object.entries(profile.routes ?? {})) add(route.model, `profiles.${name}.routes.${role}`);
+    }
     const items: DependencyItem[] = [];
     const providerExtensions = routes.providerExtensions ?? [];
     for (const source of providerExtensions) {

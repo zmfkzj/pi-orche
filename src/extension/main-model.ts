@@ -13,7 +13,7 @@
  */
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { INHERIT_MAIN, inheritsMain, inheritsMainThinking, tierThinking, usesStrongTiers, type MainMode, type ModelTiers, type RouteSettings, type TierSettings } from "../orchestration/routing.js";
+import { DEFAULT_PROFILE, findProfile, INHERIT_MAIN, inheritsMain, inheritsMainThinking, profileNames, profileTiers, tierThinking, type ModelProfile, type ModelTiers, type ProfileTiers, type RouteSettings, type TierSettings } from "../orchestration/routing.js";
 import { withExtendedContext } from "../pi/extended-context.js";
 import { THINKING_LEVELS } from "../pi/thinking-levels.js";
 
@@ -74,7 +74,8 @@ export async function applyMainModel(
 const describe = (route: TierSettings, inherited: string, main: { model?: string; current: string; thinking: string }) => inheritsMain(route)
   ? tierThinking(route) ? `main's model (${main.model ?? "no model selected"}) with thinking ${route.thinking}` : `main's model and thinking (${main.current})`
   : `${route.model} ${route.thinking === INHERIT_MAIN ? `with main's thinking (${main.thinking})` : route.thinking ?? `(thinking: ${inherited})`}${route.extendedContext ? ", extended context" : ""}`;
-const tierSource = (tier: string, route: TierSettings) => `config models.${tier}${inheritsMain(route) ? ' "main"' : route.thinking === INHERIT_MAIN ? ' (thinking "main")' : ""}`;
+/** Where a tier is configured (`models.worker`, `profiles.fast.worker`), and whether it names main's model or thinking. */
+const tierSource = (key: string, route: TierSettings) => `config ${key}${inheritsMain(route) ? ' "main"' : route.thinking === INHERIT_MAIN ? ' (thinking "main")' : ""}`;
 /**
  * The tiers main's current thinking reaches at the next hand-off: the orchestrator unless it sets a level of its own; the worker
  * directly when it names main's thinking, else through the orchestrator when it sets no level and the orchestrator takes main's.
@@ -99,6 +100,9 @@ export interface ModelTiersView {
   /** The floor of implicit thinking inheritance ({@link inheritedThinking}) and where it comes from. */
   thinkingFloor?: { level: string; source: "models.main" | "session start" };
   mode: string;
+  /** The profile in force (`--profile`; default `default`) and the config's profiles (routing.ts profileTiers). */
+  profile?: string;
+  profiles?: Readonly<Record<string, ModelProfile>>;
   path?: string;
   error?: string;
   tiers?: ModelTiers;
@@ -117,37 +121,40 @@ export function formatModelTiers(view: ModelTiersView): string {
     : configuredMain
       ? `Pi (models.main ${configuredMain.model} not applied: ${view.atStart.configured ? view.atStart.skipped ?? "not applied" : "set after this session started; applies from the next new session"})`
       : "Pi (no models.main)";
-  const orchestrator = view.tiers?.orchestrator;
-  const worker = view.tiers?.worker;
   const main = { ...(view.main ? { model: view.main } : {}), current, thinking: view.thinking ?? "off" };
-  // strong, ultra and mdsd (docs/orchestrator.md 12): the strong tiers; an unset strong-orchestrator falls back to models.orchestrator, an
-  // unset strong-worker inherits the strong orchestrator (models.worker never applies there), an unset strong-advisor falls back to
-  // models.advisor (then the strong orchestrator).
-  const strong = usesStrongTiers(view.mode as MainMode);
-  const strongOrchestrator = view.tiers?.["strong-orchestrator"];
-  const strongWorker = view.tiers?.["strong-worker"];
-  const strongAdvisor = view.tiers?.["strong-advisor"];
-  const advisor = view.tiers?.advisor;
-  const strongEffective = strongOrchestrator ?? orchestrator;
-  const strongAdvisorEffective = strongAdvisor ?? advisor;
-  const reach = mainThinkingReach(strong ? { ...view.tiers, ...(strongEffective ? { orchestrator: strongEffective } : {}), worker: strongWorker, advisor: strongAdvisorEffective } as ModelTiers : view.tiers, !!view.advisor);
+  // The tiers of the profile in force, by the resolver orche_task uses (routing.ts profileTiers): its own tier, then the
+  // top-level models tier, then inheritance. A profile the config does not define is shown as such; orche_task refuses it.
+  const profile = view.profile ?? DEFAULT_PROFILE;
+  let tiers: ProfileTiers;
+  let unknownProfile: string | undefined;
+  try { tiers = profileTiers(view.tiers, view.profiles, profile); }
+  catch (error) { unknownProfile = error instanceof Error ? error.message : String(error); tiers = profileTiers(view.tiers, view.profiles); }
+  const orchestrator = tiers.orchestrators[0];
+  const worker = tiers.worker;
+  const advisor = tiers.advisors[0];
+  const reach = mainThinkingReach({ ...view.tiers, orchestrator: orchestrator?.tier, worker: worker?.tier, advisor: advisor?.tier } as ModelTiers, !!view.advisor);
   const modelOf = (tier: TierSettings | undefined) => tier && !inheritsMain(tier) ? tier.model : view.main ?? "main's model";
-  const strongOrchestratorModel = modelOf(strongEffective);
-  const orchestratorModel = strong ? strongOrchestratorModel : modelOf(orchestrator);
+  const orchestratorModel = modelOf(orchestrator?.tier);
+  const fallback = (candidates: ProfileTiers["orchestrators"]) => candidates.length > 1 ? `; unresolvable: ${candidates[1]!.key}` : "";
+  const names = profileNames(view.profiles);
+  const describeProfile = (name: string) => {
+    if (name === DEFAULT_PROFILE) return `${name} (the top-level models)`;
+    const own = findProfile(view.profiles, name);
+    const keys = [...(["orchestrator", "worker", "advisor"] as const).filter(key => own && Object.hasOwn(own, key)).map(key => own![key] === null ? `${key}: unset` : `${key}: ${own![key]!.model}`), ...(own?.routes && Object.keys(own.routes).length ? [`routes: ${Object.keys(own.routes).join(", ")}`] : [])];
+    return `${name} (${keys.join(", ") || "no overrides"}${own?.legacy ? "; from the former models.strong-* tiers" : ""})`;
+  };
   return [
-    `orche models (${view.path ?? "no orche config file"}${view.error ? `; config error: ${view.error}` : ""}; mode ${view.mode}):`,
+    `orche models (${view.path ?? "no orche config file"}${view.error ? `; config error: ${view.error}` : ""}; mode ${view.mode}; profile ${profile}):`,
     `- main: ${current} — ${mainSource}`,
-    `- orchestrator (orche_task explore/answer/implement/verify): ${orchestrator ? `${describe(orchestrator, "main's", main)} — ${tierSource("orchestrator", orchestrator)}` : `inherited from main (${current})`}`,
-    `- worker (orche_spawn sub-workers, the fresh verifier included): ${worker ? `${describe(worker, "the orchestrator's", main)} — ${tierSource("worker", worker)}` : `inherited from the orchestrator (${orchestratorModel})`}`,
-    `- advisor (single.advisor ${view.advisor ? "on" : "off"}: one read-only plan review per orche_task explore/answer/implement/verify assignment): ${advisor ? `${describe(advisor, "the orchestrator's", main)} — ${tierSource("advisor", advisor)}` : `inherited from the orchestrator (${orchestratorModel})`}${view.advisor ? "" : "; turn it on with \"single\": { \"advisor\": true }"}`,
-    `- strong-orchestrator (strong, ultra and mdsd modes, in place of the orchestrator): ${strongOrchestrator ? `${describe(strongOrchestrator, "main's", main)} — ${tierSource("strong-orchestrator", strongOrchestrator)}` : orchestrator ? `unset: falls back to models.orchestrator (${describe(orchestrator, "main's", main)})` : `unset: inherited from main (${current})`}`,
-    `- strong-worker (strong, ultra and mdsd modes, in place of the worker): ${strongWorker ? `${describe(strongWorker, "the strong orchestrator's", main)} — ${tierSource("strong-worker", strongWorker)}` : `inherited from the strong orchestrator (${strongOrchestratorModel}); models.worker does not apply`}`,
-    `- strong-advisor (strong, ultra and mdsd modes, in place of the advisor; single.advisor ${view.advisor ? "on" : "off"}): ${strongAdvisor ? `${describe(strongAdvisor, "the strong orchestrator's", main)} — ${tierSource("strong-advisor", strongAdvisor)}` : advisor ? `unset: falls back to models.advisor (${describe(advisor, "the strong orchestrator's", main)})` : `unset: inherited from the strong orchestrator (${strongOrchestratorModel})`}`,
+    `- orchestrator (orche_task explore/answer/implement/verify): ${orchestrator ? `${describe(orchestrator.tier, "main's", main)} — ${tierSource(orchestrator.key, orchestrator.tier)}${fallback(tiers.orchestrators)}` : `inherited from main (${current})`}`,
+    `- worker (orche_spawn sub-workers, the fresh verifier included): ${worker ? `${describe(worker.tier, "the orchestrator's", main)} — ${tierSource(worker.key, worker.tier)}` : `inherited from the orchestrator (${orchestratorModel})`}`,
+    `- advisor (single.advisor ${view.advisor ? "on" : "off"}: one read-only plan review per orche_task explore/answer/implement/verify assignment): ${advisor ? `${describe(advisor.tier, "the orchestrator's", main)} — ${tierSource(advisor.key, advisor.tier)}${fallback(tiers.advisors)}` : `inherited from the orchestrator (${orchestratorModel})`}${view.advisor ? "" : "; turn it on with \"single\": { \"advisor\": true }"}`,
     ...(view.mode === "direct" ? [] : [`- main's thinking (${view.thinking ?? "off"}) reaches at each hand-off: ${reach.length ? reach.join(", ") : "no tier (each sets its own level)"}${reach.length ? "; a model that lacks the level runs the nearest one it supports (Pi's clamp; the task result and run.json record the level used)" : ""}`]),
     ...(view.mode === "direct" || !view.thinkingFloor ? [] : [`- thinking floor ${view.thinkingFloor.level} (${view.thinkingFloor.source === "models.main" ? "models.main's thinking" : "main's level at session start"}): a tier that sets no thinking of its own takes main's current thinking but not below it, so lowering main's thinking does not lower it; thinking "main" (or { "model": "main" } without a level) follows main exactly; give a tier its own level (e.g. "thinking": "high") to keep it independent of main`]),
-    "- game-asset, video: their own routes (models does not apply)",
-    ...(orchestrator || worker || advisor || strongOrchestrator || strongWorker || strongAdvisor ? ["A configured model that orche's runtime cannot resolve is replaced by the inherited one, with a warning in the task result."] : []),
-    ...(strong ? [`Mode ${view.mode}: orche_task workers run on the strong tiers above (models.orchestrator only as the fallback of an unset or unresolvable strong-orchestrator, models.advisor only as that of strong-advisor; models.worker not at all).`] : []),
+    `- game-asset, video: their own routes${profile !== DEFAULT_PROFILE && findProfile(view.profiles, profile)?.routes ? ` (profiles.${profile}.routes over the top-level routes)` : " (models does not apply)"}`,
+    `- profiles (select with --profile <name>; omitted: ${DEFAULT_PROFILE}): ${names.map(describeProfile).join("; ")}`,
+    ...(unknownProfile ? [`Profile ${profile} is not defined: orche_task refuses it until it is defined or another profile is selected (/orche mode <mode> --profile <name>). ${unknownProfile}`] : []),
+    ...(tiers.orchestrators.length || worker || tiers.advisors.length ? ["A configured model that orche's runtime cannot resolve is replaced by the inherited one, with a warning in the task result."] : []),
     ...(view.mode === "direct" ? ["Direct mode: main does the work itself; only models.main applies."] : []),
   ].join("\n");
 }

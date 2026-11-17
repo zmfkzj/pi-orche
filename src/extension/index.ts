@@ -6,7 +6,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type Exte
 import { createOrcheTools } from "../tools/index.js";
 import { spillToolResult } from "../tools/spill.js";
 import { OrcheController, type OrcheControllerOptions } from "./controller.js";
-import { inheritsMain, inheritsMainThinking, isDelegatingMode, MAIN_MODES, modeTiers, tierThinking, type MainMode, type ModelTiers } from "../orchestration/routing.js";
+import { DEFAULT_PROFILE, inheritsMain, inheritsMainThinking, isDelegatingMode, isProfileName, LEGACY_STRONG_MODE, MAIN_MODES, profileNames, profileTiers, tierThinking, UnknownProfileError, type MainMode, type ModelProfile, type ModelTiers, type TierSettings } from "../orchestration/routing.js";
 import { delegationRules, guardBusyToolCall, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
 import { contextWarning, DEFAULT_CONTEXT_WARNING, type ContextWarningSettings, type ContextWarningState } from "./context-warning.js";
 import { DEFAULT_MAIN_COMPACTION, MainCompaction, type MainCompactionSettings } from "./main-compaction.js";
@@ -46,19 +46,22 @@ const ACTIVATE_BUILTINS = ["grep", "find", "ls"];
  * extension-only keys (`concurrentSessions`, `records`) that the plain route parser behind `discoverMainMode` (mode.ts) rejects as unknown, which
  * made a config with `records` look invalid at session start and drop its `mainMode`.
  */
-async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup & { contextWarning?: ContextWarningSettings; mainCompaction?: MainCompactionSettings; spawn?: boolean; advisor?: boolean; bashReview?: BashReviewSettings; warnings?: string[]; models?: ModelTiers }> {
+async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup & { contextWarning?: ContextWarningSettings; mainCompaction?: MainCompactionSettings; spawn?: boolean; advisor?: boolean; bashReview?: BashReviewSettings; warnings?: string[]; models?: ModelTiers; profiles?: Record<string, ModelProfile> }> {
   const candidates = [...(options.projectTrusted ? [join(options.cwd, ".pi", CONFIG_FILE)] : []), join(options.agentDir, CONFIG_FILE)];
   for (const path of candidates) {
     try { await access(path); } catch { continue; }
     try {
       const { routes, contextWarning, mainCompaction, single, bashReview, warnings } = await loadOrcheConfigFile(path);
       // The tiers with the top-level extendedContext filled in where a tier leaves it out, as routes resolve it (routing.ts);
-      // not for `{ "model": "main" }`, which keeps main's own context window.
-      const models = routes.models ? Object.fromEntries(Object.entries(routes.models).map(([tier, route]) => {
+      // not for `{ "model": "main" }`, which keeps main's own context window. The same for every profile's tiers.
+      const filled = <T extends TierSettings | null | undefined>(route: T): T => {
+        if (!route) return route;
         const extendedContext = inheritsMain(route) ? undefined : route.extendedContext ?? routes.extendedContext;
-        return [tier, { ...route, ...(extendedContext !== undefined ? { extendedContext } : {}) }];
-      })) as ModelTiers : undefined;
-      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), ...(routes.legacyMainMode ? { legacyMode: routes.legacyMainMode } : {}), path, contextWarning, mainCompaction, spawn: single.spawn, advisor: single.advisor, bashReview, ...(warnings.length ? { warnings } : {}), ...(models ? { models } : {}) };
+        return { ...route, ...(extendedContext !== undefined ? { extendedContext } : {}) } as T;
+      };
+      const models = routes.models ? Object.fromEntries(Object.entries(routes.models).map(([tier, route]) => [tier, filled(route)])) as ModelTiers : undefined;
+      const profiles = routes.profiles ? Object.assign(Object.create(null), Object.fromEntries(Object.entries(routes.profiles).map(([name, profile]) => [name, Object.fromEntries(Object.entries(profile).map(([key, value]) => [key, key === "routes" || key === "legacy" ? value : filled(value as TierSettings | null)]))]))) as Record<string, ModelProfile> : undefined;
+      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), ...(routes.legacyMainMode ? { legacyMode: routes.legacyMainMode } : {}), path, contextWarning, mainCompaction, spawn: single.spawn, advisor: single.advisor, bashReview, ...(warnings.length ? { warnings } : {}), ...(models ? { models } : {}), ...(profiles ? { profiles } : {}) };
     } catch (error) {
       return { path, error: error instanceof Error ? error.message : String(error) };
     }
@@ -128,9 +131,10 @@ export const MESSAGE_CONFIRM_MAX = 2000;
 /** A message to main about an approved queued task that could not start after its job's result said it would. */
 export const QUEUE_MESSAGE_TYPE = "orche-task-queue";
 
-export const ORCHE_USAGE = "Usage: /orche single|strong|ultra|mdsd|direct [--effort LEVEL] <PROMPT> | /orche mode [single|strong|ultra|mdsd|direct] | /orche workers | /orche stop <id>|all | /orche records | /orche splits [DAYS] | /orche models | /orche cancel | /orche detach | /orche doctor | /orche install-deps";
+export const ORCHE_USAGE = "Usage: /orche single|ultra|mdsd|direct [--effort LEVEL] [--summary-budget BUDGET] [--profile NAME] <PROMPT> | /orche mode [single|ultra|mdsd|direct [--profile NAME]] | /orche workers | /orche stop <id>|all | /orche records | /orche splits [DAYS] | /orche models | /orche cancel | /orche detach | /orche doctor | /orche install-deps (--profile: a model profile of orche.config.json \"profiles\"; omitted: default, the top-level models)";
 export type OrcheCommand =
-  | { mode: MainMode; prompt: string; effort?: ThinkingLevel; summaryBudget?: SummaryBudgetProfile }
+  /** `profile`: the request's model profile (`default` when --profile is omitted; none in direct). `legacyStrong`: typed as `/orche strong`. */
+  | { mode: MainMode; prompt: string; effort?: ThinkingLevel; summaryBudget?: SummaryBudgetProfile; profile?: string; legacyStrong?: boolean }
   | { mode: "cancel" }
   | { mode: "detach" }
   | { mode: "workers" }
@@ -138,40 +142,48 @@ export type OrcheCommand =
   | { mode: "splits"; days?: number }
   | { mode: "models" }
   | { mode: "stop"; worker: string }
-  | { mode: "mode"; value?: MainMode }
+  /** `profile`: with a mode, the session's profile (`default` when --profile is omitted; none for direct). */
+  | { mode: "mode"; value?: MainMode; profile?: string; legacyStrong?: boolean }
   | { mode: "doctor" }
   | { mode: "install-deps" };
 /**
- * The one-shot request whose run is going on (`oneShot` in the extension): its mode, the jobs it started, whether main answers yet, its
- * `--effort` and, in direct mode, main's thinking before and after the effort was applied (restored when the request ends).
+ * The one-shot request whose run is going on (`oneShot` in the extension): its mode and profile, the jobs it started, whether main
+ * answers yet, its `--effort` and, in direct mode, main's thinking before and after the effort was applied (restored when the request ends).
  */
-interface OneShotRequest { mode: MainMode; jobs: Set<string>; answering: boolean; effort?: ThinkingLevel; summaryBudget?: SummaryBudgetProfile; mainThinking?: { before: ThinkingLevel; applied: ThinkingLevel } }
+interface OneShotRequest { mode: MainMode; profile: string; jobs: Set<string>; answering: boolean; effort?: ThinkingLevel; summaryBudget?: SummaryBudgetProfile; mainThinking?: { before: ThinkingLevel; applied: ThinkingLevel } }
 /** The values of a one-shot request's `--effort`: Pi's thinking levels, exactly as `pi --thinking` takes them (lowest first). */
 export const EFFORT_LEVELS: readonly ThinkingLevel[] = THINKING_LEVELS;
 const isEffortLevel = (value: string): value is ThinkingLevel => (EFFORT_LEVELS as readonly string[]).includes(value);
-/** Every one-shot option token (docs/orchestrator.md 14.5): `--effort` and `--summary-budget`, each followed by
+/** Every one-shot option token (docs/orchestrator.md 14.5): `--effort`, `--summary-budget` and `--profile`, each followed by
  *  whitespace, `=` or the end (`--efforts` or `--effort-x` are prompt text). */
-const ONE_SHOT_OPTION = /^--(effort|summary-budget)(?=[\s=]|$)/;
-const ONE_SHOT_OPTION_ANYWHERE = /(?:^|\s)--(effort|summary-budget)(?=[\s=]|$)/;
-type OneShotOption = "effort" | "summary-budget";
+const ONE_SHOT_OPTION = /^--(effort|summary-budget|profile)(?=[\s=]|$)/;
+const ONE_SHOT_OPTION_ANYWHERE = /(?:^|\s)--(effort|summary-budget|profile)(?=[\s=]|$)/;
+type OneShotOption = "effort" | "summary-budget" | "profile";
 /** The values of `--summary-budget` (src/pi/summary-budget.ts profiles). */
 export const SUMMARY_BUDGET_VALUES: readonly SummaryBudgetProfile[] = SUMMARY_BUDGET_PROFILES;
 const EFFORT_VALUES = `Valid values: ${EFFORT_LEVELS.join(", ")} (Pi's thinking levels; a model that lacks one runs the nearest level it supports)`;
 const OPTION_VALUES: Record<OneShotOption, string> = {
   effort: EFFORT_VALUES,
   "summary-budget": `Valid values: ${SUMMARY_BUDGET_VALUES.join(", ")} (compact: half the compaction summary budget; docs/compaction.md)`,
+  profile: `Valid values: "${DEFAULT_PROFILE}" (the default: the top-level models of orche.config.json) or a profile name defined under "profiles" (/orche models lists them)`,
 };
-const OPTION_PLACEHOLDER: Record<OneShotOption, string> = { effort: "<LEVEL>", "summary-budget": "<BUDGET>" };
+const OPTION_PLACEHOLDER: Record<OneShotOption, string> = { effort: "<LEVEL>", "summary-budget": "<BUDGET>", profile: "<NAME>" };
 const validOption = (name: OneShotOption, value: string): boolean =>
-  name === "effort" ? isEffortLevel(value) : (SUMMARY_BUDGET_VALUES as readonly string[]).includes(value);
+  name === "effort" ? isEffortLevel(value) : name === "profile" ? isProfileName(value) : (SUMMARY_BUDGET_VALUES as readonly string[]).includes(value);
 const optionUsageLine = (mode: string, name: OneShotOption) => `Usage: /orche ${mode} --${name} ${OPTION_PLACEHOLDER[name]} <PROMPT> (the options right after the mode word; -- after them ends the options). Nothing was sent.`;
+/** The one-shot mode words: the modes, and the merged `strong` (read as single with the profile strong). */
+const ONE_SHOT_WORDS: readonly string[] = [...MAIN_MODES, LEGACY_STRONG_MODE];
 /**
  * The arguments of a one-shot `<mode>` after the mode word (`rest`, after its one delimiter): options first (whitespace before and
- * between them only separates), each `--name <VALUE>` or `--name=<VALUE>` and given at most once: `--effort`, `--summary-budget`; then ONE whitespace character and the prompt verbatim, as after the mode word; `--` after the options ends them
- * (a prompt that itself starts with an option). Without options the prompt is `rest` unchanged.
+ * between them only separates), each `--name <VALUE>` or `--name=<VALUE>` and given at most once: `--effort`, `--summary-budget`,
+ * `--profile`; then ONE whitespace character and the prompt verbatim, as after the mode word; `--` after the options ends them
+ * (a prompt that itself starts with an option). Without options the prompt is `rest` unchanged. `--profile` defaults to `default`
+ * in the delegating modes; direct runs no workers and refuses it, like `--summary-budget`. Whether the named profile exists is
+ * checked against orche.config.json when the command runs (index.ts handler).
  * Undefined: no prompt (the caller shows the usage); `error`: an option that cannot be used, with what to type instead.
  */
-function parseOneShotArgs(mode: MainMode, rest: string): { prompt: string; effort?: ThinkingLevel; summaryBudget?: SummaryBudgetProfile } | { error: string } | undefined {
+function parseOneShotArgs(word: string, rest: string): { prompt: string; effort?: ThinkingLevel; summaryBudget?: SummaryBudgetProfile; profile?: string } | { error: string } | undefined {
+  const mode = word as MainMode | typeof LEGACY_STRONG_MODE;
   const given = new Map<OneShotOption, string>();
   let tail = rest;
   for (;;) {
@@ -187,13 +199,15 @@ function parseOneShotArgs(mode: MainMode, rest: string): { prompt: string; effor
       const so = [...given].map(([key, val]) => `--${key} ${val}`).join(" ");
       return { error: `orche ${mode}: --${name} is given more than once; give it once. To start the prompt itself with "--${name}", put -- before the prompt: /orche ${mode} ${so} -- <PROMPT>. Nothing was sent.` };
     }
-    if (!value) return { error: `orche ${mode}: --${name} needs a ${name === "effort" ? "level" : "value"}. ${OPTION_VALUES[name]}. ${optionUsageLine(mode, name)}` };
+    if (!value) return { error: `orche ${mode}: --${name} needs a ${name === "effort" ? "level" : name === "profile" ? "profile name" : "value"}. ${OPTION_VALUES[name]}. ${optionUsageLine(mode, name)}` };
     if (!validOption(name, value)) return { error: `orche ${mode}: invalid --${name} "${value}". ${OPTION_VALUES[name]}. ${optionUsageLine(mode, name)}` };
-    if (mode === "direct" && name !== "effort") return { error: `orche direct: --${name} applies to orche_task workers and direct mode runs none; use it with /orche single|strong|ultra|mdsd. Nothing was sent.` };
+    if (mode === "direct" && name !== "effort") return { error: `orche direct: --${name} applies to orche_task workers and direct mode runs none; use it with /orche single|ultra|mdsd. Nothing was sent.` };
+    if (mode === LEGACY_STRONG_MODE && name === "profile") return { error: `orche strong: strong mode was merged into single and already selects the profile "strong"; for another profile use /orche single --profile ${value} <PROMPT>. Nothing was sent.` };
     given.set(name, value);
     tail = after;
   }
-  if (!given.size) return /\S/.test(rest) ? { prompt: rest } : undefined;
+  const profile = mode === "direct" ? {} : { profile: given.get("profile") ?? DEFAULT_PROFILE };
+  if (!given.size) return /\S/.test(rest) ? { prompt: rest, ...profile } : undefined;
   let prompt = tail.slice(1);
   // `--` ends the options (whitespace before it only separates, as before an option); ONE delimiter after it, then the prompt.
   const end = /^\s*--(?=\s|$)/.exec(prompt);
@@ -204,37 +218,62 @@ function parseOneShotArgs(mode: MainMode, rest: string): { prompt: string; effor
   }
   const effort = given.get("effort") as ThinkingLevel | undefined;
   const summaryBudget = given.get("summary-budget") as SummaryBudgetProfile | undefined;
-  return { prompt, ...(effort ? { effort } : {}), ...(summaryBudget ? { summaryBudget } : {}) };
+  return { prompt, ...(effort ? { effort } : {}), ...(summaryBudget ? { summaryBudget } : {}), ...profile };
 }
-const ONE_SHOT = new RegExp(`^\\s*(${MAIN_MODES.join("|")})(?:\\s([\\s\\S]*))?$`);
+const ONE_SHOT = new RegExp(`^\\s*(${ONE_SHOT_WORDS.join("|")})(?:\\s([\\s\\S]*))?$`);
 /**
- * What is wrong with a one-shot option that kept `/orche <args>` from being a command: an unusable value, a missing value or prompt, the
- * option given twice, or the option outside a one-shot request (before the mode word, on another subcommand). Undefined otherwise.
+ * `/orche mode <mode> [--profile <NAME>]` (also `--profile=<NAME>`): the session's mode and profile, `default` when --profile is
+ * omitted (direct: none, and --profile is refused). `strong` is single with the profile strong. Undefined: not a mode command.
+ */
+function parseModeArgs(args: string): { value?: MainMode; profile?: string; legacyStrong?: boolean } | { error: string } | undefined {
+  const match = /^\s*mode(?:\s+(\S+)(\s+--profile(?:(?:=|\s+)(\S*))?)?)?\s*$/.exec(args);
+  if (!match) {
+    if (/^\s*mode\s+\S+\s+--profile(?=[\s=]|$)/.test(args)) return { error: "orche mode: --profile takes one profile name: /orche mode <single|ultra|mdsd> --profile <NAME>. Nothing changed." };
+    return undefined;
+  }
+  const [, word, flag, profile] = match;
+  if (word === undefined) return {};
+  const legacyStrong = word === LEGACY_STRONG_MODE;
+  if (!legacyStrong && !isMainMode(word)) return undefined;
+  if (flag === undefined) return legacyStrong ? { value: "single", legacyStrong } : word === "direct" ? { value: "direct" } : { value: word as MainMode, profile: DEFAULT_PROFILE };
+  if (legacyStrong) return { error: `orche mode strong: strong mode was merged into single and already selects the profile "strong"; for another profile use /orche mode single --profile ${profile || "<NAME>"}. Nothing changed.` };
+  if (word === "direct") return { error: "orche mode direct: --profile applies to orche_task workers and direct mode runs none; use it with /orche mode single|ultra|mdsd. Nothing changed." };
+  if (!profile) return { error: `orche mode ${word}: --profile needs a profile name. ${OPTION_VALUES.profile}. Usage: /orche mode ${word} --profile <NAME>. Nothing changed.` };
+  if (!isProfileName(profile)) return { error: `orche mode ${word}: invalid --profile "${profile}". ${OPTION_VALUES.profile}. Nothing changed.` };
+  return { value: word as MainMode, profile };
+}
+/**
+ * What is wrong with a one-shot or mode option that kept `/orche <args>` from being a command: an unusable value, a missing value or
+ * prompt, the option given twice, or the option outside a one-shot request or `/orche mode <mode>`. Undefined otherwise.
  */
 export function effortUsage(args: string): string | undefined {
+  const mode = parseModeArgs(args);
+  if (mode && "error" in mode) return mode.error;
+  if (mode) return undefined;
   const match = ONE_SHOT.exec(args);
-  const parsed = match?.[2] !== undefined ? parseOneShotArgs(match[1] as MainMode, match[2]) : undefined;
+  const parsed = match?.[2] !== undefined ? parseOneShotArgs(match[1]!, match[2]) : undefined;
   if (parsed && "error" in parsed) return parsed.error;
   const name = ONE_SHOT_OPTION_ANYWHERE.exec(args)?.[1] as OneShotOption | undefined;
   if (!name) return undefined;
-  return `orche: --${name} belongs to a one-shot request, right after its mode word: /orche ${MAIN_MODES.join("|")} --${name} ${OPTION_PLACEHOLDER[name]} <PROMPT>; /orche mode and the other subcommands do not take it. ${OPTION_VALUES[name]}. Nothing was sent.`;
+  return `orche: --${name} belongs to a one-shot request, right after its mode word: /orche ${MAIN_MODES.join("|")} --${name} ${OPTION_PLACEHOLDER[name]} <PROMPT>${name === "profile" ? "; for the session: /orche mode <mode> --profile <NAME>" : "; /orche mode and the other subcommands do not take it"}. ${OPTION_VALUES[name]}. Nothing was sent.`;
 }
 /** What each mode does to the request of a one-shot `/orche <mode> <prompt>` (usage and refusal texts). */
 const ONE_SHOT_EFFECT: Record<MainMode, string> = {
-  single: "delegates it to one worker on the general model tiers (models.orchestrator, models.worker)",
-  strong: "delegates it to one worker on the strong model tiers (models.strong-orchestrator, models.strong-worker)",
-  ultra: "runs it with the quality-first ultra orchestration on the strong model tiers",
-  mdsd: "runs it with the MDSD search policy (multi-dimensional search diversification: independent exploration paths that differ in interpretation, hypotheses, sources, reasoning, direction and validation, then integration, adaptive search and verification) on the strong model tiers",
+  single: "delegates it to one worker",
+  ultra: "runs it with the quality-first ultra orchestration",
+  mdsd: "runs it with the MDSD search policy (multi-dimensional search diversification: independent exploration paths that differ in interpretation, hypotheses, sources, reasoning, direction and validation, then integration, adaptive search and verification)",
   direct: "lets main edit directly, without workers",
 };
 /**
- * The usage of `/orche strong`, `/orche ultra` or `/orche mdsd` given without a prompt (or only whitespace): what the one-shot command does, and that
- * the session's mode stays unless `/orche mode <mode>` sets it. Undefined for anything else (`single`/`direct` keep the general usage).
+ * The usage of `/orche ultra`, `/orche mdsd` or the merged `/orche strong` given without a prompt (or only whitespace): what the
+ * one-shot command does, and that the session's mode stays unless `/orche mode <mode>` sets it. Undefined for anything else
+ * (`single`/`direct` keep the general usage).
  */
 export function oneShotUsage(args: string): string | undefined {
   const mode = /^\s*(\S+)\s*$/.exec(args)?.[1];
-  if (mode !== "strong" && mode !== "ultra" && mode !== "mdsd") return undefined;
-  return `Usage: /orche ${mode} [--effort LEVEL] <PROMPT>: ${ONE_SHOT_EFFECT[mode]} for this one request (the prompt may span lines; --effort ${EFFORT_LEVELS.join("|")} sets the reasoning effort its workers start at; --summary-budget ${SUMMARY_BUDGET_VALUES.join("|")} sets its workers' compaction summary budget). The session's mode does not change; /orche mode ${mode} switches it.`;
+  if (mode === LEGACY_STRONG_MODE) return `Usage: /orche strong [--effort LEVEL] <PROMPT>: strong mode was merged into single; it runs as /orche single --profile strong <PROMPT> (the profile "strong" of orche.config.json, or "default" when none is defined) for this one request. Use /orche single|ultra|mdsd --profile <NAME> <PROMPT> for any profile; /orche mode single --profile <NAME> sets the session's.`;
+  if (mode !== "ultra" && mode !== "mdsd") return undefined;
+  return `Usage: /orche ${mode} [--effort LEVEL] [--profile NAME] <PROMPT>: ${ONE_SHOT_EFFECT[mode]} for this one request (the prompt may span lines; --effort ${EFFORT_LEVELS.join("|")} sets the reasoning effort its workers start at; --summary-budget ${SUMMARY_BUDGET_VALUES.join("|")} sets its workers' compaction summary budget; --profile <NAME> runs its workers on that model profile of orche.config.json, "${DEFAULT_PROFILE}" when omitted). The session's mode does not change; /orche mode ${mode} switches it.`;
 }
 /**
  * Why a one-shot command is refused while main is busy: it starts only from an idle session, so its own run (prompt, tools, workers)
@@ -244,7 +283,7 @@ export function busyRefusal(requested: MainMode, session: MainMode): string {
   const alternative = requested === session
     ? `, or send the prompt without "/orche ${requested}" to queue it as an ordinary follow-up in the session's mode (${session})`
     : `, or switch the session with /orche mode ${requested}`;
-  return `orche ${requested}: refused. The agent is busy, and a one-shot /orche ${requested} request starts only when the session is idle, so that its run and its workers use ${requested} mode (it ${ONE_SHOT_EFFECT[requested]}); a queued turn would lose that. Send it again when the current run has ended${alternative}.`;
+  return `orche ${requested}: refused. The agent is busy, and a one-shot /orche ${requested} request starts only when the session is idle, so that its run and its workers use ${requested} mode (it ${ONE_SHOT_EFFECT[requested]}) and its --profile; a queued turn would lose that. Send it again when the current run has ended${alternative}.`;
 }
 /** The system prompt section with main's delegation rules for its mode. */
 const DELEGATION_SECTION = "orche-delegation";
@@ -252,8 +291,9 @@ const DELEGATION_SECTION = "orche-delegation";
  * Strict command grammar: extra tokens on control commands never start work. A one-shot command `<mode> <PROMPT>` is the mode word
  * (after optional leading whitespace), ONE whitespace character as the delimiter (a space, a tab or a line break), then the prompt:
  * everything after the delimiter, verbatim (its own leading and trailing whitespace, lines, quotes and slashes included). A missing or
- * whitespace-only prompt is no command (the caller shows the usage). `--effort <LEVEL>` may come first ({@link parseOneShotArgs}); an
- * unusable one is no command either ({@link effortUsage} says why).
+ * whitespace-only prompt is no command (the caller shows the usage). `--effort <LEVEL>`, `--summary-budget <BUDGET>` and
+ * `--profile <NAME>` may come first ({@link parseOneShotArgs}); an unusable one is no command either ({@link effortUsage} says why).
+ * `strong` (merged into single) is single with `legacyStrong` (the handler selects the profile strong, or default without one).
  */
 export function parseOrcheCommand(args: string): OrcheCommand | undefined {
   if (/^\s*cancel\s*$/.test(args)) return { mode: "cancel" };
@@ -268,14 +308,13 @@ export function parseOrcheCommand(args: string): OrcheCommand | undefined {
   if (splits) return splits[1] !== undefined ? (Number(splits[1]) > 0 ? { mode: "splits", days: Number(splits[1]) } : undefined) : { mode: "splits" };
   const stop = /^\s*stop\s+(\S+)\s*$/.exec(args);
   if (stop?.[1]) return { mode: "stop", worker: stop[1] };
-  const switchMode = /^\s*mode(?:\s+(\S+))?\s*$/.exec(args);
-  if (switchMode) {
-    if (switchMode[1] === undefined) return { mode: "mode" };
-    return isMainMode(switchMode[1]) ? { mode: "mode", value: switchMode[1] } : undefined;
-  }
+  const switchMode = parseModeArgs(args);
+  if (switchMode) return "error" in switchMode ? undefined : { mode: "mode", ...switchMode };
+  if (/^\s*mode(?:\s|$)/.test(args)) return undefined;
   const match = ONE_SHOT.exec(args);
-  const parsed = match?.[2] !== undefined ? parseOneShotArgs(match[1] as MainMode, match[2]) : undefined;
-  return parsed && !("error" in parsed) ? { mode: match![1] as MainMode, ...parsed } : undefined;
+  const parsed = match?.[2] !== undefined ? parseOneShotArgs(match[1]!, match[2]) : undefined;
+  if (!parsed || "error" in parsed) return undefined;
+  return match![1] === LEGACY_STRONG_MODE ? { mode: "single", ...parsed, legacyStrong: true } : { mode: match![1] as MainMode, ...parsed };
 }
 
 export interface OrcheExtensionOptions extends OrcheControllerOptions {
@@ -508,9 +547,10 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     let bashReview: BashReviewSettings = { ...DEFAULT_BASH_REVIEW };
     /** `models.main` at the last session start: what the config set and what was applied (for /orche models). */
     let mainModel: ModelTiersView["atStart"] = {};
-    /** The config's model tiers at the last session start: the mode's orchestrator tier decides main's hand-off rule (its own model or
-     * thinking level, or "inherit main's"); strong and ultra read models.strong-orchestrator, with models.orchestrator as its fallback. */
+    /** The config's model tiers and profiles at the last session start: the selected profile's orchestrator tier decides main's hand-off
+     * rule (its own model or thinking level, or "inherit main's"; routing.ts profileTiers). */
     let configuredTiers: ModelTiers | undefined;
+    let configuredProfiles: Record<string, ModelProfile> | undefined;
     /** The floor of an implicit thinking inheritance (main-model.ts inheritedThinking): models.main's thinking, else main's level
      * at the last session start. Lowering main's thinking later does not lower the workers that only inherit it. */
     let thinkingFloor: { level: ThinkingLevel; source: "models.main" | "session start" } | undefined;
@@ -521,8 +561,10 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     };
     /** The main session's long-response watch (long-response.ts): notifies the user, adds a request-local note after a long failure. */
     const longResponse = new LongResponseWatch(() => state.effective, (message, type) => { try { lastUi?.notify(message, type); } catch { /* the UI may be gone */ } }, options.longResponse);
+    /** ` · profile <name>` for a profile other than `default` (status line, /orche mode). */
+    const profileLabel = (profile: string) => profile === DEFAULT_PROFILE ? "" : ` · profile ${profile}`;
     const showMode = (ctx: Pick<ExtensionContext, "ui">) =>
-      ctx.ui.setStatus("orche-mode", `orche: ${state.session}${state.overriding ? ` (one-turn ${state.effective}${oneShot?.effort ? `, effort ${oneShot.effort}` : ""})` : ""}`);
+      ctx.ui.setStatus("orche-mode", `orche: ${state.session}${profileLabel(state.sessionProfile)}${state.overriding ? ` (one-turn ${state.effective}${state.effectiveProfile !== DEFAULT_PROFILE ? `, profile ${state.effectiveProfile}` : ""}${oneShot?.effort ? `, effort ${oneShot.effort}` : ""})` : ""}`);
     /**
      * A one-shot request's `--effort`: a delegating mode hands it to the orche_task assignments the request starts (`oneShotArgs`;
      * workers.ts applies it), main's own thinking stays. Direct mode has no workers: main itself runs the request at it, through Pi's
@@ -557,9 +599,9 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       request.mainThinking = undefined;
       try { if (pi.getThinkingLevel() === saved.applied && saved.applied !== saved.before) pi.setThinkingLevel(saved.before); } catch { /* the session may be gone */ }
     };
-    /** `oneShot` of an orche_task call in a one-shot run: the session's own mode and the request's options (delegating modes only). */
+    /** `oneShot` of an orche_task call in a one-shot run: the session's own mode and profile and the request's options (delegating modes only). */
     const oneShotArgs = () => state.overriding
-      ? { oneShot: { session: state.session, ...(oneShot && isDelegatingMode(state.effective) ? { ...(oneShot.effort ? { effort: oneShot.effort } : {}), ...(oneShot.summaryBudget ? { summaryBudget: oneShot.summaryBudget } : {}) } : {}) } }
+      ? { oneShot: { session: state.session, sessionProfile: state.sessionProfile, ...(oneShot && isDelegatingMode(state.effective) ? { ...(oneShot.effort ? { effort: oneShot.effort } : {}), ...(oneShot.summaryBudget ? { summaryBudget: oneShot.summaryBudget } : {}) } : {}) } }
       : {};
     const endOneShot = (ui: ExtensionContext["ui"]) => {
       if (!oneShot) return;
@@ -589,10 +631,13 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       } catch { /* no editor */ }
       try { ui.notify(`orche: the one-shot run was aborted; ${returned.length === 1 ? "the prompt queued during it was" : `${returned.length} prompts queued during it were`} not sent (back in the editor).`, "info"); } catch { /* no UI */ }
     };
-    /** The `orche-delegation` prompt section of a mode (the rules main follows in it). */
+    /** The `orche-delegation` prompt section of a mode (the rules main follows in it), for the profile in force now. */
     const delegationSection = (mode: MainMode) => {
-      const head = modeTiers(configuredTiers, mode).orchestrators[0];
-      return delegationRules(mode, { spawn, orchestratorModel: !!head && !inheritsMain(head.tier), orchestratorThinking: !!tierThinking(head?.tier), orchestratorThinkingMain: inheritsMainThinking(head?.tier), ...(head ? { orchestratorKey: head.key } : {}) });
+      const profile = state.effectiveProfile;
+      // A profile the config no longer defines: orche_task refuses it with the defined names; the prompt keeps the default wording.
+      let head: ReturnType<typeof profileTiers>["orchestrators"][number] | undefined;
+      try { head = profileTiers(configuredTiers, configuredProfiles, profile).orchestrators[0]; } catch { head = undefined; }
+      return delegationRules(mode, { spawn, profile, orchestratorModel: !!head && !inheritsMain(head.tier), orchestratorThinking: !!tierThinking(head?.tier), orchestratorThinkingMain: inheritsMainThinking(head?.tier), ...(head ? { orchestratorKey: head.key } : {}) });
     };
 
     // (1) Our tools replace Pi's read/edit by name; they are bound to the cwd of the call, not of the process.
@@ -625,7 +670,9 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         if (extra.length) pi.setActiveTools([...active, ...extra]);
       }
       const found = await discoverConfiguredMainMode({ cwd: ctx.cwd, agentDir: options.agentDir ?? getAgentDir(), projectTrusted: ctx.isProjectTrusted() });
-      state.setConfig(found.mode, found.path);
+      // A legacy `mainMode: "strong"` is single with the profile strong (when the config defines it, else default).
+      const knownProfiles = profileNames(found.profiles);
+      state.setConfig(found.mode, found.path, { profiles: knownProfiles, ...(found.legacyMode === LEGACY_STRONG_MODE ? { profile: knownProfiles.includes(LEGACY_STRONG_MODE) ? LEGACY_STRONG_MODE : DEFAULT_PROFILE } : {}) });
       warningSettings = found.contextWarning ?? { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
       warningState = { warnedLevel: 0 };
       mainCompactionSettings = found.mainCompaction ?? { ...DEFAULT_MAIN_COMPACTION };
@@ -634,6 +681,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       // Only a model or a thinking level of its own changes main's hand-off rule; `{ "model": "main" }` and `thinking: "main"` keep
       // the earlier sentence's "main's CURRENT" for what they inherit.
       configuredTiers = found.models;
+      configuredProfiles = found.profiles;
       // Removed settings (e.g. single.pipeline, single.mainReview) are ignored: the file still loads; say so once per session start.
       for (const warning of found.warnings ?? []) ctx.ui.notify(warning, "warning");
       // models.main: the Pi session's model and thinking, once at a fresh session start; the user's own choices are kept.
@@ -687,7 +735,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       state.apply();
       showMode(ctx);
       if (found.error) ctx.ui.notify(`orche: ${found.error}; using the default mode ${state.session}`, "warning");
-      if (found.legacyMode && !found.error) ctx.ui.notify(`orche: mainMode "${found.legacyMode}" in ${found.path} was removed (multi-agent orche_run delegation); using "single". Set mainMode to one of ${MAIN_MODES.join(", ")}.`, "warning");
+      // `strong` was merged into single: the config loader's warning (found.warnings) says so with the profile it maps to.
+      if (found.legacyMode && found.legacyMode !== LEGACY_STRONG_MODE && !found.error) ctx.ui.notify(`orche: mainMode "${found.legacyMode}" in ${found.path} was removed (multi-agent orche_run delegation); using "single". Set mainMode to one of ${MAIN_MODES.join(", ")}.`, "warning");
     });
     // Every run main starts while idle (Pi 1.2.0+: user prompts and runs a triggerTurn message starts alike; older hosts: user
     // prompts only). Both kinds get the skill list and the delegation section of the mode in force, and the first takes the notice.
@@ -1027,12 +1076,12 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
 
     // (2) Delegation, one-turn overrides and worker/session controls.
     pi.registerCommand("orche", {
-      description: "/orche single <prompt>: delegate one request to one worker. /orche strong <prompt>: the same on the strong tiers (models.strong-orchestrator, models.strong-worker). /orche ultra <prompt>: one request with quality-first ultra orchestration on the strong tiers. /orche mdsd <prompt>: one request with the MDSD search policy (diversified exploration paths, integration, adaptive search, verification; docs/mdsd.md) on the strong tiers. /orche direct <prompt>: edit directly for one turn. These one-shot commands leave the session's mode as it is and start only when the session is idle; with task ledgers (single.ledger) a task started by such a request keeps its mode when continued, otherwise later turns run in the session's mode. /orche <mode> --effort <off|minimal|low|medium|high|xhigh|max> <prompt>: the same request at that reasoning effort: every orche_task assignment it starts runs at it (also over a models tier's own level; tiers with thinking \"main\" take it too), /orche direct runs main at it for that run; each model clamps it, and Pi's settings, the session's thinking level for later turns and orche.config.json stay as they are. /orche <mode> --summary-budget <standard|compact> <prompt> (not direct; combinable with --effort, any order, each once): the request's orche_task assignments compact with that summary budget (compact: half the standard one). In every mode, a worker's Task DAG node marked read:true (simple reading) runs at low effort with read-only tools. /orche mode [single|strong|ultra|mdsd|direct]: show/set the session's delegation mode. /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche splits [days]: the orchestrator's split decisions over all sessions (split rate, criteria, cost and time), optionally of the last N days. /orche models: the main, orchestrator, worker, advisor, strong-orchestrator and strong-worker models now and where each comes from (config, inherited, Pi), and whether the advisor (single.advisor) is on. /orche cancel: stop the active task. /orche detach: stop waiting for the background task (it keeps running; its result arrives as a message). /orche doctor: check pi-orche's dependencies (npm packages and native bindings, Node.js, git, orche.config.json, configured models) and say what to do when something is wrong. /orche install-deps: install missing npm dependencies; lists what needs a manual step.",
+      description: "/orche single <prompt>: delegate one request to one worker. /orche ultra <prompt>: one request with quality-first ultra orchestration. /orche mdsd <prompt>: one request with the MDSD search policy (diversified exploration paths, integration, adaptive search, verification; docs/mdsd.md). /orche direct <prompt>: edit directly for one turn. These one-shot commands leave the session's mode as it is and start only when the session is idle; with task ledgers (single.ledger) a task started by such a request keeps its mode and profile when continued, otherwise later turns run in the session's mode and profile. /orche <mode> --profile <name> <prompt> (not direct): the request's orche_task workers (orchestrator, sub-workers, advisor, routes) run on that model profile of orche.config.json \"profiles\"; omitted, the profile is default (the top-level models). The former /orche strong <prompt> is /orche single --profile strong <prompt>. /orche <mode> --effort <off|minimal|low|medium|high|xhigh|max> <prompt>: the same request at that reasoning effort: every orche_task assignment it starts runs at it (also over a models tier's own level; tiers with thinking \"main\" take it too), /orche direct runs main at it for that run; each model clamps it, and Pi's settings, the session's thinking level for later turns and orche.config.json stay as they are. /orche <mode> --summary-budget <standard|compact> <prompt> (not direct; combinable with --effort and --profile, any order, each once): the request's orche_task assignments compact with that summary budget (compact: half the standard one). In every mode, a worker's Task DAG node marked read:true (simple reading) runs at low effort with read-only tools. /orche mode [single|ultra|mdsd|direct] [--profile <name>]: show/set the session's delegation mode and model profile (default when --profile is omitted). /orche workers: list workers. /orche stop <id>|all: dispose workers. /orche records: list this session's recent task records (transcripts and manifests of orche tasks). /orche splits [days]: the orchestrator's split decisions over all sessions (split rate, criteria, cost and time), optionally of the last N days. /orche models: the main, orchestrator, worker and advisor models of the profile in force and where each comes from (config, profile, inherited, Pi), the defined profiles, and whether the advisor (single.advisor) is on. /orche cancel: stop the active task. /orche detach: stop waiting for the background task (it keeps running; its result arrives as a message). /orche doctor: check pi-orche's dependencies (npm packages and native bindings, Node.js, git, orche.config.json, configured models) and say what to do when something is wrong. /orche install-deps: install missing npm dependencies; lists what needs a manual step.",
       // Read-only: the current roster supplies `stop <id>`; completion never creates, starts or stops workers.
       getArgumentCompletions: prefix => {
         let ids: string[] = [];
         try { ids = workers?.list().map(worker => worker.id) ?? []; } catch { /* no live pool: static candidates only */ }
-        return completeOrcheArguments(prefix, ids);
+        return completeOrcheArguments(prefix, ids, profileNames(configuredProfiles));
       },
       handler: async (args, ctx: ExtensionCommandContext) => {
         const parsed = parseOrcheCommand(args);
@@ -1084,7 +1133,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         if (parsed.mode === "models") {
           // The model tiers now and where each comes from (docs/orchestrator.md 12), with the advisor's on/off state (13).
           const found = await discoverConfiguredMainMode({ cwd: ctx.cwd, agentDir: options.agentDir ?? getAgentDir(), projectTrusted: ctx.isProjectTrusted() });
-          ctx.ui.notify(formatModelTiers({ main: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(), ...(thinkingFloor ? { thinkingFloor } : {}), mode: state.effective, ...(found.path ? { path: found.path } : {}), ...(found.error ? { error: found.error } : {}), ...(found.models ? { tiers: found.models } : {}), advisor: found.advisor ?? DEFAULT_SINGLE.advisor, atStart: mainModel }), "info");
+          ctx.ui.notify(formatModelTiers({ main: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(), ...(thinkingFloor ? { thinkingFloor } : {}), mode: state.effective, profile: state.effectiveProfile, ...(found.path ? { path: found.path } : {}), ...(found.error ? { error: found.error } : {}), ...(found.models ? { tiers: found.models } : {}), ...(found.profiles ? { profiles: found.profiles } : {}), advisor: found.advisor ?? DEFAULT_SINGLE.advisor, atStart: mainModel }), "info");
           return;
         }
         if (parsed.mode === "splits") {
@@ -1102,27 +1151,50 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
           ctx.ui.notify(workers ? await workers.stop(parsed.worker) : parsed.worker === "all" ? "no workers" : `unknown worker ${parsed.worker}`, "info");
           return;
         }
+        /**
+         * The profile a command selects, checked against the config file in force now (the same one orche_task reads): `default`
+         * always exists; another must be defined under `profiles` (or come from the legacy strong tiers). The merged `strong` takes the
+         * profile strong when it is defined, else default. Nothing changes when this refuses.
+         */
+        const commandProfile = async (word: string, requested: string | undefined, legacyStrong: boolean | undefined): Promise<{ profile: string; note?: string } | { error: string }> => {
+          const found = await discoverConfiguredMainMode({ cwd: ctx.cwd, agentDir: options.agentDir ?? getAgentDir(), projectTrusted: ctx.isProjectTrusted() });
+          const known = profileNames(found.profiles);
+          if (legacyStrong) {
+            const profile = known.includes(LEGACY_STRONG_MODE) ? LEGACY_STRONG_MODE : DEFAULT_PROFILE;
+            return { profile, note: `orche: strong mode was merged into single; ${word} runs as single with the profile "${profile}"${profile === DEFAULT_PROFILE ? " (orche.config.json defines no profile strong)" : ""}. Next time: ${word.startsWith("mode") ? "/orche mode single --profile <NAME>" : "/orche single --profile <NAME> <PROMPT>"}.` };
+          }
+          const profile = requested ?? DEFAULT_PROFILE;
+          if (known.includes(profile)) return { profile };
+          return { error: `orche ${word}: ${new UnknownProfileError(profile, known, found.error ? `config error: ${found.error}` : found.path ?? "no orche.config.json").message} Nothing was ${word.startsWith("mode") ? "changed" : "sent"}.` };
+        };
         if (parsed.mode === "mode") {
           if (parsed.value) {
-            state.choose(parsed.value);
+            const selected = parsed.value === "direct" ? { profile: DEFAULT_PROFILE } : await commandProfile(`mode ${parsed.legacyStrong ? LEGACY_STRONG_MODE : parsed.value}`, parsed.profile, parsed.legacyStrong);
+            if ("error" in selected) { ctx.ui.notify(selected.error, "warning"); return; }
+            if (selected.note) ctx.ui.notify(selected.note, "info");
+            state.choose(parsed.value, selected.profile);
             showMode(ctx);
-            ctx.ui.notify(`orche mode: ${parsed.value} (saved in this session)`, "info");
+            ctx.ui.notify(`orche mode: ${parsed.value}${parsed.value === "direct" ? "" : ` · profile ${selected.profile}`} (saved in this session)`, "info");
             return;
           }
           const { source, path } = state.source;
-          ctx.ui.notify(`orche mode: ${state.session} (${source === "config" ? `config ${path ?? ""}`.trim() : source === "session" ? "set with /orche mode in this session" : "default"})`, "info");
+          ctx.ui.notify(`orche mode: ${state.session}${state.session === "direct" ? "" : ` · profile ${state.sessionProfile}`} (${source === "config" ? `config ${path ?? ""}`.trim() : source === "session" ? "set with /orche mode in this session" : "default"})`, "info");
           return;
         }
         {
+          // The request's profile (default when --profile is omitted; none in direct), checked before anything starts.
+          const selected = parsed.mode === "direct" ? { profile: DEFAULT_PROFILE } : await commandProfile(parsed.legacyStrong ? LEGACY_STRONG_MODE : parsed.mode, parsed.profile, parsed.legacyStrong);
+          if ("error" in selected) { ctx.ui.notify(selected.error, "warning"); return; }
           // A one-shot request starts only from an idle session (its own run, in its mode); while busy it is refused, never queued as an
           // ordinary prompt that would lose its mode (busyRefusal).
           if (!ctx.isIdle() || oneShot) {
             ctx.ui.notify(busyRefusal(parsed.mode, state.session), "warning");
             return;
           }
-          const request: OneShotRequest = { mode: parsed.mode, jobs: new Set<string>(), answering: false, ...(parsed.effort ? { effort: parsed.effort } : {}), ...(parsed.summaryBudget ? { summaryBudget: parsed.summaryBudget } : {}) };
+          if (selected.note) ctx.ui.notify(selected.note, "info");
+          const request: OneShotRequest = { mode: parsed.mode, profile: selected.profile, jobs: new Set<string>(), answering: false, ...(parsed.effort ? { effort: parsed.effort } : {}), ...(parsed.summaryBudget ? { summaryBudget: parsed.summaryBudget } : {}) };
           oneShot = request;
-          state.setOverride(parsed.mode);
+          state.setOverride(parsed.mode, selected.profile);
           if (parsed.effort) applyEffort(request, parsed.effort, ctx.ui, ctx.model);
           if (parsed.summaryBudget) ctx.ui.notify(`orche ${parsed.mode}: this request's orche_task assignments compact with the ${parsed.summaryBudget} summary budget; later requests use the standard one.`, "info");
           showMode(ctx);
@@ -1177,6 +1249,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         const base = {
           ...params,
           mainMode: state.effective,
+          profile: state.effectiveProfile,
           // A one-shot `/orche <mode> <prompt>` run: the assignment runs in that request's mode (with task ledgers its task keeps it)
           // and at its --effort (this assignment only; a queued one keeps what it was given here).
           ...oneShotArgs(),
@@ -1220,6 +1293,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         return pool().executeTool({
           ...params,
           mainMode: state.effective,
+          profile: state.effectiveProfile,
           // A one-shot `/orche <mode> <prompt>` run: the assignment runs in that request's mode and at its --effort.
           ...oneShotArgs(),
           cwd: ctx.cwd,

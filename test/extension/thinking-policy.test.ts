@@ -262,7 +262,7 @@ describe("the default stays fixed", () => {
     expect(events.filter(event => event.type === "result_rewrite" || event.type === "thinking_change")).toEqual([]);
   });
   it("read nodes (every mode, no option, default fixed policy): a read:true node runs at low with read-only tools; the work after it at B; the record counts them", async () => {
-    for (const mainMode of ["single", "strong"] as const) {
+    for (const mainMode of ["single"] as const) {
       const { execute, script, seen } = await fixture();
       script([
         plan(n("r", "running", { read: true }), n("a", "pending", {}, ["r"])),

@@ -8,7 +8,7 @@
     "extensions": ["./src/extension/index.ts"]
   },
   "piOrche": {
-    "capabilities": ["orche_task.advisor", "task_plan.readNodes", "oneshot.summaryBudget"]
+    "capabilities": ["orche_task.advisor", "task_plan.readNodes", "oneshot.summaryBudget", "oneshot.profile"]
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

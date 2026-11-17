@@ -1,7 +1,7 @@
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI, ToolInfo } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_MAIN_MODE, LEGACY_MAIN_MODES, loadRouteConfig, MAIN_MODES, type MainMode } from "../orchestration/routing.js";
+import { DEFAULT_MAIN_MODE, DEFAULT_PROFILE, LEGACY_MAIN_MODES, LEGACY_STRONG_MODE, LEGACY_STRONG_PROFILE, loadRouteConfig, MAIN_MODES, type MainMode } from "../orchestration/routing.js";
 import { classifyBash, READ_ONLY_GIT_SUBCOMMANDS, type BashHint } from "./bash-policy.js";
 import { CONFIG_FILE } from "./config.js";
 import { WORK_TYPE_RULE } from "../single/work-types.js";
@@ -17,11 +17,12 @@ export const DELEGATION_TOOLS: readonly string[] = ["orche_task", "orche_task_st
 export function isMainMode(value: unknown): value is MainMode {
   return typeof value === "string" && (MAIN_MODES as readonly string[]).includes(value);
 }
-/** `auto` and `multi` were removed (multi-agent delegation measured no better than one worker); they now mean `single`. */
-export function isLegacyMainMode(value: unknown): value is (typeof LEGACY_MAIN_MODES)[number] {
-  return typeof value === "string" && (LEGACY_MAIN_MODES as readonly string[]).includes(value);
+/** `auto` and `multi` were removed (multi-agent delegation measured no better than one worker); they now mean `single`. `strong` was
+ *  merged into `single` (it now means single with the profile `strong`, see {@link MainModeState.restore}). */
+export function isLegacyMainMode(value: unknown): value is (typeof LEGACY_MAIN_MODES)[number] | typeof LEGACY_STRONG_MODE {
+  return typeof value === "string" && ((LEGACY_MAIN_MODES as readonly string[]).includes(value) || value === LEGACY_STRONG_MODE);
 }
-/** Tools that are switched off (removed from the active set) in `mode`: single, strong and ultra delegate every change. */
+/** Tools that are switched off (removed from the active set) in `mode`: single, ultra and mdsd delegate every change. */
 export function blockedTools(mode: MainMode): readonly string[] {
   return mode === "direct" ? DELEGATION_TOOLS : EDIT_TOOLS;
 }
@@ -80,8 +81,10 @@ export interface DelegationOptions {
   /** That tier names main's thinking explicitly (`thinking: "main"`, or `{ "model": "main" }` without a level): main's CURRENT
    * thinking exactly, without the floor of an implicit inheritance (main-model.ts inheritedThinking). */
   orchestratorThinkingMain?: boolean;
-  /** The `models` key of that tier (default `orchestrator`; strong/ultra: `strong-orchestrator`, or `orchestrator` as its fallback). */
+  /** Where that tier is configured (default `models.orchestrator`; with a profile e.g. `profiles.fast.orchestrator`). */
   orchestratorKey?: string;
+  /** The model profile the session's workers run on (`--profile`; default `default`, the top-level models). */
+  profile?: string;
 }
 /**
  * How standard roles get their model and thinking. A tier that names main's thinking (`"main"`) keeps the earlier sentence word
@@ -99,22 +102,25 @@ const MODEL_SENTENCE = {
 };
 const modelSentence = (options: DelegationOptions) => (options.orchestratorModel
   ? options.orchestratorThinking ? MODEL_SENTENCE.configuredBoth : options.orchestratorThinkingMain ? MODEL_SENTENCE.configured : MODEL_SENTENCE.configuredFloor
-  : options.orchestratorThinking ? MODEL_SENTENCE.inheritedModel : options.orchestratorThinkingMain ? MODEL_SENTENCE.inherited : MODEL_SENTENCE.inheritedFloor).replace("(models.orchestrator)", `(models.${options.orchestratorKey ?? "orchestrator"})`);
-/** The first sentence per delegating mode: strong and ultra are the single workflow on the strong tiers. */
+  : options.orchestratorThinking ? MODEL_SENTENCE.inheritedModel : options.orchestratorThinkingMain ? MODEL_SENTENCE.inherited : MODEL_SENTENCE.inheritedFloor).replace("(models.orchestrator)", `(${options.orchestratorKey ?? "models.orchestrator"})`);
+/** The first sentence per delegating mode. No mode selects models: the profile does (docs/orchestrator.md 12). */
 const MODE_HEAD: Record<Exclude<MainMode, "direct">, string> = {
   single: "orche mode: single.",
-  strong: "orche mode: strong (the single workflow on the strong model tiers: models.strong-orchestrator and models.strong-worker).",
-  ultra: "orche mode: ultra (the single workflow with the quality-first ultra orchestration, on the strong model tiers).",
-  mdsd: "orche mode: mdsd (the single workflow with the MDSD search policy, multi-dimensional search diversification, on the strong model tiers).",
+  ultra: "orche mode: ultra (the single workflow with the quality-first ultra orchestration).",
+  mdsd: "orche mode: mdsd (the single workflow with the MDSD search policy, multi-dimensional search diversification).",
 };
+/** The profile sentence: only for a profile other than `default`, so the default prompt stays as it was. */
+const profileSentence = (profile: string | undefined) => profile && profile !== DEFAULT_PROFILE
+  ? ` Model profile: ${profile} (profiles.${profile} in orche.config.json, selected with --profile): orche_task workers run on its orchestrator, worker and advisor models.`
+  : "";
 /** Stable per effective mode and config: never include session state or a worker roster here. */
 export function delegationRules(mode: MainMode, options: DelegationOptions = {}): string {
   if (mode === "direct")
     return "orche mode: direct. Delegation tools are disabled; make changes directly with your own tools. You may edit user-requested paths outside the cwd/workspace, including absolute paths and ../ paths. Delegated workers' workspace confinement does not restrict this main direct session; their scope remains unchanged. Existing OS permissions and other policies still apply; direct mode does not grant elevated OS privileges or bypass those restrictions.";
-  // ultra and mdsd always orchestrate (their stages and search rounds are orche_spawn calls); single and strong follow single.spawn.
+  // ultra and mdsd always orchestrate (their stages and search rounds are orche_spawn calls); single follows single.spawn.
   const spawn = mode === "ultra" || mode === "mdsd" || (options.spawn ?? true);
   return [
-    `${MODE_HEAD[mode]} You cannot edit files in this session: edit, write and ast_rewrite are disabled; explicit shell mutations and unverified shell syntax are blocked. You keep the conversation and the requirements, with limited inspection to state the task precisely, and you report results; acceptance belongs to the worker and rests on the checks it ran and reports, not on a review of yours. Do not explore or implement the codebase yourself; delegate with orche_task (the one exception: read-only answers while a background job runs, below).`,
+    `${MODE_HEAD[mode]}${profileSentence(options.profile)} You cannot edit files in this session: edit, write and ast_rewrite are disabled; explicit shell mutations and unverified shell syntax are blocked. You keep the conversation and the requirements, with limited inspection to state the task precisely, and you report results; acceptance belongs to the worker and rests on the checks it ran and reports, not on a review of yours. Do not explore or implement the codebase yourself; delegate with orche_task (the one exception: read-only answers while a background job runs, below).`,
     "orche_task (single): one persistent worker; available roles: explore | answer | implement | verify | game-asset | video. For this workflow choose implement for changes, answer for read-only questions. The worker owns the whole task end to end: investigate, settle ambiguous readings from the user's request and the instructions it names, implement completely, add or update tests, run relevant project checks and iterate until they pass, check the result against every requirement and correct what falls short, then report.",
     WORK_TYPE_RULE,
     "Git: workers never commit or push on their own, and this session cannot run commits itself. Only when the user explicitly asked in this conversation to commit or push, pass `git` ({commit:true} or {push:true, remote?, branch?}) to an implement, game-asset or video orche_task; explore, answer and verify reject it. The grant covers that assignment only, so scope the commit to the task's files where possible (pass `files` and name the paths in `request`) and check the commits listed in the result before reporting.",
@@ -192,8 +198,8 @@ export interface MainModeLookup {
   path?: string;
   /** The file exists but is invalid: the default mode applies. */
   error?: string;
-  /** The file names a removed mode (`auto`/`multi`), read as `single`. */
-  legacyMode?: (typeof LEGACY_MAIN_MODES)[number];
+  /** The file names a removed mode (`auto`/`multi`: read as `single`; `strong`: read as single with the profile `strong`). */
+  legacyMode?: (typeof LEGACY_MAIN_MODES)[number] | typeof LEGACY_STRONG_MODE;
 }
 /** `mainMode` from the same selected config file as the routes: trusted project file, else user file, else none. */
 export async function discoverMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup> {
@@ -219,17 +225,26 @@ interface SessionEntryLike { type: string; customType?: string; data?: unknown }
 type ModeHost = Pick<ExtensionAPI, "getActiveTools" | "setActiveTools" | "getAllTools" | "appendEntry">;
 
 /**
- * The main session's delegation mode and the tool set that goes with it. The effective mode is, in order:
+ * The main session's delegation mode and model profile, and the tool set that goes with the mode. The effective mode is, in order:
  * a one-shot `/orche <mode> <prompt>` override (for the run of that request only; with task ledgers its tasks keep the mode, see workers.ts RequestMode),
  * the mode chosen with `/orche mode` (persisted in the session), `mainMode` from the
  * orche config, `direct`. Only tools this class removed are ever restored (and the removed set is recorded in the session, because
  * Pi carries the reduced active set over a reload), so an explicit `--tools` selection is respected.
+ *
+ * The profile goes with the mode: a one-shot request's `--profile` (default `default`) for its run, else the profile chosen with
+ * `/orche mode <mode> [--profile <name>]` (default `default`, persisted in the same entry), else the config's (only a legacy
+ * `mainMode: "strong"` sets one), else `default`. The former `strong` mode, in an entry or the config, is single with the profile
+ * `strong` when the config defines it, else `default`.
  */
 export class MainModeState {
   private configured: MainMode | undefined;
+  private configuredProfile: string | undefined;
   private configPath: string | undefined;
+  private known: ReadonlySet<string> = new Set([DEFAULT_PROFILE]);
   private chosen: MainMode | undefined;
+  private chosenProfile: string = DEFAULT_PROFILE;
   private override: MainMode | undefined;
+  private overrideProfile: string = DEFAULT_PROFILE;
   private readonly removed = new Set<string>();
   private recorded = "";
 
@@ -243,6 +258,14 @@ export class MainModeState {
   get session(): MainMode {
     return this.chosen ?? this.configured ?? DEFAULT_MAIN_MODE;
   }
+  /** The model profile orche_task workers run on right now (a one-shot request's, else the session's). */
+  get effectiveProfile(): string {
+    return this.override ? this.overrideProfile : this.sessionProfile;
+  }
+  /** The model profile of the session, ignoring a one-turn override. */
+  get sessionProfile(): string {
+    return this.chosen ? this.chosenProfile : this.configured ? this.configuredProfile ?? DEFAULT_PROFILE : DEFAULT_PROFILE;
+  }
   get source(): { source: ModeSource; path?: string } {
     if (this.chosen) return { source: "session" };
     if (this.configured) return { source: "config", ...(this.configPath ? { path: this.configPath } : {}) };
@@ -252,14 +275,26 @@ export class MainModeState {
     return this.override !== undefined;
   }
 
-  setConfig(mode: MainMode | undefined, path?: string): void {
+  /**
+   * The config's mode, its profile (a legacy `mainMode: "strong"`), and the profiles it defines (`default` always): a restored
+   * legacy `strong` choice takes the profile `strong` only when it is one of them.
+   */
+  setConfig(mode: MainMode | undefined, path?: string, options: { profile?: string; profiles?: readonly string[] } = {}): void {
     this.configured = mode;
     this.configPath = path;
+    this.configuredProfile = options.profile;
+    this.known = new Set([DEFAULT_PROFILE, ...options.profiles ?? []]);
+  }
+  /** The profile a legacy `strong` mode maps to: `strong` when the config defines it, else `default`. */
+  legacyStrongProfile(): string {
+    return this.known.has(LEGACY_STRONG_PROFILE) ? LEGACY_STRONG_PROFILE : DEFAULT_PROFILE;
   }
   /** Adopt the last `/orche mode` choice recorded in the session branch. */
   restore(entries: readonly SessionEntryLike[]): void {
     this.chosen = undefined;
+    this.chosenProfile = DEFAULT_PROFILE;
     this.override = undefined;
+    this.overrideProfile = DEFAULT_PROFILE;
     this.removed.clear();
     this.recorded = "";
     for (const entry of entries) {
@@ -272,18 +307,26 @@ export class MainModeState {
         continue;
       }
       if (entry.customType !== MODE_ENTRY_TYPE) continue;
-      const mode = entry.data && typeof entry.data === "object" && "mode" in entry.data ? entry.data.mode : undefined;
-      if (isMainMode(mode)) this.chosen = mode;
-      else if (isLegacyMainMode(mode)) this.chosen = "single";
+      const data = entry.data && typeof entry.data === "object" ? entry.data as { mode?: unknown; profile?: unknown } : {};
+      // Entries come from the session file: a profile that is no valid name is `default`. A saved profile the config no longer
+      // defines is kept: orche_task then refuses it with the defined names instead of silently running on another model.
+      const profile = typeof data.profile === "string" && data.profile ? data.profile : DEFAULT_PROFILE;
+      if (isMainMode(data.mode)) { this.chosen = data.mode; this.chosenProfile = profile; }
+      else if (data.mode === LEGACY_STRONG_MODE) { this.chosen = "single"; this.chosenProfile = this.legacyStrongProfile(); }
+      else if (isLegacyMainMode(data.mode)) { this.chosen = "single"; this.chosenProfile = DEFAULT_PROFILE; }
     }
   }
-  choose(mode: MainMode): void {
+  /** `/orche mode <mode> [--profile <name>]`: the session's mode and profile (`default` when none is given), saved in the session. */
+  choose(mode: MainMode, profile: string = DEFAULT_PROFILE): void {
     this.chosen = mode;
-    this.host.appendEntry(MODE_ENTRY_TYPE, { mode });
+    this.chosenProfile = profile;
+    this.host.appendEntry(MODE_ENTRY_TYPE, { mode, profile });
     this.apply();
   }
-  setOverride(mode?: MainMode): void {
+  /** A one-shot request's mode and profile for its run (`default` when it gives none); no argument ends it. */
+  setOverride(mode?: MainMode, profile: string = DEFAULT_PROFILE): void {
     this.override = mode;
+    this.overrideProfile = profile;
     this.apply();
   }
   /** Make the active tool set match the effective mode. */

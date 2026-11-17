@@ -7,13 +7,13 @@ design, research and idea generation.
 - **What stays fixed:** one common objective and the mandatory constraints.
 - **How explorers differ:** in ① problem interpretation, ② hypothesis space, ③ information sources, ④ reasoning method, ⑤ search direction and ⑥ validation criteria.
 - **Operators:** six combinable operators, EXPAND, DECOMPOSE, INVERT, TRANSFER, CHALLENGE and VALIDATE.
-- **Default modes:** `single`, `strong` and `ultra` are unchanged. MDSD runs only when it is selected.
+- **Default modes:** `single` (which absorbed the former `strong`) and `ultra` are unchanged. MDSD runs only when it is selected.
 
 ## Use
 
-- **One request:** `/orche mdsd <PROMPT>`. The prompt is taken verbatim, as with `/orche strong`, and the session's mode stays as it is.
-- **Session mode:** `/orche mode mdsd`, or `"mainMode": "mdsd"` in `orche.config.json`.
-- **Models:** the strong tiers (`models.strong-orchestrator`, `models.strong-worker`), exactly as for strong and ultra. Sub-workers inherit the orchestrator's model.
+- **One request:** `/orche mdsd <PROMPT>`. The prompt is taken verbatim, as with `/orche single`, and the session's mode stays as it is.
+- **Session mode:** `/orche mode mdsd [--profile NAME]`, or `"mainMode": "mdsd"` in `orche.config.json`.
+- **Models:** the selected model profile, exactly as for single and ultra (docs/orchestrator.md 14.1): `default` (the top-level `models`) unless `/orche mdsd --profile <NAME> <PROMPT>` or `/orche mode mdsd --profile <NAME>` selects another. Until 2026-11-18 mdsd always ran on the strong tiers; for that use `--profile strong` (the legacy `models.strong-*` tiers load as that profile). Sub-workers follow the profile's worker tier, else inherit the orchestrator's model. `mdsd.replication.models` is not a role tier and no profile changes it.
 - **Bounds:** optional `"mdsd": { maxRounds, explorer, explorerMax, total, reserve, final, wrapUpAt, hardStopAt }` in `orche.config.json`, defined in `src/orchestrator/mdsd-config.ts`.
 
 Defaults of the bounds:

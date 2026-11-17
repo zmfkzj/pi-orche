@@ -80,14 +80,14 @@ describe("runs as Pi 1.2.0+ starts them", () => {
     const hold = holdFirstStart();
     const h = await createHarness({
       mainSteps: [reply("first done")], orcheSteps: [], mainMode: "single",
-      models: { "strong-orchestrator": { model: "strong-orch/s1" } }, extraExtensions: [hold.extension],
+      profiles: { fast: { orchestrator: { model: "strong-orch/s1" } } }, extraExtensions: [hold.extension],
     });
     open.push(h);
     const first = h.session.prompt("first");
     await hold.entered.promise;
     expect(h.session.isIdle).toBe(false);
-    await h.session.prompt("/orche strong second request");
-    expect(notes(h).at(-1)).toBe(busyRefusal("strong", "single"));
+    await h.session.prompt("/orche single --profile fast second request");
+    expect(notes(h).at(-1)).toBe(busyRefusal("single", "single"));
     hold.gate.resolve();
     await first;
     await h.session.agent.waitForIdle();
@@ -100,15 +100,15 @@ describe("runs as Pi 1.2.0+ starts them", () => {
     const hold = holdFirstStart();
     const h = await createHarness({
       mainSteps: [reply("NEVER-ANSWERED"), reply("NEVER-ANSWERED")], orcheSteps: [], mainMode: "single",
-      models: { "strong-orchestrator": { model: "strong-orch/s1" } }, extraExtensions: [hold.extension],
+      profiles: { fast: { orchestrator: { model: "strong-orch/s1" } } }, extraExtensions: [hold.extension],
     });
     open.push(h);
     execFileSync("git", ["init", "-q"], { cwd: h.cwd });
-    const run = h.session.prompt("/orche strong A: inspect greeting.txt");
+    const run = h.session.prompt("/orche single --profile fast A: inspect greeting.txt");
     await hold.entered.promise;
-    expect(modeStatus(h)).toBe("orche: single (one-turn strong)");
+    expect(modeStatus(h)).toBe("orche: single (one-turn single, profile fast)");
     await h.session.followUp("B: and check it again");
-    expect(notes(h).at(-1)).toBe("orche: queued until the one-shot /orche strong request has ended; it then runs as its own turn in the session's mode (single).");
+    expect(notes(h).at(-1)).toBe("orche: queued until the one-shot /orche single request has ended; it then runs as its own turn in the session's mode (single).");
     const aborting = h.session.abort();
     hold.gate.resolve();
     await aborting;

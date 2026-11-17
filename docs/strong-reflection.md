@@ -6,7 +6,7 @@
 
 ## What it does
 
-In `strong` mode (the effective mode of the assignment, a one-shot `/orche strong <PROMPT>` included) the implement/answer worker
+In `single` mode (the effective mode of the assignment, on every model profile; until 2026-11-18 only the separate `strong` mode, which was then merged into single as the profile `strong`, see docs/orchestrator.md 14.1) the implement/answer worker
 receives this prompt once per assignment, verbatim, right before it reviews its own work:
 
 ```

@@ -48,7 +48,9 @@ async function filesUnder(dir: string): Promise<string[]> {
   return out;
 }
 
-const MODELS = { orchestrator: { model: "tier-orch/o1" }, "strong-orchestrator": { model: "strong-orch/s1" } };
+const MODELS = { orchestrator: { model: "tier-orch/o1" } };
+/** No mode selects models: these mdsd requests select the profile `deep` (--profile deep). */
+const PROFILES = { deep: { orchestrator: { model: "strong-orch/s1" } } };
 async function pool(mdsd: Record<string, unknown>) {
   const h = await createHarness({ mainSteps: [], orcheSteps: [] });
   opened.push(h);
@@ -56,7 +58,7 @@ async function pool(mdsd: Record<string, unknown>) {
   await writeFile(join(h.cwd, "STYLE.md"), "Greetings are lowercase.\n");
   await writeFile(join(h.cwd, "greeting.txt"), "Hello orche\n");
   await writeFile(join(h.cwd, "notes.md"), "The brand name keeps its capital.\n");
-  await writeFile(join(h.agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: h.orche.route.model }, records: { enabled: false }, mainMode: "single", models: MODELS, mdsd }));
+  await writeFile(join(h.agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: h.orche.route.model }, records: { enabled: false }, mainMode: "single", models: MODELS, profiles: PROFILES, mdsd }));
   const scratchBase = await mkdtemp(join(tmpdir(), "orche-mdsd-"));
   temp.push(scratchBase);
   const workers = new WorkerPool({ controller: new OrcheController({ agentDir: h.agentDir, createRuntime: async () => h.runtime }), agentDir: h.agentDir, scratchBase });
@@ -130,7 +132,7 @@ describe("mdsd mode through WorkerPool", () => {
       unseen: turn => turn === 0 ? tool("ls", { path: "." }) : explorerReport([{ id: "f1", claim: "No locale files exist, so nothing overrides the greeting." }]),
       check: () => tool("report_result", { kind: "verify", summary: "greeting.txt:1 is capitalised; STYLE.md requires lowercase", data: { passed: true, evidence: ["read greeting.txt:1: Hello orche", "read STYLE.md:1"], issues: [] } }),
     }));
-    const result = await execute({ mainMode: "mdsd", oneShot: { session: "single" } });
+    const result = await execute({ mainMode: "mdsd", profile: "deep", oneShot: { session: "single" } });
 
     // The search policy's tool set: orche_spawn with strategy specs.
     const spawnSchema = JSON.stringify(workers.session("W1").getToolDefinition(SPAWN_TOOL)?.parameters);
@@ -212,7 +214,7 @@ describe("mdsd mode through WorkerPool", () => {
       attack: turn => turn === 0 ? tool("read", { path: "greeting.txt" }) : explorerReport([{ id: "f1", claim: "Hello is capitalised.", location: ["greeting.txt:3"] }]),
       check: () => tool("report_result", { kind: "verify", summary: "greeting.txt:1 is capitalised", data: { passed: true, evidence: ["read greeting.txt:1"], issues: [] } }),
     }));
-    const result = await execute({ mainMode: "mdsd" });
+    const result = await execute({ mainMode: "mdsd", profile: "deep" });
     expect(seen.checkpoint).toContain("MDSD verification round 1");
     expect(seen.checkpoint).not.toContain("Refused");
     expect(seen.refused).toContain("Refused (MDSD budget): the run reached its final-report allowance");
@@ -235,7 +237,7 @@ describe("mdsd mode through WorkerPool", () => {
       rules: () => { cancel.abort(new Error("cancelled by user")); return tool("read", { path: "STYLE.md" }); },
       attack: () => tool("read", { path: "greeting.txt" }),
     }));
-    const failure = await execute({ mainMode: "mdsd", signal: cancel.signal }).then(() => undefined, (error: unknown) => error as { message: string; details?: { status?: string; mdsd?: { explorers: { status: string }[] } } });
+    const failure = await execute({ mainMode: "mdsd", profile: "deep", signal: cancel.signal }).then(() => undefined, (error: unknown) => error as { message: string; details?: { status?: string; mdsd?: { explorers: { status: string }[] } } });
     expect(failure?.message).toMatch(/cancelled/);
     expect(failure?.details?.status).toBe("cancelled");
   });
@@ -280,7 +282,7 @@ describe("mdsd mode through WorkerPool", () => {
       },
       check: () => { served.push("check@strong-orch"); return tool("report_result", { kind: "verify", summary: "greeting.txt:1 is capitalised", data: { passed: true, evidence: ["read greeting.txt:1"], issues: [] } }); },
     }));
-    const result = await execute({ mainMode: "mdsd", oneShot: { session: "single" } });
+    const result = await execute({ mainMode: "mdsd", profile: "deep", oneShot: { session: "single" } });
 
     // Each cell ran on its own provider, the verifier on the orchestrator's model (no substitution anywhere).
     expect(served.sort()).toEqual(["attack@rep-a", "attack@rep-b", "check@strong-orch", "rules@rep-a", "rules@rep-b"]);
@@ -311,7 +313,7 @@ describe("mdsd mode through WorkerPool", () => {
     const { execute, strong } = await pool({ replication: { models: [{ model: "strong-orch/s1" }, { model: "absent/model" }] } });
     let calls = 0;
     strong.setResponses(Array.from({ length: 3 }, () => () => { calls++; return tool("report_result", { kind: "answer", summary: "x" }); }));
-    const failure = await execute({ mainMode: "mdsd" }).then(() => undefined, (error: unknown) => error as { message: string });
+    const failure = await execute({ mainMode: "mdsd", profile: "deep" }).then(() => undefined, (error: unknown) => error as { message: string });
     expect(failure?.message).toContain("MDSD replication: absent/model is not available in orche's runtime (mdsd.replication.models); no other model is substituted.");
     expect(calls).toBe(0);
   });

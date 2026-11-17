@@ -189,7 +189,7 @@ describe("/orche doctor and install-deps", () => {
     expect(parseOrcheCommand("doctor")).toEqual({ mode: "doctor" });
     expect(parseOrcheCommand("  install-deps \n")).toEqual({ mode: "install-deps" });
     for (const bad of ["doctor now", "install-deps sharp", "install", "Doctor"]) expect(parseOrcheCommand(bad)).toBeUndefined();
-    expect(parseOrcheCommand("single doctor")).toEqual({ mode: "single", prompt: "doctor" });
+    expect(parseOrcheCommand("single doctor")).toEqual({ mode: "single", prompt: "doctor", profile: "default" });
     expect(parseOrcheCommand("direct install-deps")).toEqual({ mode: "direct", prompt: "install-deps" });
     expect(parseOrcheCommand("models")).toEqual({ mode: "models" });
     expect(parseOrcheCommand("splits 7")).toEqual({ mode: "splits", days: 7 });

@@ -614,7 +614,7 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
   - `{ "model": "main", "thinking": "main" }`은 `{ "model": "main" }`과 같다. 파싱할 때 `{ "model": "main" }`으로 읽는다.
   - 문법 근거: `model: "main"`과 같은 방식으로, 상속할 값의 자리에 같은 예약값 `"main"`을 둔다. 필드마다 같은 규칙("그 필드에 main이라고 쓰면 main의 현재 값")이라 새 키(`inheritThinking` 같은 것)나 두 번째 값 모양이 필요 없다. thinking 단계 이름에 `main`이 없고 예전에는 설정 오류였으므로, 예전에 유효하던 설정의 뜻이 바뀌지 않는다. 다른 필드(`extendedContext`)에는 상속 예약값을 두지 않는다.
   - thinking을 생략하면 orchestrator는 자기 모델이어도 main의 thinking을 쓴다(b42684a부터). 다만 15.4절의 변경 이후 생략(암묵 상속)에는 하한(floor)이 있다: main의 현재 thinking과 floor(`models.main`의 thinking, 없으면 마지막 세션 시작 때 main의 단계) 가운데 높은 쪽이다. 그래서 orchestrator에서 `"thinking": "main"`(명시: main의 현재 단계 그대로)과 생략(암묵: floor 아래로 내려가지 않음)은 main이 세션 중에 단계를 낮췄을 때만 달라진다. 출처는 `config:main`(명시)과 `main`(생략)으로 기록된다. worker는 생략하면 orchestrator의 thinking을 따른다.
-- **암묵 상속의 thinking floor**(`inheritedThinking`, `src/extension/main-model.ts`, 15.4절): 단계를 정하지 않은 orchestrator 계층(계층 없음, 모델만 지정, 해석할 수 없어 main을 상속, strong에서 fallback된 `models.orchestrator` 포함)과 orche 설정이 없을 때의 세션 route는 `max(main의 현재 단계, floor)`를 쓴다. 명시적 `"thinking": "main"`·단계 없는 `{ "model": "main" }`·자기 단계는 floor를 쓰지 않는다. sub-worker와 advisor는 상속하는 orchestrator의 실제 단계를 따르므로 함께 올라간다.
+- **암묵 상속의 thinking floor**(`inheritedThinking`, `src/extension/main-model.ts`, 15.4절): 단계를 정하지 않은 orchestrator 계층(계층 없음, 모델만 지정, 해석할 수 없어 main을 상속, 프로필에서 fallback된 `models.orchestrator` 포함)과 orche 설정이 없을 때의 세션 route는 `max(main의 현재 단계, floor)`를 쓴다. 명시적 `"thinking": "main"`·단계 없는 `{ "model": "main" }`·자기 단계는 floor를 쓰지 않는다. sub-worker와 advisor는 상속하는 orchestrator의 실제 단계를 따르므로 함께 올라간다.
   - 설정 오류: `routes`, `default`, `models.main`의 `"thinking": "main"`(상속할 main이 없거나 main 자신이다).
 
 - **해석 규칙**:
@@ -697,32 +697,56 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
   - 마무리 안내가 잡힌 보고에 조언을 전달하는지(`events.jsonl` 기록 포함), `advisor: false`의 재사용 후속 적용·다음 assignment 복원·새 worker 무시(`test/extension/advisor.test.ts`), 작은 상한·안내 무시·보고 중 억제·시간 안내·unbounded·취소(`test/specialists/session.test.ts`).
 - **확인하지 못한 것**: 제품 경로로 실제 모델(cliproxyapi)에서 다시 측정하지 않았다. 벤치는 늦은 조언을 같은 worker의 후속 assignment로 줬다. 제품은 같은 assignment 안에서 보고를 잡아 두고 처리하게 하므로 동작은 비슷하지만 측정된 방식과 같지는 않다.
 
-## 14. strong · ultra 모드
+## 14. 모델 프로필(`--profile`)과 ultra 모드
 
-### 14.1 모드와 모델 계층
+### 14.1 single·strong 통합과 모델 프로필 (2026-11-18)
 
-| 모드 | orchestrator 모델 | sub-worker 모델 | advisor 모델 (`single.advisor` on일 때만, 13절) | 흐름 |
-|---|---|---|---|---|
-| `single` (기본) | `models.orchestrator` → 미설정·해석 불가 시 main | `models.worker` → 미설정 시 orchestrator 상속 | `models.advisor` → 미설정·해석 불가 시 orchestrator 상속 (`models.strong-advisor`는 쓰지 않음) | single workflow (§1~13) |
-| `strong` | `models.strong-orchestrator` → 미설정·해석 불가 시 `models.orchestrator` → main | `models.strong-worker` → 미설정·해석 불가 시 실제 strong orchestrator 상속 (`models.worker`는 쓰지 않음) | `models.strong-advisor` → 미설정·해석 불가 시 `models.advisor` → 실제 strong orchestrator 상속 | single과 동일 (hand-off, prompt, 도구, 계획, 검증, 권한) |
-| `ultra`, `mdsd` | strong과 같음 | strong과 같음 | strong과 같음 | 아래 ultra 단계 계약 / docs/mdsd.md |
-| `direct` | 해당 없음 | 해당 없음 | 해당 없음 | main이 직접 편집 |
+예전 `strong` 모드는 single 흐름과 글자 그대로 같고 모델만 `models.strong-*` 계층을 쓰는 별도 모드였다. 두 모드를 따로 유지하지 않도록 **strong 모드를 single에 합치고, 모델 선택을 모드에서 떼어 이름 붙은 프로필로 옮겼다.** 모드는 `single`(기본)·`ultra`·`mdsd`·`direct` 네 개이고, 어떤 모드도 스스로 모델을 고르지 않는다. 모든 위임 모드의 orche_task worker는 **선택된 프로필**로 돈다.
 
-상속되는 필드: 상속 시 `model`과 `thinking`(계층에 thinking이 없으면 상위의 현재 수준, `"main"`이면 main의 현재 수준), main 모델을 상속할 때의 context window. `extendedContext`는 계층마다 자기 값(없으면 `config.extendedContext`)을 쓴다. phase thinking policy에서 상속한 sub-worker의 한 단계 낮춤, specialist(game-asset/video)의 route 규칙은 single과 같다. `models.strong-advisor`는 `models.advisor`와 같은 모양·예약값(`{ "model": "main" }`, `"thinking": "main"`)·해석 규칙을 쓰고, 켜고 끄는 것은 여전히 `single.advisor`뿐이다(계층을 설정해도 advisor가 켜지지 않는다). strong-worker와 달리 미설정·해석 불가 시 `models.advisor`로 fallback한다: strong 계층이 생기기 전 strong 모드의 advisor는 `models.advisor`를 썼으므로 기존 설정의 동작을 그대로 둔다. 각 후보는 원래 orchestrator route를 기준으로 따로 해석하므로, thinking이 없는 `strong-advisor`는 `models.advisor`가 아니라 strong orchestrator의 단계를 상속하고, 해석할 수 없는 후보의 thinking·extendedContext는 다음 후보로 넘어가지 않는다. 해석 불가 시 결과와 run.json에 `Warning: models.strong-advisor … falling back to models.advisor …` 경고가 남는다. `strongOrchestrator`/`strongWorker`/`strongAdvisor` camelCase도 받지만 두 표기를 함께 쓰면 config 오류다.
+- **`default` 프로필**: 최상위 `models`(orchestrator·worker·advisor)와 `routes` 그대로다. `--profile`을 생략하면 항상 `default`다. 따라서 프로필을 쓰지 않는 기존 설정·세션은 예전 single과 같은 모델로 돈다.
+- **이름 붙은 프로필**: `orche.config.json` 최상위 `profiles` 아래에 원하는 만큼 정의한다(개수 제한 없음). 이름은 글자(모든 문자 체계)·숫자·`_`로 시작하고 그 뒤에 `.`·`-`도 쓸 수 있으며 64자 이하, 공백·`=` 불가. `default`는 예약어다(정의하면 config 오류: 기본값을 바꾸려면 최상위 `models`를 바꾼다).
+- **프로필 내용**: `orchestrator`·`worker`·`advisor`(각각 `models`의 계층과 같은 모양: `model`, `thinking?`, `extendedContext?`, `{ "model": "main" }`, `"thinking": "main"`) 또는 `null`, 그리고 `routes`(최상위 `routes`와 같은 모양). `main`은 Pi 세션 자체의 모델이라 프로필에 넣을 수 없다(config 오류). `images.model`, `bashReview.model`, `mdsd.replication.models`처럼 역할 모델이 아닌 설정은 프로필이 바꾸지 않는다.
+
+| 역할 | 선택 순서 (위가 우선) |
+|---|---|
+| orchestrator (orche_task explore/answer/implement/verify) | `profiles.<name>.orchestrator` → 미설정·해석 불가 시 `models.orchestrator` → main 상속 |
+| worker (orche_spawn sub-worker, fresh verifier 포함) | 프로필이 `worker`를 정하면 그것(`null`이면 없음), 아니면 `models.worker` → 없거나 해석 불가 시 실제 orchestrator 상속 |
+| advisor (`single.advisor` on일 때만) | `profiles.<name>.advisor` → 미설정·해석 불가 시 `models.advisor` → orchestrator 상속 |
+| specialist route (game-asset, video, 경로 기반 역할) | `profiles.<name>.routes.<role>` → `routes.<role>` → `default` |
+
+`null`은 그 프로필에서 최상위 계층을 지운다(그 계층이 `models`에 없을 때처럼 상속). advisor의 `null`은 모델 override를 지울 뿐 advisor를 끄지 않는다(켜고 끄는 것은 여전히 `single.advisor`). 해석할 수 없는 후보는 결과·run.json에 `Warning: profiles.deep.orchestrator nowhere/s is unresolvable in orche's runtime; falling back to models.orchestrator …` 경고를 남기고 다음 후보로 간다(thinking·extendedContext는 넘어가지 않는다). 상속 필드(`thinking`, main 모델의 context window, phase thinking policy의 한 단계 낮춤)는 12절과 같다. 해석기는 `src/orchestration/routing.ts` `profileTiers`/`applyProfile` 하나이고, orche_task(`src/extension/workers.ts`), main 지시문, `/orche models`가 모두 이것을 쓴다.
 
 ```json
 {
-  "mainMode": "strong",
   "models": {
     "orchestrator": { "model": "provider/general-model", "thinking": "high" },
-    "worker": { "model": "provider/general-worker" },
-    "strong-orchestrator": { "model": "provider/strongest-model", "thinking": "max" },
-    "strong-worker": { "model": "provider/strong-worker-model", "thinking": "high" }
+    "worker": { "model": "provider/general-worker" }
+  },
+  "profiles": {
+    "deep": {
+      "orchestrator": { "model": "provider/strongest-model", "thinking": "max" },
+      "worker": { "model": "provider/strong-worker-model", "thinking": "high" },
+      "advisor": { "model": "provider/reviewer-model" }
+    },
+    "fast": { "orchestrator": { "model": "provider/fast-model", "thinking": "low" }, "worker": null },
+    "art": { "routes": { "game-asset": { "model": "provider/image-capable-model" } } }
   }
 }
 ```
 
-`strong-worker`를 빼면 strong/ultra의 sub-worker는 `strongest-model`을 상속한다. 결과에는 `Mode: strong (orchestrator: models.strong-orchestrator; sub-workers: ...; advisor: ...)` 줄(advisor 부분은 `single.advisor`가 켜졌을 때만), `details.mode`/`details.modelTier`, run.json `assignment.mode`/`assignment.tier`(advisor가 계층에서 왔으면 `assignment.advisor.tier`도)가 남는다. 같은 worker를 single↔strong 사이에 재사용하면 모델이 바뀌고 결과에 `Note: W1 switched from single to strong mode ...`가 붙는다. ultra 경계를 넘으면(도구 집합이 세션 생성 때 고정되므로) 기존 worker를 은퇴시키고 새 worker가 그 transcript로 handover를 받는다.
+**선택**:
+- 요청 한 건: `/orche single|ultra|mdsd --profile <NAME> <PROMPT>`(`--profile=<NAME>`도 받는다; `--effort`·`--summary-budget`과 순서 무관, 각 한 번). 생략하면 `default`다(세션 프로필이 아니라 기본값이다). `direct`는 worker가 없어서 거부한다.
+- 세션: `/orche mode <single|ultra|mdsd> [--profile <NAME>]`. `orche-mode` 세션 항목에 `{ mode, profile }`로 저장되어 reload·resume 뒤에도 남는다. `--profile`을 생략하면 `default`로 저장한다. 상태 줄은 `orche: single · profile deep`, `/orche mode`는 `orche mode: single · profile deep (set with /orche mode in this session)`이다.
+- 존재 검사: 명령을 실행할 때 지금 적용되는 config 파일을 다시 읽어 확인하고, 없는 이름이면 `Unknown profile "nope" (<path>): orche.config.json defines "default", "deep" …. Nothing was sent.`(mode면 `Nothing was changed.`)로 거부한다. 아무 항목도 저장하지 않고 턴도 시작하지 않는다. 저장된 세션 프로필이 나중에 config에서 사라지면 `/orche models`가 그렇다고 알리고, orche_task는 다른 모델로 몰래 돌지 않고 `Unknown profile "deep" (the session's profile (/orche mode <mode> --profile); …)`로 시작 전에 실패한다.
+- 우선순위: 진행 중인 one-shot 요청의 `--profile` > (`single.ledger` 켬) task에 고정된 요청의 모드·프로필 > 세션 프로필 > `default`. task ledger는 hand-off 이벤트에 `requestMode`와 함께 `requestProfile`을 저장한다. 승인 후 대기한 작업과 background job은 요청할 때의 프로필로 돈다.
+
+**결과·기록**: `details.profile`(single 흐름의 표준 역할), `details.modelTier`(`models.orchestrator`, `profiles.deep.orchestrator` 같은 설정 위치), run.json `assignment.profile`/`assignment.tier`/`assignment.advisor.tier`, job 시작 항목의 `profile`. `default`가 아닌 프로필이나 ultra·mdsd에서는 `Profile: deep (orchestrator: profiles.deep.orchestrator; sub-workers: profiles.deep.worker; advisor: …)`(ultra·mdsd는 앞에 `Mode: ultra; `) 줄이 붙는다. default의 single 결과 텍스트는 예전과 같다. 재사용 worker가 다른 프로필로 오면 모델을 바꾸고 `Note: W1 switched from profile default to deep for this assignment: …`가 붙는다. route가 바뀐 specialist는 세션의 route를 바꿀 수 없으므로 은퇴시키고 새 worker가 transcript handover로 이어받는다(`W1 retired: profile art routes game-asset to … `). ultra 경계(도구 집합)는 예전처럼 은퇴·handover다.
+
+**호환·이행** (기존 strong 설정·명령·세션):
+- `models.strong-orchestrator`/`strong-worker`/`strong-advisor`(camelCase 포함, 두 표기를 함께 쓰면 오류)는 계속 읽히고 **프로필 `strong`**이 된다: orchestrator·advisor는 그 계층(미설정·해석 불가 시 `models.*`로 fallback, 예전과 같음), worker는 `strong-worker`가 없으면 `null`(예전처럼 strong orchestrator를 상속하고 `models.worker`는 쓰지 않음). 읽을 때마다 `profiles.strong`으로 옮기라는 경고가 나온다. `profiles.strong`과 legacy 계층을 함께 쓰면 config 오류다.
+- `mainMode: "strong"`, 세션에 저장된 `{ mode: "strong" }`, ledger에 고정된 `requestMode: "strong"`, `/orche strong <PROMPT>`, `/orche mode strong`은 모두 **single + 프로필 `strong`**으로 읽는다. config에 `strong` 프로필이 없으면 `default`로 읽고 그렇다고 알린다(예전 strong도 strong 계층이 없으면 single 계층으로 돌았다). `/orche strong --profile X`처럼 함께 쓰면 거부한다.
+- **동작 변화**: ultra·mdsd는 더 이상 strong 계층을 스스로 고르지 않는다. 예전 동작을 원하면 `/orche ultra --profile strong <PROMPT>` 또는 `/orche mode ultra --profile strong`을 쓴다. `single.strongReflection`(실험)은 이제 single 모드(모든 프로필)에 적용된다. 프로필 이름은 모델만 고르고 흐름을 고르지 않는다.
+- 테스트: `test/extension/profiles-ultra.test.ts`(파싱·우선순위·명령·`/orche models`·실제 세션 모델 사용·specialist·재사용·이행), `test/extension/one-shot.test.ts`, `test/extension/advisor.test.ts`, `test/extension/mdsd-e2e.test.ts`.
 
 ### 14.2 ultra 단계 계약
 
@@ -734,7 +758,7 @@ v1(5장)은 파일을 읽기 전, 명세 길이로 붙인 라벨로 판단을 �
 6. 반례 검토: `reason "verification"`을 채택 이후에 실행. 상한(기본 2라운드, `orche_task` `verificationRounds`)은 verifier가 하나라도 판정(passed/not passed)을 내고 끝난 라운드만 센다. verifier가 실행되기 전에 거부된 호출(잘못된 호출, 단계 계약의 거부)은 세지 않는다. 모든 verifier가 실패하거나 취소된 라운드(provider 연결 끊김, crash, verifier가 시작된 뒤 호출 자체의 실패)는 따로 세어 같은 상한에 닿으면 거부한다. 그래서 판정 없는 라운드가 늦은 채택 뒤에 필요한 검토를 써 버리지 않고, 실패가 되풀이되어도 멈춘다. 어느 쪽 상한에서 거부돼도 보고에는 `data.unresolved`가 필요하다(`createSpawnTool`, `src/orchestrator/spawn.ts`; 모든 모드의 `orche_spawn`에 공통). 모든 verifier가 실패·취소된 라운드의 결과에는 `No verifier finished with a verdict … does not count against the verification cap (N such round(s) left).`가 붙고, `Ultra:` 줄의 `verification N/2 round(s)`는 판정 있는 라운드만 세며 나머지는 `(+M without a finished verifier)`로 따로 적는다. 발견 사항은 `reproduced-fixed`/`reproduced-open`/`unverified`/`refuted`로 분류한다. `review[].source`는 발견 사항의 출처를 적는 자유 텍스트 이름표(300자까지)일 뿐 근거가 아니다(근거는 `evidence`의 ref).
 7. 통합 재검증: 작업공간의 마지막 변경 이후 단독으로 실행해 성공한 검사이며, 그 검사 전후의 작업공간 fingerprint가 보고 시점의 fingerprint와 같아야 한다.
 
-**분석가 finding hand-off** (`UltraRun.captureHandoff`·`handoffDecision`, `src/orchestrator/ultra.ts`; 2라운드 규칙 H2). 켜기: ultra 모드에서 항상 켜져 있고 설정할 것이 없다(implement·answer 모두). strong·single·MDSD에는 적용되지 않으며 그 모드의 `orche_spawn` 스키마에는 `reference`·`excluded`가 없다.
+**분석가 finding hand-off** (`UltraRun.captureHandoff`·`handoffDecision`, `src/orchestrator/ultra.ts`; 2라운드 규칙 H2). 켜기: ultra 모드에서 항상 켜져 있고 설정할 것이 없다(implement·answer 모두). single·MDSD에는 적용되지 않으며 그 모드의 `orche_spawn` 스키마에는 `reference`·`excluded`가 없다.
 
 - **기록**: exploration 라운드가 끝나면 role answer로 done 보고를 낸 분석가마다 보고 전체(`summary`와 `JSON.stringify(data)`; 잘린 `orche_spawn` 결과 텍스트가 아님)가 이름 붙인, 작업공간 안에 실제로 있는 일반 파일을 **finding**으로 남긴다(`path`, `path:12`, `path:12-30`(en dash 포함); `./`는 떼고 cwd 아래 절대 경로는 상대 경로로; `/`·`.`이 없는 이름은 작업공간 최상위 파일 이름과 정확히 같을 때만). cwd 밖(링크로 나가는 경로 포함), `.git`·`.orche`·`node_modules`·`.venv`·`venv` 아래, orchestrator의 scratch(후보 사본), 보호된 검증 기준은 finding이 아니고, 검증 기준 작성자·done이 아닌 분석가의 보고와 orchestrator의 요청도 읽지 않는다. finding은 (경로, exploration 라운드)로 구분하고 출처(분석가 id, 줄 범위, 200자 이내 발췌, 라운드)를 가진다. 뒤 라운드가 같은 파일을 다시 보고하면 이전 finding의 처분과 상관없이 새 finding이며 다음 candidates 호출에서 따로 처분해야 한다(경로만 보고 이전 처분으로 갈음하지 않는다).
 - **적용**: 그 뒤의 candidates 호출은 사본을 만들거나 후보를 실행하기 전에(`validate`) 아직 처분되지 않은 finding마다 다음 하나를 요구한다.
@@ -776,7 +800,7 @@ read-only answer 변형: 모든 sub-worker가 answer/verify, `orche_adopt` 거�
 - report_result의 guard에서 그 호출에 묶인 현재 작업공간과 끝난 모든 후보 사본의 fingerprint를 구한다(후보 평가의 현재 상태). 통합 검사의 fingerprint가 이것과 다르면 거부한다(셸·편집·다른 세션의 변경 모두 포함). 기존 dirty 파일이나 다른 세션의 변경을 되돌려 맞추지 않는다. 다시 검사해야 한다.
 - 비용(정확성 우선): 후보가 생긴 뒤에는 bash 호출마다 작업공간과 끝난 모든 사본의 manifest·의존성 manifest 계산(git ls-files 3회 + 모든 항목 stat, 바뀐 파일만 해시)이 전후로 붙는다. 사본의 의존성은 처음 한 번 전부 해시하므로 큰 `node_modules`/`.venv`에서는 첫 검사가 수 초 늦어질 수 있다.
 
-재개: ultra implement/answer assignment는 `single.ledger`와 상관없이 항상 task ledger를 가진다(결과의 `Task ledger Tn …` 줄, `details.task`; single·strong·mdsd와 ultra의 다른 역할은 예전처럼 `single.ledger`가 켜져 있을 때만 갖고, 아니면 `task`를 무시한다). 그래서 이어가기의 식별자는 worker + task다. 같은 worker가 같은 task를 이어 받으면(`worker`와 `task`, 타임아웃·blocked·실패 이후) exploration(라운드 수, 끝난 basis builder·analyst 수)·보호 기준·분석가 finding과 그 처분(hand-off)·후보와 사본·채택(채택한 fingerprint 포함)·candidates 라운드 수와 **sub-worker 번호의 최고값**이 이어진다. `task`를 빼면 같은 worker라도 새 task이고 단계를 새로 시작한다. 다른 worker나 새 worker가 그 task를 넘겨받으면 ledger로 briefing을 받지만 단계는 새로 시작한다. worker가 이어 줄 수 있는 상태는 끝나지(done) 않은 마지막 ultra assignment의 것 하나뿐이다. 실패·타임아웃 결과의 `Ultra resume:` 줄(타임아웃이면 `Resume:` 줄도)이 이어갈 worker와 task를 적는다(`… continue in W1's next ultra assignment of that task (worker "W1", task "T1"), with or without single.ledger; …`). 요청 모드는 여전히 `single.ledger`만 따른다(14.5). 구현: `src/extension/workers.ts`(`ledgered`, `ultraResumeLine`).
+재개: ultra implement/answer assignment는 `single.ledger`와 상관없이 항상 task ledger를 가진다(결과의 `Task ledger Tn …` 줄, `details.task`; single·mdsd와 ultra의 다른 역할은 예전처럼 `single.ledger`가 켜져 있을 때만 갖고, 아니면 `task`를 무시한다). 그래서 이어가기의 식별자는 worker + task다. 같은 worker가 같은 task를 이어 받으면(`worker`와 `task`, 타임아웃·blocked·실패 이후) exploration(라운드 수, 끝난 basis builder·analyst 수)·보호 기준·분석가 finding과 그 처분(hand-off)·후보와 사본·채택(채택한 fingerprint 포함)·candidates 라운드 수와 **sub-worker 번호의 최고값**이 이어진다. `task`를 빼면 같은 worker라도 새 task이고 단계를 새로 시작한다. 다른 worker나 새 worker가 그 task를 넘겨받으면 ledger로 briefing을 받지만 단계는 새로 시작한다. worker가 이어 줄 수 있는 상태는 끝나지(done) 않은 마지막 ultra assignment의 것 하나뿐이다. 실패·타임아웃 결과의 `Ultra resume:` 줄(타임아웃이면 `Resume:` 줄도)이 이어갈 worker와 task를 적는다(`… continue in W1's next ultra assignment of that task (worker "W1", task "T1"), with or without single.ledger; …`). 요청 모드는 여전히 `single.ledger`만 따른다(14.5). 구현: `src/extension/workers.ts`(`ledgered`, `ultraResumeLine`).
 
 이어받은 assignment의 sub-worker는 그 다음 번호부터 받으므로(exploration·verification·거부된 spawn 번호 포함) 새 후보가 기존 후보의 id나 사본을 차지하지 않는다. 그래도 이미 있는 id(사본, index, base manifest 중 하나라도 있으면)나 `from`과 같은 id로 사본을 만들려 하면 아무것도 지우지 않고 candidates 호출을 거부한다. evidence ref와 probe는 assignment마다 새로 시작하므로 검사는 다시 실행한다(보존된 incumbent도 새 검사 뒤에 채택·평가된다). 이어받은 후보와 채택은 이 assignment의 모든 호출보다 앞선 것(spawn ref·채택 ref 0)으로 기록되므로, 이 assignment의 검사가 첫 호출부터 그 후보의 평가·채택 근거가 되고, 이어받은 채택 뒤에는 이 assignment에서 판정 있는 검토 라운드가 다시 필요하다(검증 라운드 기록은 이어지지 않는다). 완료(done)된 run은 사본을 삭제해 공간을 돌려준다. blocked·timeout은 이어받기와 확인을 위해 사본을 남긴다. 다음 ultra run이 새로 시작할 때 지운다. 테스트: `test/extension/ultra-continuity.test.ts`(WorkerPool 경로), `test/orchestrator/ultra-lifecycle.test.ts`.
 
@@ -795,28 +819,28 @@ read-only answer 변형: 모든 sub-worker가 answer/verify, `orche_adopt` 거�
 - 하위 의존성 디렉터리(예: `packages/a/node_modules`)는 fingerprint에는 들어가지만 사본에는 복사되지 않는다(기존과 같음).
 - 자동 테스트는 faux 모델과 실제 git·bash로 검증한다. 실제 모델(cliproxyapi/gpt-6.1-sol) E2E와 독립 검토 결과는 `CHANGELOG.md` [Unreleased]에 요약한다.
 
-### 14.5 one-shot 명령 `/orche strong <PROMPT>` · `/orche ultra <PROMPT>`
+### 14.5 one-shot 명령 `/orche single|ultra|mdsd [--profile NAME] <PROMPT>`
 
-(`mdsd` 모드와 `/orche mdsd <PROMPT>`도 같은 one-shot 문법과 strong 계층을 쓴다: [mdsd.md](mdsd.md).)
+(`mdsd` 모드와 `/orche mdsd <PROMPT>`도 같은 one-shot 문법을 쓴다: [mdsd.md](mdsd.md). 예전 `/orche strong <PROMPT>`는 `/orche single --profile strong <PROMPT>`로 실행된다(14.1).)
 
 ```text
-/orche strong src/parser.ts의 줄바꿈 처리 버그를 고쳐줘
+/orche single --profile deep src/parser.ts의 줄바꿈 처리 버그를 고쳐줘
 /orche ultra 결제 모듈의 환불 계산을 다시 구현해줘.
 요구사항:
 - "부분 환불" 지원 / 기존 API 유지
 ```
 
 - **프롬프트**: 모드 단어 뒤의 **구분자 한 글자**(공백·탭·줄바꿈 중 하나) 다음 전부다. 앞뒤 공백, 내부 공백, 여러 줄, 탭, 따옴표, 슬래시를 그대로 보존해 main에게 보낸다(다듬지 않는다). `single`/`direct`도 같은 규칙이다. 다만 Pi 대화형 편집기는 제출한 입력 전체를 명령 처리 전에 trim하므로, TUI에서 입력한 프롬프트의 맨 앞(모드 단어 앞)과 맨 뒤 공백은 Pi 단계에서 이미 사라진다(print/JSON/RPC 모드와 확장의 `sendUserMessage`는 그대로 전달). `/`로 시작해도 명령이 아닌 본문으로 보낸다. 프롬프트가 없거나 공백뿐이면 이 모드의 사용법만 보여 주고, 턴과 설정 변경은 일어나지 않는다.
-- **요청 한 건의 추론 강도 `--effort <LEVEL>`**: `/orche <mode> --effort <LEVEL> <PROMPT>`. 다섯 모드 모두에 쓸 수 있다.
+- **요청 한 건의 추론 강도 `--effort <LEVEL>`**: `/orche <mode> --effort <LEVEL> <PROMPT>`. 네 모드 모두에 쓸 수 있다.
   - 문법: 옵션은 모드 단어 바로 뒤에 둔다(앞의 공백은 구분자일 뿐이다). `--effort=<LEVEL>`도 받는다. 단계 뒤의 **구분자 한 글자** 다음 전부가 프롬프트이고, 모드 단어 뒤와 같은 규칙으로 그대로 보존한다. 단계 뒤의 `--`는 옵션의 끝이므로 `--effort`나 `--`로 시작하는 프롬프트는 `/orche single --effort low -- --effort …`처럼 보낸다. 프롬프트가 `--effort` 토큰으로 시작하지 않으면 예전과 똑같이 전부 프롬프트다(`/orche single explain --effort high`, `/orche single -- x`, `--efforts …`는 본문).
   - 값: Pi의 thinking 단계 `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. `pi --thinking`과 같이 소문자 그대로만 받는다(`src/pi/thinking-levels.ts`). 별도 설정 키나 별칭은 만들지 않았다.
   - 오류(아무것도 보내지 않고 경고만): 단계 없음(`--effort needs a level`), 모르는 단계(`invalid --effort "HIGH". Valid values: …`), 단계 뒤 프롬프트 없음(`no prompt after --effort high`), 옵션 두 번(`--effort is given more than once … put -- before the prompt`), 모드 단어 앞이나 다른 하위 명령에 쓴 경우(`--effort belongs to a one-shot request, right after its mode word …`). 메시지마다 올바른 문법을 함께 보여 준다(`effortUsage`, `src/extension/index.ts`). busy일 때는 다른 one-shot 명령처럼 거부된다.
-  - 위임 모드(`single`·`strong`·`ultra`·`mdsd`): 그 요청이 시작한 모든 `orche_task` assignment가 그 단계를 baseline B로 시작한다(`src/extension/workers.ts`). 계층·route를 고른 뒤에 적용하므로 모델 선택은 그대로이고, orchestrator 계층의 자기 `thinking`, 암묵 상속의 floor(15.4절), 재사용 worker가 유지하던 단계, specialist(game-asset/video) assignment의 route 단계보다 우선한다. `"thinking": "main"`(또는 단계 없는 `{ "model": "main" }`)으로 main의 thinking을 따르는 계층(worker·advisor와 그 strong 계층)은 그 요청에서 main의 현재 단계 대신 이 단계를 쓴다. orchestrator를 상속하는 sub-worker와 advisor는 그 실제 단계를 따르고(phase policy의 한 단계 낮춤도 그대로), 자기 단계를 정한 계층과 orche_spawn의 specialist route는 자기 단계를 지킨다(기록되는 `thinkingSource`도 예전 이름 그대로다). main 자신의 thinking은 바꾸지 않는다(main은 hand-off만 쓰고, 15.1절의 긴 응답 문제를 키우지 않기 위해서다). background job, 승인 후 대기한 작업(요청이 끝난 뒤 시작해도)도 그 요청에서 받은 단계로 돈다.
+  - 위임 모드(`single`·`ultra`·`mdsd`): 그 요청이 시작한 모든 `orche_task` assignment가 그 단계를 baseline B로 시작한다(`src/extension/workers.ts`). 계층·route를 고른 뒤에 적용하므로 모델 선택은 그대로이고, orchestrator 계층의 자기 `thinking`, 암묵 상속의 floor(15.4절), 재사용 worker가 유지하던 단계, specialist(game-asset/video) assignment의 route 단계보다 우선한다. `"thinking": "main"`(또는 단계 없는 `{ "model": "main" }`)으로 main의 thinking을 따르는 계층(worker·advisor와 프로필의 같은 계층)은 그 요청에서 main의 현재 단계 대신 이 단계를 쓴다. orchestrator를 상속하는 sub-worker와 advisor는 그 실제 단계를 따르고(phase policy의 한 단계 낮춤도 그대로), 자기 단계를 정한 계층과 orche_spawn의 specialist route는 자기 단계를 지킨다(기록되는 `thinkingSource`도 예전 이름 그대로다). main 자신의 thinking은 바꾸지 않는다(main은 hand-off만 쓰고, 15.1절의 긴 응답 문제를 키우지 않기 위해서다). background job, 승인 후 대기한 작업(요청이 끝난 뒤 시작해도)도 그 요청에서 받은 단계로 돈다.
   - `direct`: worker가 없으므로 main이 그 run을 그 단계로 돈다. `pi.setThinkingLevel`로 바꾸고(main 모델에 맞게 clamp), 요청이 끝날 때(`agent_settled`, Esc 중단, 출처를 가릴 수 없는 메시지로 요청 모드가 끝날 때, 턴이 시작되지 않은 경우, `session_shutdown`) 원래 단계로 돌린다. 그 사이 사용자가 `/thinking` 등으로 단계를 바꿨으면 그 선택을 유지한다. Pi는 이 두 변경을 `/thinking`처럼 세션 기록(`thinking_level_change`)에 남기지만 settings의 기본값(`defaultThinkingLevel`)과 orche.config.json은 바꾸지 않는다. 프로세스가 run 도중 강제 종료되면 되돌리지 못하므로, 그 세션을 이어 열면 그 단계로 시작한다(한계).
   - clamp: 모델이 그 단계를 지원하지 않으면 Pi의 clamp를 따른다(추론 미지원 모델은 `off`, `xhigh`·`max`가 없는 추론 모델은 가장 가까운 지원 단계, 예: `high`). 결과 줄 `Effort: low (one-shot /orche single --effort low): W1 runs at low; …`가 요청한 단계와 실제 단계를 함께 보여 주고(다르면 `(the nearest level its model supports)`), `details.thinking`·run.json `assignment.thinking`은 실제 단계, `thinkingSource`는 `effort`, `details.requestMode.effort`·run.json `assignment.requestMode.effort`는 요청한 단계다. 시작 알림과 상태 줄(`orche: single (one-turn single, effort low)`)도 있다.
   - 유지되지 않는다: 같은 요청 밖의 다음 assignment는 평소 단계다. 재사용 worker(`worker`)와 ledger로 이어가는 task(`task`)도 마찬가지이고, task ledger는 모드만 고정하고 effort는 저장하지 않는다. route를 그대로 쓰는 재사용 worker(specialist, main 모델이 없을 때)는 effort 이전의 자기 B를 기억했다가 다음 assignment에서 돌아간다(`ownBaseline`, `nextBaseline`).
   - 테스트: `test/extension/one-shot-effort.test.ts`(문법·오류·자동완성, provider가 받은 thinking으로 확인한 계층·floor·clamp·sub-worker·advisor·specialist·재사용·ledger, 확장을 거친 blocking·background·승인 대기 작업, direct 적용·복원·Esc·사용자 변경 유지).
-- **요청 한 건의 요약 예산 `--summary-budget <standard|compact>`**: `/orche strong --effort=max --summary-budget=compact <PROMPT>`처럼 `--effort`와 함께 써도 된다.
+- **요청 한 건의 요약 예산 `--summary-budget <standard|compact>`**: `/orche single --effort=max --summary-budget=compact --profile deep <PROMPT>`처럼 `--effort`·`--profile`과 함께 써도 된다.
   - 순서와 횟수: 옵션은 모드 단어 바로 뒤에 순서와 상관없이 두고, 각각 한 번만 준다. `--`가 옵션을 끝낸다.
   - direct 모드: worker가 없어서 거부한다.
   - 적용 범위: 그 요청이 시작한 orche_task assignment의 worker 세션에 compact 요약 예산 프로필을 쓴다(docs/compaction.md "Compact profile"). compaction하는 sub-worker도 포함한다.
@@ -827,30 +851,30 @@ read-only answer 변형: 모든 sub-worker가 answer/verify, `orche_adopt` 거�
   - 예전에 제안했던 `--thinking-policy`는 사용자 결정(2026-11-12)으로 만들지 않았다. 단순 읽기는 모든 모드의 read 노드가 맡는다(docs/thinking-policy.md "Read nodes").
 - **요청 = 하나의 실행(run)**: 요청은 자기만의 run으로 실행되고, run이 끝날(settle) 때까지 main의 위임 규칙(system prompt section)·도구 집합·guard가 그 모드의 것이 된다.
   - run에 들어가는 것은 그 요청에 속한 것뿐이다. 프롬프트와 Pi가 함께 보내는 문맥, run 중에 사용자가 넣은 steer(요청을 고치는 입력), 그 요청이 시작한 job의 결과가 여기에 해당한다.
-  - run 중에 큐에 들어온 follow-up(사용자 입력이든 다른 확장의 `sendUserMessage`든)은 다른 요청이다. orche가 붙잡아 두고(`orche: queued until the one-shot /orche strong request has ended; …`), run이 끝나면 각각 자기 run으로 세션 모드에서 실행한다. 그 run은 `before_agent_start`부터 다시 시작하므로 프롬프트·도구·dispatch가 모두 세션 모드다.
+  - run 중에 큐에 들어온 follow-up(사용자 입력이든 다른 확장의 `sendUserMessage`든)은 다른 요청이다. orche가 붙잡아 두고(`orche: queued until the one-shot /orche single request has ended; …`), run이 끝나면 각각 자기 run으로 세션 모드에서 실행한다. 그 run은 `before_agent_start`부터 다시 시작하므로 프롬프트·도구·dispatch가 모두 세션 모드다.
   - 그 요청과 무관한 이전 job의 결과(`orche-task-result`)도 붙잡았다가 run이 끝난 뒤 전달한다. 크래시로 중단된 job 안내(`orche-job-interrupted`)는 one-shot 요청이 아닌 다음 일반 프롬프트와 함께 보낸다.
   - Esc로 run을 중단하면 붙잡아 둔 프롬프트는 Pi의 큐처럼 편집기로 돌아가고, 붙잡아 둔 결과는 턴 없이 표시만 된다.
   - main이 답하기 시작한 뒤 출처를 가릴 수 없는 메시지(pi-session-bus의 다른 세션 메모, 다른 확장의 custom 메시지)가 run에 들어오면 보수적으로 그 시점에 요청 모드를 끝낸다. 남은 run은 세션 모드의 프롬프트·도구·guard·dispatch로 진행된다(`orche: a message from outside the one-shot … request arrived (<type>); the rest of this run follows the session's mode (<mode>).`).
   - **프롬프트 일치**: Pi는 prompt section을 run 시작 때 기록하고, Pi가 스스로 시작한 run(예: one-shot 뒤 도착한 job 결과의 run)에서는 이전 section을 그대로 쓴다. 그래서 orche는 모델 요청마다 `context_with_system`으로 지금 적용 중인 모드의 section을 확인하고, 다르면 그 요청에만 패치를 붙인다. transcript 기록은 바꾸지 않는다.
-- **그 요청이 시작한 `orche_task`**: 모든 assignment가 그 모드로 실행된다. strong은 strong 계층 + single 흐름, ultra는 strong 계층 + ultra 흐름이다. strong-worker 미설정 시 strong orchestrator를 상속하는 등 라우팅 규칙은 14.1 그대로다. run보다 오래 도는 background job도 끝날 때까지 시작할 때의 모드로 돈다(같은 job에 attach해도 새 assignment가 아니므로 그대로다).
+- **그 요청이 시작한 `orche_task`**: 모든 assignment가 그 모드와 그 요청의 프로필(`--profile`, 생략 시 `default`)로 실행된다. 계층 선택 규칙은 14.1 그대로다. run보다 오래 도는 background job도 끝날 때까지 시작할 때의 모드로 돈다(같은 job에 attach해도 새 assignment가 아니므로 그대로다).
 - **나중 턴에서의 모드**: 같은 요청임을 증명할 수 있는 경우에만 모드를 유지한다.
-  - `single.ledger`가 켜져 있으면 task id가 증명이다. 그 task를 이어가면(`task`) 다른 worker나 새 worker가 맡아도 모드를 유지하고, 이 고정은 ledger hand-off 이벤트에 저장되어 재시작 뒤에도 남는다. 새 task나 고정이 없는 task는 그 요청이 쓰던 worker에서 실행돼도 세션 모드다.
+  - `single.ledger`가 켜져 있으면 task id가 증명이다. 그 task를 이어가면(`task`) 다른 worker나 새 worker가 맡아도 모드와 프로필을 유지하고, 이 고정은 ledger hand-off 이벤트에 저장되어 재시작 뒤에도 남는다. 새 task나 고정이 없는 task는 그 요청이 쓰던 worker에서 실행돼도 세션 모드다.
   - ledger가 꺼져 있으면 run 밖에서 요청을 식별할 수단이 없다. worker는 요청이 아니다. 그 worker를 나중에 재사용하거나(`worker`), 사라진 뒤 후임자가 이어받거나(handover), 재시작 뒤 복원된 gone 항목으로 이어가도 세션 모드로 실행된다. 그 모드로 계속하려면 사용자가 one-shot 명령을 다시 쓴다.
   - ultra implement/answer assignment가 `single.ledger` 없이도 갖는 task ledger(14.4 재개)는 ultra run을 이어가는 식별자일 뿐 요청을 증명하지 않는다. ledger가 꺼져 있으면 run 밖에서 그 task를 넘겨도 세션 모드로 실행된다(세션 모드가 ultra가 아니면 `task`는 무시된다).
-  - 우선순위: 지금 run 중인 one-shot 요청 > (ledger 켬) task의 고정 > 세션 모드.
+  - 우선순위: 지금 run 중인 one-shot 요청 > (ledger 켬) task의 고정 > 세션 모드·프로필.
   - 결과 기록:
-    - `Request mode: ultra (one-shot /orche ultra; the session stays in single). After this request, assignments to W1 (worker "W1") run in the session's mode; to continue in ultra, the user repeats /orche ultra <PROMPT>.` 줄. ledger가 켜져 있으면 `Task T1 keeps ultra for its continuations (task "T1"); other tasks run in the session's mode.`이다. 요청 모드가 세션 모드와 다를 때만 붙는다.
+    - `Request mode: ultra --profile deep (one-shot /orche ultra --profile deep; the session stays in single). After this request, assignments to W1 (worker "W1") run in the session's mode and profile; to continue in ultra --profile deep, the user repeats /orche ultra --profile deep <PROMPT>.` 줄(프로필이 `default`면 `--profile …` 부분이 없다). ledger가 켜져 있으면 `Task T1 keeps ultra --profile deep for its continuations (task "T1"); other tasks run in the session's mode and profile.`이다. 요청 모드나 프로필이 세션과 다를 때만 붙는다.
     - `details.requestMode`
     - run.json `assignment.requestMode`
     - job 시작 항목. 기록일 뿐 고정이 아니다.
-- **세션 모드는 바뀌지 않는다**: 저장된 `/orche mode` 항목과 config 모두 그대로다. 지속적으로 바꾸려면 `/orche mode strong|ultra`를 쓴다.
+- **세션 모드는 바뀌지 않는다**: 저장된 `/orche mode` 항목과 config 모두 그대로다. 지속적으로 바꾸려면 `/orche mode <mode> [--profile <NAME>]`를 쓴다.
 - **busy이면 거부한다**: one-shot 명령(`single`·`direct` 포함)은 세션이 idle일 때만 시작한다.
   - 세션 모드가 같아도 거부한다. 큐에 넣으면 일반 프롬프트가 되어 명시한 모드를 잃기 때문이다.
   - 거부 메시지는 run이 끝난 뒤 다시 보내라고 안내한다. 세션 모드가 같으면 `/orche <mode>` 없이 보내 일반 follow-up으로 큐에 넣을 수 있다고, 다르면 `/orche mode <mode>`로 전환할 수 있다고 덧붙인다.
   - 일반 follow-up과 steer의 큐 동작은 그대로다. 단, one-shot run 중의 follow-up은 위처럼 그 run 뒤로 미룬다.
   - 한 번에 한 작업만 실행, 취소(`/orche cancel`), 권한, `git` grant(그 assignment에만 적용)는 일반 `orche_task`와 같다.
 - **한계**:
-  - `direct` 세션에서는 run이 끝난 뒤 위임 도구가 꺼진다. 같은 worker로 이어가려면 `/orche strong|ultra <PROMPT>`를 다시 쓴다.
+  - `direct` 세션에서는 run이 끝난 뒤 위임 도구가 꺼진다. 같은 worker로 이어가려면 `/orche single|ultra … <PROMPT>`를 다시 쓴다.
   - main이 답하기 전에 run의 첫 steering 확인에 들어온 메시지는 그 요청의 문맥으로 취급한다(프롬프트와 같은 시점).
   - 출처를 가릴 수 없는 메시지로 요청 모드가 끝난 그 run의 첫 다음 모델 요청에서는, Pi가 이미 선언한 도구 목록이 한 번 늦게 바뀔 수 있다. guard는 호출 시점의 모드로 막고, 프롬프트는 그 요청부터 세션 모드다.
   - 자동 테스트는 faux 모델로 실제 Pi 세션·확장·job 경로를 검증한다. 실제 모델(cliproxyapi/gpt-6.1-sol) E2E 결과는 `CHANGELOG.md` [Unreleased]에 요약했다.
@@ -865,7 +889,7 @@ read-only answer 변형: 모든 sub-worker가 answer/verify, `orche_adopt` 거�
 
 ### 15.2 역할 경계 (`ROLE_BOUNDARY_RULE`, `src/extension/mode.ts`)
 
-- single·strong·ultra의 main 지시문에 `Role boundary:` 문단을 더했다. main은 WHAT/WHY(목표, 제약, 관찰 가능한 성공 조건, 사용자 요구와 원문)를 쓰고, HOW(공식과 수치, 자료구조, 네트워크·프로토콜, 알고리즘, 상세 테스트 설계)는 코드를 읽는 worker가 정한다. 미정 사항은 worker가 정할 open decision으로 넘기되, 지어낸 요구사항으로 쓰지 않고 사용자 요구를 빼거나 약화·변경하지 않는다.
+- single·ultra(당시 strong 포함)의 main 지시문에 `Role boundary:` 문단을 더했다. main은 WHAT/WHY(목표, 제약, 관찰 가능한 성공 조건, 사용자 요구와 원문)를 쓰고, HOW(공식과 수치, 자료구조, 네트워크·프로토콜, 알고리즘, 상세 테스트 설계)는 코드를 읽는 worker가 정한다. 미정 사항은 worker가 정할 open decision으로 넘기되, 지어낸 요구사항으로 쓰지 않고 사용자 요구를 빼거나 약화·변경하지 않는다.
 - 시간 수치는 넣지 않았다. "분석은 짧게, 요구사항이 정리되면 바로 위임"이라는 권고이며 아무것도 강제하지 않는다. 기존 hand-off 형식(R1..Rn, Original request 원문), Reuse·Supervision 규칙은 그대로다.
 
 ### 15.3 긴 응답 감시 (`LongResponseWatch`, `src/extension/long-response.ts`)

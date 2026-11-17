@@ -1,9 +1,34 @@
 {
   "routes": {},
-  "limits": { "overallMs": 3600000 },
-  "default": { "model": "openai/gpt-6.1-sol", "thinking": "high" },
+  "limits": {
+    "overallMs": 3600000
+  },
+  "default": {
+    "model": "openai/gpt-6.1-sol",
+    "thinking": "high"
+  },
+  "models": {
+    "orchestrator": { "model": "openai/gpt-6.1-sol", "thinking": "high" }
+  },
+  "profiles": {
+    "deep": {
+      "orchestrator": { "model": "openai/gpt-6.1-sol", "thinking": "max" },
+      "worker": { "model": "openai/gpt-6.1-sol", "thinking": "high" },
+      "advisor": { "model": "openai/gpt-6.1-sol", "thinking": "xhigh" }
+    },
+    "fast": {
+      "orchestrator": { "model": "openai/gpt-6.1-sol", "thinking": "low" },
+      "worker": null
+    }
+  },
   "advisors": [
-    { "preset": "plan-review", "enabled": false },
-    { "preset": "verification-audit", "enabled": false }
+    {
+      "preset": "plan-review",
+      "enabled": false
+    },
+    {
+      "preset": "verification-audit",
+      "enabled": false
+    }
   ]
 }

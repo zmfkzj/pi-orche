@@ -347,7 +347,7 @@ export interface SpawnContext {
   maxVerificationRounds?: number;
   /** A verification call refused at the cap (the result then has to state what stays unresolved; see workers.ts). */
   onVerificationRefused?(rounds: number, cap: number): void;
-  /** Ultra mode: the stage contract of this assignment (src/orchestrator/ultra.ts); absent in single, strong and mdsd. */
+  /** Ultra mode: the stage contract of this assignment (src/orchestrator/ultra.ts); absent in single and mdsd. */
   ultra?: UltraSpawnHooks;
   /** MDSD mode: the search policy of this assignment (src/orchestrator/mdsd.ts); absent in the other modes. */
   mdsd?: SpawnStageHooks;

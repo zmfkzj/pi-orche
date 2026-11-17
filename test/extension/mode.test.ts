@@ -36,7 +36,7 @@ describe("mainMode: tool sets", () => {
     expect(active).not.toContain("orche_run");
     expect(active).toEqual(expect.arrayContaining(["read", "grep", "find", "ls", "ast_search", "diagnostics", "bash"]));
     await h.session.prompt("/orche mode");
-    expect(notes(h).at(-1)).toBe("orche mode: single (default)");
+    expect(notes(h).at(-1)).toBe("orche mode: single · profile default (default)");
     expect(h.session.getToolDefinition("read")?.description).toContain("LINE#TAG");
   });
 
@@ -324,7 +324,7 @@ describe("/orche mode", () => {
   it("prints the mode and its source, switches it, applies the tool set and survives a reload of the session", async () => {
     const h = await harness({ mainSteps: [], orcheSteps: [], mainMode: "single" });
     await h.session.prompt("/orche mode");
-    expect(notes(h).at(-1)).toMatch(/^orche mode: single \(config .*orche\.config\.json\)$/);
+    expect(notes(h).at(-1)).toMatch(/^orche mode: single · profile default \(config .*orche\.config\.json\)$/);
 
     await h.session.prompt("/orche mode direct");
     expect(notes(h).at(-1)).toBe("orche mode: direct (saved in this session)");
@@ -336,12 +336,13 @@ describe("/orche mode", () => {
 
     for (const removed of ["auto", "multi"]) {
       await h.session.prompt(`/orche mode ${removed}`);
-      expect(notes(h).at(-1)).toContain("/orche mode [single|strong|ultra|mdsd|direct]");
+      expect(notes(h).at(-1)).toContain("/orche mode [single|ultra|mdsd|direct [--profile NAME]]");
     }
     await h.session.prompt("/orche mode single");
+    expect(notes(h).at(-1)).toBe("orche mode: single · profile default (saved in this session)");
     await h.session.reload();
     await h.session.prompt("/orche mode");
-    expect(notes(h).at(-1)).toBe("orche mode: single (set with /orche mode in this session)");
+    expect(notes(h).at(-1)).toBe("orche mode: single · profile default (set with /orche mode in this session)");
     for (const name of MUTATORS) expect(h.session.getActiveToolNames()).not.toContain(name);
     expect(h.session.getActiveToolNames()).toContain("orche_task");
     expect(h.session.getActiveToolNames()).not.toContain("orche_run");
@@ -350,7 +351,7 @@ describe("/orche mode", () => {
   it("rejects unknown modes with the usage text and changes nothing", async () => {
     const h = await harness({ mainSteps: [], orcheSteps: [], mainMode: "single" });
     await h.session.prompt("/orche mode turbo");
-    expect(notes(h)).toEqual([expect.stringContaining("/orche mode [single|strong|ultra|mdsd|direct]")]);
+    expect(notes(h)).toEqual([expect.stringContaining("/orche mode [single|ultra|mdsd|direct [--profile NAME]]")]);
     for (const name of MUTATORS) expect(h.session.getActiveToolNames()).not.toContain(name);
   });
 });
@@ -463,7 +464,7 @@ describe("mainMode config discovery", () => {
     const bad = await layout({ user: cfg({ mainMode: "turbo" }) });
     const found = await discoverMainMode({ ...bad, projectTrusted: true });
     expect(found.mode).toBeUndefined();
-    expect(found.error).toContain("config.mainMode: expected single, strong, ultra, mdsd, direct");
+    expect(found.error).toContain("config.mainMode: expected single, ultra, mdsd, direct");
     expect(() => parseRouteConfig({ routes: {}, mainMode: 3 })).toThrow("config.mainMode");
     for (const mainMode of ["single", "direct"] as const) expect(parseRouteConfig({ routes: {}, mainMode }).mainMode).toBe(mainMode);
     // The removed modes are still read, as single, and flagged so the extension can warn.

@@ -1,9 +1,10 @@
 /**
- * Strong-mode reflection before the self-review (`single.strongReflection`, off unless set; docs/strong-reflection.md): an
- * experiment that gives the worker of a strong-mode implement/answer assignment one fixed reflection prompt right before it reviews
- * its own work. Nothing else changes: the review itself, its checks, the report gates and the report format stay as they are.
+ * Reflection before the self-review (`single.strongReflection`, off unless set; docs/strong-reflection.md): an experiment that
+ * gives the worker of a single-mode implement/answer assignment one fixed reflection prompt right before it reviews its own work.
+ * Nothing else changes: the review itself, its checks, the report gates and the report format stay as they are. It was made for
+ * strong mode; strong was merged into single (a model profile now), so it applies to single on every profile, never ultra or mdsd.
  *
- * Strong is the single workflow on the strong tiers; it has no separate self-review API. The observable self-review boundary is the
+ * The single workflow has no separate self-review API. The observable self-review boundary is the
  * Task DAG's integration node (`phase: "integrate"`: compare every requirement with the actual changes and checks) before
  * report_result. The prompt is given once per assignment, at the first of:
  * - `integrate`: the first ACCEPTED task_plan (after validation and carry-over) that sets an integration node running; the prompt
@@ -39,14 +40,14 @@ export interface ReflectionSummary {
 
 /** The text that comes with the prompt at the start of integration node `node`. */
 export function integrationReflection(node: string): string {
-  return `Reflection before your self-review (strong mode, single.strongReflection; integration node ${node}):\n${STRONG_REFLECTION_PROMPT}\nThen carry out the integration as planned: this assignment's requirements, checks and report format are unchanged.`;
+  return `Reflection before your self-review (single.strongReflection; integration node ${node}):\n${STRONG_REFLECTION_PROMPT}\nThen carry out the integration as planned: this assignment's requirements, checks and report format are unchanged.`;
 }
 
 /** The reason a first report_result is held when no integration node carried the prompt. */
-export const REPORT_REFLECTION = `Report held once (strong mode, single.strongReflection): this is not a validation error, and nothing in your report was found wrong. Before your self-review of the result:\n${STRONG_REFLECTION_PROMPT}\nThen review the result afresh yourself against every requirement and the actual changes and checks, and call report_result alone again with your complete result (the same result when nothing gives a real reason to change it). This assignment's requirements, checks and report format are unchanged.`;
+export const REPORT_REFLECTION = `Report held once (single.strongReflection): this is not a validation error, and nothing in your report was found wrong. Before your self-review of the result:\n${STRONG_REFLECTION_PROMPT}\nThen review the result afresh yourself against every requirement and the actual changes and checks, and call report_result alone again with your complete result (the same result when nothing gives a real reason to change it). This assignment's requirements, checks and report format are unchanged.`;
 
 /** The reason a report_result is held that was sent in the same response as the prompt (so before it was read). */
-export const SAME_RESPONSE_REFLECTION = "Report held (strong mode, single.strongReflection): it was sent in the same response that received the reflection prompt, so it was written before that prompt was read. Read the reflection prompt in this response's tool results, do your self-review, then call report_result alone again with your complete result. This is not a validation error.";
+export const SAME_RESPONSE_REFLECTION = "Report held (single.strongReflection): it was sent in the same response that received the reflection prompt, so it was written before that prompt was read. Read the reflection prompt in this response's tool results, do your self-review, then call report_result alone again with your complete result. This is not a validation error.";
 
 /** One assignment's reflection: given at most once (see the module comment). */
 export class StrongReflection {

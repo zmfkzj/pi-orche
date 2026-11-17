@@ -1,5 +1,5 @@
 /**
- * Strong-mode reflection before the self-review (`single.strongReflection`, src/single/reflection.ts) through the real stack:
+ * Reflection before the self-review (`single.strongReflection`; made for strong mode, which was merged into single, so single on any profile, src/single/reflection.ts) through the real stack:
  * WorkerPool → AgentManager → Pi AgentSession with faux models. These tests check wiring only (prompt text, where and when the model
  * receives it, which modes get it); they say nothing about whether a real model reviews better with it.
  */
@@ -57,11 +57,11 @@ function recording(steps: AssistantMessage[], seen: Seen[]): FauxResponseStep[] 
 }
 const count = (text: string, part: string) => text.split(part).length - 1;
 
-async function fixture(single: Record<string, unknown> | undefined) {
+async function fixture(single: Record<string, unknown> | undefined, profiles?: Record<string, unknown>) {
   const h = await createHarness({ mainSteps: [], orcheSteps: [] });
   opened.push(h);
   execFileSync("git", ["init", "-q"], { cwd: h.cwd });
-  await writeFile(join(h.agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: h.orche.route.model }, records: { enabled: false }, mainMode: "single", ...(single ? { single } : {}) }));
+  await writeFile(join(h.agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: h.orche.route.model }, records: { enabled: false }, mainMode: "single", ...(single ? { single } : {}), ...(profiles ? { profiles } : {}) }));
   const scratchBase = await mkdtemp(join(tmpdir(), "orche-scratch-"));
   temp.push(scratchBase);
   const controller = new OrcheController({ agentDir: h.agentDir, createRuntime: async () => h.runtime });
@@ -69,8 +69,8 @@ async function fixture(single: Record<string, unknown> | undefined) {
   opened.push(pool);
   const main = fauxProvider({ provider: "main-reasoning", models: [{ id: "current", reasoning: true }] });
   h.runtime.registerNativeProvider(main.provider);
-  const execute = (args: Partial<Parameters<WorkerPool["execute"]>[0]> = {}) => pool.execute({ role: "implement", request, cwd: h.cwd, projectTrusted: false, mainMode: "strong", model: main.getModel(), thinking: "high", ...args });
-  // Every worker model in these tests is main's (the strong tiers are unset, so standard roles inherit it).
+  const execute = (args: Partial<Parameters<WorkerPool["execute"]>[0]> = {}) => pool.execute({ role: "implement", request, cwd: h.cwd, projectTrusted: false, mainMode: "single", model: main.getModel(), thinking: "high", ...args });
+  // Every worker model in these tests is main's (no models tiers, so standard roles inherit it).
   const script = (steps: AssistantMessage[]) => { const seen: Seen[] = []; main.setResponses(recording(steps, seen)); return seen; };
   return { pool, execute, script, main };
 }
@@ -109,7 +109,7 @@ describe("single.strongReflection config", () => {
   });
 });
 
-describe("strong mode with single.strongReflection: the prompt before the self-review", () => {
+describe("single mode with single.strongReflection: the prompt before the self-review", () => {
   it("rides on the accepted task_plan that starts the integration node (phase carried over) and reaches the next request once", async () => {
     const { pool, execute, script } = await fixture({ strongReflection: true });
     const seen = script([plan1(), plan2(), plan3(), reported()]);
@@ -139,7 +139,7 @@ describe("strong mode with single.strongReflection: the prompt before the self-r
     const held = seen[2]!.results;
     expect(held).toHaveLength(1);
     expect(held[0]!.name).toBe("report_result");
-    expect(held[0]!.text).toContain(`Report held once (strong mode, single.strongReflection): this is not a validation error`);
+    expect(held[0]!.text).toContain(`Report held once (single.strongReflection): this is not a validation error`);
     expect(held[0]!.text).toContain(`Before your self-review of the result:\n${USER_PROMPT}\nThen review the result afresh`);
     expect(held[0]!.text).not.toContain("attempts left");
     expect(result.details.reflection).toMatchObject({ delivered: "report" });
@@ -218,8 +218,8 @@ describe("strong mode with single.strongReflection: the prompt before the self-r
   });
 });
 
-describe("single.strongReflection targets strong only", () => {
-  it("strong without the key, or with false: no prompt, nothing held (the behaviour before)", async () => {
+describe("single.strongReflection targets single mode only (strong was merged into it), on every profile", () => {
+  it("single without the key, or with false: no prompt, nothing held (the behaviour before)", async () => {
     for (const single of [undefined, { strongReflection: false }]) {
       const { execute, script } = await fixture(single);
       const seen = script([plan1(), plan2(), plan3(), reported()]);
@@ -231,13 +231,12 @@ describe("single.strongReflection targets strong only", () => {
     }
   });
 
-  it("enabled, but single mode, or a verify worker in strong mode: no prompt, nothing held", async () => {
-    const { execute, script } = await fixture({ strongReflection: true });
+  it("enabled: single on another profile gets it too (a profile selects models, never a workflow); a verify worker does not", async () => {
+    const { execute, script } = await fixture({ strongReflection: true }, { deep: {} });
     const seen = script([plan1(), plan2(), plan3(), reported()]);
-    const single = await execute({ mainMode: "single" });
-    expect(seen).toHaveLength(4);
-    expect(seen.every(item => !item.all.includes(FIRST_LINE))).toBe(true);
-    expect(single.details.reflection).toBeUndefined();
+    const profiled = await execute({ profile: "deep" });
+    expect(seen.some(item => item.all.includes(FIRST_LINE))).toBe(true);
+    expect(profiled.details).toMatchObject({ profile: "deep", reflection: { delivered: "integrate", node: "N2" } });
     const verifySeen = script([tool("report_result", { kind: "verify", summary: "fine", data: { passed: true, evidence: ["cat greeting.txt"], issues: [] } })]);
     const verify = await execute({ role: "verify" });
     expect(verifySeen).toHaveLength(1);
@@ -253,16 +252,16 @@ describe("single.strongReflection targets strong only", () => {
     expect(result.details.reflection).toBeUndefined();
   });
 
-  it("a reused worker: strong gets it per assignment, a single assignment in between does not", async () => {
+  it("a reused worker: it is given per assignment, a verify assignment in between does not get it", async () => {
     const { execute, script } = await fixture({ strongReflection: true });
     const first = script([plan1(), plan2(), plan3(), reported()]);
     const a = await execute();
     expect(first.some(item => item.all.includes(FIRST_LINE))).toBe(true);
-    const between = script([plan1(), plan2(), plan3(), reported()]);
-    const b = await execute({ worker: a.details.worker, mainMode: "single" });
+    const between = script([tool("report_result", { kind: "verify", summary: "fine", data: { passed: true, evidence: ["cat greeting.txt"], issues: [] } })]);
+    const b = await execute({ worker: a.details.worker, role: "verify" });
     expect(b.details.worker).toBe(a.details.worker);
     expect(b.details.reflection).toBeUndefined();
-    // The single assignment's own requests add no prompt (the first assignment's tool result may still be in the context).
+    // The verify assignment's own requests add no prompt (the first assignment's tool result may still be in the context).
     expect(between.map(item => count(item.all, FIRST_LINE))).toEqual(between.map(() => count(between[0]!.all, FIRST_LINE)));
     const again = script([plan1(), plan2(), plan3(), reported()]);
     const c = await execute({ worker: a.details.worker });

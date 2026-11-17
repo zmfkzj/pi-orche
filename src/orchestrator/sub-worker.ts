@@ -1,7 +1,7 @@
 /**
  * One sub-worker of an orche_spawn call: a fresh one-shot session (src/specialists/session.ts) that sees only its own request, works
  * with the worker tool set, may write only its own files, cannot spawn, and ends with one report_result. Standard roles inherit the
- * orchestrator's model and thinking unless the config sets `models.worker` (strong/ultra: `models.strong-worker`; under `"thinkingPolicy": "phase"` implement/answer run one
+ * orchestrator's model and thinking unless the config sets `models.worker` (a model profile: `profiles.<name>.worker`; under `"thinkingPolicy": "phase"` implement/answer run one
  * supported level below the orchestrator's assignment level and verify at it: docs/thinking-policy.md); game-asset and video use their
  * specialist routes (and generate_image when images are set up). An MDSD replication cell (mdsd.replication) runs on its own model
  * route (`worker.route`); an MDSD explorer with mdsd.explorerScratch may also write its private scratch directory (`worker.scratch`).

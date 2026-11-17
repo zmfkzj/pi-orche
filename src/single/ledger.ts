@@ -18,7 +18,7 @@
  * last accepted call (and no private reasoning) can be restored.
  */
 import { requirementDefinitions, type Ambiguity, type ChecklistItem } from "../orchestration/result-schemas.js";
-import { isDelegatingMode, type DelegatingMode, type MainMode } from "../orchestration/routing.js";
+import { DEFAULT_PROFILE, isDelegatingMode, LEGACY_STRONG_MODE, LEGACY_STRONG_PROFILE, type DelegatingMode, type MainMode } from "../orchestration/routing.js";
 
 /** Session entry type (`pi.appendEntry`, not sent to the model) of one ledger event. */
 export const LEDGER_ENTRY_TYPE = "orche-ledger";
@@ -81,6 +81,10 @@ export interface TaskLedger {
   plan?: LedgerPlan;
   /** The mode of the one-shot `/orche <mode> <prompt>` request the task belongs to: its continuations keep it (absent: the session's mode). */
   requestMode?: DelegatingMode;
+  /** That request's model profile (`--profile`, `default` when it named none); kept with the mode. */
+  requestProfile?: string;
+  /** The pin came from the merged `strong` mode (an older ledger): the profile strong when the config defines it, else default. */
+  legacyStrong?: boolean;
 }
 
 /** A compact Task DAG node: what a continuation needs (status, requirement coverage, the node's checkpoint). */
@@ -99,7 +103,7 @@ export interface RequirementUpdate { id: string; status: Exclude<RequirementStat
 interface EventBase { v: 1; taskId: string; at: number }
 export interface CreateEvent extends EventBase { event: "create"; cwd: string }
 /** A hand-off: its original request when new, its requirement declarations (statuses carried from the previous assignment), the worker taking it, and the readings the Framer settled. */
-export interface HandoffEvent extends EventBase { event: "handoff"; assignment: number; original?: string; requirements: LedgerRequirement[]; primary: LedgerWorker; decisions?: LedgerDecision[]; requestMode?: DelegatingMode }
+export interface HandoffEvent extends EventBase { event: "handoff"; assignment: number; original?: string; requirements: LedgerRequirement[]; primary: LedgerWorker; decisions?: LedgerDecision[]; requestMode?: DelegatingMode | typeof LEGACY_STRONG_MODE; requestProfile?: string }
 export interface ResultEvent extends EventBase { event: "result"; assignment: number; statuses: RequirementUpdate[]; decisions: LedgerDecision[]; history: LedgerHistoryItem }
 export interface FailureEvent extends EventBase { event: "failure"; history: LedgerHistoryItem }
 /** The risk assessment of the current assignment's result and, when the Verifier ran, its findings. */
@@ -161,7 +165,16 @@ export function applyEvent(ledger: TaskLedger, event: Exclude<LedgerEvent, Creat
       }
       ledger.primary = { ...event.primary, live: true };
       // A hand-off in a one-shot request's mode pins it to the task; one without keeps the pin it had.
-      if (isDelegatingMode(event.requestMode)) ledger.requestMode = event.requestMode;
+      // The merged `strong` mode of an older ledger: single with the profile strong (default when the config defines none).
+      if (isDelegatingMode(event.requestMode)) {
+        ledger.requestMode = event.requestMode;
+        ledger.requestProfile = isString(event.requestProfile) ? event.requestProfile : DEFAULT_PROFILE;
+        ledger.legacyStrong = undefined;
+      } else if (event.requestMode === LEGACY_STRONG_MODE) {
+        ledger.requestMode = "single";
+        ledger.requestProfile = LEGACY_STRONG_PROFILE;
+        ledger.legacyStrong = true;
+      }
       if (event.decisions?.length) {
         ledger.decisions.push(...event.decisions.map(item => ({ ...item, readings: [...item.readings] })));
         trimOldest(ledger.decisions, LEDGER_LIMITS.decisions);
@@ -211,7 +224,7 @@ export function applyEvent(ledger: TaskLedger, event: Exclude<LedgerEvent, Creat
  * A new assignment was handed off to `primary`: count it, keep its original request when new, and add its requirement
  * declarations. A requirement restated unchanged from the previous assignment keeps its last status. Returns the applied event.
  */
-export function recordHandoff(ledger: TaskLedger, handoff: { request: string; primary: LedgerWorker; at?: number; decisions?: readonly Omit<LedgerDecision, "assignment" | "by">[]; requestMode?: DelegatingMode }): HandoffEvent {
+export function recordHandoff(ledger: TaskLedger, handoff: { request: string; primary: LedgerWorker; at?: number; decisions?: readonly Omit<LedgerDecision, "assignment" | "by">[]; requestMode?: DelegatingMode; requestProfile?: string }): HandoffEvent {
   const assignment = ledger.assignments + 1;
   const found = originalRequestOf(handoff.request);
   const original = found === undefined ? undefined : clip(found, LEDGER_LIMITS.originalChars);
@@ -223,7 +236,7 @@ export function recordHandoff(ledger: TaskLedger, handoff: { request: string; pr
     return { assignment, id, text, status: carried?.status ?? "open", ...(carried?.evidence ? { evidence: carried.evidence } : {}), ...(carried?.verifiedBy ? { verifiedBy: carried.verifiedBy } : {}) };
   });
   const decisions = (handoff.decisions ?? []).map((item): LedgerDecision => ({ assignment, ...(item.id ? { id: item.id } : {}), readings: item.readings.map(reading => oneLine(reading)), chosen: oneLine(item.chosen), by: "framer", ...(item.quote ? { quote: oneLine(item.quote, 200) } : {}), ...(item.askUser ? { askUser: true } : {}) }));
-  const event: HandoffEvent = { v: 1, event: "handoff", taskId: ledger.taskId, at: handoff.at ?? Date.now(), assignment, ...(isNew ? { original } : {}), requirements, primary: { ...handoff.primary }, ...(decisions.length ? { decisions } : {}), ...(handoff.requestMode ? { requestMode: handoff.requestMode } : {}) };
+  const event: HandoffEvent = { v: 1, event: "handoff", taskId: ledger.taskId, at: handoff.at ?? Date.now(), assignment, ...(isNew ? { original } : {}), requirements, primary: { ...handoff.primary }, ...(decisions.length ? { decisions } : {}), ...(handoff.requestMode ? { requestMode: handoff.requestMode, requestProfile: handoff.requestProfile ?? DEFAULT_PROFILE } : {}) };
   applyEvent(ledger, event);
   return event;
 }
@@ -480,7 +493,7 @@ export function isLedgerEvent(value: unknown): value is LedgerEvent {
   switch (value.event) {
     case "create": return isString(value.cwd);
     case "handoff": return typeof value.assignment === "number" && optionalString(value.original) && Array.isArray(value.requirements) && value.requirements.every(isRequirement) && isWorker(value.primary)
-      && (value.decisions === undefined || Array.isArray(value.decisions) && value.decisions.every(isDecision)) && (value.requestMode === undefined || isDelegatingMode(value.requestMode as MainMode));
+      && (value.decisions === undefined || Array.isArray(value.decisions) && value.decisions.every(isDecision)) && (value.requestMode === undefined || isDelegatingMode(value.requestMode as MainMode) || value.requestMode === LEGACY_STRONG_MODE) && optionalString(value.requestProfile);
     case "result": return typeof value.assignment === "number" && Array.isArray(value.statuses) && value.statuses.every(isUpdate) && Array.isArray(value.decisions) && value.decisions.every(isDecision) && isHistory(value.history);
     case "failure": return isHistory(value.history);
     case "check": return typeof value.assignment === "number" && isCheck(value.check) && Array.isArray(value.findings) && value.findings.every(isFinding);

@@ -9,7 +9,7 @@ import { assignmentPrompt } from "../../src/extension/workers.js";
 describe("removed stage-eval changes #5 and #7", () => {
   it("ships no regression_check tool or rule", () => {
     expect(existsSync(new URL("../../src/tools/regression-check.ts", import.meta.url))).toBe(false);
-    for (const mode of ["single", "strong", "ultra", "mdsd"] as const) {
+    for (const mode of ["single", "ultra", "mdsd"] as const) {
       const prompt = assignmentPrompt({ role: "implement", request: "R1: x", mainMode: mode, orchestrate: true }, []);
       expect(prompt).not.toContain("regression_check");
       expect(prompt).not.toContain("Regression check:");
@@ -17,7 +17,7 @@ describe("removed stage-eval changes #5 and #7", () => {
   });
 
   it("drops the acceptance-first rule but keeps the earlier ambiguity contract and worker-owned acceptance", () => {
-    for (const mode of ["single", "strong"] as const) {
+    for (const mode of ["single"] as const) {
       const prompt = assignmentPrompt({ role: "implement", request: "R1: x", mainMode: mode, orchestrate: true }, []);
       expect(prompt).not.toContain("Acceptance first");
       expect(prompt).not.toContain("material ambiguity");
@@ -30,8 +30,8 @@ describe("removed stage-eval changes #5 and #7", () => {
   });
 
   it("drops the main-side material-ambiguity hand-off rule but keeps requirement refinement", () => {
-    for (const mode of ["single", "strong"] as const) {
-      const rules = delegationRules(mode);
+    for (const profile of ["default", "fast"] as const) {
+      const rules = delegationRules("single", { profile });
       expect(rules).not.toContain("material ambiguit");
       expect(rules).toContain("Single workflow: refine the requirements with the user: goal, constraints and acceptance criteria.");
       expect(rules).toContain("Assumptions (explicit when there is no UI);");

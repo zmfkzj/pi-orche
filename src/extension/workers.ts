@@ -27,7 +27,7 @@ import { composeEssentials, renderReference, renderWorkLog } from "../pi/compact
 import { renderDecisionWorkLog } from "../pi/decision-memory.js";
 import { withExtendedContext } from "../pi/extended-context.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { advisorTiers, inheritsMain, inheritsMainThinking, isDelegatingMode, modeTiers, type DelegatingMode, resolveRoute, resolveSpecialistRoute, tierThinking, usesStrongTiers, type AssignmentModelSource, type AssignmentThinkingSource, type MainMode, type ModelRoute, type ModelTier, type SubWorkerModelSource, type SubWorkerThinkingSource, type TierCandidate, type TierSettings } from "../orchestration/routing.js";
+import { applyProfile, DEFAULT_PROFILE, findProfile, inheritsMain, inheritsMainThinking, isDelegatingMode, LEGACY_STRONG_PROFILE, type DelegatingMode, resolveRoute, resolveSpecialistRoute, tierThinking, UnknownProfileError, type AssignmentModelSource, type AssignmentThinkingSource, type MainMode, type ModelRoute, type SubWorkerModelSource, type SubWorkerThinkingSource, type TierCandidate, type TierSettings } from "../orchestration/routing.js";
 import { formatModelUse } from "../orchestration/model-use.js";
 import { WorkspaceAudit, type GitlinkChange, type WorkspaceChange } from "../orchestration/workspace.js";
 import { CHANGED_WHILE_QUIET, WorkspaceActivity } from "../orchestration/run/activity.js";
@@ -101,6 +101,12 @@ export type TaskRole = TaskParameters["role"];
 type TaskArgs = Omit<OrcheRunArgs, "model"> & TaskParameters & {
   mainMode?: MainMode; model?: { provider: string; id: string; contextWindow?: number }; modelRegistry?: ModelRegistry;
   /**
+   * The model profile of this call (routing.ts profileTiers/applyProfile; docs/orchestrator.md 12): the one-shot request's `--profile`
+   * in a one-shot run, else the session's (`/orche mode <mode> --profile`). Omitted: `default` (the top-level models and routes).
+   * A task pinned by a one-shot request (task ledgers) runs on the pinned profile instead.
+   */
+  profile?: string;
+  /**
    * The thinking level a tier that sets none of its own inherits (an unset orchestrator tier, or a model without `thinking`):
    * main's current `thinking`, raised to the floor main started the session with (main-model.ts inheritedThinking). A tier that
    * names main's thinking (`thinking: "main"`, `{ "model": "main" }` without a level) takes `thinking` as it is. Omitted: `thinking`.
@@ -113,7 +119,7 @@ type TaskArgs = Omit<OrcheRunArgs, "model"> & TaskParameters & {
    * name it (`"main"`); never pinned, so a later assignment without it runs at the usual levels. `summaryBudget`: the request's
    * `--summary-budget` (the summary budget profile of the worker's sessions); never pinned either.
    */
-  oneShot?: { session: MainMode; effort?: ThinkingLevel; summaryBudget?: SummaryBudgetProfile };
+  oneShot?: { session: MainMode; sessionProfile?: string; effort?: ThinkingLevel; summaryBudget?: SummaryBudgetProfile };
   /** Called once, the moment the worker has its assignment (before it runs): the background job's "started" point. */
   onStarted?: (info: TaskStartedInfo) => void;
 };
@@ -130,6 +136,8 @@ export interface TaskStartedInfo {
   sessionFile?: string;
   /** The one-shot request mode the assignment runs in (recorded with the job; not a pin of the worker). */
   requestMode?: DelegatingMode;
+  /** The model profile the assignment runs on (recorded with the job). */
+  profile?: string;
 }
 /**
  * The mode of an assignment that did not simply follow the session's mode (docs/orchestrator.md 14.5): `one-shot` (it ran in a one-shot
@@ -138,6 +146,8 @@ export interface TaskStartedInfo {
  */
 export interface RequestMode {
   mode: DelegatingMode; source: "one-shot" | "task"; by?: string; session?: MainMode;
+  /** The request's model profile (`--profile`, `default` when omitted) and the session's at that moment. */
+  profile?: string; sessionProfile?: string;
   /** The one-shot request's `--effort` and `--summary-budget` (never kept by a task). */
   effort?: ThinkingLevel; summaryBudget?: SummaryBudgetProfile;
 }
@@ -237,8 +247,11 @@ export interface TaskDetails {
   modelSource?: AssignmentModelSource;
   /** Where `thinking` came from (AssignmentThinkingSource); `thinking` is the level the session runs on, after Pi's clamp. */
   thinkingSource?: AssignmentThinkingSource;
-  /** strong and ultra: the mode, and the `models` key whose model the assignment runs on (absent: inherited from main or a route). */
+  /** ultra and mdsd: the mode. */
   mode?: MainMode;
+  /** The model profile the assignment ran on (single workflow; `default`: the top-level models). */
+  profile?: string;
+  /** Where the orchestrator's model is configured (`models.orchestrator`, `profiles.<name>.orchestrator`); absent: inherited from main or a route. */
   modelTier?: string;
   /** Ultra: the stages that ran, the candidates, adoptions and the report gate (src/orchestrator/ultra.ts). */
   ultra?: UltraSummary;
@@ -258,7 +271,7 @@ export interface TaskDetails {
   codeGraph?: boolean;
   /** Why the worker has no CodeGraph tools although a provider answered (e.g. the project has no index). */
   codeGraphUnavailable?: string;
-  /** Strong mode with `single.strongReflection` (an experiment, src/single/reflection.ts): where the reflection prompt was given. */
+  /** Single mode with `single.strongReflection` (an experiment, src/single/reflection.ts): where the reflection prompt was given. */
   reflection?: ReflectionSummary;
   /** Messages main injected while the assignment ran (`orche_task_message`), with their delivery status. */
   injected?: InjectedMessage[];
@@ -367,8 +380,10 @@ interface Worker {
   maxSubWorkers?: number;
   /** The orche_spawn context of the orchestrator assignment in flight; absent otherwise (the tool then refuses). */
   spawn?: SpawnContext;
-  /** The mode of the worker's last assignment (a reused worker switching modes says so in its result). */
+  /** The mode of the worker's last assignment. */
   mode?: MainMode;
+  /** The model profile of the worker's last assignment (a reused worker switching profiles says so in its result). */
+  profile?: string;
   /** The one-shot request mode of the worker's current assignment (recorded with its job start); never a pin for later assignments. */
   requestMode?: DelegatingMode;
   /**
@@ -396,7 +411,7 @@ interface Worker {
   summaryBudget?: SummaryBudgetProfile;
   /** The plan advisor of the assignment in flight (`single.advisor`); started by its first task_plan or edit, cleared when it ends. */
   advisor?: AssignmentAdvisor;
-  /** The strong-mode reflection of the assignment in flight (`single.strongReflection`); cleared when it ends. */
+  /** The reflection of the assignment in flight (`single.strongReflection`, single mode); cleared when it ends. */
   reflection?: StrongReflection;
   /** `bashReview` of the latest assignment's config and the model runtime its classifier runs on (src/extension/bash-review.ts). */
   bashReview?: { settings: BashReviewSettings; runtime: ModelRuntime };
@@ -414,7 +429,7 @@ function taskPlanToolFor(worker: Worker, session: () => AgentSession) {
     try { worker.onPlan?.(plan); } catch { /* persistence is best effort */ }
     // The plan advisor (single.advisor) starts at the first accepted plan of the assignment; later plans do not restart it.
     worker.advisor?.trigger("task_plan", plan);
-    // The strong-mode reflection (single.strongReflection) rides on the accepted plan that starts the first integration node.
+    // The reflection (single.strongReflection) rides on the accepted plan that starts the first integration node.
     return [...onTaskPlan(session(), plan), ...worker.reflection?.onPlan(plan) ?? []];
   }, () => worker.requirementIds ?? [], {
     previous: () => worker.plan,
@@ -458,7 +473,7 @@ function stepRouteThinking(runtime: { getModel(provider: string, id: string): Pa
 
 /**
  * The route of a helper that inherits the orchestrator, by the rules of `models.worker` (docs/orchestrator.md 12), for
- * `models.advisor` (strong, ultra and mdsd: `models.strong-advisor`, then `models.advisor`; {@link advisorTiers}): the first
+ * `models.advisor` (with a profile: its advisor, then `models.advisor`; routing.ts profileTiers): the first
  * resolvable tier's own model (`config`) or main's model named by `"main"` (`config:main`), else the orchestrator's current
  * route (`orchestrator`); thinking likewise (the tier's level, main's current one named by it, else the orchestrator's). A
  * model orche's runtime cannot resolve is replaced by the next tier's, or by the orchestrator's, with a warning.
@@ -466,17 +481,17 @@ function stepRouteThinking(runtime: { getModel(provider: string, id: string): Pa
 function helperTierRoute(input: {
   name: string; tiers: readonly TierCandidate[]; current: ModelRoute; runtime: { getModel(provider: string, id: string): unknown };
   sessionModel?: string; mainResolvable: boolean; mainThinking?: ThinkingLevel; extendedContext?: boolean; warnings: string[];
-}): { route: ModelRoute; source: AdvisorSource; thinkingSource: AdvisorSource; key?: ModelTier } {
+}): { route: ModelRoute; source: AdvisorSource; thinkingSource: AdvisorSource; key?: string } {
   const { current } = input;
   const isResolvable = (tier: TierSettings) => inheritsMain(tier) ? input.mainResolvable : !!input.runtime.getModel(tier.model.slice(0, tier.model.indexOf("/")), tier.model.slice(tier.model.indexOf("/") + 1));
   let picked: TierCandidate | undefined;
   for (const [index, candidate] of input.tiers.entries()) {
     if (isResolvable(candidate.tier)) { picked = candidate; break; }
     const next = input.tiers[index + 1];
-    const instead = next ? `falling back to models.${next.key} ${next.tier.model}` : `the ${input.name} inherits the orchestrator's model instead`;
+    const instead = next ? `falling back to ${next.key} ${next.tier.model}` : `the ${input.name} inherits the orchestrator's model instead`;
     input.warnings.push(inheritsMain(candidate.tier)
-      ? `Warning: models.${candidate.key} "main": ${input.sessionModel ? `main's model ${input.sessionModel} is unresolvable in orche's runtime` : "main's model is absent"}; ${instead}.`
-      : `Warning: models.${candidate.key} ${candidate.tier.model} is unresolvable in orche's runtime; ${instead}.`);
+      ? `Warning: ${candidate.key} "main": ${input.sessionModel ? `main's model ${input.sessionModel} is unresolvable in orche's runtime` : "main's model is absent"}; ${instead}.`
+      : `Warning: ${candidate.key} ${candidate.tier.model} is unresolvable in orche's runtime; ${instead}.`);
   }
   const tier = picked?.tier;
   const main = inheritsMain(tier);
@@ -946,7 +961,7 @@ export function toolResultText(session: { messages: readonly unknown[] }, toolCa
 export function assignmentPrompt(args: Pick<TaskParameters, "role" | "request" | "context" | "files"> & { mainMode?: MainMode; orchestrate?: boolean }, commands: readonly string[], imagesAvailable = false, grant?: GitGrant, extraInstructions = ""): string {
   const task = args.context?.trim() ? `${args.request}\n\n## Context from the requesting session\n${args.context.trim()}` : args.request;
   const scope = args.files === undefined ? "anywhere inside the workspace" : JSON.stringify(args.files);
-  // The single workflow's prompt; strong is the same workflow on other models, ultra replaces the split decision with its stages.
+  // The single workflow's prompt (on any model profile); ultra replaces the split decision with its stages.
   const workflow = isDelegatingMode(args.mainMode);
   const ultra = args.orchestrate && args.mainMode === "ultra";
   const mdsd = args.orchestrate && args.mainMode === "mdsd";
@@ -1332,20 +1347,22 @@ export class WorkerPool {
     if (args.oneShot) {
       const { effort, summaryBudget } = args.oneShot;
       // SDK callers may pass anything: only valid values count (a bogus one is ignored, as for --effort).
-      return { mode: args.mainMode, source: "one-shot", session: args.oneShot.session, ...(effort && (THINKING_LEVELS as readonly string[]).includes(effort) ? { effort } : {}),
+      return { mode: args.mainMode, source: "one-shot", session: args.oneShot.session, profile: args.profile ?? DEFAULT_PROFILE, sessionProfile: args.oneShot.sessionProfile ?? DEFAULT_PROFILE,
+        ...(effort && (THINKING_LEVELS as readonly string[]).includes(effort) ? { effort } : {}),
         ...(summaryBudget && (SUMMARY_BUDGET_PROFILES as readonly string[]).includes(summaryBudget) ? { summaryBudget } : {}) };
     }
     if (!ledgerOn) return undefined;
-    // Ledgers come from session entries (untrusted): only a valid mode counts.
+    // Ledgers come from session entries (untrusted): only a valid mode counts. The pinned profile goes with the mode (an older
+    // ledger's merged `strong` pin is the profile strong, or default when the config defines none: resolved in executeAssignment).
     const task = args.task !== undefined ? this.ledgers.get(args.task) : undefined;
-    return isDelegatingMode(task?.requestMode) ? { mode: task.requestMode, source: "task", by: task.taskId, session: args.mainMode } : undefined;
+    return isDelegatingMode(task?.requestMode) ? { mode: task.requestMode, source: "task", by: task.taskId, session: args.mainMode, profile: task.requestProfile ?? DEFAULT_PROFILE, sessionProfile: args.profile ?? DEFAULT_PROFILE } : undefined;
   }
 
   private async executeAssignment(args: TaskArgs, signal: AbortSignal): Promise<{ text: string; details: TaskDetails }> {
     if (this.disposed) throw new Error("Worker pool is disposed");
     const grant = resolveGitGrant(args.role, args.git); // before any worker is touched: a bad grant spawns and changes nothing
     const started = Date.now();
-    // single, strong and ultra share the single workflow; strong and ultra run it on the strong tiers, ultra orchestrates by its stages.
+    // single, ultra and mdsd share the single workflow (ultra orchestrates by its stages, mdsd by its search policy); the profile picks the models.
     // (A request mode, resolved once the config is known, is a delegating mode too: these three do not depend on which one.)
     const workflowMode = isDelegatingMode(args.mainMode);
     const singleWorkflow = workflowMode && ["explore", "answer", "implement", "verify"].includes(args.role);
@@ -1376,13 +1393,28 @@ export class WorkerPool {
     try {
     const sessionModel = args.model ? `${args.model.provider}/${args.model.id}` : undefined;
     const agentDir = this.options.agentDir ?? getAgentDir();
-    const config = await discoverOrcheConfig({ cwd: args.cwd, agentDir, projectTrusted: args.projectTrusted, session: { model: sessionModel, thinking: args.inheritedThinking ?? args.thinking } });
+    let config = await discoverOrcheConfig({ cwd: args.cwd, agentDir, projectTrusted: args.projectTrusted, session: { model: sessionModel, thinking: args.inheritedThinking ?? args.thinking } });
     signal.throwIfAborted();
     // Task ledgers (single.ledger): `task` continues a task, also with another or a new worker; without it every assignment starts a new task.
     const ledgerOn = singleWorkflow && config.single.ledger;
     // Everything below (tiers, prompts, tools, ultra) reads the request's mode, never the session's, for such assignments.
     const requestMode = this.requestModeOf(args, ledgerOn);
     if (requestMode) args = { ...args, mainMode: requestMode.mode };
+    // The model profile (docs/orchestrator.md 12): the request's (one-shot, or pinned to its task), else the session's, else
+    // `default`. It governs every model role below: the orchestrator, its sub-workers, the advisor and the routes (specialists,
+    // route-based workers); no mode selects models. An unknown profile fails here, before any worker is touched.
+    const pinnedTask = requestMode?.source === "task" && args.task !== undefined ? this.ledgers.get(args.task) : undefined;
+    let profileName = requestMode?.profile ?? args.profile ?? DEFAULT_PROFILE;
+    if (pinnedTask?.legacyStrong && profileName === LEGACY_STRONG_PROFILE && !findProfile(config.routes.profiles, LEGACY_STRONG_PROFILE)) profileName = DEFAULT_PROFILE;
+    if (requestMode) args = { ...args, profile: profileName };
+    let profiled: ReturnType<typeof applyProfile>;
+    try { profiled = applyProfile(config.routes, profileName); }
+    catch (error) {
+      if (!(error instanceof UnknownProfileError)) throw error;
+      const where = requestMode?.source === "one-shot" ? "the one-shot request's --profile" : requestMode?.source === "task" ? `pinned to task ${requestMode.by}` : "the session's profile (/orche mode <mode> --profile)";
+      throw new UnknownProfileError(error.profile, error.known, `${where}; ${describeSource(config.source)}`);
+    }
+    config = { ...config, routes: profiled.config };
     // A one-shot request's --effort (docs/orchestrator.md 14.5): this assignment's baseline thinking (below, after the route), and main's
     // thinking for the tiers that name main's (`thinking: "main"`, `{ "model": "main" }`); routes and tiers themselves stay as configured.
     const effort = requestMode?.source === "one-shot" ? requestMode.effort : undefined;
@@ -1394,8 +1426,8 @@ export class WorkerPool {
     // sub-workers with orche_spawn. `single.spawn: false` keeps the earlier single worker; ultra always orchestrates (its stages
     // are orche_spawn calls), which the result says when single.spawn is off.
     const orchestrate = singleWorkflow && (config.single.spawn || ultraMode || mdsdMode) && (args.role === "implement" || args.role === "answer");
-    if (orchestrate && ultraMode && !config.single.spawn) ledgerNotes.push("Note: single.spawn: false does not apply in ultra mode: the ultra stages run with orche_spawn (single and strong keep it off).");
-    if (orchestrate && mdsdMode && !config.single.spawn) ledgerNotes.push("Note: single.spawn: false does not apply in mdsd mode: MDSD search rounds run with orche_spawn (single and strong keep it off).");
+    if (orchestrate && ultraMode && !config.single.spawn) ledgerNotes.push("Note: single.spawn: false does not apply in ultra mode: the ultra stages run with orche_spawn (single keeps it off).");
+    if (orchestrate && mdsdMode && !config.single.spawn) ledgerNotes.push("Note: single.spawn: false does not apply in mdsd mode: MDSD search rounds run with orche_spawn (single keeps it off).");
     // Ultra: the task ledger is also the continuation identity of an ultra run (candidates, copies, basis, adoptions), whatever
     // single.ledger says: `task` continues the run, omitting it starts a new task with fresh stages. The request mode still
     // follows single.ledger alone (requestModeOf above), so a later turn outside a one-shot request keeps the session's mode.
@@ -1536,24 +1568,41 @@ export class WorkerPool {
       modeHandover = this.gone.get(worker.id);
       worker = undefined;
     }
+    // A reused specialist (game-asset, video) keeps its session's route unless the model profile changed it: a profile's `routes`
+    // replace the top-level route of its role, and a session cannot switch to another route's tools and instructions, so the worker
+    // is replaced by a fresh one on the profile's route, briefed from its transcript (as for a capability change).
+    if (worker && !singleWorkflow && this.manager && (worker.profile ?? DEFAULT_PROFILE) !== profileName) {
+      const role = args.role === "answer" ? "analyst" : args.role === "explore" ? config.routes.workers?.explorerRoles?.[0] ?? "explorer-path" : args.role === "implement" ? "implementer" : args.role === "verify" ? "verifier" : args.role;
+      let wanted: ModelRoute | undefined;
+      try { wanted = args.role === "game-asset" || args.role === "video" ? resolveSpecialistRoute(config.routes, role, (provider, id) => !!runtime.getModel(provider, id)) : resolveRoute(config.routes, role); } catch { wanted = undefined; }
+      const current = this.manager.get(worker.id).route;
+      if (wanted && (wanted.model !== current.model || (wanted.thinking ?? "off") !== (current.thinking ?? "off") || !!wanted.extendedContext !== !!current.extendedContext)) {
+        const from = worker.profile ?? DEFAULT_PROFILE;
+        await this.retire(worker.id, `replaced: model profile changed (${from} -> ${profileName})`);
+        retired.push(worker.id);
+        retirementLines.push(`${worker.id} retired: profile ${profileName} routes ${args.role} to ${wanted.model} (profile ${from}: ${current.model}); a fresh worker continues, briefed from ${worker.id}'s transcript.`);
+        capabilityHandover = this.gone.get(worker.id);
+        worker = undefined;
+      }
+    }
     const reusedContext = !!worker;
-    /** A reused worker whose previous assignment ran in another mode (single <-> strong): the same tools, other model tiers. */
-    const previousMode = worker && worker.mode && worker.mode !== args.mainMode ? worker.mode : undefined;
+    /** A reused worker whose previous assignment ran on another model profile: the same tools, other models. */
+    const previousProfile = worker && (worker.profile ?? DEFAULT_PROFILE) !== profileName ? worker.profile ?? DEFAULT_PROFILE : undefined;
     this.manager ??= new AgentManager(runtime, { resultSchemas: orchestrationResultSchemas, stopTimeoutMs: this.options.stopTimeoutMs });
     this.manager.setRequestCheckpoint(limits.assignmentRequests);
     const routeRole = args.role === "answer" ? "analyst" : args.role === "explore" ? config.routes.workers?.explorerRoles?.[0] ?? "explorer-path" : args.role === "implement" ? "implementer" : args.role === "verify" ? "verifier" : args.role;
     // `models.orchestrator` (docs/orchestrator.md 12) replaces main's model for the standard roles; unresolvable: inherit main.
-    // strong and ultra try `models.strong-orchestrator` first, then `models.orchestrator` (unset or unresolvable strong tier).
+    // A profile's orchestrator comes first, then `models.orchestrator` (unset or unresolvable profile tier; routing.ts profileTiers).
     // `{ "model": "main" }` (INHERIT_MAIN) names main's model explicitly: the inheritance below, with the tier's thinking if it sets one.
     // `thinking: "main"` (or none) takes main's CURRENT thinking at this hand-off; Pi clamps it to the model (meta.thinking records the result).
-    const tiers = modeTiers(config.routes.models, args.mainMode);
+    const tiers = profiled.tiers;
     let tier: TierSettings | undefined;
     let tierKey: string | undefined;
     if (inheritMain) for (const [index, candidate] of tiers.orchestrators.entries()) {
       const slash = candidate.tier.model.indexOf("/");
       if (inheritsMain(candidate.tier) || runtime.getModel(candidate.tier.model.slice(0, slash), candidate.tier.model.slice(slash + 1))) { tier = candidate.tier; tierKey = candidate.key; break; }
       const next = tiers.orchestrators[index + 1];
-      modelWarnings.push(`Warning: models.${candidate.key} ${candidate.tier.model} is unresolvable in orche's runtime; ${next ? `falling back to models.${next.key} ${next.tier.model}` : "inheriting main's model instead"}.`);
+      modelWarnings.push(`Warning: ${candidate.key} ${candidate.tier.model} is unresolvable in orche's runtime; ${next ? `falling back to ${next.key} ${next.tier.model}` : "inheriting main's model instead"}.`);
     }
     const tierMain = inheritsMain(tier);
     const tierLevel = tierThinking(tier);
@@ -1681,6 +1730,7 @@ export class WorkerPool {
     if (meta.taskWorkflowInstalled) configureTaskWorkflow(this.manager.session(meta.id), singleWorkflow ? taskCompactionFor(meta) : undefined);
     meta.singleWorkflow = singleWorkflow;
     meta.mode = args.mainMode;
+    meta.profile = profileName;
     // The mode of this assignment's request (job start entry); a later assignment resolves its own (requestModeOf), never from this.
     meta.requestMode = requestMode?.mode;
     const activeSession = this.manager.session(meta.id);
@@ -1755,8 +1805,8 @@ export class WorkerPool {
     // current model and thinking; specialists on their own routes. Resolved before the run record is written, so that its
     // warnings include an unresolvable models.worker.
     const current: ModelRoute = { role: routeRole, model: meta.model ?? route.model, ...(meta.thinking ?? route.thinking ? { thinking: (meta.thinking ?? route.thinking) as ThinkingLevel } : {}), ...(configured && tierExtended !== undefined ? { extendedContext: tierExtended } : {}) };
-    // strong and ultra: `models.strong-worker`, else the (strong) orchestrator's route; `models.worker` never applies there.
-    const workerKey = tiers.workerKey;
+    // The profile's worker when it names one (`null`: none), else `models.worker`; none: the orchestrator's route.
+    const workerKey = tiers.worker?.key ?? "models.worker";
     const workerTier = orchestrating ? tiers.worker?.tier : undefined;
     const workerMain = inheritsMain(workerTier);
     const workerLevel = tierThinking(workerTier);
@@ -1764,8 +1814,8 @@ export class WorkerPool {
       : workerMain ? (args.model ? runtime.getModel(args.model.provider, args.model.id) : undefined)
       : runtime.getModel(workerTier.model.slice(0, workerTier.model.indexOf("/")), workerTier.model.slice(workerTier.model.indexOf("/") + 1));
     if (workerTier && !workerTierModel) modelWarnings.push(workerMain
-      ? `Warning: models.${workerKey} "main": ${sessionModel ? `main's model ${sessionModel} is unresolvable in orche's runtime` : "main's model is absent"}; sub-workers inherit the orchestrator's model instead.`
-      : `Warning: models.${workerKey} ${workerTier.model} is unresolvable in orche's runtime; sub-workers inherit the orchestrator's model instead.`);
+      ? `Warning: ${workerKey} "main": ${sessionModel ? `main's model ${sessionModel} is unresolvable in orche's runtime` : "main's model is absent"}; sub-workers inherit the orchestrator's model instead.`
+      : `Warning: ${workerKey} ${workerTier.model} is unresolvable in orche's runtime; sub-workers inherit the orchestrator's model instead.`);
     const workerExtended = workerTier?.extendedContext ?? config.routes.extendedContext;
     const subSource: Exclude<SubWorkerModelSource, "route"> = workerTier && workerTierModel ? (workerMain ? "config:main" : "config") : "orchestrator";
     /** The sub-workers' thinking (SubWorkerThinkingSource): models.worker's level, main's CURRENT thinking named by it
@@ -1788,8 +1838,8 @@ export class WorkerPool {
     // implement, verify) started by orche_task; never for specialists (game-asset, video), direct mode, orche_spawn sub-workers or
     // the advisor itself. `models.advisor` follows the rules of `models.worker`: its own model and thinking, main's named by
     // "main", otherwise the worker's current model and thinking (the assignment's baseline). Resolved here so that run.json and the
-    // result carry an unresolvable models.advisor warning. strong, ultra and mdsd try `models.strong-advisor` first, then
-    // `models.advisor` (unset or unresolvable strong tier), then the (strong) orchestrator's route.
+    // result carry an unresolvable models.advisor warning. A profile's advisor comes first, then `models.advisor` (unset or
+    // unresolvable profile tier), then the orchestrator's route.
     // `advisor: false` (main): no advisor for this one assignment, and only for a follow-up of a reused worker (a mechanical
     // re-report or format fix); new work always keeps it, and the next assignment of the same worker has it again.
     const advisorDeclined = singleWorkflow && config.single.advisor && args.advisor === false && reusedContext;
@@ -1797,7 +1847,7 @@ export class WorkerPool {
     if (advisorDeclined) ledgerNotes.push(`Note: plan advisor off for this follow-up of ${meta.id} (advisor: false, set by main); its next assignment has the advisor again.`);
     const advisorOn = singleWorkflow && config.single.advisor && !advisorDeclined;
     const advisorRoute = advisorOn ? helperTierRoute({
-      name: "advisor", tiers: advisorTiers(config.routes.models, args.mainMode), current: { ...current, role: "advisor" }, runtime, sessionModel,
+      name: "advisor", tiers: tiers.advisors, current: { ...current, role: "advisor" }, runtime, sessionModel,
       mainResolvable: !!args.model && !!runtime.getModel(args.model.provider, args.model.id), mainThinking, extendedContext: config.routes.extendedContext, warnings: modelWarnings,
     }) : undefined;
     const advisorWindow = advisorRoute && (advisorRoute.source === "config:main" || advisorRoute.source === "orchestrator" && mainModel) ? mainWindow : undefined;
@@ -1834,7 +1884,7 @@ export class WorkerPool {
       const taskId = ledger.taskId;
       meta.taskId = taskId;
       meta.ledger = () => this.ledgers.get(taskId);
-      this.persist(recordHandoff(ledger, { request: handoffRequest, at: Date.now(), ...(requestMode ? { requestMode: requestMode.mode } : {}),
+      this.persist(recordHandoff(ledger, { request: handoffRequest, at: Date.now(), ...(requestMode ? { requestMode: requestMode.mode, requestProfile: profileName } : {}),
         primary: { worker: meta.id, ...(meta.model ? { model: meta.model } : {}), ...(meta.thinking ? { thinking: meta.thinking } : {}), ...(workerFile ? { sessionFile: workerFile } : {}) } }));
     } else {
       meta.taskId = undefined;
@@ -1853,7 +1903,7 @@ export class WorkerPool {
       ...(ledger && handedFrom ? [`Note: ${meta.id} took task ${ledger.taskId} over from ${handedFrom.worker}${handedFrom.live ? "" : " (not live)"}, briefed from its task ledger.`] : []),
       ...(modeHandover && !handedFrom ? [`Note: ${meta.id} continues the work of ${modeHandover.id} in ${args.mainMode} mode, briefed from ${modeHandover.id}'s transcript. Name ${meta.id} from now on.`] : []),
       ...(capabilityHandover && !handedFrom ? [`Note: ${meta.id} continues the work of ${capabilityHandover.id}, briefed from ${capabilityHandover.id}'s transcript. Name ${meta.id} from now on.`] : []),
-      ...(previousMode ? [`Note: ${meta.id} switched from ${previousMode} to ${args.mainMode} mode for this assignment: it runs on ${meta.model ?? "its model"}${tierKey ? ` (models.${tierKey})` : ""}.`] : []),
+      ...(previousProfile ? [`Note: ${meta.id} switched from profile ${previousProfile} to ${profileName} for this assignment: it runs on ${meta.model ?? "its model"}${tierKey && modelSource !== "route" ? ` (${tierKey})` : ""}.`] : []),
       ...(handover && !handedFrom ? [`Note: ${handover.id} was gone (${handover.reason}); ${meta.id} continued its work, briefed from ${handover.id}'s transcript${handover.record ? " and last record" : ""}. Name ${meta.id} from now on.`] : []),
       ...ledgerNotes,
     ];
@@ -1864,7 +1914,7 @@ export class WorkerPool {
       manifest: {
         config: describeSource(config.source), routes: routesSummary(config.routes),
         worker: { id: meta.id, role: args.role, ...(workerFile ? { sessionFile: workerFile } : {}) },
-        assignment: { role: args.role, reusedWorker: reusedContext, model: meta.model, thinking: meta.thinking, modelSource, thinkingSource, ...(files ? { files } : {}), ...(grant ? { git: grant } : {}), ...(meta.gui ? { gui: true } : {}), ...(advisorRoute ? { advisor: { model: advisorRoute.route.model, ...(advisorRoute.route.thinking ? { thinking: advisorRoute.route.thinking } : {}), modelSource: advisorRoute.source, thinkingSource: advisorRoute.thinkingSource, ...(usesStrongTiers(args.mainMode) && advisorRoute.key ? { tier: advisorRoute.key } : {}) } } : {}), ...(advisorDeclined ? { advisorDeclined: true } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(usesStrongTiers(args.mainMode) ? { mode: args.mainMode, ...(tierKey ? { tier: tierKey } : {}) } : {}), ...(requestMode ? { requestMode } : {}) },
+        assignment: { role: args.role, reusedWorker: reusedContext, model: meta.model, thinking: meta.thinking, modelSource, thinkingSource, ...(files ? { files } : {}), ...(grant ? { git: grant } : {}), ...(meta.gui ? { gui: true } : {}), ...(advisorRoute ? { advisor: { model: advisorRoute.route.model, ...(advisorRoute.route.thinking ? { thinking: advisorRoute.route.thinking } : {}), modelSource: advisorRoute.source, thinkingSource: advisorRoute.thinkingSource, ...(advisorRoute.key ? { tier: advisorRoute.key } : {}) } } : {}), ...(advisorDeclined ? { advisorDeclined: true } : {}), ...(modelWarnings.length ? { warnings: modelWarnings } : {}), ...(singleWorkflow ? { mode: args.mainMode, profile: profileName, ...(tierKey ? { tier: tierKey } : {}) } : {}), ...(requestMode ? { requestMode } : {}) },
         ...(concurrent ? { concurrentSessions: concurrent.activity } : {}),
         // The process that runs it: a later session start tells an orphan (that process is gone) from a record still being written.
         owner: { pid: process.pid },
@@ -1873,10 +1923,11 @@ export class WorkerPool {
     if (record) this.inflight.add(record);
     meta.lastRecord = record?.dir;
     meta.recordEvent = event => record?.appendEvent(event);
-    // Strong-mode reflection before the self-review (single.strongReflection, an experiment; src/single/reflection.ts): the effective
-    // mode of this assignment (after requestModeOf) must be exactly strong, and only the implement/answer worker that owns the task gets it.
+    // Reflection before the self-review (single.strongReflection, an experiment; src/single/reflection.ts): formerly strong mode only;
+    // strong was merged into single, so the effective mode of this assignment (after requestModeOf) must be exactly single (any
+    // profile: a profile's name selects models, never a workflow), and only the implement/answer worker that owns the task gets it.
     // A new one per assignment, so a reused worker never carries one over from another assignment or mode.
-    const reflection = singleWorkflow && args.mainMode === "strong" && config.single.strongReflection === true && (args.role === "implement" || args.role === "answer")
+    const reflection = singleWorkflow && args.mainMode === "single" && config.single.strongReflection === true && (args.role === "implement" || args.role === "answer")
       ? new StrongReflection({
         responseCalls: () => responseToolCalls(this.manager!.session(meta.id)),
         onDelivered: summary => meta.recordEvent?.({ type: "reflection", timestamp: Date.now(), worker: meta.id, ...summary }),
@@ -1932,29 +1983,33 @@ export class WorkerPool {
       if (!summary) return [];
       return [`Thinking policy: ${summary.mode}${summary.mode === "phase" ? ` (baseline ${summary.baseline ?? "?"}, steps ${summary.step ?? "?"}): ${summary.switches} level switch${summary.switches === 1 ? "" : "es"}` : thinkingPolicy.checkpoints ? " (checkpoints)" : ` (baseline ${summary.baseline ?? "?"})`}${summary.requests?.read ? `; ${summary.requests.read} of ${summary.requests.total} request${summary.requests.total === 1 ? "" : "s"} in read nodes at ${summary.read ?? "low"}` : ""}${summary.escalated?.length ? `; at baseline: ${summary.escalated.map(item => `${item.node} (${item.reason})`).join(", ")}` : ""}${summary.redecompositions ? `; ${summary.redecompositions} re-decomposition${summary.redecompositions === 1 ? "" : "s"}` : ""}${summary.falseRedecompositions ? `; ${summary.falseRedecompositions} plan update${summary.falseRedecompositions === 1 ? "" : "s"} did not split the node as asked` : ""}${summary.reportRewrites ? `; ${summary.reportRewrites} report${summary.reportRewrites === 1 ? "" : "s"} written below the baseline rewritten at it` : ""}`];
     };
-    /** strong and ultra: the mode, the tier the model came from, and (ultra) the stage summary; nothing in single (unchanged details). */
-    const modeDetails = (): Pick<TaskDetails, "mode" | "modelTier" | "ultra" | "mdsd" | "requestMode"> => ({
-      ...(usesStrongTiers(args.mainMode) ? { mode: args.mainMode, ...(tierKey && modelSource !== "route" ? { modelTier: tierKey } : {}), ...(ultraRun ? { ultra: ultraRun.summary() } : {}), ...(mdsdRun ? { mdsd: mdsdRun.summary() } : {}) } : {}),
+    /** The profile and the tier the model came from (single workflow); ultra and mdsd: the mode and its stage or search summary. */
+    const modeDetails = (): Pick<TaskDetails, "mode" | "profile" | "modelTier" | "ultra" | "mdsd" | "requestMode"> => ({
+      ...(ultraMode || mdsdMode ? { mode: args.mainMode, ...(ultraRun ? { ultra: ultraRun.summary() } : {}), ...(mdsdRun ? { mdsd: mdsdRun.summary() } : {}) } : {}),
+      ...(singleWorkflow ? { profile: profileName, ...(tierKey && modelSource !== "route" ? { modelTier: tierKey } : {}) } : {}),
       ...(requestMode ? { requestMode } : {}),
     });
     /** A request mode that differs from the session's: where it came from and how the work keeps it (or leaves it). */
     const requestLine = (): string[] => {
-      if (!requestMode || requestMode.mode === requestMode.session) return [];
+      if (!requestMode || requestMode.mode === requestMode.session && requestMode.profile === requestMode.sessionProfile) return [];
+      const what = `${requestMode.mode}${requestMode.profile && requestMode.profile !== DEFAULT_PROFILE ? ` --profile ${requestMode.profile}` : ""}`;
+      const sessionWhat = `${requestMode.session ?? "its mode"}${requestMode.sessionProfile && requestMode.sessionProfile !== DEFAULT_PROFILE ? ` (profile ${requestMode.sessionProfile})` : ""}`;
       // With single.ledger the task is the request; without it nothing outside the one-shot turn identifies it (an ultra task's ledger
       // identifies its ultra run, not the request: requestModeOf does not read it then).
       const keep = ledger && ledgerOn
-        ? `Task ${ledger.taskId} keeps ${requestMode.mode} for its continuations (task "${ledger.taskId}"); other tasks run in the session's mode`
-        : `After this request, assignments to ${meta.id} (worker "${meta.id}") run in the session's mode; to continue in ${requestMode.mode}, the user repeats /orche ${requestMode.mode} <PROMPT>`;
+        ? `Task ${ledger.taskId} keeps ${what} for its continuations (task "${ledger.taskId}"); other tasks run in the session's mode and profile`
+        : `After this request, assignments to ${meta.id} (worker "${meta.id}") run in the session's mode and profile; to continue in ${what}, the user repeats /orche ${what} <PROMPT>`;
       return [requestMode.source === "one-shot"
-        ? `Request mode: ${requestMode.mode} (one-shot /orche ${requestMode.mode}; the session stays in ${requestMode.session ?? "its mode"}). ${keep}.`
-        : `Request mode: ${requestMode.mode} (kept from the one-shot /orche ${requestMode.mode} request that ${requestMode.source} ${requestMode.by} belongs to; the session is in ${requestMode.session ?? "another mode"}). ${keep}.`];
+        ? `Request mode: ${what} (one-shot /orche ${what}; the session stays in ${sessionWhat}). ${keep}.`
+        : `Request mode: ${what} (kept from the one-shot /orche ${what} request that ${requestMode.source} ${requestMode.by} belongs to; the session is in ${requestMode.session === undefined ? "another mode" : sessionWhat}). ${keep}.`];
     };
     /** A one-shot request's --effort: the level asked for, the one this worker's model runs it at, and that it ends with the request. */
     const effortLine = (): string[] => effort
       ? [`Effort: ${effort} (one-shot /orche ${args.mainMode} --effort ${effort}): ${meta.id} runs at ${effortApplied ?? effort}${effortApplied && effortApplied !== effort ? " (the nearest level its model supports)" : ""}${singleWorkflow ? "; sub-workers and the advisor follow it unless their models tier sets a level of its own" : ""}. Later requests, and this worker's or task's continuations, run at the usual levels.`]
       : [];
-    const modeLines = (): string[] => [...requestLine(), ...effortLine(), ...(usesStrongTiers(args.mainMode)
-      ? [`Mode: ${args.mainMode} (orchestrator: ${tierKey && modelSource !== "route" ? `models.${tierKey}` : modelSource === "route" ? "a configured route" : "main's model"}${orchestrating ? `; sub-workers: ${subSource === "orchestrator" ? "the orchestrator's model" : `models.${workerKey}`}` : ""}${advisorRoute ? `; advisor: ${advisorRoute.key ? `models.${advisorRoute.key}` : "the orchestrator's model"}` : ""})`] : []), ...reflectionLines()];
+    // The models line: for a profile other than default, and in ultra and mdsd (as their former strong-tier line), where each role's model comes from.
+    const modeLines = (): string[] => [...requestLine(), ...effortLine(), ...(singleWorkflow && (profileName !== DEFAULT_PROFILE || ultraMode || mdsdMode)
+      ? [`${ultraMode || mdsdMode ? `Mode: ${args.mainMode}; ` : ""}Profile: ${profileName} (orchestrator: ${tierKey && modelSource !== "route" ? tierKey : modelSource === "route" ? "a configured route" : "main's model"}${orchestrating ? `; sub-workers: ${subSource === "orchestrator" ? "the orchestrator's model" : workerKey}` : ""}${advisorRoute ? `; advisor: ${advisorRoute.key ?? "the orchestrator's model"}` : ""})`] : []), ...reflectionLines()];
     const reflectionLines = (): string[] => {
       if (!reflection) return [];
       const summary = reflection.summary();
@@ -2304,7 +2359,7 @@ export class WorkerPool {
       assigned = true;
       try {
         const sessionFile = workerFile;
-        args.onStarted?.({ worker: meta.id, role: args.role, ...(meta.model ? { model: meta.model } : {}), ...(meta.thinking ? { thinking: meta.thinking } : {}), ...(record ? { record: record.dir } : {}), ...(ledger ? { task: ledger.taskId } : {}), ...(continuedFrom ? { continuedFrom } : {}), ...(sessionFile ? { sessionFile } : {}), ...(meta.requestMode ? { requestMode: meta.requestMode } : {}) });
+        args.onStarted?.({ worker: meta.id, role: args.role, ...(meta.model ? { model: meta.model } : {}), ...(meta.thinking ? { thinking: meta.thinking } : {}), ...(record ? { record: record.dir } : {}), ...(ledger ? { task: ledger.taskId } : {}), ...(continuedFrom ? { continuedFrom } : {}), ...(sessionFile ? { sessionFile } : {}), ...(meta.requestMode ? { requestMode: meta.requestMode } : {}), ...(meta.singleWorkflow ? { profile: meta.profile ?? DEFAULT_PROFILE } : {}) });
       } catch { /* an observer cannot stop the assignment */ }
       if (signal.aborted) abort();
       progress();

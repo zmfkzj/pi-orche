@@ -1,7 +1,7 @@
 /**
  * MDSD — Multi-Dimensional Search Diversification (docs/mdsd.md): an opt-in search policy for intellectual exploration (cause
  * analysis, solution search, technology choice, design, research, idea generation), run by an orche orchestrator in mode `mdsd`
- * (`/orche mdsd <PROMPT>`, `/orche mode mdsd`, `mainMode: "mdsd"`) on the strong model tiers. Default, single and strong are untouched.
+ * (`/orche mdsd <PROMPT>`, `/orche mode mdsd`, `mainMode: "mdsd"`) on the selected model profile (default unless --profile). Single and ultra are untouched.
  *
  * The idea (the user's specification): diversify the SEARCH PATHS, not the outputs. Under one common objective and the mandatory
  * constraints, strategies differ in ① problem interpretation, ② hypothesis space, ③ information space, ④ reasoning method,

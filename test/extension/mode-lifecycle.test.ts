@@ -21,7 +21,7 @@ afterEach(async () => {
 });
 
 /** Real SDK lifecycle, disk-backed sessions in scratch, faux model; no provider calls. */
-async function setup(mode: "single" | "strong" | "ultra" | "direct") {
+async function setup(mode: "single" | "ultra" | "mdsd" | "direct") {
   const root = await mkdtemp(join(tmpdir(), "orche-mode-lifecycle-"));
   roots.push(root);
   const agentDir = join(root, "agent");
@@ -70,7 +70,7 @@ async function setup(mode: "single" | "strong" | "ultra" | "direct") {
 }
 
 describe("Pi 1.3 late and restored main tools", () => {
-  it.each(["single", "strong", "ultra", "direct"] as const)("%s never executes forbidden late tools, including nested calls after reload/resume/new", async mode => {
+  it.each(["single", "ultra", "mdsd", "direct"] as const)("%s never executes forbidden late tools, including nested calls after reload/resume/new", async mode => {
     const h = await setup(mode);
     const file = h.runtime.session.sessionFile!;
     for (const transition of ["startup", "reload", "resume", "new"] as const) {
@@ -125,6 +125,31 @@ describe("mode restoration", () => {
     state.apply();
     expect(state.effective).toBe("single");
     expect(active).not.toContain("write");
+  });
+
+  it("a one-shot profile lasts only while its override does: when the request ends (settled, cancelled or failed: setOverride()) the session's profile is back", () => {
+    let active = ["read", "write", "orche_task"];
+    const entries: unknown[] = [];
+    const state = new MainModeState({ getActiveTools: () => active, getAllTools: () => ["read", "write", "orche_task"].map(name => ({ name })) as never,
+      setActiveTools: names => { active = names; }, appendEntry: (type, data) => { if (type === MODE_ENTRY_TYPE) entries.push(data); } });
+    state.setConfig(undefined, undefined, { profiles: ["deep", "fast"] });
+    state.choose("single", "deep");
+    expect(entries).toEqual([{ mode: "single", profile: "deep" }]);
+    state.setOverride("ultra", "fast");
+    expect([state.effective, state.effectiveProfile, state.sessionProfile]).toEqual(["ultra", "fast", "deep"]);
+    state.setOverride("single");
+    expect(state.effectiveProfile).toBe("default"); // a one-shot request without --profile: default, not the session's
+    state.setOverride();
+    expect([state.effective, state.effectiveProfile]).toEqual(["single", "deep"]);
+    expect(entries).toHaveLength(1); // the one-shot requests saved nothing
+    // Reload: the saved choice comes back; an older { mode: "strong" } entry is single with the profile strong only when defined.
+    state.restore([{ type: "custom", customType: MODE_ENTRY_TYPE, data: { mode: "single", profile: "deep" } }]);
+    expect([state.session, state.sessionProfile]).toEqual(["single", "deep"]);
+    state.restore([{ type: "custom", customType: MODE_ENTRY_TYPE, data: { mode: "strong" } }]);
+    expect([state.session, state.sessionProfile]).toEqual(["single", "default"]);
+    state.setConfig(undefined, undefined, { profiles: ["strong"] });
+    state.restore([{ type: "custom", customType: MODE_ENTRY_TYPE, data: { mode: "strong" } }]);
+    expect([state.session, state.sessionProfile]).toEqual(["single", "strong"]);
   });
 
   it("keeps removed tools pending until they register instead of forgetting them on resume", () => {

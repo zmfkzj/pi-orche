@@ -285,7 +285,7 @@ describe("model tiers: through the extension", () => {
   });
 });
 
-const mainError = 'config.models.main: "main" (inherit main\'s model) is for models.orchestrator, models.worker, models.advisor, models.strong-orchestrator, models.strong-worker and models.strong-advisor; models.main is the Pi session\'s own model (omit it to keep Pi\'s model)';
+const mainError = 'config.models.main: "main" (inherit main\'s model) is for models.orchestrator, models.worker, models.advisor and the same tiers of profiles.<name>; models.main is the Pi session\'s own model (omit it to keep Pi\'s model)';
 describe('model tiers: { "model": "main" } (main\'s model, named in the config)', () => {
   it("parses in models.orchestrator and models.worker with or without thinking; models.main, a bare string, extendedContext and routes reject it", () => {
     expect(parseRouteConfig({ routes: {}, models: { orchestrator: { model: "main" }, worker: { model: "main", thinking: "medium" } } }).models)
@@ -427,7 +427,7 @@ describe('model tiers: { "model": "main" } through the extension', () => {
 });
 
 
-const thinkingMainError = (location: string) => `${location}.thinking: "main" (inherit main's thinking) is for models.orchestrator, models.worker, models.advisor, models.strong-orchestrator, models.strong-worker and models.strong-advisor; expected off, minimal, low, medium, high, xhigh, max`;
+const thinkingMainError = (location: string) => `${location}.thinking: "main" (inherit main's thinking) is for models.orchestrator, models.worker, models.advisor and the same tiers of profiles.<name>; expected off, minimal, low, medium, high, xhigh, max`;
 describe('model tiers: { "thinking": "main" } (another model, main\'s current thinking)', () => {
   it('parses in models.orchestrator and models.worker; { "model": "main", "thinking": "main" } reads as { "model": "main" }; routes, default and models.main reject it', () => {
     expect(parseRouteConfig({ routes: {}, models: { orchestrator: { model: "tier-orch/o1", thinking: "main" }, worker: { model: "c/w", thinking: "main", extendedContext: true } } }).models)
@@ -625,9 +625,9 @@ describe("model tiers: implicit thinking inheritance has a floor; named inherita
       expect((await execute(floored)).details, JSON.stringify(models)).toMatchObject({ thinking, thinkingSource });
     }
   });
-  it("strong mode: models.orchestrator as the fallback of an unset strong-orchestrator is floored too; an explicit strong level is kept", async () => {
-    const floored = { thinking: "low" as const, inheritedThinking: "high" as const, mainMode: "strong" as const };
-    for (const [models, thinking] of [[{ orchestrator: { model: "tier-orch/o1" } }, "high"], [{ "strong-orchestrator": { model: "tier-orch/o1", thinking: "medium" } }, "medium"]] as const) {
+  it("profile strong (the legacy strong tiers): models.orchestrator as the fallback of a profile without an orchestrator is floored too; an explicit profile level is kept", async () => {
+    const floored = { thinking: "low" as const, inheritedThinking: "high" as const, mainMode: "single" as const, profile: "strong" };
+    for (const [models, thinking] of [[{ orchestrator: { model: "tier-orch/o1" }, "strong-worker": { model: "main" } }, "high"], [{ "strong-orchestrator": { model: "tier-orch/o1", thinking: "medium" } }, "medium"]] as const) {
       const orchestrator = tierProvider("tier-orch", "o1");
       const { h, execute } = await fixture({ models });
       h.runtime.registerNativeProvider(orchestrator.provider);

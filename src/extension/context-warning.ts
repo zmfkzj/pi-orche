@@ -2,7 +2,7 @@ import type { MainMode } from "../orchestration/routing.js";
 
 /**
  * Advisory for the main session when its context crosses a threshold, in every mode. Direct: the remaining large work can move to
- * `/orche mode single`, where a worker carries the context and the main keeps only the results. Delegating modes (single, strong,
+ * `/orche mode single`, where a worker carries the context and the main keeps only the results. Delegating modes (single,
  * ultra): every main request re-sends the whole conversation, so a long session makes main's turns slower and its long responses
  * closer to provider time limits (a 1M-window main at ~59% ran 15-minute responses that were cut off); the remedy is /compact or a
  * new session, both the user's choice: nothing is compacted or deleted here. One warning state for all modes: a level warned in

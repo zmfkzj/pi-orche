@@ -20,7 +20,9 @@ export const MODEL = { provider: "cliproxyapi", id: "gpt-6.1-sol" } as const;
 export const MODEL_REF = `${MODEL.provider}/${MODEL.id}`;
 export const THINKING = "high" as const;
 /** orche's model tiers (src/orchestration/routing.ts MODEL_TIERS): all pinned, so no tier can inherit or fall back to another model. */
-export const TIERS = ["main", "orchestrator", "worker", "strong-orchestrator", "strong-worker", "advisor", "strong-advisor"] as const;
+// The former strong-* tiers were merged into profiles (strong mode -> single --profile strong); ultra now runs on the selected
+// profile, `default` here, i.e. these top-level tiers, so pinning them still leaves no tier to inherit or fall back.
+export const TIERS = ["main", "orchestrator", "worker", "advisor"] as const;
 export const ROUTE = { model: MODEL_REF, thinking: THINKING } as const;
 
 export const MODES = ["ultra", "strong"] as const;

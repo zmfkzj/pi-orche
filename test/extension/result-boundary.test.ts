@@ -40,7 +40,7 @@ const REMOVED = [
 
 const combos = [
   ["single", { spawn: true }], ["single", { spawn: false }],
-  ["strong", { spawn: true }], ["strong", { spawn: false }],
+  ["single", { spawn: true, profile: "fast" }], ["single", { spawn: false, profile: "fast" }],
   ["ultra", {}], ["mdsd", {}],
 ] as const;
 
@@ -73,7 +73,7 @@ const ANSWER_DUTIES = [
 ];
 
 describe("the delegated assignment carries the verification main no longer does", () => {
-  it.each(["single", "strong", "ultra", "mdsd"] as const)("%s: implement and answer workers own interpretation, checks and corrections, with or without orchestration", mode => {
+  it.each(["single", "ultra", "mdsd"] as const)("%s: implement and answer workers own interpretation, checks and corrections, with or without orchestration", mode => {
     for (const orchestrate of [true, false]) {
       const implement = assignmentPrompt({ role: "implement", request, mainMode: mode, orchestrate }, []);
       for (const duty of IMPLEMENT_DUTIES) expect(implement).toContain(duty);

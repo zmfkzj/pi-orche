@@ -137,7 +137,7 @@ describe("ultra continuity: an interrupted ultra assignment continued by the sam
     expect(first.failure).toMatchObject({ status: "timeout" });
     expect(stateOf(first.details)).toMatchObject({ stage: "evaluation", explorationRounds: 1, candidateRounds: 1, protectedBasis: ["test/basis.sh"], candidates: ["W1.3 done", "W1.4 done"] });
     // Request mode is unchanged by the task identity: the one-shot request keeps ultra within its run, later turns follow the session.
-    expect(first.message).toContain('Request mode: ultra (one-shot /orche ultra; the session stays in single). After this request, assignments to W1 (worker "W1") run in the session\'s mode; to continue in ultra, the user repeats /orche ultra <PROMPT>.');
+    expect(first.message).toContain('Request mode: ultra (one-shot /orche ultra; the session stays in single). After this request, assignments to W1 (worker "W1") run in the session\'s mode and profile; to continue in ultra, the user repeats /orche ultra <PROMPT>.');
     const copies = { a: copyOf(first.details, "W1.3"), b: copyOf(first.details, "W1.4") };
     const args = resumeArgs(first.message);
 
@@ -302,13 +302,13 @@ describe("ultra continuity: what does not change", () => {
   const mdsdBlocked = () => tool("report_result", { kind: "implement", summary: "Blocked before any search", data: { status: "blocked", reason: "the test stops here", checklist: partial, mdsd: { decision: "single-path", reason: "one file", objective: "fix the greeting", findings: [], explored_scope: ["greeting.txt"], unexplored_scope: [], stop: { reason: "blocked", basis: "the test stops here" } } } });
   const explored = () => tool("report_result", { kind: "explore", summary: "greeting.txt:1 says hello", data: { cause: "greeting.txt:1", evidence: ["greeting.txt:1"] } });
 
-  it("(5) single, strong and mdsd (and a non-orchestrating ultra role) keep no task ledger without single.ledger, and task stays ignored", async () => {
+  it("(5) single (on any profile; strong was merged into it) and mdsd (and a non-orchestrating ultra role) keep no task ledger without single.ledger, and task stays ignored", async () => {
     const { faux, execute, ledgerEvents } = await fixture();
     const plain = { oneShot: undefined };
     faux.setResponses([done()]);
     const single = await execute({ ...plain, mainMode: "single" });
     faux.setResponses([done()]);
-    const strong = await execute({ ...plain, mainMode: "strong" });
+    const strong = await execute({ ...plain, mainMode: "single", profile: "default" });
     faux.setResponses([mdsdBlocked()]);
     const mdsd = await execute({ ...plain, mainMode: "mdsd" });
     faux.setResponses([explored()]);
@@ -316,18 +316,18 @@ describe("ultra continuity: what does not change", () => {
     faux.setResponses([done()]);
     const singleWithTask = await execute({ ...plain, mainMode: "single", task: "T1" });
     faux.setResponses([done()]);
-    const strongWithTask = await execute({ ...plain, mainMode: "strong", task: "T1" });
+    const strongWithTask = await execute({ ...plain, mainMode: "single", profile: "default", task: "T1" });
     for (const result of [single, strong, mdsd, explore, singleWithTask, strongWithTask]) {
       expect(result.details.task).toBeUndefined();
       expect(result.text).not.toContain("Task ledger");
     }
     // (an explore report has no data.status: its status is the outcome's, "completed")
-    expect([single, strong, mdsd, explore].map(result => [result.details.mode, result.details.status, result.details.ultra])).toEqual([[undefined, "done", undefined], ["strong", "done", undefined], ["mdsd", "blocked", undefined], ["ultra", "completed", undefined]]);
+    expect([single, strong, mdsd, explore].map(result => [result.details.mode, result.details.status, result.details.ultra])).toEqual([[undefined, "done", undefined], [undefined, "done", undefined], ["mdsd", "blocked", undefined], ["ultra", "completed", undefined]]);
     for (const result of [singleWithTask, strongWithTask]) expect(result.text).toContain("Note: task T1 ignored: task ledgers apply to single-workflow standard roles with single.ledger on.");
     expect(ledgerEvents).toEqual([]);
   }, 30_000);
 
-  it("(5b) only an ultra orchestrator keeps the task identity without single.ledger; single and strong passing that task id still ignore it", async () => {
+  it("(5b) only an ultra orchestrator keeps the task identity without single.ledger; single (any profile) passing that task id still ignores it", async () => {
     const { faux, execute, ledgerEvents } = await fixture();
     const plain = { oneShot: undefined };
     faux.setResponses([blocked("exploration")]);
@@ -338,7 +338,7 @@ describe("ultra continuity: what does not change", () => {
     faux.setResponses([done()]);
     const singleWithTask = await execute({ ...plain, mainMode: "single", task: "T1" });
     faux.setResponses([done()]);
-    const strongWithTask = await execute({ ...plain, mainMode: "strong", task: "T1" });
+    const strongWithTask = await execute({ ...plain, mainMode: "single", profile: "default", task: "T1" });
     for (const result of [singleWithTask, strongWithTask]) {
       expect(result.details.task).toBeUndefined();
       expect(result.text).toContain("Note: task T1 ignored: task ledgers apply to single-workflow standard roles with single.ledger on.");

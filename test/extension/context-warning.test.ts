@@ -31,7 +31,7 @@ describe("contextWarning (pure)", () => {
     expect(contextWarning("direct", usage(55), settings, state).message).toContain("55%");
   });
   it("warns in the delegating modes too, with /compact and a new session as the remedy (not a mode switch)", () => {
-    for (const mode of ["single", "strong", "ultra"] as const) {
+    for (const mode of ["single", "ultra", "mdsd"] as const) {
       expect(contextWarning(mode, usage(40), settings, { warnedLevel: 0 }).message).toBeUndefined();
       const first = contextWarning(mode, usage(52), settings, { warnedLevel: 0 });
       expect(first.message).toBe(`orche: main context is at 52% of the window (104k/200k tokens) (mode ${mode}). Every main request re-sends this conversation, so main's turns get slower and its long responses come closer to provider time limits; delegating does not shrink the history this session already holds. Run /compact to summarize it, or start the next task in a new session (/new).`);
@@ -47,7 +47,7 @@ describe("contextWarning (pure)", () => {
   it("one warning state across mode switches: a level warned in one mode is not repeated in another until usage re-arms below 40%", () => {
     let state = contextWarning("direct", usage(55), settings, { warnedLevel: 0 }).state;
     expect(contextWarning("single", usage(58), settings, state).message).toBeUndefined();
-    state = contextWarning("strong", usage(58), settings, state).state;
+    state = contextWarning("ultra", usage(58), settings, state).state;
     const higher = contextWarning("single", usage(80), settings, state);
     expect(higher.message).toContain("(mode single)");
     expect(contextWarning("direct", usage(85), settings, higher.state).message).toBeUndefined();

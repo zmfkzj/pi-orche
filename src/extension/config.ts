@@ -199,7 +199,7 @@ export function parseContextWarningConfig(value: unknown): ContextWarningSetting
  *
  * `maxSubWorkers` (default 4 = MAX_SUB_WORKERS, an integer from SUB_WORKER_CAP_MIN 2 to SUB_WORKER_CAP_MAX 8): how many
  * sub-workers one `orche_spawn` call may start; they run at the same time, so this is the orchestrator's parallel sub-worker cap (the
- * single, strong and ultra modes; ultra's exploration and candidates need 2, hence the minimum). It is fixed when an orchestrator
+ * single, ultra and mdsd modes; ultra's exploration and candidates need 2, hence the minimum). It is fixed when an orchestrator
  * worker session starts (its tool schema carries it); a reused worker keeps its value. Not the session's job queue or the pool of
  * idle workers (no cap: they live as long as the session).
  *
@@ -220,7 +220,7 @@ export interface SingleSettings {
   spawn: boolean;
   advisor: boolean;
   maxSubWorkers: number;
-  /** Experiment (src/single/reflection.ts): absent unless the config sets it; only `true` turns it on, and only in strong mode. */
+  /** Experiment (src/single/reflection.ts): absent unless the config sets it; only `true` turns it on, and only in single mode (strong was merged into it). */
   strongReflection?: boolean;
   /** Append the assignment's Original request to a verification round's verify sub-worker that lacks it (default false). */
   verifierOriginal: boolean;

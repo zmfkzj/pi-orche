@@ -50,7 +50,8 @@ export async function createHarness(options: {
   /** `mainMode` in the user config (default single delegates; unset omits the key). */
   /** Resolve the main provider in the worker runtime; default tests keep separate scripts/routes. */
   inheritMainModel?: boolean;
-  mainMode?: "single" | "strong" | "ultra" | "direct" | "unset";
+  /** `strong` is the merged mode (a legacy value: single with the profile strong). */
+  mainMode?: "single" | "strong" | "ultra" | "mdsd" | "direct" | "unset";
   /**
    * `records` in the user config. The default is OFF here (`{ enabled: false }`), unlike the extension's own default (on): suites that do not
    * look at records keep their exact result texts and write nothing. Pass `true` for the defaults, or a `records` object (`dir`, `retentionDays`,
@@ -62,6 +63,8 @@ export async function createHarness(options: {
   single?: { ledger?: boolean; spawn?: boolean } & Record<string, unknown>;
   /** `models` in the user config (docs/orchestrator.md 12); omitted when unset. */
   models?: Record<string, unknown>;
+  /** `profiles` in the user config (named model profiles, `--profile`); omitted when unset. */
+  profiles?: Record<string, unknown>;
   /** `bashReview` in the user config (the Bash safety review; default: omitted, i.e. on with Jev, which the fake classifier answers). */
   bashReview?: Record<string, unknown>;
   /** Extra providers registered in the main session's model runtime before the session starts (e.g. a `models.main` target). */
@@ -97,7 +100,7 @@ export async function createHarness(options: {
   installFakeClassifier(orche.runtime, classifier);
   if (options.writeUserConfig !== false) {
     const records = options.records === true ? {} : options.records === undefined || options.records === false ? { enabled: false } : options.records;
-    await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: orche.route.model }, records, ...(options.taskContext ? { taskContext: options.taskContext } : {}), ...(options.single ? { single: options.single } : {}), ...(options.models ? { models: options.models } : {}), ...(options.bashReview ? { bashReview: options.bashReview } : {}), ...(options.mainMode === "unset" ? {} : { mainMode: options.mainMode ?? "single" }) }));
+    await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: orche.route.model }, records, ...(options.taskContext ? { taskContext: options.taskContext } : {}), ...(options.single ? { single: options.single } : {}), ...(options.models ? { models: options.models } : {}), ...(options.profiles ? { profiles: options.profiles } : {}), ...(options.bashReview ? { bashReview: options.bashReview } : {}), ...(options.mainMode === "unset" ? {} : { mainMode: options.mainMode ?? "single" }) }));
   }
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, ...options.settings });
   const resourceLoader = new DefaultResourceLoader({

@@ -50,7 +50,7 @@ describe("explicit single delegation rule snapshot", () => {
     expect(rules).toContain("as lines `R1: …`");
   });
   it("a live worker gets a concise follow-up; only a new worker gets the full hand-off", () => {
-    for (const mode of ["single", "strong", "ultra", "mdsd"] as const) {
+    for (const mode of ["single", "ultra", "mdsd"] as const) {
       const rules = delegationRules(mode);
       expect(rules).toContain("A NEW worker (`worker` omitted) starts without any context: write its `request` as: Intent/Purpose;");
       expect(rules).toContain("So send a concise follow-up, not the full hand-off again");
@@ -63,7 +63,7 @@ describe("explicit single delegation rule snapshot", () => {
     }
   });
   it("the role boundary is in every delegating mode, next to the unchanged hand-off format, original request and supervision rules", () => {
-    for (const mode of ["single", "strong", "ultra"] as const) {
+    for (const mode of ["single", "ultra", "mdsd"] as const) {
       const rules = delegationRules(mode);
       expect(rules).toContain(ROLE_BOUNDARY);
       expect(rules.indexOf(ROLE_BOUNDARY)).toBeLessThan(rules.indexOf("Single hand-off:"));

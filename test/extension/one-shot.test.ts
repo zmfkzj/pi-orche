@@ -1,5 +1,6 @@
 /**
- * One-shot `/orche strong <PROMPT>` and `/orche ultra <PROMPT>` (docs/orchestrator.md 14.5): the command grammar, the request mode that
+ * One-shot `/orche single --profile <NAME> <PROMPT>`, `/orche ultra <PROMPT>` and the merged `/orche strong <PROMPT>` (= single --profile
+ * strong; docs/orchestrator.md 14.5): the command grammar, the request mode and profile that
  * the assignments of that request run in and that only a provable continuation keeps (its task with ledgers; never a reused worker),
  * the request boundary of its run (held-back follow-ups and job results, the prompt main sees per request, unattributable messages),
  * the session's own mode left unchanged, and the busy/usage paths. Models are faux providers (no external API); git, files and Pi
@@ -35,38 +36,41 @@ const tierProvider = (provider: string, id: string, responses: FauxResponseStep[
   faux.setResponses(responses);
   return faux;
 };
+/** The legacy strong tier: loaded as the profile `strong` (strong mode was merged into single; --profile strong selects it). */
 const MODELS = { orchestrator: { model: "tier-orch/o1" }, "strong-orchestrator": { model: "strong-orch/s1" } };
 
 describe("one-shot commands: grammar, usage and refusals", () => {
-  it("parses /orche strong|ultra <PROMPT> verbatim: one whitespace character delimits; the prompt's own leading/trailing whitespace, lines, quotes and slashes survive", () => {
+  it("parses /orche single|ultra|mdsd [--profile NAME] <PROMPT> and the merged strong verbatim: one whitespace character delimits; the prompt's own leading/trailing whitespace, lines, quotes and slashes survive", () => {
     const prompt = 'fix "src/a b.ts"  and\n  keep  \'quotes\' / slashes\\n\n\n- item: /orche mode direct';
-    for (const mode of ["strong", "ultra", "mdsd"] as const) {
-      expect(parseOrcheCommand(`${mode} ${prompt}`)).toEqual({ mode, prompt });
+    for (const word of ["strong", "ultra", "mdsd", "single --profile strong"] as const) {
+      const mode = word === "strong" || word.startsWith("single") ? "single" : word;
+      const extra = { profile: word === "single --profile strong" ? "strong" : "default", ...(word === "strong" ? { legacyStrong: true } : {}) };
+      expect(parseOrcheCommand(`${word} ${prompt}`)).toEqual({ mode, prompt, ...extra });
       // Only the delimiter (one space, tab or line break after the mode word) is syntax; everything after it is the prompt.
-      expect(parseOrcheCommand(`  ${mode}\n${prompt}  \n`)).toEqual({ mode, prompt: `${prompt}  \n` });
-      expect(parseOrcheCommand(`${mode}   keep me  \n`)).toEqual({ mode, prompt: "  keep me  \n" });
-      expect(parseOrcheCommand(`${mode}\t\tindented\n\t- item\t`)).toEqual({ mode, prompt: "\tindented\n\t- item\t" });
-      expect(parseOrcheCommand(`${mode} /not-a-command "x" `)).toEqual({ mode, prompt: '/not-a-command "x" ' });
+      expect(parseOrcheCommand(`  ${word}\n${prompt}  \n`)).toEqual({ mode, prompt: `${prompt}  \n`, ...extra });
+      expect(parseOrcheCommand(`${word}   keep me  \n`)).toEqual({ mode, prompt: "  keep me  \n", ...extra });
+      expect(parseOrcheCommand(`${word}\t\tindented\n\t- item\t`)).toEqual({ mode, prompt: "\tindented\n\t- item\t", ...extra });
+      expect(parseOrcheCommand(`${word} /not-a-command "x" `)).toEqual({ mode, prompt: '/not-a-command "x" ', ...extra });
     }
     // Neither a missing prompt, a whitespace-only one, a literal "strong/ultra", nor another case starts work; existing commands keep their grammar.
     for (const input of ["strong", "ultra", "strong   ", "ultra \n\t ", "strong/ultra fix it", "Strong fix", "ultrafix", "mode ultra now"]) expect(parseOrcheCommand(input)).toBeUndefined();
-    expect(parseOrcheCommand("mode ultra")).toEqual({ mode: "mode", value: "ultra" });
-    // single and direct use the same grammar (verbatim prompt after one delimiter).
-    expect(parseOrcheCommand("single fix the bug")).toEqual({ mode: "single", prompt: "fix the bug" });
-    expect(parseOrcheCommand("single  fix the bug ")).toEqual({ mode: "single", prompt: " fix the bug " });
+    expect(parseOrcheCommand("mode ultra")).toEqual({ mode: "mode", value: "ultra", profile: "default" });
+    // single and direct use the same grammar (verbatim prompt after one delimiter); --profile omitted is "default".
+    expect(parseOrcheCommand("single fix the bug")).toEqual({ mode: "single", prompt: "fix the bug", profile: "default" });
+    expect(parseOrcheCommand("single  fix the bug ")).toEqual({ mode: "single", prompt: " fix the bug ", profile: "default" });
     expect(parseOrcheCommand("direct fix it")).toEqual({ mode: "direct", prompt: "fix it" });
     expect(parseOrcheCommand("direct \n")).toBeUndefined();
     expect(parseOrcheCommand("stop W1")).toEqual({ mode: "stop", worker: "W1" });
   });
 
   it("explains the one-shot usage for a mode without a prompt; busy refusals say why it is not queued and what to do", () => {
-    expect(oneShotUsage("ultra")).toBe("Usage: /orche ultra [--effort LEVEL] <PROMPT>: runs it with the quality-first ultra orchestration on the strong model tiers for this one request (the prompt may span lines; --effort off|minimal|low|medium|high|xhigh|max sets the reasoning effort its workers start at; --summary-budget standard|compact sets its workers' compaction summary budget). The session's mode does not change; /orche mode ultra switches it.");
-    expect(oneShotUsage(" strong \n ")).toContain("Usage: /orche strong [--effort LEVEL] <PROMPT>: delegates it to one worker on the strong model tiers (models.strong-orchestrator, models.strong-worker)");
+    expect(oneShotUsage("ultra")).toBe("Usage: /orche ultra [--effort LEVEL] [--profile NAME] <PROMPT>: runs it with the quality-first ultra orchestration for this one request (the prompt may span lines; --effort off|minimal|low|medium|high|xhigh|max sets the reasoning effort its workers start at; --summary-budget standard|compact sets its workers' compaction summary budget; --profile <NAME> runs its workers on that model profile of orche.config.json, \"default\" when omitted). The session's mode does not change; /orche mode ultra switches it.");
+    expect(oneShotUsage(" strong \n ")).toContain("Usage: /orche strong [--effort LEVEL] <PROMPT>: strong mode was merged into single; it runs as /orche single --profile strong <PROMPT> (the profile \"strong\" of orche.config.json, or \"default\" when none is defined)");
     // single and direct keep the general usage line they always had.
     for (const input of ["", "   ", "workers now", "Ultra", "strong fix", "single", "direct "]) expect(oneShotUsage(input)).toBeUndefined();
-    expect(busyRefusal("ultra", "single")).toBe("orche ultra: refused. The agent is busy, and a one-shot /orche ultra request starts only when the session is idle, so that its run and its workers use ultra mode (it runs it with the quality-first ultra orchestration on the strong model tiers); a queued turn would lose that. Send it again when the current run has ended, or switch the session with /orche mode ultra.");
+    expect(busyRefusal("ultra", "single")).toBe("orche ultra: refused. The agent is busy, and a one-shot /orche ultra request starts only when the session is idle, so that its run and its workers use ultra mode (it runs it with the quality-first ultra orchestration) and its --profile; a queued turn would lose that. Send it again when the current run has ended, or switch the session with /orche mode ultra.");
     // The same mode as the session's is refused too (its explicit choice is not dropped); the plain prompt queues as before.
-    expect(busyRefusal("strong", "strong")).toContain('Send it again when the current run has ended, or send the prompt without "/orche strong" to queue it as an ordinary follow-up in the session\'s mode (strong).');
+    expect(busyRefusal("single", "single")).toContain('Send it again when the current run has ended, or send the prompt without "/orche single" to queue it as an ordinary follow-up in the session\'s mode (single).');
   });
 });
 
@@ -95,18 +99,19 @@ describe("one-shot request mode: the request's assignments run in it; only a pro
     const { execute, general, strong } = await pool();
     strong.setResponses([answered("first"), answered("same request")]);
     general.setResponses([answered("later, another request"), answered("fresh")]);
-    const first = await execute({ mainMode: "strong", oneShot: { session: "single" } });
-    expect(first.details).toMatchObject({ worker: "W1", model: "strong-orch/s1", mode: "strong", requestMode: { mode: "strong", source: "one-shot", session: "single" } });
-    expect(first.text).toContain('Request mode: strong (one-shot /orche strong; the session stays in single). After this request, assignments to W1 (worker "W1") run in the session\'s mode; to continue in strong, the user repeats /orche strong <PROMPT>.');
-    // Still the one-shot request (its run): W1 keeps strong.
-    const same = await execute({ worker: "W1", mainMode: "strong", oneShot: { session: "single" } });
+    const first = await execute({ profile: "strong", oneShot: { session: "single" } });
+    expect(first.details).toMatchObject({ worker: "W1", model: "strong-orch/s1", profile: "strong", requestMode: { mode: "single", profile: "strong", sessionProfile: "default", source: "one-shot", session: "single" } });
+    expect(first.details.mode).toBeUndefined();
+    expect(first.text).toContain('Request mode: single --profile strong (one-shot /orche single --profile strong; the session stays in single). After this request, assignments to W1 (worker "W1") run in the session\'s mode and profile; to continue in single --profile strong, the user repeats /orche single --profile strong <PROMPT>.');
+    // Still the one-shot request (its run): W1 keeps the profile strong.
+    const same = await execute({ worker: "W1", profile: "strong", oneShot: { session: "single" } });
     expect(same.details).toMatchObject({ worker: "W1", model: "strong-orch/s1", requestMode: { source: "one-shot" } });
     // A later turn in the session's mode reusing W1: nothing proves it is the same request, so it runs in single.
     const later = await execute({ worker: "W1" });
     expect(later.details).toMatchObject({ worker: "W1", model: "tier-orch/o1" });
     expect(later.details.requestMode).toBeUndefined();
-    expect(later.details.mode).toBeUndefined();
-    expect(later.text).toContain("Note: W1 switched from strong to single mode for this assignment");
+    expect(later.details).toMatchObject({ profile: "default" });
+    expect(later.text).toContain("Note: W1 switched from profile strong to default for this assignment");
     expect(later.text).not.toContain("Request mode");
     const fresh = await execute();
     expect(fresh.details).toMatchObject({ worker: "W2", model: "tier-orch/o1" });
@@ -118,9 +123,9 @@ describe("one-shot request mode: the request's assignments run in it; only a pro
     const { workers, execute, general, strong } = await pool();
     strong.setResponses([ultraBlocked(), ultraBlocked()]);
     general.setResponses([answered("single again")]);
-    await execute({ role: "implement", mainMode: "ultra", oneShot: { session: "single" } });
-    const again = await execute({ role: "implement", worker: "W1", mainMode: "ultra", oneShot: { session: "single" } });
-    expect(again.details).toMatchObject({ worker: "W1", mode: "ultra", status: "blocked", requestMode: { mode: "ultra", source: "one-shot" } });
+    await execute({ role: "implement", mainMode: "ultra", profile: "strong", oneShot: { session: "single" } });
+    const again = await execute({ role: "implement", worker: "W1", mainMode: "ultra", profile: "strong", oneShot: { session: "single" } });
+    expect(again.details).toMatchObject({ worker: "W1", mode: "ultra", profile: "strong", model: "strong-orch/s1", status: "blocked", requestMode: { mode: "ultra", profile: "strong", source: "one-shot" } });
     expect(again.details.retired).toBeUndefined();
     expect(workers.session("W1").getActiveToolNames()).toContain(ADOPT_TOOL);
     const plain = await execute({ worker: "W1" });
@@ -133,41 +138,41 @@ describe("one-shot request mode: the request's assignments run in it; only a pro
     const { workers, execute, strong, general, events } = await pool({ single: { ledger: true } });
     strong.setResponses([answered("first"), answered("taken over"), answered("T1 again on W2")]);
     general.setResponses([answered("T2 in the session's mode"), answered("T2 continued")]);
-    const first = await execute({ mainMode: "strong", oneShot: { session: "single" } });
+    const first = await execute({ profile: "strong", oneShot: { session: "single" } });
     expect(first.details).toMatchObject({ task: "T1", requestMode: { source: "one-shot" } });
-    expect(first.text).toContain('Task T1 keeps strong for its continuations (task "T1"); other tasks run in the session\'s mode.');
+    expect(first.text).toContain('Task T1 keeps single --profile strong for its continuations (task "T1"); other tasks run in the session\'s mode and profile.');
     await workers.stop("W1");
     const taken = await execute({ task: "T1" });
-    expect(taken.details).toMatchObject({ worker: "W2", task: "T1", model: "strong-orch/s1", requestMode: { mode: "strong", source: "task", by: "T1" } });
-    // W2 now works for T1 (strong); a NEW task on W2 is another request: the session's mode, and W2's pin is gone.
+    expect(taken.details).toMatchObject({ worker: "W2", task: "T1", model: "strong-orch/s1", requestMode: { mode: "single", profile: "strong", source: "task", by: "T1" } });
+    // W2 now works for T1 (profile strong); a NEW task on W2 is another request: the session's mode and profile, and W2's pin is gone.
     const other = await execute({ worker: "W2" });
     expect(other.details).toMatchObject({ worker: "W2", task: "T2", model: "tier-orch/o1" });
     expect(other.details.requestMode).toBeUndefined();
-    expect(other.text).toContain("Note: W2 switched from strong to single mode for this assignment");
+    expect(other.text).toContain("Note: W2 switched from profile strong to default for this assignment");
     const unpinned = await execute({ worker: "W2", task: "T2" });
     expect(unpinned.details).toMatchObject({ task: "T2", model: "tier-orch/o1" });
     expect(unpinned.details.requestMode).toBeUndefined();
     const back = await execute({ worker: "W2", task: "T1" });
     expect(back.details).toMatchObject({ task: "T1", model: "strong-orch/s1", requestMode: { source: "task", by: "T1" } });
     expect(strong.getPendingResponseCount() + general.getPendingResponseCount()).toBe(0);
-    const handoffs = events.filter(event => (event as { event: string }).event === "handoff") as { taskId: string; requestMode?: string }[];
-    expect(handoffs.map(event => [event.taskId, event.requestMode])).toEqual([["T1", "strong"], ["T1", "strong"], ["T2", undefined], ["T2", undefined], ["T1", "strong"]]);
+    const handoffs = events.filter(event => (event as { event: string }).event === "handoff") as { taskId: string; requestMode?: string; requestProfile?: string }[];
+    expect(handoffs.map(event => [event.taskId, event.requestMode, event.requestProfile])).toEqual([["T1", "single", "strong"], ["T1", "single", "strong"], ["T2", undefined, undefined], ["T2", undefined, undefined], ["T1", "single", "strong"]]);
     const replayed = latestLedgers(events.map(data => ({ type: "custom", customType: LEDGER_ENTRY_TYPE, data })));
-    expect(replayed.map(ledger => [ledger.taskId, ledger.requestMode])).toEqual([["T1", "strong"], ["T2", undefined]]);
+    expect(replayed.map(ledger => [ledger.taskId, ledger.requestMode, ledger.requestProfile])).toEqual([["T1", "single", "strong"], ["T2", undefined, undefined]]);
   });
 
-  it("a one-shot /orche single request overrides a task's strong pin on its worker; the next /orche strong request continues the task on the strong tiers again", async () => {
+  it("a one-shot /orche single request (profile default: --profile omitted) overrides a task's profile pin on its worker; the next /orche single --profile strong request continues the task on that profile again", async () => {
     // Research harness (agent_workflow 2026-11-08): a mechanical design repair is sent as `/orche single <prompt>` in the session whose
     // design turn ran `/orche strong`; its follow-ups to the design's task/worker must not keep the strong tiers, and the analysis
     // turn after it (another `/orche strong` request) must be strong again.
     const { execute, strong, general } = await pool({ single: { ledger: true } });
     strong.setResponses([answered("design"), answered("analysis")]);
     general.setResponses([answered("mechanical fix")]);
-    await execute({ mainMode: "strong", oneShot: { session: "single" } });
+    await execute({ profile: "strong", oneShot: { session: "single" } });
     const fix = await execute({ worker: "W1", task: "T1", mainMode: "single", oneShot: { session: "single" } });
-    expect(fix.details).toMatchObject({ worker: "W1", task: "T1", model: "tier-orch/o1", requestMode: { mode: "single", source: "one-shot" } });
-    const analysis = await execute({ worker: "W1", task: "T1", mainMode: "strong", oneShot: { session: "single" } });
-    expect(analysis.details).toMatchObject({ worker: "W1", task: "T1", model: "strong-orch/s1", requestMode: { mode: "strong", source: "one-shot" } });
+    expect(fix.details).toMatchObject({ worker: "W1", task: "T1", model: "tier-orch/o1", profile: "default", requestMode: { mode: "single", profile: "default", source: "one-shot" } });
+    const analysis = await execute({ worker: "W1", task: "T1", profile: "strong", oneShot: { session: "single" } });
+    expect(analysis.details).toMatchObject({ worker: "W1", task: "T1", model: "strong-orch/s1", requestMode: { mode: "single", profile: "strong", source: "one-shot" } });
     expect(strong.getPendingResponseCount() + general.getPendingResponseCount()).toBe(0);
   });
 
@@ -175,7 +180,7 @@ describe("one-shot request mode: the request's assignments run in it; only a pro
     const { workers, execute, strong, general, gone } = await pool();
     strong.setResponses([answered("first")]);
     general.setResponses([answered("handed over")]);
-    await execute({ mainMode: "strong", oneShot: { session: "single" } });
+    await execute({ profile: "strong", oneShot: { session: "single" } });
     await workers.stop("W1");
     expect(gone).toEqual([expect.not.objectContaining({ requestMode: expect.anything() })]);
     const handed = await execute({ worker: "W1" });
@@ -189,19 +194,23 @@ describe("one-shot request mode: the request's assignments run in it; only a pro
     expect(strong.getPendingResponseCount() + general.getPendingResponseCount()).toBe(0);
   });
 
-  it("the ledger keeps a pin through hand-offs without one and rejects a malformed mode", () => {
+  it("the ledger keeps a pin (mode and profile) through hand-offs without one, reads an older strong pin as single with the profile strong, and rejects a malformed mode", () => {
     const ledger = createLedger("T1", "/w");
-    recordHandoff(ledger, { request: "a", primary: { worker: "W1" }, requestMode: "ultra" });
+    recordHandoff(ledger, { request: "a", primary: { worker: "W1" }, requestMode: "ultra", requestProfile: "deep" });
     recordHandoff(ledger, { request: "b", primary: { worker: "W1" } });
-    expect(ledger.requestMode).toBe("ultra");
+    expect([ledger.requestMode, ledger.requestProfile]).toEqual(["ultra", "deep"]);
+    recordHandoff(ledger, { request: "c", primary: { worker: "W1" }, requestMode: "single" });
+    expect([ledger.requestMode, ledger.requestProfile]).toEqual(["single", "default"]);
+    const older = [{ v: 1, event: "create", taskId: "T3", cwd: "/w", at: 1 }, { v: 1, event: "handoff", taskId: "T3", at: 2, assignment: 1, requirements: [], primary: { worker: "W1" }, requestMode: "strong" }];
+    expect(latestLedgers(older.map(data => ({ type: "custom", customType: LEDGER_ENTRY_TYPE, data })))[0]).toMatchObject({ requestMode: "single", requestProfile: "strong", legacyStrong: true });
     const entries = [{ v: 1, event: "create", taskId: "T2", cwd: "/w", at: 1 }, { v: 1, event: "handoff", taskId: "T2", at: 2, assignment: 1, requirements: [], primary: { worker: "W1" }, requestMode: "turbo" }];
     expect(latestLedgers(entries.map(data => ({ type: "custom", customType: LEDGER_ENTRY_TYPE, data })))[0]?.requestMode).toBeUndefined();
   });
 });
 
-/** The extension in a real session; the workers' strong tier is a faux provider registered in the worker runtime. */
+/** The extension in a real session; the profile strong's orchestrator is a faux provider registered in the worker runtime. */
 async function session(options: { mainSteps: FauxResponseStep[]; strongSteps?: FauxResponseStep[]; generalSteps?: FauxResponseStep[]; mainMode?: "single" | "ultra" | "direct"; mode?: "tui"; ui?: Parameters<typeof createHarness>[0]["ui"] }) {
-  const h = await createHarness({ mainSteps: options.mainSteps, orcheSteps: options.generalSteps ?? [], models: { "strong-orchestrator": { model: "strong-orch/s1" } }, mainMode: options.mainMode ?? "single", ...(options.mode ? { mode: options.mode } : {}), ...(options.ui ? { ui: options.ui } : {}) });
+  const h = await createHarness({ mainSteps: options.mainSteps, orcheSteps: options.generalSteps ?? [], profiles: { strong: { orchestrator: { model: "strong-orch/s1" } } }, mainMode: options.mainMode ?? "single", ...(options.mode ? { mode: options.mode } : {}), ...(options.ui ? { ui: options.ui } : {}) });
   opened.push(h);
   execFileSync("git", ["init", "-q"], { cwd: h.cwd });
   const strong = tierProvider("strong-orch", "s1", options.strongSteps ?? []);
@@ -212,8 +221,9 @@ const toolResults = (h: Harness) => h.session.messages.filter(message => message
 const notes = (h: Harness) => h.notifications.map(note => note.message);
 /** The system prompt main's model gets for one request (every prompt section after replaying the transcript's patches). */
 const promptOf = (context: { messages: Parameters<typeof getCurrentSystemPrompt>[0] }) => getCurrentSystemPrompt(context.messages);
-const STRONG_HEAD = "orche mode: strong (the single workflow on the strong model tiers";
-const SINGLE_HEAD = "orche mode: single.";
+/** Main's prompt in a request on the profile strong, and on the default profile (no profile sentence). */
+const STRONG_HEAD = "orche mode: single. Model profile: strong (profiles.strong in orche.config.json, selected with --profile)";
+const SINGLE_HEAD = "orche mode: single. You cannot edit files";
 /** Wait until main has used its whole script: runs Pi starts after a settled run (held-back work) begin a moment later. */
 async function settledAll(h: Harness) {
   for (let i = 0; i < 250 && h.main.faux.getPendingResponseCount() > 0; i++) await new Promise(resolve => setTimeout(resolve, 20));
@@ -222,8 +232,8 @@ async function settledAll(h: Harness) {
 const modeEntries = (h: Harness) => h.session.sessionManager.getBranch().filter(entry => entry.type === "custom" && (entry as { customType?: string }).customType === MODE_ENTRY_TYPE);
 
 describe("one-shot commands through the extension", () => {
-  it.each([["blocking call", undefined], ["background job (TUI)", "tui"]] as const)("/orche strong <PROMPT> (%s): the turn runs in strong with the prompt verbatim, its worker on the strong tier; the session's mode is untouched", async (_label, mode) => {
-    // Leading and trailing whitespace of the prompt are its own (only the one space after "strong" is the delimiter).
+  it.each([["blocking call", undefined], ["background job (TUI)", "tui"]] as const)("/orche single --profile strong <PROMPT> (%s): the turn runs on the profile with the prompt verbatim, its worker on the profile's tier; the session's mode and profile are untouched", async (_label, mode) => {
+    // Leading and trailing whitespace of the prompt are its own (only the one space after the options is the delimiter).
     const prompt = '  Inspect "greeting.txt" / report\n  two  spaces stay \n';
     let system = "";
     let userText: unknown;
@@ -237,21 +247,21 @@ describe("one-shot commands through the extension", () => {
       strongSteps: [answered("inspected on the strong tier")],
       ...(mode ? { mode } : {}),
     });
-    await h.session.prompt(`/orche strong ${prompt}`);
+    await h.session.prompt(`/orche single --profile strong ${prompt}`);
     expect(system).toContain(STRONG_HEAD);
     expect(system).not.toContain(SINGLE_HEAD);
     expect(userText).toBe(prompt);
     const result = JSON.stringify(toolResults(h).at(-1));
     expect(result).toContain("inspected on the strong tier");
-    expect(result).toContain("Mode: strong (orchestrator: models.strong-orchestrator");
-    expect(result).toContain("Request mode: strong (one-shot /orche strong; the session stays in single)");
+    expect(result).toContain("Profile: strong (orchestrator: profiles.strong.orchestrator");
+    expect(result).toContain("Request mode: single --profile strong (one-shot /orche single --profile strong; the session stays in single)");
     expect(strong.getPendingResponseCount()).toBe(0);
     await h.session.prompt("/orche mode");
-    expect(notes(h).at(-1)).toMatch(/^orche mode: single \(config /);
+    expect(notes(h).at(-1)).toMatch(/^orche mode: single · profile default \(config /);
     expect(modeEntries(h)).toEqual([]);
   });
 
-  it.each([["strong"], ["ultra"], ["single"], ["direct"]] as const)("/orche %s <PROMPT>: main receives exactly the text after the one delimiter (leading/trailing whitespace, lines, tabs, quotes, slashes)", async mode => {
+  it.each([["strong"], ["ultra"], ["single"], ["single --profile strong"], ["mdsd --effort=low --profile=strong"], ["direct"]] as const)("/orche %s <PROMPT>: main receives exactly the text after the one delimiter (leading/trailing whitespace, lines, tabs, quotes, slashes)", async mode => {
     const prompt = "  /keep this \"quoted\" path\n\tindented line\n\n trailing \t\n";
     const users: string[] = [];
     const { h } = await session({
@@ -265,7 +275,7 @@ describe("one-shot commands through the extension", () => {
     expect(users).toEqual([prompt]);
   });
 
-  it("/orche ultra <PROMPT>: ultra orchestration on the strong tier; a later plain turn reusing W1 is another request: the session's mode, prompt and dispatch alike", async () => {
+  it("/orche ultra --profile strong <PROMPT>: ultra orchestration on the profile's tier; a later plain turn reusing W1 is another request: the session's mode, prompt and dispatch alike", async () => {
     const prompts: string[] = [];
     const { h, strong } = await session({
       mainSteps: [
@@ -275,10 +285,10 @@ describe("one-shot commands through the extension", () => {
       strongSteps: [ultraBlocked()],
       generalSteps: [tool("report_result", { kind: "implement", summary: "Continued in single", data: { status: "done", split: { decision: "none", reason: "small" } } })],
     });
-    await h.session.prompt("/orche ultra Fix the greeting");
+    await h.session.prompt("/orche ultra --profile strong Fix the greeting");
     const first = JSON.stringify(toolResults(h).at(-1));
     expect(first).toContain("Ultra: stage exploration");
-    expect(first).toContain("Request mode: ultra (one-shot /orche ultra; the session stays in single). After this request, assignments to W1");
+    expect(first).toContain("Request mode: ultra --profile strong (one-shot /orche ultra --profile strong; the session stays in single). After this request, assignments to W1");
     await h.session.prompt("Continue with W1; the wording is fixed now");
     const second = JSON.stringify(toolResults(h).at(-1));
     expect(second).toContain("Continued in single");
@@ -320,20 +330,20 @@ describe("one-shot commands through the extension", () => {
       generalSteps: [answered("B on the general tier")],
     });
     h = started.h;
-    const run = h.session.prompt("/orche strong A");
+    const run = h.session.prompt("/orche single --profile strong A");
     await entered.promise;
     await h.session.followUp("B: and check it again");
-    expect(notes(h).at(-1)).toBe("orche: queued until the one-shot /orche strong request has ended; it then runs as its own turn in the session's mode (single).");
+    expect(notes(h).at(-1)).toBe("orche: queued until the one-shot /orche single request has ended; it then runs as its own turn in the session's mode (single).");
     gate.resolve();
     await run;
     await h.session.agent.waitForIdle();
     await settledAll(h);
     const [a, b] = toolResults(h).map(result => JSON.stringify(result));
     expect(a).toContain("A on the strong tier");
-    expect(a).toContain("Request mode: strong (one-shot /orche strong; the session stays in single)");
+    expect(a).toContain("Request mode: single --profile strong (one-shot /orche single --profile strong; the session stays in single)");
     expect(b).toContain("B on the general tier");
     expect(b).not.toContain("Request mode");
-    expect(b).not.toContain("Mode: strong");
+    expect(b).not.toContain("Profile: strong");
     // Every model request of A's run had the strong prompt and never saw B; B's had the single prompt.
     for (const request of seen.slice(0, 2)) {
       expect(request.prompt).toContain(STRONG_HEAD);
@@ -363,7 +373,7 @@ describe("one-shot commands through the extension", () => {
       ],
       strongSteps: [answered("A on the strong tier"), answered("corrected on the strong tier")],
     });
-    const run = h.session.prompt("/orche strong A");
+    const run = h.session.prompt("/orche single --profile strong A");
     await entered.promise;
     await h.session.steer("also check the date");
     gate.resolve();
@@ -371,7 +381,7 @@ describe("one-shot commands through the extension", () => {
     await h.session.agent.waitForIdle();
     const corrected = JSON.stringify(toolResults(h).at(-1));
     expect(corrected).toContain("corrected on the strong tier");
-    expect(corrected).toContain("Request mode: strong (one-shot /orche strong");
+    expect(corrected).toContain("Request mode: single --profile strong (one-shot /orche single --profile strong");
     for (const prompt of prompts) expect(prompt).toContain(STRONG_HEAD);
     expect(strong.getPendingResponseCount()).toBe(0);
   });
@@ -392,10 +402,12 @@ describe("one-shot commands through the extension", () => {
       generalSteps: [answered("peer request on the general tier")],
     });
     h = started.h;
+    // The merged /orche strong: single with the profile strong (the legacy strong tier is that profile).
     await h.session.prompt("/orche strong A");
+    expect(notes(h)).toContain('orche: strong mode was merged into single; strong runs as single with the profile "strong". Next time: /orche single --profile <NAME> <PROMPT>.');
     const [a, peer] = toolResults(h).map(result => JSON.stringify(result));
     expect(a).toContain("A on the strong tier");
-    expect(notes(h)).toContain("orche: a message from outside the one-shot /orche strong request arrived (peer-note); the rest of this run follows the session's mode (single).");
+    expect(notes(h)).toContain("orche: a message from outside the one-shot /orche single request arrived (peer-note); the rest of this run follows the session's mode (single).");
     expect(after).toContain(SINGLE_HEAD);
     expect(after).not.toContain(STRONG_HEAD);
     expect(peer).toContain("peer request on the general tier");
@@ -427,7 +439,7 @@ describe("one-shot commands through the extension", () => {
     });
     h = started.h;
     await h.session.prompt("start J1");
-    await h.session.prompt("/orche strong Just answer: what is in greeting.txt?");
+    await h.session.prompt("/orche single --profile strong Just answer: what is in greeting.txt?");
     await oneShotEntered.promise;
     await settledAll(h);
     expect(seen[0]?.prompt).toContain(STRONG_HEAD);
@@ -455,13 +467,13 @@ describe("one-shot commands through the extension", () => {
       ],
       strongSteps: [ultraBlocked(), ultraBlocked()],
     });
-    await h.session.prompt("/orche ultra Fix the greeting");
-    expect(JSON.stringify(toolResults(h).at(-1))).toContain("Request mode: ultra (one-shot /orche ultra; the session stays in direct)");
+    await h.session.prompt("/orche ultra --profile strong Fix the greeting");
+    expect(JSON.stringify(toolResults(h).at(-1))).toContain("Request mode: ultra --profile strong (one-shot /orche ultra --profile strong; the session stays in direct)");
     await h.session.prompt("Continue with W1");
     const blocked = JSON.stringify(toolResults(h).at(-1));
     expect(blocked).not.toContain("orche task W1");
     expect(strong.getPendingResponseCount()).toBe(1);
-    await h.session.prompt("/orche ultra Continue with W1: the wording is decided");
+    await h.session.prompt("/orche ultra --profile strong Continue with W1: the wording is decided");
     const continued = JSON.stringify(toolResults(h).at(-1));
     expect(continued).toContain("orche task W1 (implement");
     expect(continued).toContain("Ultra: stage exploration");
@@ -487,7 +499,7 @@ describe("one-shot commands through the extension", () => {
         async (_context, options) => { stopped.resolve(); await new Promise<void>(resolve => options?.signal?.addEventListener("abort", () => resolve())); return reply("aborted"); },
       ],
     });
-    const run = h.session.prompt("/orche strong Fix the greeting, commit, then inspect");
+    const run = h.session.prompt("/orche single --profile strong Fix the greeting, commit, then inspect");
     await stopped.promise;
     await h.session.prompt("/orche cancel");
     await run;
@@ -496,7 +508,7 @@ describe("one-shot commands through the extension", () => {
     expect(notes(h)).toContain("orche task cancelled");
     expect(JSON.stringify(toolResults(h).at(-1))).toContain("cancelled");
     await h.session.prompt("/orche mode");
-    expect(notes(h).at(-1)).toMatch(/^orche mode: single \(config /);
+    expect(notes(h).at(-1)).toMatch(/^orche mode: single · profile default \(config /);
     expect(modeEntries(h)).toEqual([]);
   });
 
@@ -513,14 +525,14 @@ describe("one-shot commands through the extension", () => {
       ],
       strongSteps: [async () => { await gate.promise; return answered("background result on the strong tier"); }],
     });
-    await h.session.prompt("/orche strong Inspect greeting.txt in the background");
+    await h.session.prompt("/orche single --profile strong Inspect greeting.txt in the background");
     expect(JSON.stringify(toolResults(h).at(-1))).toContain("Not delegated: the user declined. J1 keeps running");
     expect(h.statuses.filter(status => status.key === "orche-mode").at(-1)?.text).toBe("orche: single");
     gate.resolve();
     for (let i = 0; i < 100 && !h.session.messages.some(message => (message as { customType?: string }).customType === "orche-task-result"); i++) await new Promise(resolve => setTimeout(resolve, 20));
     await h.session.agent.waitForIdle();
     const delivered = h.session.messages.find(message => (message as { customType?: string }).customType === "orche-task-result") as { details?: { task?: { model?: string; requestMode?: unknown } } } | undefined;
-    expect(delivered?.details?.task).toMatchObject({ model: "strong-orch/s1", requestMode: { mode: "strong", source: "one-shot", session: "single" } });
+    expect(delivered?.details?.task).toMatchObject({ model: "strong-orch/s1", requestMode: { mode: "single", profile: "strong", source: "one-shot", session: "single" } });
   });
 
   it("the notice about jobs a crash interrupted is not part of a one-shot request: it goes with the next ordinary prompt", async () => {
@@ -531,7 +543,7 @@ describe("one-shot commands through the extension", () => {
     });
     h.session.sessionManager.appendCustomEntry(JOB_ENTRY_TYPE, { event: "start", job: "J5", role: "explore", worker: "W4", at: Date.now() - 60_000, request: "look", sessionFile: "/nowhere/W4.jsonl" } satisfies JobEntry);
     await h.session.extensionRunner.emit({ type: "session_start", reason: "resume" } as never);
-    await h.session.prompt("/orche strong What is in greeting.txt?");
+    await h.session.prompt("/orche single --profile strong What is in greeting.txt?");
     await h.session.prompt("anything else?");
     expect(contexts[0]).not.toContain("still running when the previous pi process ended");
     expect(contexts[1]).toContain("still running when the previous pi process ended");
