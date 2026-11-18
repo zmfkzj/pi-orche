@@ -183,6 +183,6 @@
 - Directory `ast_rewrite` now checks ownership per matching file at write time, skipping and listing blocked files instead of failing the whole call. Directory rewrites never follow file symlinks or escape their target directory, and guarded sessions without a per-file guard fail closed.
 - Multi-run workspace audits now include uncommitted submodule files and moved submodule HEADs. Worker-attributed HEAD moves still undergo ownership checks and retain submodule-aware checkout recovery; quiet external moves are not restored.
 - Disposed workers release their sessions and adapters instead of retaining full transcripts; lightweight status and record data remain available.
-- Worker startup observes cancellation and assignment deadlines. An unresponsive SDK abort is bounded to one second by default, then the worker is force-disposed so subsequent tasks can start.
+- Worker startup observes cancellation and assignment deadlines. An unresponsive SDK abort after a cancellation, deadline or supersede gets up to 30 seconds by default (was 1 second; `WORKER_STOP_TIMEOUT_MS`), then the worker is force-disposed so subsequent tasks can start; an abort that settles earlier returns at once and the worker stays idle. Disposal (`/orche stop`, the session's end) still waits at most 1 second (`WORKER_DISPOSE_TIMEOUT_MS`) and releases a stop already waiting out the grace. Tests: `test/agent/worker-retirement.test.ts`.
 - Each assignment uses its freshly resolved `limits.assignmentRequests` budget, including changes between tasks on a reused worker.
 

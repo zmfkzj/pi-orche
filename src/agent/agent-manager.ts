@@ -44,8 +44,14 @@ export const BUDGET_GRACE_REQUESTS = 5;
 export const MAX_REPORT_REWRITES = 2;
 /** customType of a message main injected into a running worker ({@link AgentManager.steer}). */
 export const MAIN_MESSAGE_TYPE = "pi-orche.main-message";
-/** SDK abort is cooperative; never hold a session's activity slot indefinitely. */
-export const WORKER_STOP_TIMEOUT_MS = 1000;
+/**
+ * Grace an interrupted worker (cancel, assignment deadline, supersede) gets after the abort signal: SDK abort is cooperative,
+ * so a session whose abort has not settled by then is force-disposed rather than holding its activity slot indefinitely.
+ * A responsive abort returns as soon as it settles; only an unresponsive one waits the whole grace.
+ */
+export const WORKER_STOP_TIMEOUT_MS = 30_000;
+/** Bound on the abort wait when the worker is disposed anyway ({@link AgentManager.dispose}: /orche stop, the pi session's end). */
+export const WORKER_DISPOSE_TIMEOUT_MS = 1000;
 interface RetiredWorker {
   snapshot: AgentSnapshot;
   record: AgentRecordEntry;
@@ -82,6 +88,8 @@ interface Worker {
   /** Length stops of the session before the current assignment (to count this assignment's). */
   lengthBefore: number;
   abort?: Promise<void>;
+  /** Settles {@link abort} early once the worker is disposed anyway, so its waiters do not sit out the rest of the grace. */
+  abortRelease?: () => void;
   unsubscribe: () => void;
   /** Records bookkeeping (see {@link AgentManager.agentRecord}); never read by the lifecycle itself. */
   stats: WorkerStats;
@@ -725,7 +733,10 @@ export class AgentManager {
     const pending = Promise.resolve().then(() => w.adapter.abort());
     const bounded = Promise.race([
       pending,
-      new Promise<void>(resolve => { timer = setTimeout(() => { this.retireWorker(w); resolve(); }, this.stopTimeoutMs); }),
+      new Promise<void>(resolve => {
+        timer = setTimeout(() => { this.retireWorker(w); resolve(); }, this.stopTimeoutMs);
+        w.abortRelease = () => { clearTimeout(timer); resolve(); };
+      }),
     ]);
     w.abort = bounded;
     try {
@@ -733,6 +744,7 @@ export class AgentManager {
     } finally {
       clearTimeout(timer);
       w.abort = undefined;
+      w.abortRelease = undefined;
       w.runAssignment = undefined;
       if (this.get(w.snapshot.id).status !== "disposed") w.snapshot.status = "idle";
     }
@@ -1034,11 +1046,20 @@ export class AgentManager {
     } finally { clearTimeout(timer); }
     return { pendingWorkerIds: [...new Set([...pending, ...this.pendingSpawns])] };
   }
+  /**
+   * Stop, then dispose. The worker goes away regardless, so its abort is waited for at most {@link WORKER_DISPOSE_TIMEOUT_MS}
+   * (not the interrupt grace), and waiters of a stop already in flight are released with it.
+   */
   async dispose(agentId?: string): Promise<void> {
     if (agentId && this.retired.has(agentId)) return;
+    const bound = Math.min(this.stopTimeoutMs, WORKER_DISPOSE_TIMEOUT_MS);
     for (const w of agentId ? [this.require(agentId)] : [...this.workers.values()]) {
-      await this.stop(w.snapshot.id);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([this.stop(w.snapshot.id), new Promise<void>(resolve => { timer = setTimeout(resolve, bound); })]);
+      } finally { clearTimeout(timer); }
       this.retireWorker(w);
+      w.abortRelease?.();
     }
   }
 }
