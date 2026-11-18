@@ -28,9 +28,11 @@ export const taskPlanParameters = Type.Object({
   nodes: Type.Array(Type.Object({
     id: nodeId,
     title: Type.String({ minLength: 1, maxLength: MAX_INPUT_TITLE_CHARS, description: `Short title; longer than ${MAX_TITLE_CHARS} characters is shortened` }),
-    dependsOn: Type.Array(nodeId, { maxItems: MAX_NODES, uniqueItems: true }),
+    // No uniqueItems in this schema (also below): strict provider schema compilers reject it for the whole request (a 400 before the
+    // worker's first turn); checkSchema rejects repeated values instead.
+    dependsOn: Type.Array(nodeId, { maxItems: MAX_NODES }),
     // The R-id format is checked by the tool (one error listing every bad value and the valid ids), not by a bare pattern.
-    covers: Type.Array(Type.String({ minLength: 1, maxLength: 100, description: "Bare requirement id, e.g. R3" }), { maxItems: MAX_NODES, uniqueItems: true }),
+    covers: Type.Array(Type.String({ minLength: 1, maxLength: 100, description: "Bare requirement id, e.g. R3" }), { maxItems: MAX_NODES }),
     status: Type.Union([Type.Literal("pending"), Type.Literal("running"), Type.Literal("done"), Type.Literal("blocked"), Type.Literal("skipped")]),
     note: Type.Optional(Type.String({ maxLength: 500 })),
     phase: Type.Optional(Type.Union([Type.Literal("step"), Type.Literal("integrate")], { description: "step (default): one piece of the work; integrate: comparing every requirement with the actual changes and checks, final verification" })),
@@ -45,6 +47,12 @@ export type TaskPlan = Static<typeof taskPlanParameters>;
 function checkSchema(plan: TaskPlan): void {
   if (!Value.Check(taskPlanParameters, plan)) {
     throw new Error(`Invalid task_plan: ${schemaErrors(taskPlanParameters, plan, 1)[0] ?? "invalid plan"}`);
+  }
+  for (const [index, node] of plan.nodes.entries()) {
+    for (const field of ["dependsOn", "covers"] as const) {
+      const repeated = node[field].find((value, at) => node[field].indexOf(value) !== at);
+      if (repeated !== undefined) throw new Error(`Invalid task_plan: /nodes/${index}/${field}: ${JSON.stringify(repeated)} appears more than once; list each value once.`);
+    }
   }
 }
 

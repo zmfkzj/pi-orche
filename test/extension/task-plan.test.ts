@@ -15,6 +15,8 @@ describe("task_plan replacement DAG", () => {
     ["covers that are not bare requirement ids", [{ ...node("a"), covers: ["R3-revised"] }], /Invalid covers ids: "R3-revised" \(node a; did you mean R3\?\)/],
     ["long note", [{ ...node("a"), note: "x".repeat(501) }], /500/],
     ["two running nodes", [node("a", [], "running"), node("b", [], "running")], /At most one node/],
+    ["a repeated dependency", [node("a"), node("b", ["a", "a"])], /\/nodes\/1\/dependsOn: "a" appears more than once/],
+    ["a repeated requirement id", [{ ...node("a"), covers: ["R1", "R2", "R1"] }], /\/nodes\/0\/covers: "R1" appears more than once/],
     ["oversized extra field", [{ ...node("a"), arbitrary: "x".repeat(100_000) }], /\/nodes\/0\/arbitrary: Unexpected property/],
   ])("rejects %s with actionable errors", (_name, nodes, error) => {
     expect(() => orderTaskPlan({ nodes } as TaskPlan)).toThrow(error);
@@ -34,6 +36,15 @@ describe("task_plan replacement DAG", () => {
     const rejected = await tool.execute("3", { nodes: [node("c", ["unknown"])] }, undefined as never, undefined as never, undefined as never);
     expect(rejected.isError).toBe(true);
     expect(latest?.nodes.map(n => n.id)).toEqual(["b"]);
+  });
+  it("publishes no uniqueItems (strict provider schemas reject it) yet rejects a repeated dependency through the tool", async () => {
+    expect(JSON.stringify(createTaskPlanTool(() => {}).parameters)).not.toContain("uniqueItems");
+    let latest: TaskPlan | undefined;
+    const tool = createTaskPlanTool(plan => { latest = plan; });
+    const rejected = await tool.execute("1", { nodes: [node("a"), node("b", ["a", "a"])] }, undefined as never, undefined as never, undefined as never);
+    expect(rejected.isError).toBe(true);
+    expect(JSON.stringify(rejected.content)).toContain("appears more than once");
+    expect(latest).toBeUndefined();
   });
 });
 
