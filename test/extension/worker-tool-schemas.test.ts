@@ -57,7 +57,7 @@ describe("worker request tool schemas", () => {
     } finally { await h.dispose(); }
   });
 
-  it("Responses wire of a worker session (loopback CPA stand-in, not the live provider): task_plan is tools[10], strict is omitted and nothing is rejected", async () => {
+  it("Responses wire of a worker session (loopback CPA stand-in, not the live provider): task_plan is tools[10], strict is null as main's provider adapter sends, and nothing is rejected", async () => {
     // The stand-in applies the rule observed live on cliproxyapi gpt-6.2-astra/sol (2026-11-18): a function tool whose `strict` is
     // omitted or true is compiled as a strict schema and an unimplemented keyword fails the whole request; `strict: null` is not.
     const bodies: { tools?: { name: string; strict?: unknown; parameters: unknown }[] }[] = [];
@@ -107,8 +107,9 @@ describe("worker request tool schemas", () => {
     expect(bodies).toHaveLength(1);
     const wire = bodies[0]!.tools ?? [];
     expect(wire.findIndex(item => item.name === "task_plan")).toBe(10);
-    // Orche's worker sessions do not load pi-cliproxyapi-provider's `strict: null` payload adapter, so the backend's default applies.
-    expect(wire.every(item => !("strict" in item))).toBe(true);
+    // Orche's worker sessions do not load pi-cliproxyapi-provider's payload adapter; orche sends its `strict: null` itself
+    // (src/pi/cliproxy-tool-strict.ts), so the proxy does not compile the tools as strict schemas (every optional property required).
+    expect(wire.every(item => item.strict === null)).toBe(true);
     expect(wire.filter(item => unsupportedKeywords(item.parameters).length).map(item => item.name)).toEqual([]);
   });
 });

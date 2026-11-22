@@ -31,6 +31,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { projectImageContext } from "./image-context.js";
 import { lengthRecoveryHandlers, type LengthRecoveryOptions } from "./length-recovery.js";
 import { outputCapHandler, withSummaryOutputCap } from "./output-cap.js";
+import { cliproxyToolStrictPayload } from "./cliproxy-tool-strict.js";
 import { setSummaryDecisionMemory, summaryBudgetUse, takeSummaryRequests, type SummaryBudgetUse, type SummaryRequests } from "./summary-budget.js";
 import { markCompaction, recordToolResult } from "./read-telemetry.js";
 import { readNodeRefusal } from "./read-node-guard.js";
@@ -324,7 +325,8 @@ function createCompactionExtension(options: SessionOptions, getSession: () => Ag
 }
 /**
  * Worker-session hygiene that every orche session gets: output-limit recovery (length-recovery.ts), a suggestion on Pi's bare
- * `Tool X not found` result (unknown-tool.ts), the explicit output budget of Claude requests through CLIProxyAPI (output-cap.ts), and
+ * `Tool X not found` result (unknown-tool.ts), the explicit output budget of Claude requests through CLIProxyAPI (output-cap.ts),
+ * `strict: null` on the function tools of CLIProxyAPI Responses requests, as main's provider adapter sends (cliproxy-tool-strict.ts), and
  * the tool-call ledger behind checkpoint evidence (tool-evidence.ts: a `[orche ref Tn]` line on tool results when the assignment's
  * thinking policy links evidence), and the tool boundary of read nodes (read-node-guard.ts: only read-only tools while a Task DAG node
  * marked read:true runs at the read level). None of them re-routes a tool call.
@@ -338,8 +340,10 @@ function createWorkerHygieneExtension(options: SessionOptions, getSession: () =>
     const session = getSession();
     if (!session) return outputCap(event);
     observeEffortRequest(session, session.model, session.thinkingLevel);
-    const safe = preserveAnthropicToolLoopEffort(session, session.model, event.payload);
-    return outputCap({ payload: safe ?? event.payload }) ?? safe;
+    const strict = cliproxyToolStrictPayload(event.payload, session.model);
+    const payload = strict ?? event.payload;
+    const safe = preserveAnthropicToolLoopEffort(session, session.model, payload) ?? strict;
+    return outputCap({ payload: safe ?? payload }) ?? safe;
   };
   const messageEnd = (event: { message: AgentMessage }) => {
     length.message_end(event as never);
