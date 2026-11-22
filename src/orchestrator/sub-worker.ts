@@ -9,7 +9,7 @@
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { formatSchemaErrors } from "../orchestration/schema-errors.js";
-import type { ModelRuntime, Skill, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ModelRuntime, RetrySettings, Skill, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ModelRoute, SubWorkerModelSource, SubWorkerThinkingSource } from "../orchestration/routing.js";
 import type { TaskItem } from "../orchestration/backlog.js";
 import { relative, resolve, sep } from "node:path";
@@ -81,6 +81,8 @@ export interface SubWorkerEnvironment {
   onSessionEnd?(id: string): void;
   /** Main's discovered skills (metadata) every sub-worker lists, as an orche_task worker does (src/pi/worker-skills.ts). */
   skills?: readonly Skill[];
+  /** The host's effective Pi `retry` settings every sub-worker session uses (SessionOptions.retry); absent: Pi's defaults. */
+  retry?: RetrySettings;
   /**
    * The web-fetch capability of one sub-worker (pi-browser's own browser_fetch in its session), asked with its own id and role,
    * as an orche_task worker gets it; `unavailable` is told to the sub-worker. Absent: none.
@@ -214,6 +216,7 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
         ...(env.onSessionEvent ? { onEvent: (event: { type: string; [key: string]: unknown }) => env.onSessionEvent!(worker.id, event) } : {}),
         ...(sessionFile ? { sessionFile } : {}), ...(!specialist && !cellRoute && env.inheritedContextWindow ? { inheritedContextWindow: env.inheritedContextWindow } : {}),
         ...(env.skills?.length ? { skills: env.skills } : {}),
+        ...(env.retry ? { retry: env.retry } : {}),
         ...(!specialist && env.lengthLadder ? { lengthRecovery: { ladder: env.lengthLadder } } : {}),
         ...(compaction ? { taskCompaction: compaction } : {}),
         ...(compaction && env.summaryBudget ? { summaryBudget: env.summaryBudget } : {}),

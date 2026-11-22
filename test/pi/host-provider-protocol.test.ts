@@ -3,7 +3,7 @@ import { createServer, type Server, type IncomingHttpHeaders } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ModelRegistry, ModelRuntime, type AgentSession, type AgentSessionEvent, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import { ModelRegistry, ModelRuntime, type AgentSession, type AgentSessionEvent, type ExtensionFactory, type RetrySettings } from "@earendil-works/pi-coding-agent";
 import { InMemoryCredentialStore, type Api, type AssistantMessageEvent } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { InheritedProviders } from "../../src/pi/inherit-providers.js";
@@ -63,8 +63,14 @@ const cases = [
 type Fixture = (typeof cases)[number];
 type Response = { body: string; status?: number; hold?: boolean };
 
+/**
+ * A user's Pi `retry` settings as a worker session inherits them (SessionOptions.retry). These tests pin orche's former fixed worker
+ * policy (one fast agent retry, no provider retry) explicitly, so the protocol checks keep their exact request counts.
+ */
+const ONE_FAST_RETRY: RetrySettings = { enabled: true, maxRetries: 1, baseDelayMs: 250, maxAgentDelayMs: 1000, provider: { maxRetries: 0, maxRetryDelayMs: 1000 } };
+
 /** Real Pi SDK + builtin HTTP/SSE adapters. Only an ephemeral loopback server receives requests. */
-async function setup(fixture: Fixture, script: Response[], extensions: ExtensionFactory[] = []) {
+async function setup(fixture: Fixture, script: Response[], extensions: ExtensionFactory[] = [], retry: RetrySettings | null = ONE_FAST_RETRY) {
   const root = await mkdtemp(join(tmpdir(), "orche-protocol-"));
   roots.push(root);
   const requests: { url: string; headers: IncomingHttpHeaders; body: Record<string, unknown> }[] = [];
@@ -102,6 +108,7 @@ async function setup(fixture: Fixture, script: Response[], extensions: Extension
   let guards = 0;
   const session = await createSession({
     cwd: root, modelRuntime: runtime, route: { role: "test", model: `${fixture.provider}/test-model` }, instructions: "Answer briefly.", tools: ["echo"],
+    ...(retry ? { retry } : {}),
     customTools: [{ name: "echo", label: "echo", description: "Echo a value", parameters: Type.Object({ value: Type.String() }),
       async execute(_id, args) { executions++; return { content: [{ type: "text", text: `echo:${(args as { value: string }).value}` }], details: undefined }; } }],
     toolGuard: () => { guards++; return undefined; },
@@ -282,5 +289,42 @@ describe("Pi 1.3 builtin transports in inherited worker sessions (loopback, not 
     expect(cancelled.errorMessage).toBe(hostCancelled.errorMessage);
     expect(cancelled.errorMessage).toMatch(/abort/i);
     expect(h.requests).toHaveLength(1);
+  });
+});
+
+describe("worker sessions retry failed provider calls by the user's Pi retry settings", () => {
+  const overloaded = { status: 503, body: '{"error":{"message":"Service unavailable","type":"overloaded_error","code":503}}' };
+  const openai = cases[0]!;
+
+  it("a user retry config sets the number of retries and the backoff of the requests the worker really sends", async () => {
+    const h = await setup(openai, [overloaded, overloaded, overloaded, openai.response()], [], { maxRetries: 3, baseDelayMs: 5, maxAgentDelayMs: 20 });
+    await h.session.prompt("Retry until it works");
+    expect(h.requests).toHaveLength(4);
+    expect(endings(h)).toEqual(["error", "error", "error", "stop"]);
+    // baseDelayMs doubled per attempt (5, 10, 20), capped at maxAgentDelayMs.
+    expect(h.events.filter(event => event.type === "auto_retry_start")).toMatchObject([
+      { attempt: 1, maxAttempts: 3, delayMs: 5 }, { attempt: 2, maxAttempts: 3, delayMs: 10 }, { attempt: 3, maxAttempts: 3, delayMs: 20 },
+    ]);
+    expect(h.events.filter(event => event.type === "auto_retry_end")).toMatchObject([{ success: true }]);
+    expect(settled(h)).toHaveLength(1);
+  });
+
+  it("retry.enabled false in the user's settings: the worker does not retry", async () => {
+    const h = await setup(openai, [overloaded, openai.response()], [], { enabled: false });
+    await h.session.prompt("Do not retry");
+    expect(h.requests).toHaveLength(1);
+    expect(endings(h)).toEqual(["error"]);
+    expect(h.events.filter(event => event.type === "auto_retry_start")).toHaveLength(0);
+  });
+
+  it("no user retry config: the worker runs on Pi's defaults (3 retries from 2 s)", async () => {
+    const h = await setup(openai, [overloaded, openai.response()], [], null);
+    const first = Promise.withResolvers<void>();
+    h.session.subscribe(event => { if (event.type === "auto_retry_start") first.resolve(); });
+    const prompt = h.session.prompt("Default retry");
+    await first.promise;
+    await h.session.abort();
+    await prompt;
+    expect(h.events.filter(event => event.type === "auto_retry_start")).toMatchObject([{ attempt: 1, maxAttempts: 3, delayMs: 2000 }]);
   });
 });

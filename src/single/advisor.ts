@@ -27,7 +27,7 @@
  * and never gets an advisor of its own.
  */
 import { Type } from "typebox";
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { ModelRuntime, RetrySettings } from "@earendil-works/pi-coding-agent";
 import type { InjectedMessage, SteerReceipt } from "../agent/agent-handle.js";
 import { classifyBash } from "../extension/bash-policy.js";
 import type { ModelRoute, SubWorkerModelSource } from "../orchestration/routing.js";
@@ -190,6 +190,8 @@ export interface AdvisorOptions {
   signal: AbortSignal;
   sessionFile?: string;
   inheritedContextWindow?: number;
+  /** The host's effective Pi `retry` settings of the advisor's session (SessionOptions.retry); absent: Pi's defaults. */
+  retry?: RetrySettings;
   maxTurns?: number;
   /** Steer the advice into the worker's running assignment (WorkerPool → AgentManager.steer with source "advisor"). */
   deliver(text: string, content: (id: string) => string): SteerReceipt;
@@ -316,6 +318,7 @@ export class AssignmentAdvisor {
         signal: AbortSignal.any([this.options.signal, this.abort.signal]), nudges: 1,
         ...(this.options.sessionFile ? { sessionFile: this.options.sessionFile } : {}),
         ...(this.options.inheritedContextWindow ? { inheritedContextWindow: this.options.inheritedContextWindow } : {}),
+        ...(this.options.retry ? { retry: this.options.retry } : {}),
       });
       this.stats = stats;
       const advice = value.advice.trim();

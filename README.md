@@ -126,6 +126,16 @@ Workers automatically use **all providers in the running Pi session**: built-ins
 
 `providerExtensions` is optional, for additional worker-only providers (or standalone SDK callers). An obsolete, missing package now warns instead of blocking tasks when the host registry is available; an installed but broken package still fails, and SDK tasks without a host registry keep the strict missing-package error. Explicit worker-only provider registrations retain precedence. See [provider details and limits](docs/pi-package.md#models-auth-and-providers-that-extensions-register).
 
+### Retries of failed provider calls in workers
+
+orche's worker sessions (`orche_task` workers, `orche_spawn` sub-workers and advisors) retry a failed provider call (overload, rate limit, 5xx, network error) **exactly by your Pi `retry` settings**, the same ones main uses: `~/.pi/agent/settings.json` merged with a trusted project's `.pi/settings.json` (`pi.getSettings().retry`). There is no separate orche key. Fields you do not set use Pi's own defaults (3 retries, 2 s doubling up to 60 s, no provider-level retries), for example:
+
+```json
+{ "retry": { "maxRetries": 6, "baseDelayMs": 5000, "maxAgentDelayMs": 120000, "provider": { "maxRetries": 0, "maxRetryDelayMs": 60000 } } }
+```
+
+The settings are read when a worker or advisor session starts (and when an orchestrating assignment starts its sub-workers); a running worker, also one that is reused for a later assignment, keeps what it started with. Before this release workers always used a fixed policy (1 retry, 250 ms, at most 1 s, no provider retries); set exactly that in `retry` to keep it. A retry backoff counts as a model request in flight for orche's activity checks, which stop counting a single wait after 5 minutes, so keep `maxAgentDelayMs` well below that.
+
 ### Raster image generation
 
 The `cliproxyapi-images/gpt-image-2.5` image model (CLIProxyAPI gateway, from [pi-images](https://github.com/zmfkzj/pi-images)) is **bundled with pi-orche**: `pi install git:github.com/zmfkzj/pi-orche` brings its provider along, so there is no separate install and no `providerExtensions` entry. Set the model in `orche.config.json` (merge into your existing file, retaining `routes` and `default`):

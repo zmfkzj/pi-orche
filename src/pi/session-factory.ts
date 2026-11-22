@@ -18,6 +18,7 @@ import {
   type ResourceLoader,
   type ToolDefinition,
   type Skill,
+  type RetrySettings,
 } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { createOrcheTools } from "../tools/index.js";
@@ -115,6 +116,12 @@ export interface SessionOptions {
    * absolute SKILL.md path; see worker-skills.ts). Copied at creation: a living session keeps this list. Without it, none.
    */
   skills?: readonly Skill[];
+  /**
+   * Pi's `retry` settings for this session (auto-retry of failed provider calls and `retry.provider.*`): the host's effective
+   * settings (`pi.getSettings().retry`: global `settings.json` merged with a trusted project's `.pi/settings.json`), see
+   * {@link workerRetrySettings}. Fields left unset fall back to Pi's own defaults. Copied at creation: a living session keeps it.
+   */
+  retry?: RetrySettings;
 }
 /** `toolCallId`: the call's id, for owners that pair the guard with the call's end (the ultra integrity probes in src/orchestrator/ultra.ts). */
 export type ToolGuard = (toolName: string, input: Record<string, unknown>, toolCallId?: string) => string | undefined | Promise<string | undefined>;
@@ -472,6 +479,27 @@ async function bindFactoryExtensions(session: AgentSession): Promise<void> {
   };
 }
 
+/**
+ * The `retry` part of a session's in-memory Pi settings: the host's own effective `retry` settings, copied as they are (`false`
+ * and `0` included, `retry.provider.*` too), so Pi resolves every field the user left unset to its own defaults, as for the main
+ * session. Without host settings (no `retry` given, or not an object) the key is left out and Pi's defaults apply.
+ */
+export function workerRetrySettings(retry: RetrySettings | undefined): { retry?: RetrySettings } {
+  return retry && typeof retry === "object" && !Array.isArray(retry) ? { retry: structuredClone(retry) } : {};
+}
+
+/**
+ * Read the host's effective Pi `retry` settings (the extension passes `() => pi.getSettings().retry`: global merged with a trusted
+ * project, plus Pi's runtime overrides). Undefined when there is no reader, it throws (an older Pi host) or the value is not an object.
+ */
+export function hostRetrySettings(read: (() => RetrySettings | undefined) | undefined): RetrySettings | undefined {
+  try {
+    return workerRetrySettings(read?.()).retry;
+  } catch {
+    return undefined;
+  }
+}
+
 let defaultRuntime: Promise<ModelRuntime> | undefined;
 export async function createSession(
   options: SessionOptions,
@@ -529,13 +557,7 @@ export async function createSession(
     sessionManager,
     settingsManager: SettingsManager.inMemory({
       compaction: options.taskCompaction ? piCompactionSettings(resolvedFor(options.taskCompaction, model)) : { enabled: false },
-      retry: {
-        enabled: true,
-        maxRetries: 1,
-        baseDelayMs: 250,
-        maxAgentDelayMs: 1000,
-        provider: { maxRetries: 0, maxRetryDelayMs: 1000 },
-      },
+      ...workerRetrySettings(options.retry),
     }),
   });
   createdSession = session;

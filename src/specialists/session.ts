@@ -86,6 +86,8 @@ export interface SpecialistRun<S extends TSchema> {
   lengthRecovery?: LengthRecoveryOptions;
   /** Skills (metadata) the session lists in its prompt; see SessionOptions.skills. */
   skills?: SessionOptions["skills"];
+  /** Pi `retry` settings of the session (the host's effective settings); see SessionOptions.retry. Absent: Pi's defaults. */
+  retry?: SessionOptions["retry"];
   /** Compaction with restored essentials (orche_spawn sub-workers with `workerCompaction.subWorkers`); absent: compaction stays off. */
   taskCompaction?: SessionOptions["taskCompaction"];
   /** The summary budget profile of this session's compactions (src/pi/summary-budget.ts; absent: standard). */
@@ -236,6 +238,7 @@ export async function runSpecialistSession<S extends TSchema>(run: SpecialistRun
       ...(run.inheritedContextWindow ? { inheritedContextWindow: run.inheritedContextWindow } : {}),
       ...(run.lengthRecovery ? { lengthRecovery: run.lengthRecovery } : {}),
       ...(run.skills?.length ? { skills: run.skills } : {}),
+      ...(run.retry ? { retry: run.retry } : {}),
       ...(run.extensionFactories?.length ? { extensionFactories: run.extensionFactories } : {}),
       ...(run.taskCompaction ? { taskCompaction: run.taskCompaction } : {}),
     }).then(created => {

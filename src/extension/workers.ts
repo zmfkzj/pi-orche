@@ -5,7 +5,7 @@
  * executeTool() is execute() as a tool result, with such a failure returned as an isError result that keeps the details.
  * formatWorkers(), stop(id|"all") and roster() implement the pool slash commands. */
 import { Type, type Static } from "typebox";
-import { getAgentDir, type AgentToolResult, type ModelRegistry, type ModelRuntime, type Skill } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type AgentToolResult, type ModelRegistry, type ModelRuntime, type RetrySettings, type Skill } from "@earendil-works/pi-coding-agent";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
@@ -21,7 +21,7 @@ import { COMPLETION_WAIT_LINE, type CompletionWait } from "../orchestration/comp
 import { taskWorkerInstructions } from "../orchestration/prompts.js";
 import { orchestrationResultSchemas, requirementDefinitions, requirementIds, requiredChecklistError, type Ambiguity, type ChecklistItem } from "../orchestration/result-schemas.js";
 import { createTaskPlanTool, renderTaskPlan, type TaskPlan } from "../tools/task-plan.js";
-import { configureTaskWorkflow, enableTaskWorkflow, type CompactionStats, type TaskCompaction } from "../pi/session-factory.js";
+import { configureTaskWorkflow, enableTaskWorkflow, hostRetrySettings, type CompactionStats, type TaskCompaction } from "../pi/session-factory.js";
 import { DEFAULT_WORKER_COMPACTION, resolveCompaction, type WorkerCompactionSettings } from "../pi/compaction-policy.js";
 import { composeEssentials, renderReference, renderWorkLog } from "../pi/compaction-state.js";
 import { renderDecisionWorkLog } from "../pi/decision-memory.js";
@@ -604,6 +604,12 @@ export interface WorkerPoolOptions {
    */
   skills?: () => readonly Skill[];
   /**
+   * The host's effective Pi `retry` settings (the extension wires `pi.getSettings().retry`): read when an orche_task worker or an
+   * advisor session is created and when an orchestrating assignment starts its sub-worker runner; each session keeps what it got.
+   * Absent, throwing or not an object: Pi's defaults (see SessionOptions.retry).
+   */
+  retry?: () => RetrySettings | undefined;
+  /**
    * Completion wait of this Pi process (src/orchestration/completion-wait.ts; the extension wires `--orche-completion-wait`). Read
    * per assignment; absent or `deadline`: the finite deadlines. A throw (an invalid flag value) fails the assignment before it starts.
    */
@@ -1039,6 +1045,11 @@ export class WorkerPool {
   private disposed = false;
   private disposal?: Promise<void>;
   constructor(private readonly options: WorkerPoolOptions) {}
+  /** The host's effective Pi `retry` settings for a session (or a sub-worker runner) created now; empty: Pi's defaults. */
+  private hostRetry(): { retry?: RetrySettings } {
+    const retry = hostRetrySettings(this.options.retry);
+    return retry ? { retry } : {};
+  }
   /**
    * Ledgers restored from the session (its start, a reload or a resume). Their workers are gone; an orche_task that names the
    * task continues it with a new worker briefed from the ledger. Replaces the current set.
@@ -1699,6 +1710,7 @@ export class WorkerPool {
       const toolTimeoutsMs = { ...(images ? { generate_image: images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } : {}), ...capabilities.toolTimeoutsMs };
       await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, signal: startupSignal, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name), ...capabilities.tools], customTools, peerMessaging: false, ...(sessionFile ? { sessionFile } : {}),
         skills: this.options.skills?.() ?? [],
+        ...this.hostRetry(),
         ...(Object.keys(toolTimeoutsMs).length ? { toolTimeoutsMs } : {}),
         // The capabilities' own extensions (pi-gui's MCP + desktop server, pi-browser's browser_fetch) live in this worker's session only.
         ...(capabilities.extensionFactories.length ? { extensionFactories: capabilities.extensionFactories } : {}),
@@ -2283,6 +2295,7 @@ export class WorkerPool {
             // workerCompaction.subWorkers: standard sub-workers compact by the same policy with their own essentials (off by default).
             ...(config.workerCompaction?.subWorkers ? { compaction: config.workerCompaction } : {}),
             skills: this.options.skills?.() ?? [],
+            ...this.hostRetry(),
             // Each sub-worker gets its own browser_fetch instance (asked with its own id and role), like an orche_task worker.
             webFetch: planned => webFetchCapability(this.options.capability, { cwd: planned.workspace ?? args.cwd, workerId: planned.id, role: planned.role, readOnly: !WRITING_KINDS.has(planned.role) }),
             // And its own CodeGraph MCP connection (pi-codegraph), for the code graph of its workspace.
@@ -2345,6 +2358,7 @@ export class WorkerPool {
         const advisorFile = workerSessionFile(resolved, { ...(args.currentSession?.id ? { parentSessionId: args.currentSession.id } : {}), workerId: `${meta.id}.advisor`, spawnedAt: Date.now() });
         advisor = new AssignmentAdvisor({
           worker: meta.id, role: args.role, cwd: args.cwd, runtime, claudeNative: config.claudeNative, route: advisorRoute.route, modelSource: advisorRoute.source, thinkingSource: advisorRoute.thinkingSource,
+          ...this.hostRetry(),
           // At most half the assignment's base cap: a report held for the advisor leaves the worker time to process its notes.
           request: meta.request ?? handoffRequest, timeoutMs: Math.min(ADVISOR_TIMEOUT_MS, Math.max(1000, Math.floor(limits.assignmentMs / 2))), signal, ...(unbounded ? { unbounded: true } : {}),
           ...(advisorFile ? { sessionFile: advisorFile } : {}), ...(advisorWindow ? { inheritedContextWindow: advisorWindow } : {}),

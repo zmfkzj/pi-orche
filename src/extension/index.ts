@@ -367,6 +367,9 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         workers = new WorkerPool({
           controller, ...(options.agentDir ? { agentDir: options.agentDir } : {}),
           skills: knownSkills,
+          // Pi's own effective retry settings (global settings.json merged with a trusted project's .pi/settings.json), read for each
+          // new worker, sub-worker runner and advisor: orche sessions retry failed provider calls exactly as main does.
+          retry: () => pi.getSettings().retry,
           completionWait: () => parseCompletionWait(pi.getFlag(COMPLETION_WAIT_FLAG)),
           // One small entry per ledger event, not part of the model context: it follows the session branch and survives reloads.
           onLedgerEvent: event => pi.appendEntry(LEDGER_ENTRY_TYPE, event),
