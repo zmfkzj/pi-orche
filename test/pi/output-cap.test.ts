@@ -508,21 +508,35 @@ describe("Pi's summary requests (compaction) through orche's session factory", (
     // The proxy provider reuses this module under api `cliproxyapi-codex-responses`; the model keeps that api here too.
     const viaCodex: FauxResponseFactory = (async (context, options, _state, model) =>
       codexStreamSimple({ ...model, baseUrl: "http://codex.invalid" } as never, context, { ...options, apiKey: token, transport: "sse", fetch } as never).result()) as FauxResponseFactory;
-    for (const settings of [undefined, { mode: "off" } as OutputCapSettings]) {
+    const summaryPrompt = await summarySystemPrompt();
+    expect(summaryPrompt).toBeTruthy();
+    const leading = (body: Record<string, unknown>) => (body.input as { role?: string; content?: unknown }[])[0]!;
+    for (const settings of [undefined, { mode: "off" } as OutputCapSettings, { mode: "auto", tokens: 64_000 } as OutputCapSettings]) {
       bodies.length = 0;
-      const { session } = await open(env, "claude-opus-5-5", settings);
+      const { session, decisions } = await open(env, "claude-opus-5-5", settings);
       env.faux.setResponses([viaCodex, viaCodex, viaCodex, viaCodex]);
       await session.prompt("First question");
       await session.prompt("Second question");
       session.settingsManager.applyOverrides({ compaction: { keepRecentTokens: 1 } });
       expect((await session.compact()).summary).toContain("answer 3");
       expect(bodies).toHaveLength(4);
-      expect(bodies[2]!.instructions).not.toBe(bodies[0]!.instructions); // Pi's summarization prompt
+      // Pi 1.6.0 (#12273): the system prompt is the leading developer item of `input`, no longer top-level `instructions`.
+      for (const body of bodies) expect(body).not.toHaveProperty("instructions");
+      expect(leading(bodies[0]!)).toMatchObject({ role: "developer" });
+      expect(leading(bodies[2]!)).toMatchObject({ role: "developer", content: expect.stringContaining(summaryPrompt!) }); // Pi's summarization prompt
+      expect(leading(bodies[0]!).content).not.toContain(summaryPrompt!);
       expect(bodies[2]!.reasoning).toEqual(bodies[0]!.reasoning);
       expect(bodies[0]).toHaveProperty("prompt_cache_key");
       expect(bodies[2]).not.toHaveProperty("prompt_cache_key"); // summaries keep their one-off cache routing
-      // Off: the real body has no max_output_tokens at all (Pi's maxTokens is not serialized); auto: every request has the budget.
-      expect(bodies.map(body => body.max_output_tokens)).toEqual(settings ? [undefined, undefined, undefined, undefined] : [128_000, 128_000, 128_000, 128_000]);
+      // Pi 1.6.0 serializes its own maxTokens (the model's 128000, fitted to the context) as max_output_tokens on every Codex
+      // Responses request, cap on or off (Pi 1.5.x sent none). Orche keeps a budget the request already has (rule 1 of
+      // output-cap.ts), so on this wire its decision is `payload`, and an `outputCap.tokens`/`models` budget no longer replaces Pi's.
+      expect(bodies.map(body => body.max_output_tokens)).toEqual([128_000, 128_000, 128_000, 128_000]);
+      expect(new Set(decisions.map(decision => decision.source))).toEqual(new Set([settings?.mode === "off" ? "disabled" : "payload"]));
+      if (settings?.mode !== "off") {
+        expect(decisions.map(decision => decision.cap)).toEqual(decisions.map(() => 128_000));
+        expect(decisions.map(decision => decision.request)).toEqual([undefined, "summary"]); // the summary is still recognised
+      }
     }
   });
 });

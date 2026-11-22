@@ -6,6 +6,8 @@
  * required `max_tokens` with its own default of 32000 (internal/translator/claude/openai/responses/claude_openai-responses_request.go,
  * 8.0.16 a2976eb8 and 8.0.20), whatever the model allows; a request that sends `max_output_tokens` gets that value instead (a cap of 64
  * really ended at 64 tokens, `incomplete: max_output_tokens`). Long reasoning at high effort was cut at exactly 32000 tokens.
+ * (Pi 1.5.x. From Pi 1.6.0 that provider serializes Pi's own maxTokens, the model's catalog value fitted to the context, as
+ * `max_output_tokens` on every request; rule 1 below then keeps it, so `outputCap.tokens`/`models` no longer replace it there.)
  *
  * This module adds `max_output_tokens` to such requests through Pi's `before_provider_request` hook of orche's own sessions only (never
  * main's session, never another provider or a non-Claude model: GPT models on the same proxy path keep the request untouched).
