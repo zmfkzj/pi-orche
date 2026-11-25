@@ -145,6 +145,17 @@ describe("pi-orche dependency provider: check", () => {
     expect(item(report.items, "provider extension git:github.com/example/gateway")).toMatchObject({ status: "warn", optional: true, action: expect.stringContaining("pi install git:github.com/example/gateway") });
     expect(item(report.items, "model gateway/model-x")).toMatchObject({ status: "unverified", action: expect.stringContaining("/orche single") });
   });
+
+  it("lists configured worker extensions as resolved paths, and reports a missing one as an invalid config", async () => {
+    const f = await fixture({ config: { routes: {}, default: { model: "openai/gpt-5" }, workerExtensions: ["extensions/compat.ts"] } });
+    await mkdir(join(f.agentDir, "extensions"), { recursive: true });
+    await writeFile(join(f.agentDir, "extensions", "compat.ts"), "export default function () {}\n");
+    const report = await provider(f).check({ cwd: f.cwd, modelRegistry: registry(["openai/gpt-5"]) });
+    expect(item(report.items, `worker extension ${join(f.agentDir, "extensions", "compat.ts")}`)).toMatchObject({ status: "ok", detail: expect.stringContaining("orche_spawn sub-workers, plan advisors") });
+    await writeFile(join(f.agentDir, "orche.config.json"), JSON.stringify({ routes: {}, workerExtensions: ["extensions/missing.ts"] }));
+    const missing = await provider(f).check({ cwd: f.cwd, modelRegistry: registry([]) });
+    expect(missing.items.find(entry => entry.status === "error" && entry.detail?.includes("config.workerExtensions[0]"))?.detail).toContain("does not exist");
+  });
 });
 
 describe("pi-orche dependency provider: install", () => {

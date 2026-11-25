@@ -367,6 +367,8 @@ interface Worker {
   skillCache?: string;
   /** {@link WorkerCapabilityProvider.key} of the worker's session-bus capability (session_list / session_send); absent without one. */
   sessionBus?: string;
+  /** The `workerExtensions` the session loaded (JSON of the absolute paths); absent without any. */
+  workerExtensions?: string;
   /** Context size of the latest request: input + cache reads + cache writes (providers count cache writes outside `input`). */
   latestInput: number;
   /** Last real provider usage: used for one-request model-switch price comparison; not fabricated from context length. */
@@ -1576,6 +1578,16 @@ export class WorkerPool {
       capabilityHandover = this.gone.get(worker.id);
       worker = undefined;
     }
+    // `workerExtensions` (orche.config.json) load once, when the session is created: a changed list needs a fresh session.
+    const workerExtensions = config.routes.workerExtensions?.length ? [...config.routes.workerExtensions] : undefined;
+    const workerExtensionsKey = workerExtensions ? JSON.stringify(workerExtensions) : undefined;
+    if (worker && worker.workerExtensions !== workerExtensionsKey) {
+      await this.retire(worker.id, "replaced: workerExtensions changed");
+      retired.push(worker.id);
+      retirementLines.push(`${worker.id} retired: workerExtensions ${workerExtensions ? (worker.workerExtensions ? "changed" : "were configured") : "were removed"}; a fresh worker continues, briefed from ${worker.id}'s transcript.`);
+      capabilityHandover = this.gone.get(worker.id);
+      worker = undefined;
+    }
     // The ultra tool set (orche_spawn with the ultra reasons, orche_adopt) is installed when a session is created and cannot be
     // removed: a worker crosses the ultra boundary as a fresh worker, briefed from the transcript of the one it replaces.
     let modeHandover: GoneWorker | undefined;
@@ -1707,6 +1719,7 @@ export class WorkerPool {
       const spawnTool = singleWorkflow && (config.single.spawn || ultraMode || mdsdMode);
       worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool, ...(spawnTool ? { maxSubWorkers: config.single.maxSubWorkers } : {}), ...(singleWorkflow && ultraMode ? { ultraTools: true } : {}), ...(singleWorkflow && mdsdMode ? { mdsdTools: true } : {}), ...(gui ? { gui: gui.key } : {}), ...(webFetch.provider ? { webFetch: webFetch.provider.key } : {}), ...(codeGraph.provider ? { codeGraph: codeGraph.provider.key } : {}), ...(skillCache.provider ? { skillCache: skillCache.provider.key } : {}) };
       if (sessionBus.provider) worker.sessionBus = sessionBus.provider.key;
+      if (workerExtensionsKey) worker.workerExtensions = workerExtensionsKey;
       const meta = worker;
       this.setCompaction(meta, config.workerCompaction, resolved);
       meta.model = route.model;
@@ -1728,6 +1741,8 @@ export class WorkerPool {
         ...(Object.keys(toolTimeoutsMs).length ? { toolTimeoutsMs } : {}),
         // The capabilities' own extensions (pi-gui's MCP + desktop server, pi-browser's browser_fetch) live in this worker's session only.
         ...(capabilities.extensionFactories.length ? { extensionFactories: capabilities.extensionFactories } : {}),
+        // The configured workerExtensions (e.g. a request-compatibility hook) load into this worker's session the same way.
+        ...(workerExtensions ? { extensionPaths: workerExtensions } : {}),
         contextProjection: createAssignmentProjector(),
         ...(mainModel ? { inheritedContextWindow: mainWindow } : {}),
         claudeNative: config.claudeNative,
@@ -2303,7 +2318,7 @@ export class WorkerPool {
             return `${meta.id}.${++sub}`;
           },
           runWorker: createSubWorkerRunner({
-            orchestrator: meta.id, cwd: args.cwd, runtime, claudeNative: config.claudeNative, route: standardSubRoute, routeSource: subSource, thinkingSource: standardSubRoute === subRoute ? subThinkingSource : "orchestrator:step", ...(subWindow ? { inheritedContextWindow: subWindow } : {}),
+            orchestrator: meta.id, cwd: args.cwd, runtime, claudeNative: config.claudeNative, ...(config.routes.workerExtensions?.length ? { extensionPaths: config.routes.workerExtensions } : {}), route: standardSubRoute, routeSource: subSource, thinkingSource: standardSubRoute === subRoute ? subThinkingSource : "orchestrator:step", ...(subWindow ? { inheritedContextWindow: subWindow } : {}),
             // Every sub-worker's Bash goes through the same safety review as this assignment's own (once per call, in the sub-worker's guard).
             bashReview: config.bashReview,
             // workerCompaction.subWorkers: standard sub-workers compact by the same policy with their own essentials (off by default).
@@ -2371,7 +2386,7 @@ export class WorkerPool {
         const manager = this.manager;
         const advisorFile = workerSessionFile(resolved, { ...(args.currentSession?.id ? { parentSessionId: args.currentSession.id } : {}), workerId: `${meta.id}.advisor`, spawnedAt: Date.now() });
         advisor = new AssignmentAdvisor({
-          worker: meta.id, role: args.role, cwd: args.cwd, runtime, claudeNative: config.claudeNative, route: advisorRoute.route, modelSource: advisorRoute.source, thinkingSource: advisorRoute.thinkingSource,
+          worker: meta.id, role: args.role, cwd: args.cwd, runtime, claudeNative: config.claudeNative, ...(config.routes.workerExtensions?.length ? { extensionPaths: config.routes.workerExtensions } : {}), route: advisorRoute.route, modelSource: advisorRoute.source, thinkingSource: advisorRoute.thinkingSource,
           ...this.hostRetry(),
           // At most half the assignment's base cap: a report held for the advisor leaves the worker time to process its notes.
           request: meta.request ?? handoffRequest, timeoutMs: Math.min(ADVISOR_TIMEOUT_MS, Math.max(1000, Math.floor(limits.assignmentMs / 2))), signal, ...(unbounded ? { unbounded: true } : {}),

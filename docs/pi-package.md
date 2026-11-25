@@ -273,7 +273,7 @@ Config discovery, first match wins:
 2. `~/.pi/agent/orche.config.json` (`PI_CODING_AGENT_DIR` is honored).
 3. Otherwise every orche role uses the session's current model and thinking level.
 
-The file has the same format as the repository's `orche.config.json` (`routes`, `default`, optional `providerExtensions`, `extendedContext`, `verifyCommands`, `workers`, `mainMode`, `models` (the model tiers, above) and `limits`; see [advisor.md](advisor.md)). `verifyCommands` is a list of 1–8 shell commands the verifier must run (for example `["npm test", "npm run lint"]`); without it the verifier discovers the project's own checks. An existing file that fails validation is an error; there is no silent fallback.
+The file has the same format as the repository's `orche.config.json` (`routes`, `default`, optional `providerExtensions`, `workerExtensions` (below), `extendedContext`, `verifyCommands`, `workers`, `mainMode`, `models` (the model tiers, above) and `limits`; see [advisor.md](advisor.md)). `verifyCommands` is a list of 1–8 shell commands the verifier must run (for example `["npm test", "npm run lint"]`); without it the verifier discovers the project's own checks. An existing file that fails validation is an error; there is no silent fallback.
 
 ### Run limits (`limits`)
 
@@ -314,6 +314,24 @@ Explicit worker-only registrations take precedence and keep using the isolated r
 Each configured source is resolved at user scope, without downloading (`pi install <source>`). Only its declared extensions load into a hidden, tool-less in-memory session; unrelated extensions and pi-orche itself never load. Hosts are cached by the source list until pool disposal. When main's registry is available, a missing source emits a visible warning in the task result and `details.warnings` rather than preventing the task from using Pi's providers. Remove obsolete entries (for example after moving a provider into an umbrella bundle). An installed package that fails to load, recursion or invalid configuration still fails; missing sources remain errors without a host registry. Unknown model references still fail or follow the existing, visibly warned tier fallback rules—missing auth is never replaced with another provider.
 
 SDK callers may pass `modelRegistry` to `WorkerPool.execute`. `createOrcheExtension({ inheritProviders: false })` retains intentionally isolated runtimes. Without a host, the default runtime loads `auth.json` and `models.json` from the configured `agentDir` (else Pi's usual agent directory); caller-supplied `createRuntime` remains authoritative.
+
+### Your extensions in worker sessions (`workerExtensions`)
+
+Worker sessions are built with their own resource loader: orche's tools, guards, compaction and hygiene, the opt-in capability factories (pi-gui, pi-browser, pi-codegraph, SkillCache, session bus) and nothing else. Extensions that main loads from `~/.pi/agent/extensions`, `settings.json` packages or `--extension` do not run there, so a hook that main relies on for its own requests (`context_with_system`, `before_provider_request`, ...) never sees a worker's requests. `workerExtensions` adds local extensions to every worker session orche creates: `orche_task` workers, `orche_spawn` sub-workers (specialists included) and plan advisors.
+
+- **Format:** 1–8 strings, each a local extension file or directory as Pi's `--extension` takes it; absolute, `~/…` or relative. orche resolves relative entries against the directory of the config file that lists them (`~/.pi/agent` for the user config, `<cwd>/.pi` for a trusted project config), not against the task cwd, and checks that each exists when the file loads. Package sources (`npm:`, `git:`, `https:`) are refused; duplicates (also after resolution) are errors. SDK callers passing `extensionPaths` to `createSession` directly give absolute paths (a relative one resolves against the session cwd).
+- **Loading:** together with the capability factories, through one Pi `DefaultResourceLoader` with discovery off (`noExtensions`, no settings packages, skills, prompts, themes or context files) and the paths as `additionalExtensionPaths`; the session is bound (`session_start`) and its disposal emits `session_shutdown`. A load error fails the session creation with the extension's message, before any model request.
+- **Scope:** the extensions run as trusted code with full access to the worker session's events. Their tools are not activated (the worker's tool allowlist is unchanged); guards and the Bash safety review still apply. Changing the list replaces a reused `orche_task` worker with a fresh one, briefed from its transcript (as for a capability change).
+- **Trust:** a project config can only add extensions when Pi trusts the project (the usual discovery rule above).
+
+Example (`~/.pi/agent/orche.config.json`):
+
+```json
+{
+  "workerExtensions": ["extensions/neon-system-compat.ts"],
+  "models": { "orchestrator": { "model": "cliproxyapi/claude-opus-5-5-high", "thinking": "high", "extendedContext": true } }
+}
+```
 
 ### Extended context (`extendedContext`)
 

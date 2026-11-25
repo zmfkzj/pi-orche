@@ -178,6 +178,8 @@ export interface AdvisorOptions {
   runtime: ModelRuntime;
   /** Project/user native Claude routing setting. */
   claudeNative?: boolean;
+  /** `workerExtensions` of the config (absolute paths), loaded into the advisor's session. Absent: none. */
+  extensionPaths?: readonly string[];
   route: ModelRoute;
   modelSource: AdvisorSource;
   thinkingSource: AdvisorSource;
@@ -319,6 +321,7 @@ export class AssignmentAdvisor {
         ...(this.options.sessionFile ? { sessionFile: this.options.sessionFile } : {}),
         ...(this.options.inheritedContextWindow ? { inheritedContextWindow: this.options.inheritedContextWindow } : {}),
         ...(this.options.retry ? { retry: this.options.retry } : {}),
+        ...(this.options.extensionPaths?.length ? { extensionPaths: this.options.extensionPaths } : {}),
       });
       this.stats = stats;
       const advice = value.advice.trim();

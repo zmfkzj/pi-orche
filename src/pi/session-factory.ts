@@ -107,6 +107,13 @@ export interface SessionOptions {
    */
   extensionFactories?: readonly ExtensionFactory[];
   /**
+   * Pi extension files or directories (`workerExtensions` in orche.config.json, resolved to absolute paths by the config loader;
+   * a relative path here is resolved against `cwd`) loaded into this session only, together with {@link extensionFactories} and
+   * bound the same way. Their handlers (e.g. `context_with_system`, `before_provider_request`) see this session's requests. A
+   * missing or failing extension fails the session creation, before any model request.
+   */
+  extensionPaths?: readonly string[];
+  /**
    * Output-limit recovery (src/pi/length-recovery.ts): a thinking-only or cut-off response is no longer "recovered" by compacting a
    * context that is far from full; the worker gets a bounded next-step continuation instead. On by default (`mode: "nudge"`);
    * `{ mode: "off" }` keeps Pi's own behaviour (the state is still tracked).
@@ -462,19 +469,21 @@ export function configureTaskWorkflow(session: AgentSession, taskCompaction: Ses
 }
 
 /**
- * Load capability extension factories the way Pi's SDK loads inline extensions, with nothing else: no settings packages
- * (in-memory settings), no user/project extensions, skills, prompts, themes or context files. A factory that throws fails
- * the session creation with its message.
+ * Load capability extension factories and the configured worker extensions (`workerExtensions`) the way Pi's SDK loads inline
+ * and `--extension` extensions, with nothing else: no settings packages (in-memory settings), no discovered user/project
+ * extensions, skills, prompts, themes or context files. A factory that throws, or a path that is missing or fails to load,
+ * fails the session creation with its message.
  */
-async function loadFactoryExtensions(cwd: string, factories: readonly ExtensionFactory[]): Promise<LoadExtensionsResult> {
+async function loadFactoryExtensions(cwd: string, factories: readonly ExtensionFactory[], paths: readonly string[] = []): Promise<LoadExtensionsResult> {
   const loader = new DefaultResourceLoader({
     cwd, agentDir: getAgentDir(), settingsManager: SettingsManager.inMemory({}),
     noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
     extensionFactories: [...factories],
+    ...(paths.length ? { additionalExtensionPaths: [...paths] } : {}),
   });
   await loader.reload();
   const result = loader.getExtensions();
-  if (result.errors.length) throw new Error(`Worker capability extensions failed to load: ${result.errors.map(error => `${error.path}: ${error.error}`).join("; ")}`);
+  if (result.errors.length) throw new Error(`Worker ${paths.length ? "extensions (workerExtensions or capabilities)" : "capability extensions"} failed to load: ${result.errors.map(error => `${error.path}: ${error.error}`).join("; ")}`);
   return result;
 }
 
@@ -540,7 +549,7 @@ export async function createSession(
   options.onContextWindow?.(info);
   // Capability extensions (e.g. pi-gui's MCP server for a GUI worker) load once, with their own extension runtime, which
   // the session then uses: their `pi.*` calls (tools, MCP registrations) must reach the runner of this session.
-  const factoryExtensions = options.extensionFactories?.length ? await loadFactoryExtensions(options.cwd, options.extensionFactories) : undefined;
+  const factoryExtensions = options.extensionFactories?.length || options.extensionPaths?.length ? await loadFactoryExtensions(options.cwd, options.extensionFactories ?? [], options.extensionPaths) : undefined;
   const skills = workerSkills(options.skills);
   const loader: ResourceLoader = {
     getExtensions: () => ({

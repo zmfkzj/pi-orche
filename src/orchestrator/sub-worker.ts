@@ -35,6 +35,8 @@ export interface SubWorkerEnvironment {
   runtime: ModelRuntime;
   /** Project/user claudeNative routing setting, inherited by every sub-worker. */
   claudeNative?: boolean;
+  /** `workerExtensions` of the config (absolute paths), loaded into every sub-worker's session (specialists included). Absent: none. */
+  extensionPaths?: readonly string[];
   /** The Bash safety review of every sub-worker (the orchestrator assignment's `bashReview`; src/extension/bash-review.ts), on `runtime`. Absent: none. */
   bashReview?: BashReviewSettings;
   /** The route standard roles run on: `models.worker` when configured, else the orchestrator's current route. */
@@ -207,6 +209,7 @@ export function createSubWorkerRunner(env: SubWorkerEnvironment): RunSubWorker {
         instructions: [SUB_WORKER_INSTRUCTIONS, ...capabilities.instructions, ...(webFetch.unavailable ? [webFetch.unavailable] : []), ...(codeGraph.unavailable ? [codeGraph.unavailable] : [])].join("\n"),
         tools: [...WORKER_TOOL_NAMES, ...(image ? [image.name] : []), ...capabilities.tools], ...(image ? { customTools: [image] } : {}), report: reportFor(worker.role, worker.check),
         ...(capabilities.extensionFactories.length ? { extensionFactories: capabilities.extensionFactories } : {}),
+        ...(env.extensionPaths?.length ? { extensionPaths: env.extensionPaths } : {}),
         // The Bash safety review runs after the sub-worker's own guard allowed the call (it can only refuse more), with its own request and cwd.
         toolGuard: async (name, input) => await guard(name, input) ?? await guardBashReview(name, input, { settings: env.bashReview, access: () => runtimeAccess(env.runtime), cwd, task: worker.request, signal }),
         writeFileGuard: (file, abort) => abort?.aborted ? "cancelled" : guard("ast_rewrite", { path: file }),

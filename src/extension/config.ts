@@ -1,7 +1,7 @@
 import { access, readFile } from "node:fs/promises";
 import { parseWorkerCompaction, type WorkerCompactionSettings } from "../pi/compaction-policy.js";
 import { homedir } from "node:os";
-import { isAbsolute, join, normalize, resolve } from "node:path";
+import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parseRouteConfig, RouteConfigError, type RouteConfig } from "../orchestration/routing.js";
 import { parseMdsdConfig, type MdsdSettings } from "../orchestrator/mdsd-config.js";
@@ -432,7 +432,26 @@ export async function loadOrcheConfigFile(path: string): Promise<{ routes: Route
     }
     routeValue = rest;
   }
-  return { routes: parseRouteConfig(routeValue, warnings), concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, mainCompaction, single, thinkingPolicy, claudeNative, outputCap, writeRoots, bashReview, ...(mdsd ? { mdsd } : {}), ...(workerCompaction ? { workerCompaction } : {}), warnings: warnings.map(warning => `${warning} (${path})`) };
+  const parsed = parseRouteConfig(routeValue, warnings);
+  const routes = parsed.workerExtensions ? { ...parsed, workerExtensions: await resolveWorkerExtensions(dirname(path), parsed.workerExtensions) } : parsed;
+  return { routes, concurrentSessions: resolveConcurrentSessions(concurrent), records: resolveRecordsSettings(records), taskContext, contextWarning, mainCompaction, single, thinkingPolicy, claudeNative, outputCap, writeRoots, bashReview, ...(mdsd ? { mdsd } : {}), ...(workerCompaction ? { workerCompaction } : {}), warnings: warnings.map(warning => `${warning} (${path})`) };
+}
+
+/**
+ * `workerExtensions` of a config file as absolute paths: `~/` is expanded and relative entries are resolved against `base`, the
+ * directory of the file (so `extensions/x.ts` in `~/.pi/agent/orche.config.json` is `~/.pi/agent/extensions/x.ts` whatever the
+ * task cwd). A missing path, or two entries naming the same path, is a config error: a worker silently started without an
+ * extension the user relies on (e.g. a request-compatibility hook) would fail differently and much later.
+ */
+export async function resolveWorkerExtensions(base: string, entries: readonly string[]): Promise<string[]> {
+  const result: string[] = [];
+  for (const [index, entry] of entries.entries()) {
+    const path = resolve(base, expandHome(entry));
+    if (!(await exists(path))) throw new RouteConfigError(`config.workerExtensions[${index}]: ${path} does not exist (relative entries are resolved against ${base}, the directory of the config file)`);
+    if (result.includes(path)) throw new RouteConfigError(`config.workerExtensions[${index}]: ${path} is listed twice`);
+    result.push(path);
+  }
+  return result;
 }
 export class NoRouteError extends Error {
   override readonly name = "NoRouteError";

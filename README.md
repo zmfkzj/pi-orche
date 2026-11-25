@@ -126,6 +126,16 @@ Workers automatically use **all providers in the running Pi session**: built-ins
 
 `providerExtensions` is optional, for additional worker-only providers (or standalone SDK callers). An obsolete, missing package now warns instead of blocking tasks when the host registry is available; an installed but broken package still fails, and SDK tasks without a host registry keep the strict missing-package error. Explicit worker-only provider registrations retain precedence. See [provider details and limits](docs/pi-package.md#models-auth-and-providers-that-extensions-register).
 
+### Your extensions in workers (`workerExtensions`)
+
+Worker sessions (`orche_task` workers, `orche_spawn` sub-workers and plan advisors) load **no** user extension by default: your `~/.pi/agent/extensions` and installed packages stay in main. To run a local extension in every worker session too, for example a request-compatibility hook that rewrites the system prompt in `context_with_system` for one provider, list it in `orche.config.json`:
+
+```json
+{ "workerExtensions": ["extensions/neon-system-compat.ts"] }
+```
+
+Entries (1–8) are local extension files or directories: absolute, `~/…`, or relative to the directory of the config file that lists them (so `extensions/x.ts` in `~/.pi/agent/orche.config.json` is `~/.pi/agent/extensions/x.ts`, whatever the task cwd). Package sources (`npm:`, `git:`, URLs) are refused; name the installed file instead. A listed path that does not exist makes the config invalid (`/orche doctor` shows it), and an extension that fails to load fails the worker before any model request, so a worker never runs silently without it. The extensions are trusted code with the worker's own event handlers (requests, tools, session lifecycle); their tools are not added to the worker's tool set. A reused worker is replaced by a fresh one, briefed from its transcript, when the list changes. Details: [docs/pi-package.md](docs/pi-package.md#your-extensions-in-worker-sessions-workerextensions).
+
 ### Retries of failed provider calls in workers
 
 orche's worker sessions (`orche_task` workers, `orche_spawn` sub-workers and advisors) retry a failed provider call (overload, rate limit, 5xx, network error) **exactly by your Pi `retry` settings**, the same ones main uses: `~/.pi/agent/settings.json` merged with a trusted project's `.pi/settings.json` (`pi.getSettings().retry`). There is no separate orche key. Fields you do not set use Pi's own defaults (3 retries, 2 s doubling up to 60 s, no provider-level retries), for example:

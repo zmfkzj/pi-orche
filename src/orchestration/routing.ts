@@ -32,6 +32,13 @@ export interface RouteConfig {
   readonly default?: RouteSettings;
   /** Pi package sources (installed at user scope) whose extensions register model providers for orche's own runtime. */
   readonly providerExtensions?: readonly string[];
+  /**
+   * Local Pi extension files or directories (absolute, `~/…`, or relative to the config file's directory; see
+   * {@link parseWorkerExtensions}) loaded into every worker session orche creates: orche_task workers, orche_spawn sub-workers
+   * and plan advisors. They run as trusted code in those sessions (event handlers such as `context_with_system` included).
+   * Opt-in; absent: worker sessions load no user extension.
+   */
+  readonly workerExtensions?: readonly string[];
   /** Raster generation for game-asset/video tasks; the provider must be loaded into orche's runtime. */
   readonly images?: ImageSettings;
   /** Default for routes that do not say: use the curated maximum context window of models that have one (see src/pi/extended-context.ts). */
@@ -200,6 +207,7 @@ export class RouteConfigError extends Error {
 }
 const thinkingLevels: readonly string[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const MAX_PROVIDER_EXTENSIONS = 4;
+const MAX_WORKER_EXTENSIONS = 8;
 const MAX_VERIFY_COMMANDS = 8;
 /** The former MAX_WORKERS_LIMIT bound of `workers.explorerRoles`. */
 const MAX_EXPLORER_ROLES = 8;
@@ -231,7 +239,7 @@ export function parseRouteConfig(value: unknown, warnings?: string[]): RouteConf
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config: expected object");
   const config = value as Record<string, unknown>;
   const legacy = Object.keys(config).filter(key => LEGACY_CONFIG_KEYS.includes(key));
-  if (Object.keys(config).some(key => !LEGACY_CONFIG_KEYS.includes(key) && key !== "routes" && key !== "default" && key !== "providerExtensions" && key !== "extendedContext" && key !== "verifyCommands" && key !== "mainMode" && key !== "workers" && key !== "limits" && key !== "images" && key !== "models" && key !== "profiles")) throw new RouteConfigError("config: unknown field");
+  if (Object.keys(config).some(key => !LEGACY_CONFIG_KEYS.includes(key) && key !== "routes" && key !== "default" && key !== "providerExtensions" && key !== "workerExtensions" && key !== "extendedContext" && key !== "verifyCommands" && key !== "mainMode" && key !== "workers" && key !== "limits" && key !== "images" && key !== "models" && key !== "profiles")) throw new RouteConfigError("config: unknown field");
   let limits: Partial<RunLimits> | undefined;
   if (config.limits !== undefined) {
     try { limits = parseRunLimits(config.limits, "config.limits"); }
@@ -254,6 +262,7 @@ export function parseRouteConfig(value: unknown, warnings?: string[]): RouteConf
     });
     if (new Set(providerExtensions).size !== providerExtensions.length) throw new RouteConfigError("config.providerExtensions: duplicate source");
   }
+  const workerExtensions = config.workerExtensions !== undefined ? parseWorkerExtensions(config.workerExtensions) : undefined;
   const legacyMainMode = typeof config.mainMode === "string" && ((LEGACY_MAIN_MODES as readonly string[]).includes(config.mainMode) || config.mainMode === LEGACY_STRONG_MODE) ? config.mainMode as LegacyMainMode : undefined;
   if (config.mainMode !== undefined && !legacyMainMode && !MAIN_MODES.includes(config.mainMode as MainMode)) throw new RouteConfigError(`config.mainMode: expected ${MAIN_MODES.join(", ")}`);
   let verifyCommands: string[] | undefined;
@@ -281,6 +290,7 @@ export function parseRouteConfig(value: unknown, warnings?: string[]): RouteConf
     ...(limits !== undefined ? { limits } : {}),
     ...(config.default !== undefined ? { default: parseSettings(config.default, "config.default") } : {}),
     ...(providerExtensions ? { providerExtensions } : {}),
+    ...(workerExtensions ? { workerExtensions } : {}),
     ...(config.images !== undefined ? { images: parseImages(config.images) } : {}),
     ...(config.extendedContext !== undefined ? { extendedContext: config.extendedContext } : {}),
     ...(verifyCommands ? { verifyCommands } : {}),
@@ -289,6 +299,22 @@ export function parseRouteConfig(value: unknown, warnings?: string[]): RouteConf
     ...(allProfiles ? { profiles: allProfiles } : {}),
     ...(legacyMainMode ? { mainMode: "single" as const, legacyMainMode } : config.mainMode !== undefined ? { mainMode: config.mainMode as MainMode } : {}),
   };
+}
+/**
+ * `workerExtensions`: 1-8 local Pi extension paths (a `.ts`/`.js` file or a directory Pi loads as an extension), each absolute,
+ * `~/…` or relative (to the config file's directory when orche loads the file; see resolveWorkerExtensions in
+ * src/extension/config.ts). Pi package sources (`npm:`, `git:`, URLs) are refused: install the package and name its file.
+ */
+export function parseWorkerExtensions(value: unknown): string[] {
+  if (!Array.isArray(value) || !value.length || value.length > MAX_WORKER_EXTENSIONS) throw new RouteConfigError(`config.workerExtensions: expected 1-${MAX_WORKER_EXTENSIONS} local extension paths`);
+  const list = value.map((entry, index) => {
+    if (typeof entry !== "string" || !entry.trim() || entry !== entry.trim() || entry.includes("\0")) throw new RouteConfigError(`config.workerExtensions[${index}]: expected a non-empty extension path without surrounding spaces, such as "extensions/my-extension.ts"`);
+    if (/^(npm|git|github|https?|ssh|file):/i.test(entry)) throw new RouteConfigError(`config.workerExtensions[${index}]: "${entry}" is a package source; workerExtensions takes local extension files or directories (absolute, ~/..., or relative to the config file)`);
+    if (entry.startsWith("~") && !entry.startsWith("~/")) throw new RouteConfigError(`config.workerExtensions[${index}]: only ~/ is expanded; write the home-relative path as ~/<path>`);
+    return entry;
+  });
+  if (new Set(list).size !== list.length) throw new RouteConfigError("config.workerExtensions: duplicate path");
+  return list;
 }
 function parseImages(value: unknown): ImageSettings {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RouteConfigError("config.images: expected object");

@@ -239,6 +239,8 @@ export function createOrcheDependencyProvider(options: OrcheDependencyOptions = 
         ? { name: `provider extension ${source}`, status: "ok", detail: "installed at user scope" }
         : { name: `provider extension ${source}`, status: "warn", optional: true, detail: `not installed at user scope; orche falls back to Pi's inherited providers (${path} providerExtensions)`, action: `pi install ${source}, or remove the entry from providerExtensions in ${path}` });
     }
+    // Resolved and checked to exist when the file loaded (loadOrcheConfigFile); a load failure surfaces when a worker starts.
+    for (const path of routes.workerExtensions ?? []) items.push({ name: `worker extension ${path}`, status: "ok", detail: "loaded into every orche worker session (orche_task workers, orche_spawn sub-workers, plan advisors)" });
     const registry = ctx.modelRegistry;
     if (!registry && (uses.size || routes.images)) {
       items.push({ name: "configured models", status: "unverified", detail: "no Pi model registry in this context", action: "Run /orche doctor (or /orche models) inside a Pi session to look the models up" });
