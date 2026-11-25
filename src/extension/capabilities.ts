@@ -1,8 +1,8 @@
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 
 /**
- * A worker capability that another Pi extension provides: `gui` (pi-gui, opt-in per task), `web-fetch` (pi-browser) and
- * `codegraph` (pi-codegraph), the last two asked for every worker. Orche asks on `pi.events` channel {@link WORKER_CAPABILITY_CHANNEL} with a
+ * A worker capability that another Pi extension provides: `gui` (pi-gui, opt-in per task), `web-fetch` (pi-browser),
+ * `codegraph` (pi-codegraph) and `session-bus` (pi-session-bus), the last three asked for every worker. Orche asks on `pi.events` channel {@link WORKER_CAPABILITY_CHANNEL} with a
  * {@link WorkerCapabilityRequest} plus `provide(answer)`; the provider answers synchronously. The answer's extension
  * factories are loaded into that worker's own session only, so whatever they start (an MCP server process, a fetch child)
  * belongs to that worker and stops with its session: nothing of main's own tool instances or state is shared. Orche knows
@@ -30,6 +30,11 @@ export const WEB_FETCH_CAPABILITY = "web-fetch";
 export const CODEGRAPH_CAPABILITY = "codegraph";
 /** Optional read-only trace cache for explicitly trusted project workers. */
 export const SKILLCACHE_CAPABILITY = "skillcache";
+/**
+ * The user's other live Pi sessions (pi-session-bus's `session_list` / `session_send` in the worker's own session, sending as
+ * main's session with the worker's attribution), asked for every orche_task worker; not for orche_spawn sub-workers.
+ */
+export const SESSION_BUS_CAPABILITY = "session-bus";
 /**
  * The capabilities of one worker session, merged: their tools, factories, instructions and tool timeouts. Factories are
  * merged by identity: providers that need the same shared factory (Pi's MCP extension for the worker, see pi-gui and
@@ -61,4 +66,8 @@ export function codeGraphCapability(ask: ((request: WorkerCapabilityRequest) => 
 /** Optional cache extension factory; no new tools or shared mutable state. */
 export function skillCacheCapability(ask: ((request: WorkerCapabilityRequest) => WorkerCapabilityAnswer) | undefined, request: Omit<WorkerCapabilityRequest, "capability">): { provider?: WorkerCapabilityProvider; unavailable?: string } {
   return askCapability(SKILLCACHE_CAPABILITY, ask, request);
+}
+/** Ask for the session-bus capability (absent: no pi-session-bus; unavailable: e.g. its endpoint has not started). */
+export function sessionBusCapability(ask: ((request: WorkerCapabilityRequest) => WorkerCapabilityAnswer) | undefined, request: Omit<WorkerCapabilityRequest, "capability">): { provider?: WorkerCapabilityProvider; unavailable?: string } {
+  return askCapability(SESSION_BUS_CAPABILITY, ask, request);
 }

@@ -64,6 +64,7 @@ describe("orche_task gui capability", () => {
       { capability: "web-fetch", cwd: expect.any(String), workerId: "W1", role: "explore", readOnly: true },
       { capability: "codegraph", cwd: expect.any(String), workerId: "W1", role: "explore", readOnly: true },
       { capability: "skillcache", cwd: expect.any(String), workerId: "W1", role: "explore", readOnly: true },
+      { capability: "session-bus", cwd: expect.any(String), workerId: "W1", role: "explore", readOnly: true },
     ]);
     const options = spawned.mock.calls[0]![0];
     expect(options.tools).toContain("gui_probe");
@@ -85,7 +86,7 @@ describe("orche_task gui capability", () => {
     const result = await execute();
     expect(result.details.gui).toBeUndefined();
     // Always-asked optional capabilities (nobody provides them here), never the GUI.
-    expect(provider.requests.map(request => request.capability)).toEqual(["web-fetch", "codegraph", "skillcache"]);
+    expect(provider.requests.map(request => request.capability)).toEqual(["web-fetch", "codegraph", "skillcache", "session-bus"]);
     expect(spawned.mock.calls[0]![0].extensionFactories).toBeUndefined();
     expect(pool.session("W1").getActiveToolNames()).not.toContain("gui_probe");
   });
@@ -159,6 +160,7 @@ describe("web-fetch capability (every worker)", () => {
       { capability: "web-fetch", cwd: expect.any(String), workerId: "W1", role: "answer", readOnly: true },
       { capability: "codegraph", cwd: expect.any(String), workerId: "W1", role: "answer", readOnly: true },
       { capability: "skillcache", cwd: expect.any(String), workerId: "W1", role: "answer", readOnly: true },
+      { capability: "session-bus", cwd: expect.any(String), workerId: "W1", role: "answer", readOnly: true },
     ]);
     const options = spawned.mock.calls[0]![0];
     expect(options.tools).toContain("web_probe");
@@ -194,7 +196,7 @@ describe("web-fetch capability (every worker)", () => {
     const implementReport = tool("report_result", { kind: "implement", summary: "Done", data: { status: "done", reason: "ok", evidence: [] } });
     const { pool, execute } = await fixture([implementReport, implementReport], provider.capability);
     await execute({ role: "implement", gui: true }).catch(() => undefined);
-    expect(provider.requests.map(request => [request.capability, request.role, request.readOnly])).toEqual([["gui", "implement", false], ["web-fetch", "implement", false], ["codegraph", "implement", false], ["skillcache", "implement", false]]);
+    expect(provider.requests.map(request => [request.capability, request.role, request.readOnly])).toEqual([["gui", "implement", false], ["web-fetch", "implement", false], ["codegraph", "implement", false], ["skillcache", "implement", false], ["session-bus", "implement", false]]);
     const options = spawned.mock.calls[0]![0];
     expect(options.tools).toEqual(expect.arrayContaining(["gui_probe", "web_probe"]));
     expect(options.extensionFactories).toHaveLength(2);

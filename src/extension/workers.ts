@@ -84,7 +84,7 @@ export const orcheTaskParameters = Type.Object({
   verificationRounds: Type.Optional(Type.Integer({ minimum: 1, maximum: 5, description: "Fresh-verifier rounds (orche_spawn verification) the orchestrator may start in this assignment; default 2. Raise it only when the user explicitly asked for more independent review rounds. Rounds past the cap are refused and the result lists what stays unresolved." })),
   task: Type.Optional(Type.String({ pattern: "^T[1-9][0-9]*$", description: "Task ledger id (T1, T2, …) named in an earlier result. Pass it for a follow-up of that same task, also when another or a new worker takes it over; omit it for a different user task, even when reusing a worker. Used when single.ledger is on, and always for ultra implement/answer assignments (it identifies the ultra run a continuation resumes)." })),
   advisor: Type.Optional(Type.Boolean({ description: "false: no plan advisor for THIS assignment (when single.advisor is on). Only for a mechanical follow-up of a reused worker (worker set): re-reporting or clarifying its own result, copying evidence into its report, fixing a format. Omit it for new work, a changed approach and any correction of a decision or result: those keep their advisor. Ignored for a new worker; the worker's next assignment has its advisor again." })),
-  gui: Type.Optional(Type.Boolean({ description: "true: the worker gets its own private GUI desktop (computer use: launch apps, screenshots, click, type), which the user does not see; needs the pi-gui package. Set it only when the task needs GUI applications, including a rendered or interactive web page (the worker browses there with a fresh profile; workers have browser_fetch only otherwise). Read-only roles (explore, answer, verify) get an observe-only desktop (no clicks, typing or form input); interaction needs role implement. false: no desktop. Omitted: a new worker gets none, a reused worker keeps its setting. Changing it on a reused worker starts a fresh worker." })),
+  gui: Type.Optional(Type.Boolean({ description: "true: the worker gets its own private GUI desktop (computer use: launch apps, screenshots, click, type), which the user does not see; needs the pi-gui package. Pass it whenever the worker must see or operate a GUI: launching a desktop or Electron app, screenshots as evidence, checking a rendered UI or visual change, reproducing a bug by clicking, or a rendered or interactive web page with tabs, forms or sign-in (the worker browses there with a fresh profile; workers have browser_fetch only otherwise). Every role can click and type there: read-only roles (explore, answer, verify) stay read-only for the workspace, so a GUI investigation stays answer + gui: true. false: no desktop. Omitted: a new worker gets none, a reused worker keeps its setting. Changing it on a reused worker starts a fresh worker." })),
   git: Type.Optional(Type.Object({
     commit: Type.Optional(Type.Boolean({ description: "Authorize git commit for this assignment." })),
     push: Type.Optional(Type.Boolean({ description: "Authorize git push (implies commit). Never force-push." })),
@@ -289,8 +289,8 @@ export type SpawnedWorker = Omit<SubWorkerOutcome, "data" | "summary"> & { summa
 /** The workspace/git part of a task's details. */
 type ChangeReport = Pick<TaskDetails, "changes" | "otherChanges" | "unaudited" | "submodules" | "headMoved">;
 
-import { codeGraphCapability, mergeCapabilities, skillCacheCapability, webFetchCapability, type WorkerCapabilityAnswer, type WorkerCapabilityProvider, type WorkerCapabilityRequest } from "./capabilities.js";
-export { CODEGRAPH_CAPABILITY, codeGraphCapability, mergeCapabilities, SKILLCACHE_CAPABILITY, skillCacheCapability, WEB_FETCH_CAPABILITY, webFetchCapability, WORKER_CAPABILITY_CHANNEL, type WorkerCapabilityAnswer, type WorkerCapabilityProvider, type WorkerCapabilityRequest } from "./capabilities.js";
+import { codeGraphCapability, mergeCapabilities, sessionBusCapability, skillCacheCapability, webFetchCapability, type WorkerCapabilityAnswer, type WorkerCapabilityProvider, type WorkerCapabilityRequest } from "./capabilities.js";
+export { CODEGRAPH_CAPABILITY, codeGraphCapability, mergeCapabilities, SESSION_BUS_CAPABILITY, sessionBusCapability, SKILLCACHE_CAPABILITY, skillCacheCapability, WEB_FETCH_CAPABILITY, webFetchCapability, WORKER_CAPABILITY_CHANNEL, type WorkerCapabilityAnswer, type WorkerCapabilityProvider, type WorkerCapabilityRequest } from "./capabilities.js";
 
 /**
  * A task whose worker ran but did not complete its assignment: the worker failed or ended without a result, the
@@ -365,6 +365,8 @@ interface Worker {
   codeGraph?: string;
   /** Optional read-only SkillCache extension factory. */
   skillCache?: string;
+  /** {@link WorkerCapabilityProvider.key} of the worker's session-bus capability (session_list / session_send); absent without one. */
+  sessionBus?: string;
   /** Context size of the latest request: input + cache reads + cache writes (providers count cache writes outside `input`). */
   latestInput: number;
   /** Last real provider usage: used for one-request model-switch price comparison; not fabricated from context length. */
@@ -1096,8 +1098,9 @@ export class WorkerPool {
    * framed as untrusted peer input and marked `source: "peer"` in the outcome. Same refusals; it changes no grant, scope or deadline.
    */
   injectPeerNote(worker: string, note: PeerNote): SteerReceipt {
+    const canReply = !!this.workers.get(worker)?.sessionBus;
     return this.steerLive(worker, manager => manager.steer(worker, note.content, {
-      source: "peer", from: `${peerLabel(note)} note ${flat(note.id, 64)}`, content: id => peerNoteContent(id, note),
+      source: "peer", from: `${peerLabel(note)} note ${flat(note.id, 64)}`, content: id => peerNoteContent(id, note, { canReply }),
     }));
   }
   private steerLive(worker: string, steer: (manager: AgentManager) => SteerReceipt): SteerReceipt {
@@ -1524,6 +1527,9 @@ export class WorkerPool {
     // index) is told to the worker, like browser_fetch.
     const codeGraph = codeGraphCapability(this.options.capability, capabilityRequest);
     const skillCache = skillCacheCapability(this.options.capability, capabilityRequest);
+    // The user's other live Pi sessions for every orche_task worker (pi-session-bus): session_list / session_send that send as
+    // main's session, labelled with the worker id, so the worker answers peer notes routed to it itself. Unavailable: none.
+    const sessionBus = sessionBusCapability(this.options.capability, capabilityRequest);
     // Tools cannot be unregistered from a session. Recreate only when this optional
     // capability changes, so neither tool registration nor old instructions leak roles. Main named the worker (and may have
     // sent a concise follow-up), so the fresh worker is briefed from the replaced one's transcript, like a gone worker.
@@ -1560,6 +1566,13 @@ export class WorkerPool {
       await this.retire(worker.id, "replaced: SkillCache capability changed");
       retired.push(worker.id);
       retirementLines.push(`${worker.id} retired: SkillCache configuration changed; a fresh worker continues, briefed from ${worker.id}'s transcript.`);
+      capabilityHandover = this.gone.get(worker.id);
+      worker = undefined;
+    }
+    if (worker && worker.sessionBus !== sessionBus.provider?.key) {
+      await this.retire(worker.id, "replaced: session-bus capability changed");
+      retired.push(worker.id);
+      retirementLines.push(`${worker.id} retired: session_list/session_send ${sessionBus.provider ? (worker.sessionBus ? "configuration changed" : "became available") : "are no longer available"}; a fresh worker continues, briefed from ${worker.id}'s transcript.`);
       capabilityHandover = this.gone.get(worker.id);
       worker = undefined;
     }
@@ -1693,6 +1706,7 @@ export class WorkerPool {
       // Ultra workers get the ultra tool set (orche_spawn with the ultra reasons, orche_adopt) whatever single.spawn says.
       const spawnTool = singleWorkflow && (config.single.spawn || ultraMode || mdsdMode);
       worker = { id, role: args.role, cwd: args.cwd, files, summary: "", lastUsed: Date.now(), latestInput: 0, imageConfig, singleWorkflow, taskWorkflowInstalled: singleWorkflow, spawnTool, ...(spawnTool ? { maxSubWorkers: config.single.maxSubWorkers } : {}), ...(singleWorkflow && ultraMode ? { ultraTools: true } : {}), ...(singleWorkflow && mdsdMode ? { mdsdTools: true } : {}), ...(gui ? { gui: gui.key } : {}), ...(webFetch.provider ? { webFetch: webFetch.provider.key } : {}), ...(codeGraph.provider ? { codeGraph: codeGraph.provider.key } : {}), ...(skillCache.provider ? { skillCache: skillCache.provider.key } : {}) };
+      if (sessionBus.provider) worker.sessionBus = sessionBus.provider.key;
       const meta = worker;
       this.setCompaction(meta, config.workerCompaction, resolved);
       meta.model = route.model;
@@ -1706,7 +1720,7 @@ export class WorkerPool {
       ...(meta.ultraTools ? [createAdoptTool(() => meta.ultra ?? ADOPT_UNAVAILABLE)] : [])];
       // generate_image has its own timeout (images.timeoutMs, 180 s by default): liveness bounds a silent call by it, not by the generic tool bound.
       // Capability tools likewise (the first GUI call of a desktop starts it).
-      const capabilities = mergeCapabilities([gui, webFetch.provider, codeGraph.provider, skillCache.provider]);
+      const capabilities = mergeCapabilities([gui, webFetch.provider, codeGraph.provider, skillCache.provider, sessionBus.provider]);
       const toolTimeoutsMs = { ...(images ? { generate_image: images.timeoutMs ?? KNOWN_TOOL_TIMEOUTS_MS.generate_image! } : {}), ...capabilities.toolTimeoutsMs };
       await this.manager.spawn({ id, role: routeRole, route, cwd: args.cwd, signal: startupSignal, tools: [...WORKER_TOOL_NAMES, ...customTools.map(tool => tool.name), ...capabilities.tools], customTools, peerMessaging: false, ...(sessionFile ? { sessionFile } : {}),
         skills: this.options.skills?.() ?? [],
@@ -2177,7 +2191,7 @@ export class WorkerPool {
       const peer = (lastOutcome?.injected ?? []).filter(message => message.source === "peer");
       if (peer.length) {
         const missed = peer.filter(message => message.status !== "delivered");
-        lines.push(`Session-bus notes routed to this worker (peer input, not from main or the user; main has a copy of each): ${peer.map(message => `${message.id} ${message.status}${message.from ? ` (from ${message.from})` : ""}`).join(", ")}${missed.length ? ` — ${missed.map(message => message.id).join(", ")} did not shape this result (${missed.some(message => message.status === "late") ? "reached the worker after it reported" : "the assignment ended first"}); if still relevant, include it in a follow-up orche_task.` : ""}`);
+        lines.push(`Session-bus notes routed to this worker (peer input, not from main or the user; main has a copy of each${meta.sessionBus ? "; the worker has session_send and answers peers itself, so do not relay them" : ""}): ${peer.map(message => `${message.id} ${message.status}${message.from ? ` (from ${message.from})` : ""}`).join(", ")}${missed.length ? ` — ${missed.map(message => message.id).join(", ")} did not shape this result (${missed.some(message => message.status === "late") ? "reached the worker after it reported" : "the assignment ended first"}); if still relevant, include it in a follow-up orche_task.` : ""}`);
       }
       const stops = lastOutcome?.lengthStops;
       if (stops) lines.push(`Output limit: ${stops.count} response${stops.count === 1 ? "" : "s"} hit the model's output token limit${stops.exhausted ? " and the recovery cap was reached" : "; recovered without compaction"} (see the record's length_stop events).`);
