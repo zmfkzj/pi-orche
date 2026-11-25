@@ -29,7 +29,8 @@ import { dirname, resolve } from "node:path";
 import { ensurePrivateDir, ensurePrivateFile } from "../agent/private-files.js";
 import type { createAssignmentProjector } from "./context-projection.js";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { projectImageContext } from "./image-context.js";
+import { IMAGE_CONTEXT_LIMITS, planImageContext } from "./image-context.js";
+import { createCacheAnchorState, isCacheControlLimitError, withCacheAnchor, type CacheAnchorState } from "./cache-anchor.js";
 import { lengthRecoveryHandlers, type LengthRecoveryOptions } from "./length-recovery.js";
 import { outputCapHandler, withSummaryOutputCap } from "./output-cap.js";
 import { cliproxyToolStrictPayload } from "./cliproxy-tool-strict.js";
@@ -338,12 +339,17 @@ function createCompactionExtension(options: SessionOptions, getSession: () => Ag
  * thinking policy links evidence), and the tool boundary of read nodes (read-node-guard.ts: only read-only tools while a Task DAG node
  * marked read:true runs at the read level). None of them re-routes a tool call.
  */
-function createWorkerHygieneExtension(options: SessionOptions, getSession: () => AgentSession | undefined): Extension {
+function createWorkerHygieneExtension(options: SessionOptions, getSession: () => AgentSession | undefined, anchors: CacheAnchorState): Extension {
   const path = "<orche:worker-hygiene>";
   const length = lengthRecoveryHandlers(getSession, options.lengthRecovery);
   const unknownTool = unknownToolHandler(() => getSession()?.getActiveToolNames() ?? []);
   const outputCap = outputCapHandler(getSession);
   const beforeProviderRequest = (event: { payload: unknown }) => {
+    const changed = adjustPayload(event);
+    // Last: the image cache anchor (cache-anchor.ts) on the payload every other step produced.
+    return withCacheAnchor(changed ?? event.payload, anchors) ?? changed;
+  };
+  const adjustPayload = (event: { payload: unknown }) => {
     const session = getSession();
     if (!session) return outputCap(event);
     observeEffortRequest(session, session.model, session.thinkingLevel);
@@ -353,6 +359,8 @@ function createWorkerHygieneExtension(options: SessionOptions, getSession: () =>
     return outputCap({ payload: safe ?? payload }) ?? safe;
   };
   const messageEnd = (event: { message: AgentMessage }) => {
+    // The provider refused the anchor's marker budget: stop anchoring in this session, so the retry goes through.
+    if (event.message.role === "assistant" && event.message.stopReason === "error" && isCacheControlLimitError(event.message.errorMessage)) anchors.disabled = true;
     length.message_end(event as never);
     return unknownTool(event as never);
   };
@@ -409,13 +417,22 @@ function createGuardExtension(guard: ToolGuard): Extension {
     shortcuts: new Map(),
   };
 }
-/** Never persisted: assignment clears and rolling image limits leave raw agent/session history intact. */
-function createContextProjectionExtension(getProjector: () => SessionOptions["contextProjection"]): Extension {
+/**
+ * Never persisted: assignment clears and rolling image limits leave raw agent/session history intact. Each projected request
+ * also records where its image cache anchor goes (image-context.ts); the worker hygiene's payload hook marks it (cache-anchor.ts).
+ */
+function createContextProjectionExtension(getProjector: () => SessionOptions["contextProjection"], anchors: CacheAnchorState): Extension {
   const path = "<orche:task-context>";
+  const context = (event: { messages: AgentMessage[] }) => {
+    const projector = getProjector();
+    const plan = planImageContext(projector?.project(event.messages) ?? event.messages, IMAGE_CONTEXT_LIMITS, projector?.imageRebases);
+    anchors.anchor = plan.anchor;
+    return { messages: plan.messages };
+  };
   return {
     path, resolvedPath: path, hidden: true,
     sourceInfo: createSyntheticSourceInfo(path, { source: "orche" }),
-    handlers: new Map([["context", [((event: { messages: AgentMessage[] }) => ({ messages: projectImageContext(getProjector()?.project(event.messages) ?? event.messages) })) as never]]]),
+    handlers: new Map([["context", [context as never]]]),
     tools: new Map(), messageRenderers: new Map(), entryRenderers: new Map(),
     commands: new Map(), flags: new Map(), shortcuts: new Map(),
   };
@@ -518,7 +535,8 @@ export async function createSession(
   const info = { ...resolved.info, contextWindow: model.contextWindow, extended: model.contextWindow > catalogModel.contextWindow };
   let createdSession: AgentSession | undefined;
   const compactionExtension = createCompactionExtension(options, () => createdSession!);
-  const hygieneExtension = createWorkerHygieneExtension(options, () => createdSession);
+  const anchors = createCacheAnchorState();
+  const hygieneExtension = createWorkerHygieneExtension(options, () => createdSession, anchors);
   options.onContextWindow?.(info);
   // Capability extensions (e.g. pi-gui's MCP server for a GUI worker) load once, with their own extension runtime, which
   // the session then uses: their `pi.*` calls (tools, MCP registrations) must reach the runner of this session.
@@ -526,7 +544,7 @@ export async function createSession(
   const skills = workerSkills(options.skills);
   const loader: ResourceLoader = {
     getExtensions: () => ({
-      extensions: [createSpillExtension(options.cwd), ...(options.toolGuard ? [createGuardExtension(options.toolGuard)] : []), createContextProjectionExtension(() => options.contextProjection), compactionExtension, hygieneExtension, ...(factoryExtensions?.extensions ?? [])],
+      extensions: [createSpillExtension(options.cwd), ...(options.toolGuard ? [createGuardExtension(options.toolGuard)] : []), createContextProjectionExtension(() => options.contextProjection, anchors), compactionExtension, hygieneExtension, ...(factoryExtensions?.extensions ?? [])],
       errors: [],
       runtime: factoryExtensions?.runtime ?? createExtensionRuntime(),
     }),

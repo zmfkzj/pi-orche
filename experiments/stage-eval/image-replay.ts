@@ -5,7 +5,9 @@
  * - kept images per request (visual context available to the model);
  * - the longest common message prefix with the previous projected request; tokens after it are the part a prefix cache cannot
  *   serve (an optimistic cache model: everything the previous request sent is assumed cached);
- * - "breaks": requests whose change starts before the previous request's end (an earlier part of the prompt was rewritten).
+ * - "breaks": requests whose change starts before the previous request's end (an earlier part of the prompt was rewritten);
+ * - the same lookback model plus orche's image cache anchor (cache-anchor.ts): the previous request also wrote an entry ending at
+ *   its anchor, which serves the prefix up to it when the change starts after it ("uncachedAnchor").
  * Token estimates: text = serialized characters / 4, image = pixels / 750 after scaling to at most 1.15 MP (Anthropic's rule of
  * thumb). The measured usage recorded in the transcript (the policy that actually ran then, the rolling window) is reported next
  * to the simulated rolling policy as a check of the cache model.
@@ -18,7 +20,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { projectImageContext, type ImageContextLimits } from "../../src/pi/image-context.js";
+import { planImageContext, type ImageContextLimits } from "../../src/pi/image-context.js";
 import { rng, shuffle } from "./protocol.js";
 
 /** Content blocks before a cache breakpoint that an Anthropic-style automatic prefix check examines. */
@@ -68,8 +70,8 @@ function measure(message: any): { hash: string; tokens: number } {
   return result;
 }
 
-export interface PolicyStats { requests: number; totalTokens: number; uncachedTokens: number; uncachedLookback: number; breaks: number; keptMin: number; keptSum: number; keptRequests: number; overflowRequests: number; omittedRequests: number }
-const emptyStats = (): PolicyStats => ({ requests: 0, totalTokens: 0, uncachedTokens: 0, uncachedLookback: 0, breaks: 0, keptMin: Infinity, keptSum: 0, keptRequests: 0, overflowRequests: 0, omittedRequests: 0 });
+export interface PolicyStats { requests: number; totalTokens: number; uncachedTokens: number; uncachedLookback: number; uncachedAnchor: number; breaks: number; keptMin: number; keptSum: number; keptRequests: number; overflowRequests: number; omittedRequests: number }
+const emptyStats = (): PolicyStats => ({ requests: 0, totalTokens: 0, uncachedTokens: 0, uncachedLookback: 0, uncachedAnchor: 0, breaks: 0, keptMin: Infinity, keptSum: 0, keptRequests: 0, overflowRequests: 0, omittedRequests: 0 });
 
 export interface ReplayResult { file: string; requests: number; images: number; compactions: number; measured: { requests: number; input: number; cacheRead: number }; policies: Record<string, PolicyStats> }
 
@@ -78,7 +80,7 @@ export function replayMessages(segments: any[][], measuredUsage: { input: number
   const stats: Record<string, PolicyStats> = Object.fromEntries(Object.keys(policies).map(name => [name, emptyStats()]));
   let requests = 0, images = 0;
   for (const segment of segments) {
-    const previous: Record<string, { hashes: string[]; blocks: number[] } | undefined> = {};
+    const previous: Record<string, { hashes: string[]; blocks: number[]; anchorTokens?: { index: number; tokens: number } } | undefined> = {};
     for (let i = 0; i < segment.length; i++) {
       const message = segment[i];
       if (message.role === "toolResult") images += (message.content ?? []).filter((block: any) => block?.type === "image").length;
@@ -87,7 +89,8 @@ export function replayMessages(segments: any[][], measuredUsage: { input: number
       const context = segment.slice(0, i);
       const rawImages = context.reduce((sum: number, m: any) => sum + (m.role === "toolResult" ? (m.content ?? []).filter((b: any) => b?.type === "image").length : 0), 0);
       for (const [name, limits] of Object.entries(policies)) {
-        const projected = projectImageContext(context as never, limits) as any[];
+        const plan = planImageContext(context as never, limits);
+        const projected = plan.messages as any[];
         const measures = projected.map(measure);
         const hashes = measures.map(item => item.hash);
         const blocks = projected.map(m => Array.isArray(m.content) ? Math.max(1, m.content.length) : 1);
@@ -103,12 +106,16 @@ export function replayMessages(segments: any[][], measuredUsage: { input: number
         // Lookback model (Anthropic-style automatic prefix check): a cache entry written at the end of the previous request is
         // found only when the first changed block lies within LOOKBACK_BLOCKS content blocks of that end; otherwise nothing is cached.
         const changedBlocks = (previous[name]?.blocks ?? []).slice(common).reduce((sum, n) => sum + n, 0);
-        s.uncachedLookback += !before.length || changedBlocks <= LOOKBACK_BLOCKS ? tail : total;
+        const lookback = !before.length || changedBlocks <= LOOKBACK_BLOCKS ? tail : total;
+        s.uncachedLookback += lookback;
+        const anchor = previous[name]?.anchorTokens;
+        s.uncachedAnchor += anchor && common > anchor.index ? Math.min(lookback, total - anchor.tokens) : lookback;
         if (before.length && common < before.length) s.breaks++;
         const kept = projected.reduce((sum, m) => sum + (m.role === "toolResult" ? (m.content ?? []).filter((b: any) => b?.type === "image").length : 0), 0);
         if (rawImages > 8) { s.overflowRequests++; s.keptMin = Math.min(s.keptMin, kept); s.keptSum += kept; s.keptRequests++; }
         if (kept < rawImages) s.omittedRequests++;
-        previous[name] = { hashes, blocks };
+        const anchorTokens = plan.anchor ? { index: plan.anchor.index, tokens: measures.slice(0, plan.anchor.index + 1).reduce((sum, item) => sum + item.tokens, 0) } : undefined;
+        previous[name] = { hashes, blocks, ...(anchorTokens ? { anchorTokens } : {}) };
       }
     }
   }
@@ -160,7 +167,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     if (images < 20) continue;
     const result = { file, compactions, ...replayMessages(segments, usage) };
     results.push(result);
-    console.log(JSON.stringify({ file: file.split("/").slice(-3).join("/"), requests: result.requests, images: result.images, ...Object.fromEntries(Object.entries(result.policies).map(([name, s]) => [name, { uncachedK: Math.round(s.uncachedTokens / 1000), breaks: s.breaks, keptMin: s.keptMin }])) }));
+    console.log(JSON.stringify({ file: file.split("/").slice(-3).join("/"), requests: result.requests, images: result.images, ...Object.fromEntries(Object.entries(result.policies).map(([name, s]) => [name, { uncachedK: Math.round(s.uncachedTokens / 1000), lookbackK: Math.round(s.uncachedLookback / 1000), anchorK: Math.round(s.uncachedAnchor / 1000), breaks: s.breaks, keptMin: s.keptMin }])) }));
   }
   const totals: Record<string, PolicyStats> = {};
   for (const result of results) for (const [name, s] of Object.entries(result.policies)) {

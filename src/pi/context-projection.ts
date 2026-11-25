@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ImageRebase } from "./image-context.js";
 
 /** One original result. The position disambiguates providers that reuse call IDs. */
 export interface ClearCandidate {
@@ -201,9 +202,12 @@ export function applyProjection<T extends readonly AgentMessage[]>(
 export function createAssignmentProjector() {
   let boundaryIndex = 0;
   let plan: AssignmentProjectionPlan | undefined;
+  // Assignment clears of the current transcript: the request is rewritten from the earliest newly cleared result on, so the
+  // image budget may trim kept images after it for free (image-context.ts). Cumulative, like the clears themselves.
+  let imageRebases: ImageRebase[] = [];
   return {
     /** Compaction rebases the transcript: suspend projection until the next boundary. */
-    reset() { boundaryIndex = 0; plan = undefined; },
+    reset() { boundaryIndex = 0; plan = undefined; imageRebases = []; },
     beginAssignment(messages: readonly AgentMessage[], boundary: number, options: {
       enabled?: boolean;
       minClearTokens?: number;
@@ -220,11 +224,15 @@ export function createAssignmentProjector() {
         omittedReasoning: previous?.omittedReasoning ?? new Set(), idRewrites: previous?.idRewrites ?? new Map(),
         stats: { results: 0, estTokens: 0, thinkingBlocks: 0 },
       };
+      if (plan.newlyCleared.size) {
+        imageRebases = [...imageRebases, { before: boundary, from: Math.min(...[...plan.newlyCleared.values()].map(candidate => candidate.index)) }];
+      }
       return plan;
     },
     project<T extends readonly AgentMessage[]>(messages: T): T | AgentMessage[] {
       return plan ? applyProjection(messages, plan, boundaryIndex) : messages;
     },
     get plan(): AssignmentProjectionPlan | undefined { return plan; },
+    get imageRebases(): readonly ImageRebase[] { return imageRebases; },
   };
 }
