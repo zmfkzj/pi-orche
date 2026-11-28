@@ -38,7 +38,10 @@ invalidating the existing prompt prefix.
   arbitration. With fresh measured `cacheRead` tokens and positive per-model catalog prices, compare one estimated
   warm request on the current model against a cold request on the target. Keep the current model *for that assignment*
   only when the warm request is strictly cheaper; explicitly configured model tiers always win. Missing/zero prices,
-  missing cache reads, stale usage (more than four minutes) or unfamiliar routes do not justify overriding a model switch.
+  missing cache reads, stale usage or unfamiliar routes do not justify overriding a model switch. Usage is stale after
+  four minutes (Claude's ~5-minute cache, and every unknown or older model), or after 30 minutes when the warm model is
+  OpenAI GPT-5.6+/GPT-6+ on an OpenAI API family route (native, Codex or CLIProxyAPI), matching its documented minimum
+  cache lifetime of 30 minutes (a heuristic, not a TTL guarantee; `cacheAgeLimitMs`).
   The estimate uses the prior request's input/output counts and is not a forecast of an entire future task.
 
 The lock starts when the first provider request is about to be sent, resets for a different model identity, and is

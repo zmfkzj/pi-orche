@@ -256,6 +256,8 @@ interface Aggregation { duplicates: { id: string; members: string[]; why: string
 export interface MdsdRound { round: number; spawnedAt: number; endedAt?: number; workers: string[]; adapt?: MdsdAdapt; redundancy?: number; pairs?: { a: string; b: string; files: number }[]; models?: string[]; pinned?: boolean }
 /** A verifier or other non-search sub-worker of an MDSD run: allocation, then what it used. */
 interface StageWorker { id: string; status: string; requests: number; costUSD: number; durationMs: number; outputTokens?: number; allocated?: MdsdBudget; stoppedBy?: string; inFlightUnknown?: boolean }
+/** inputTokens counts every input token not read from the cache: the uncached input plus cache writes (OpenAI
+ * cache_write_tokens, Anthropic cache creation), so no input token goes missing; cache reads stay in cacheReadTokens. */
 interface PhaseWindow { phase: string; requests: number; costUSD: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; startedAt: number; lastAt?: number }
 export interface MdsdState {
   plan?: MdsdPlan;
@@ -382,12 +384,12 @@ export class MdsdRun implements SpawnStageHooks {
 
   // ---- measurement ----
   /** One response of the orchestrator's own session (its usage), attributed to the phase window open now. */
-  observeOrchestrator(usage: { input?: number; output?: number; cacheRead?: number; cost?: { total?: number } } | undefined): void {
+  observeOrchestrator(usage: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } | undefined): void {
     const window = this.state.phases.at(-1)!;
     window.requests++;
     if (typeof usage?.cost?.total !== "number") this.state.unpriced++;
     window.costUSD += usage?.cost?.total ?? 0;
-    window.inputTokens += usage?.input ?? 0;
+    window.inputTokens += (usage?.input ?? 0) + (usage?.cacheWrite ?? 0);
     window.outputTokens += usage?.output ?? 0;
     window.cacheReadTokens += usage?.cacheRead ?? 0;
     window.lastAt = this.now();
@@ -701,7 +703,7 @@ export class MdsdRun implements SpawnStageHooks {
       if (outcome?.error) explorer.error = clip(outcome.error, 600);
       if (explorer.status !== "done" && explorer.status !== "blocked" && trace?.lastText) explorer.partial = trace.lastText;
       if (outcome) {
-        explorer.actual = { requests: outcome.requests, costUSD: round2(outcome.costUSD * 10000) / 10000, durationMs: outcome.durationMs, ...(outcome.usage ? { outputTokens: outcome.usage.output, inputTokens: outcome.usage.input, cacheReadTokens: outcome.usage.cacheRead } : {}) };
+        explorer.actual = { requests: outcome.requests, costUSD: round2(outcome.costUSD * 10000) / 10000, durationMs: outcome.durationMs, ...(outcome.usage ? { outputTokens: outcome.usage.output, inputTokens: outcome.usage.input + outcome.usage.cacheWrite, cacheReadTokens: outcome.usage.cacheRead } : {}) };
         const over: string[] = [];
         if (outcome.costUSD > explorer.allocated.costUSD) over.push(`cost $${round2(outcome.costUSD)}/$${explorer.allocated.costUSD}`);
         if (outcome.durationMs > explorer.allocated.minutes * 60_000) over.push(`time ${round2(outcome.durationMs / 60_000)}/${explorer.allocated.minutes} min`);

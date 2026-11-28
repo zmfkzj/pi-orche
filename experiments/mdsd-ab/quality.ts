@@ -52,9 +52,9 @@ export const QUALITY_MDSD = {
  * The stage's orche config: the user's live config (read only, never written) with the declared deviations: thinkingPolicy recovers
  * output-limit stops without lowering effort (`redecompose`; live: the default `step-down`), time limits instead of the 30-minute
  * defaults and a request soft budget that never stops work, no specialist routes, and the uncapped MDSD settings for E and A.
- */
-export function qualityConfig(stage: StageName, seed?: { claims: MdsdSeedClaim[] }): Record<string, unknown> {
-  const live = JSON.parse(readFileSync(join(AGENT, "orche.config.json"), "utf8")) as Record<string, unknown>;
+ * `base` replaces the live config (tests pass a fixture so they never depend on the user's ~/.pi/agent setup). */
+export function qualityConfig(stage: StageName, seed?: { claims: MdsdSeedClaim[] }, base?: Record<string, unknown>): Record<string, unknown> {
+  const live = base ?? JSON.parse(readFileSync(join(AGENT, "orche.config.json"), "utf8")) as Record<string, unknown>;
   const { images: _images, routes: _routes, ...kept } = live;
   const assignmentMs = BOUNDS[stage].assignmentMs;
   return {

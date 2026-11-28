@@ -10,7 +10,6 @@ import { R1_CALL, SUBSTITUTIONS, admission, auditMatrix, contentHashes, hashDiff
 import { DEFAULT_MDSD, parseMdsdConfig } from "../../src/orchestrator/mdsd-config.js";
 import { parseThinkingPolicyConfig } from "../../src/extension/config.js";
 import { answerDocument, finalReport, parseClaims, qualityConfig, seedsOf } from "../../experiments/mdsd-ab/quality.js";
-import { homedir } from "node:os";
 // @ts-ignore plain ESM module without types (no declarations for tsc; inferred where JS is checked)
 import { costOf, errorOf, updateEffortsOf, usageFrom } from "../../experiments/mdsd-ab/proxy.mjs";
 
@@ -174,13 +173,22 @@ describe("quality validation harness (experiments/mdsd-ab/quality.ts)", () => {
     expect(parseMdsdConfig({ seed }).seed?.claims).toHaveLength(3);
   });
 
-  it.skipIf(!existsSync(join(homedir(), ".pi/agent/orche.config.json")))("stage configs: the live strong route, no money/request/output ceilings for the quality stages, time bounds, max-preserving recovery; defaults untouched", () => {
-    const config = qualityConfig("A", { claims: [{ ref: "P1:c1", claim: "x" }] }) as any;
+  it("stage configs: the live strong route, no money/request/output ceilings for the quality stages, time bounds, max-preserving recovery; defaults untouched", () => {
+    // A fixture stands in for the user's live ~/.pi/agent/orche.config.json: the routes come from there, whatever their names.
+    const live = {
+      models: { "strong-orchestrator": { model: "cliproxyapi/gpt-6-astra", thinking: "max" }, advisor: { model: "cliproxyapi/gpt-6.2-sol", thinking: "high" } },
+      images: { model: "x/image" }, routes: { game: "x/route" }, thinkingPolicy: { mode: "adaptive" }, limits: { assignmentMs: 1 },
+    };
+    const config = qualityConfig("A", { claims: [{ ref: "P1:c1", claim: "x" }] }, live) as any;
     expect(parseThinkingPolicyConfig(config.thinkingPolicy)).toMatchObject({ lengthRecovery: "redecompose" });
     expect(parseMdsdConfig(config.mdsd)).toMatchObject({ maxRounds: 3, explorerScratch: true, total: { costUSD: 100_000_000, requests: 10_000_000 }, explorer: { minutes: 240 }, seed: { claims: [{ ref: "P1:c1" }] } });
     expect(config.limits).toMatchObject({ assignmentMs: 6 * 3_600_000, maxExtensions: 2 });
-    expect(config.models?.["strong-orchestrator"]?.model).toBeDefined();
-    expect("mdsd" in qualityConfig("S")).toBe(false);
+    // The live model routes survive unchanged; specialist routes and images are dropped; the declared deviations replace the live values.
+    expect(config.models).toEqual(live.models);
+    expect(config.routes).toEqual({});
+    expect("images" in config).toBe(false);
+    expect("mdsd" in qualityConfig("S", undefined, live)).toBe(false);
+    expect(qualityConfig("S", undefined, live).models).toEqual(live.models);
     expect(DEFAULT_MDSD).toMatchObject({ total: { costUSD: 80, requests: 600 }, explorer: { costUSD: 6 } });
     expect("seed" in DEFAULT_MDSD).toBe(false);
   });

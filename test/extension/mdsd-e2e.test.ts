@@ -184,7 +184,8 @@ describe("mdsd mode through WorkerPool", () => {
     const { execute, strong } = await pool({ explorer: { requests: 2, minutes: 30, costUSD: 5, outputTokens: 100_000 }, total: { costUSD: 100, requests: 6 } });
     // Faux models report no cost: every orchestrator response is charged $5 here, so the cost total is reached at its 20th response.
     const observe = MdsdRun.prototype.observeOrchestrator;
-    vi.spyOn(MdsdRun.prototype, "observeOrchestrator").mockImplementation(function (this: MdsdRun, usage) { observe.call(this, { ...usage, cost: { total: 5 } }); });
+    const observed: Array<Parameters<MdsdRun["observeOrchestrator"]>[0]> = [];
+    vi.spyOn(MdsdRun.prototype, "observeOrchestrator").mockImplementation(function (this: MdsdRun, usage) { observed.push(usage); observe.call(this, { ...usage, cost: { total: 5 } }); });
     const seen: Record<string, string> = {};
     strong.setResponses(scripted(80, {
       orchestrator: (turn, context) => {
@@ -224,6 +225,14 @@ describe("mdsd mode through WorkerPool", () => {
     expect(mdsd.gate).toBe("passed after the budget stop (1 explorer finding(s) left unaccounted)");
     expect(mdsd.verificationRounds).toBe(1);
     expect(result.text).toMatch(/STOPPED at \$100 of \$100 \(\d+ requests\)/);
+    // workers.ts hands every usage dimension to the phase telemetry, cache writes included.
+    expect(observed.length).toBeGreaterThan(0);
+    for (const usage of observed) expect(usage).toMatchObject({ input: expect.any(Number), output: expect.any(Number), cacheRead: expect.any(Number), cacheWrite: expect.any(Number) });
+    // ...and the phase windows count cache writes as input: summed inputTokens equal the observed input + cacheWrite.
+    const observedInput = observed.reduce((sum, usage) => sum + (usage?.input ?? 0) + (usage?.cacheWrite ?? 0), 0);
+    expect(observed.some(usage => (usage?.cacheWrite ?? 0) > 0), "the faux provider reported cache writes").toBe(true);
+    expect(observedInput).toBeGreaterThan(observed.reduce((sum, usage) => sum + (usage?.input ?? 0), 0));
+    expect(mdsd.phases.reduce((sum, item) => sum + item.inputTokens, 0)).toBe(observedInput);
   });
 
   it("cancelled during a search round: the task ends cancelled, the explorers' sessions are stopped and their partial state is reported", async () => {

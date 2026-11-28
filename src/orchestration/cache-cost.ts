@@ -5,6 +5,9 @@
  * a requested model change.
  */
 export interface CacheCostModel {
+  /** Pi model identity (optional): selects the cache age limit, see cacheAgeLimitMs. Price-only callers get the short default. */
+  id?: string;
+  api?: string;
   cost?: {
     input?: number; output?: number; cacheRead?: number; cacheWrite?: number;
     tiers?: Array<{ inputTokensAbove: number; input: number; output: number; cacheRead: number; cacheWrite: number }>;
@@ -38,8 +41,32 @@ function rateAt(model: CacheCostModel, tokens: number) {
   }
   return rate;
 }
-/** A stale cache isn't a discount. Claude's short TTL is generally about five minutes. */
+/** A stale cache isn't a discount. Claude's short TTL is generally about five minutes: the default for every model
+ * not known to keep its prompt cache longer. */
 export const MAX_CACHE_AGE_MS = 4 * 60 * 1000;
+/** OpenAI GPT-5.6 and later document a minimum cache lifetime of 30 minutes (the default `prompt_cache_options.ttl`
+ * "30m", refreshed by every read; https://developers.openai.com/api/docs/guides/prompt-caching), applied here to every
+ * OpenAI API family route, CLIProxyAPI/Codex included. A heuristic matching that documented minimum, not a TTL
+ * guarantee: earlier GPT models (in_memory retention, typically 5-10 minutes) keep the short default. */
+export const OPENAI_EXTENDED_CACHE_AGE_MS = 30 * 60 * 1000;
+
+const OPENAI_APIS = new Set(["openai-responses", "openai-codex-responses", "azure-openai-responses", "openai-completions"]);
+
+/** GPT-5.6+ and GPT-6+ by numeric major/minor of the model id's last path segment (route prefixes such as
+ * `openai/` are ignored; `gpt-5.10` counts as 5.10, not 5.1). */
+function hasExtendedOpenAICache(model: CacheCostModel): boolean {
+  if (typeof model.id !== "string") return false;
+  if (model.api !== undefined && !OPENAI_APIS.has(model.api)) return false;
+  const match = /^gpt-(\d+)(?:\.(\d+))?(?![\d.])/i.exec(model.id.slice(model.id.lastIndexOf("/") + 1));
+  if (!match) return false;
+  const major = Number(match[1]), minor = Number(match[2] ?? 0);
+  return major > 5 || (major === 5 && minor >= 6);
+}
+
+/** How old the warm model's cache observation may be before it no longer counts as a discount. */
+export function cacheAgeLimitMs(model: CacheCostModel): number {
+  return hasExtendedOpenAICache(model) ? OPENAI_EXTENDED_CACHE_AGE_MS : MAX_CACHE_AGE_MS;
+}
 
 export function compareCachedModelSwitch(
   current: CacheCostModel,
@@ -50,7 +77,7 @@ export function compareCachedModelSwitch(
   if (!observation || observation.cacheRead <= 0) return { action: "switch", reason: "no measured cache reuse" };
   if (!validTokens(observation.input) || !validTokens(observation.cacheRead) ||
       !validTokens(observation.cacheWrite) || !validTokens(observation.output) ||
-      observation.at > now || now - observation.at > MAX_CACHE_AGE_MS) {
+      !Number.isFinite(observation.at) || observation.at > now || now - observation.at > cacheAgeLimitMs(current)) {
     return { action: "switch", reason: "invalid or stale cache observation" };
   }
   const tokens = observation.input + observation.cacheRead + observation.cacheWrite;

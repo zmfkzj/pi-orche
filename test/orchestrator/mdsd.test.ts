@@ -182,7 +182,7 @@ describe("mdsd: measurement, aggregation and persisted round data", () => {
     tool(c.id, "read", { path: "/elsewhere/notes.md" });
     ctx.mdsd.observe(c.id, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Partial: payment systems use per-account sequencing; not checked yet." }] } });
     const lines = await ctx.mdsd.finish("search", workers, [
-      outcome(a, { requests: 50, costUSD: 7.5, durationMs: 30 * 60_000, usage: { input: 1, output: 130_000, cacheRead: 0, cacheWrite: 0 }, budget: { wrapUp: "$4.80/$6", stoppedBy: "cost at $7.50/$6 (1.25x the allocation)" }, data: answerOf([
+      outcome(a, { requests: 50, costUSD: 7.5, durationMs: 30 * 60_000, usage: { input: 1, output: 130_000, cacheRead: 0, cacheWrite: 4_000 }, budget: { wrapUp: "$4.80/$6", stoppedBy: "cost at $7.50/$6 (1.25x the allocation)" }, data: answerOf([
         { id: "f1", claim: "Kafka keeps per-key ordering only within a partition; the order router at src/a.ts:12 hashes by customer, not by order.", location: ["src/a.ts:12"], uncertainty: "low" },
         { id: "f2", claim: "Retention settings are undocumented.", uncertainty: "high" },
       ], { unexplored_scope: ["load profile in benchmarks/broker-latency.csv", "the consumer group settings in deploy/kafka.yaml"] }) }),
@@ -201,7 +201,9 @@ describe("mdsd: measurement, aggregation and persisted round data", () => {
     // Redundancy: the mean pairwise Jaccard overlap of the files the finished explorers read (src/a.ts shared of three files).
     expect(mdsd.state.rounds[0]).toMatchObject({ redundancy: 0.33, pairs: [{ a: a.id, b: b.id, files: 0.33 }] });
     // Allocated vs actual, overshoot and the budget stop are recorded; requests past the allocation are measured, never an overshoot (a checkpoint).
-    expect(ea!.actual).toMatchObject({ requests: 50, costUSD: 7.5, outputTokens: 130_000 });
+    // Cache writes count as input (input 1 + cacheWrite 4,000); cache reads stay apart.
+    expect(ea!.actual).toMatchObject({ requests: 50, costUSD: 7.5, outputTokens: 130_000, inputTokens: 4_001, cacheReadTokens: 0 });
+    expect(ea!.actual).not.toHaveProperty("cacheWriteTokens");
     expect(ea!.overshoot).toEqual(["cost $7.5/$6", "time 30/25 min", "output tokens 130000/120000"]);
     expect(ea).toMatchObject({ wrapUp: "$4.80/$6", stoppedBy: "cost at $7.50/$6 (1.25x the allocation)" });
   });
@@ -308,7 +310,7 @@ describe("mdsd: budget across all stages", () => {
   it("every stage is admitted on its worst-case cost (allocation x hardStopAt): search up to 1 - reserve, other stages up to 1 - final", async () => {
     const settings: MdsdSettings = { ...DEFAULT_MDSD, total: { costUSD: 30, requests: 300 }, reserve: 0.3, final: 0.1 };
     const { mdsd, events } = run({ settings });
-    mdsd.observeOrchestrator({ input: 10_000, output: 2_000, cacheRead: 50_000, cost: { total: 3 } });
+    mdsd.observeOrchestrator({ input: 10_000, output: 2_000, cacheRead: 50_000, cacheWrite: 6_000, cost: { total: 3 } });
     const three = [explorer("a", invertRequirements), explorer("b", challengeFavourite), explorer("c", transferDomains)];
     // $3 spent + 3 x ($6 x 1.25) = $25.5 > $21 (70% of $30): refused with the figures and the way out.
     expect(() => mdsd.validate("search", three, { reason: "search", workers: three, plan: techPlan })).toThrow("Refused (MDSD budget): this search call's worst-case cost is $22.5 (3 worker(s): allocation x 1.25 hard stop), but the search share of mdsd.total has $18 left");
@@ -332,6 +334,11 @@ describe("mdsd: budget across all stages", () => {
     const summary = mdsd.summary();
     expect(summary.budget).toMatchObject({ spentOrchestratorUSD: 3.75, spentExplorersUSD: 9, spentVerifiersUSD: 2, spentUSD: 14.75, totalUSD: 30, searchLimitUSD: 21, stageLimitUSD: 27, finalAllowanceUSD: 3, allocatedUSD: 8, inFlightUnknown: 1, unpricedResponses: 0 });
     expect(summary.phases.map(item => [item.phase, item.requests, item.costUSD])).toEqual([["planning", 1, 3], ["search-1", 1, 0.5], ["integration-1", 1, 0.25], ["verification-1", 0, 0], ["after-verification-1", 0, 0]]);
+    // Cache writes (OpenAI cache_write_tokens, Anthropic cache creation) are folded into inputTokens (10,000 + 6,000),
+    // as workers.ts counts a request's input; cache reads stay in cacheReadTokens only, so nothing is counted twice.
+    expect(summary.phases[0]).toMatchObject({ phase: "planning", inputTokens: 16_000, outputTokens: 2_000, cacheReadTokens: 50_000 });
+    expect(summary.phases[0]).not.toHaveProperty("cacheWriteTokens");
+    expect(summary.phases[1]).toMatchObject({ phase: "search-1", inputTokens: 0, cacheReadTokens: 0 });
     expect(events.filter(event => event.stage === "admission").map(event => event.reason)).toEqual(["search", "verification"]);
   });
 
