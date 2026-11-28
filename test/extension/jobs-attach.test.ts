@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TaskJobs, type AttachOutcome, type Job, type JobEntry } from "../../src/extension/jobs.js";
 import { attachResult, jobWidgetLines } from "../../src/extension/job-view.js";
 import type { WorkerPool } from "../../src/extension/workers.js";
@@ -160,5 +160,104 @@ describe("TaskJobs attach/detach", () => {
     expect(jobWidgetLines(job, { attached: false })[0]).toMatch(/^✓ orche J1 · W1 implement · done after \d+s · result delivered as a message$/);
     expect(changes).toEqual(["J1:running:attached", "J1:running:attached", "J1:running:detached", "J1:done:detached"]);
     await tick();
+  });
+
+  describe("keepalive (main-cache.ts)", () => {
+    afterEach(() => { vi.useRealTimers(); });
+
+    it("releases the attached call at keepaliveAt with reason keepalive; the worker keeps running and a re-attach gets the result", async () => {
+      vi.useFakeTimers();
+      const { jobs, runs, delivered, start } = setup();
+      const { job, outcome } = await start({ keepaliveAt: Date.now() + 60_000 });
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(jobs.attached).toBe(job);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const released = await outcome!;
+      expect(released).toMatchObject({ kind: "detached", reason: "keepalive" });
+      expect(runs[0]!.signal.aborted).toBe(false);
+      const result = attachResult(released, "orche_task");
+      expect(result.isError).toBeUndefined();
+      expect(result.details).toMatchObject({ job: "J1", attach: "detached", reason: "keepalive" });
+      expect(result.content).toHaveLength(1);
+      expect(result.content[0]!.text).toMatch(/^Keepalive for J1 \(worker W1 implement, running .*\): .*prompt cache.*Call orche_task_attach \{"job":"J1"\} now, as your only action and without any text\.$/);
+      // Re-attach: a new keepalive of its own; the job ends first and its result goes to this call, never as a message.
+      const again = jobs.attach("J1", { keepaliveAt: Date.now() + 60_000 });
+      await vi.advanceTimersByTimeAsync(30_000);
+      runs[0]!.finish();
+      expect(await again).toMatchObject({ kind: "ended" });
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(delivered).toEqual([]);
+      expect(job.delivered).toBe("tool");
+    });
+
+    it("each attach has its own timer: a re-attach resets it, and a replaced or detached attachment's timer releases nothing", async () => {
+      vi.useFakeTimers();
+      const { jobs, runs, start } = setup();
+      const { outcome } = await start({ keepaliveAt: Date.now() + 60_000 });
+      await vi.advanceTimersByTimeAsync(10_000);
+      jobs.detach("input");
+      expect(await outcome!).toMatchObject({ reason: "input" });
+      const second = jobs.attach("J1", { keepaliveAt: Date.now() + 60_000 });
+      const secondAttachment = jobs.attachment;
+      // The first timer (due at 60 s) must not release the second attach (due at 70 s).
+      await vi.advanceTimersByTimeAsync(55_000);
+      expect(jobs.attachment).toBe(secondAttachment);
+      const third = jobs.attach("J1", {});
+      expect(await second).toMatchObject({ kind: "detached", reason: "replaced" });
+      // The replaced attach's timer is gone; the third has none.
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(jobs.attached?.id).toBe("J1");
+      runs[0]!.finish();
+      expect(await third).toMatchObject({ kind: "ended" });
+    });
+
+    it("input waiting at that moment detaches as input; a job that ended first, cancel and shutdown leave nothing for the timer", async () => {
+      vi.useFakeTimers();
+      const a = setup();
+      let waiting = false;
+      const { outcome } = await a.start({ keepaliveAt: Date.now() + 1_000, pending: () => waiting });
+      waiting = true;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await outcome!).toMatchObject({ kind: "detached", reason: "input" });
+
+      const b = setup();
+      const ended = await b.start({ keepaliveAt: Date.now() + 1_000 });
+      b.runs[0]!.finish();
+      await ended.job.done;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await ended.outcome!).toMatchObject({ kind: "ended" });
+      expect(b.delivered).toEqual([]);
+
+      const c = setup();
+      const cancelled = await c.start({ keepaliveAt: Date.now() + 1_000 });
+      const cancel = c.jobs.cancel();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await cancel;
+      expect(await cancelled.outcome!).toMatchObject({ kind: "ended", job: { status: "cancelled" } });
+
+      const d = setup();
+      const shut = await d.start({ keepaliveAt: Date.now() + 1_000 });
+      d.jobs.dispose();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await shut.outcome!).toMatchObject({ kind: "detached", reason: "shutdown" });
+    });
+
+    it("a keepalive before the end leaves the result to one message; a keepalive already past releases at once", async () => {
+      vi.useFakeTimers();
+      const { jobs, runs, delivered, start } = setup();
+      const { job, outcome } = await start({ keepaliveAt: Date.now() + 1_000 });
+      await vi.advanceTimersByTimeAsync(1_000);
+      runs[0]!.finish();
+      await job.done;
+      const result = await outcome!;
+      expect(result).toMatchObject({ kind: "detached", reason: "keepalive" });
+      expect(delivered.map(j => j.id)).toEqual(["J1"]);
+
+      const late = setup();
+      const past = await late.start({ keepaliveAt: Date.now() - 5_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await past.outcome!).toMatchObject({ kind: "detached", reason: "keepalive" });
+      expect(jobs.attached).toBeUndefined();
+    });
   });
 });

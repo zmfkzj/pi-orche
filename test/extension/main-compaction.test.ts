@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   checkMainCompaction, DEFAULT_MAIN_COMPACTION, MAIN_COMPACTION_RESUME_TYPE, MainCompaction, parseMainCompactionConfig, piReserveTokens,
-  ratioThreshold, type MainCompactionSettings,
+  mainThreshold, ratioThreshold, type MainCompactionSettings,
 } from "../../src/extension/main-compaction.js";
 import { loadOrcheConfigFile } from "../../src/extension/config.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -44,6 +44,17 @@ describe("ratio threshold (model-independent: only the current window counts)", 
   });
   it("a configured ratio replaces 0.8", () => {
     expect(checkMainCompaction({ settings: { ...on, usageRatio: 0.5 }, piEnabled: true, usage: { tokens: 100_001, contextWindow: 200_000 } })).toMatchObject({ compact: true, threshold: 100_000 });
+  });
+  it("maxTokens caps the threshold on a large window (the lower of the two wins); unset keeps the ratio alone", () => {
+    const big = { tokens: 300_001, contextWindow: 1_048_576 };
+    expect(mainThreshold(1_048_576, { usageRatio: 0.5, maxTokens: 300_000 })).toBe(300_000);
+    expect(mainThreshold(200_000, { usageRatio: 0.5, maxTokens: 300_000 })).toBe(100_000);
+    expect(mainThreshold(1_048_576, { usageRatio: 0.5 })).toBe(524_288);
+    expect(checkMainCompaction({ settings: { ...on, usageRatio: 0.5, maxTokens: 300_000 }, piEnabled: true, usage: big })).toMatchObject({ compact: true, threshold: 300_000 });
+    expect(checkMainCompaction({ settings: { ...on, usageRatio: 0.5 }, piEnabled: true, usage: big })).toEqual({ compact: false, reason: "below" });
+    expect(parseMainCompactionConfig({ usageRatio: 0.5, maxTokens: 300_000 })).toEqual({ enabled: true, usageRatio: 0.5, midRun: true, maxTokens: 300_000 });
+    expect(parseMainCompactionConfig({ usageRatio: 0.5 })).not.toHaveProperty("maxTokens");
+    for (const bad of [0, 29_999, 1.5e5 + 0.5, "300k", 2e7]) expect(() => parseMainCompactionConfig({ maxTokens: bad })).toThrow(/mainCompaction\.maxTokens/);
   });
 });
 

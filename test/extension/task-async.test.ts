@@ -61,7 +61,7 @@ async function stillAttached(h: Harness, followUps: string[]) {
   expect(h.session.isStreaming).toBe(true);
 }
 
-async function harness(mainSteps: FauxResponseStep[], orcheSteps: FauxResponseStep[], extra: { records?: boolean; extraExtensions?: ExtensionFactory[]; ui?: Partial<ExtensionUIContext> } = {}) {
+async function harness(mainSteps: FauxResponseStep[], orcheSteps: FauxResponseStep[], extra: { records?: boolean; extraExtensions?: ExtensionFactory[]; ui?: Partial<ExtensionUIContext>; mainCache?: unknown } = {}) {
   const h = await createHarness({ mainSteps, orcheSteps, mode: "tui", mainMode: "single", single: { spawn: false }, ...extra });
   open.push(h);
   execFileSync("git", ["init", "-q"], { cwd: h.cwd });
@@ -667,5 +667,109 @@ describe("background orche_task jobs (wait:false)", () => {
     expect(JSON.parse(await readFile(join(record, "run.json"), "utf8"))).toMatchObject({ status: "interrupted" });
     expect(jobEntries(h).filter(entry => entry.event === "end")).toMatchObject([{ job: "J1", status: "interrupted" }]);
     expect(customMessages(h, TASK_RESULT_TYPE)).toHaveLength(0);
+  });
+});
+
+/** Main's prompt cache while a task runs (src/extension/main-cache.ts): keepalive releases of attached waits, the warming override. */
+describe("main cache during a long orche_task", () => {
+  const keepaliveOf = (message: unknown) => (message as { details?: { reason?: string } }).details?.reason === "keepalive";
+  /** Main re-attaches after every keepalive release and reviews the result otherwise (enough copies for any number of releases). */
+  const reattachOnKeepalive: FauxResponseStep = context => {
+    const last = context.messages.at(-1) as { role?: string; details?: { reason?: string; job?: string } };
+    return last?.role === "toolResult" && last.details?.reason === "keepalive" ? tool("orche_task_attach", { job: last.details.job ?? "J1" }) : reply("Reviewed J1.");
+  };
+
+  it("a keepalive releases orche_task, main re-attaches at once; the re-attached wait has its own keepalive; the result reaches the attached call once", async () => {
+    const entered = deferred(), gate = deferred();
+    const h = await harness([tool("orche_task", { role: "implement", request }), ...Array.from({ length: 12 }, () => reattachOnKeepalive)], [gated(entered, gate, report())], { mainCache: { keepalive: 0.03 } });
+    const run = h.session.prompt("go");
+    await entered.promise;
+    await vi.waitFor(() => expect(toolResults(h, "orche_task")).toHaveLength(1), { timeout: 5000 });
+    const released = toolResults(h, "orche_task")[0]!;
+    expect(keepaliveOf(released)).toBe(true);
+    expect(released).toMatchObject({ isError: false, details: { job: "J1", attach: "detached", reason: "keepalive" } });
+    expect(textOf(released)).toContain("Keepalive for J1");
+    // The re-attach is released by its own keepalive too (the timer starts again with each attach), and main attaches again.
+    await vi.waitFor(() => expect(toolResults(h, "orche_task_attach").length).toBeGreaterThanOrEqual(1), { timeout: 5000 });
+    expect(keepaliveOf(toolResults(h, "orche_task_attach")[0])).toBe(true);
+    const seen = toolResults(h, "orche_task_attach").length;
+    await vi.waitFor(() => { attachedNow(h); expect(toolResults(h, "orche_task_attach")).toHaveLength(seen); }, { timeout: 5000 });
+    gate.resolve();
+    await run;
+    const attaches = toolResults(h, "orche_task_attach");
+    expect(attaches.at(-1)).toMatchObject({ details: { job: "J1", attach: "ended" } });
+    expect(textOf(attaches.at(-1))).toContain("Done: greeting checked");
+    expect(attaches.slice(0, -1).every(keepaliveOf)).toBe(true);
+    expect(customMessages(h, TASK_RESULT_TYPE)).toHaveLength(0);
+    expect(h.session.getLastAssistantText()).toBe("Reviewed J1.");
+    expect(jobEntries(h).map(entry => `${entry.event}:${"status" in entry ? entry.status : ""}`)).toEqual(["start:", "end:done"]);
+  });
+
+  it("keepalive off: the call stays attached however long the worker takes", async () => {
+    const entered = deferred(), gate = deferred();
+    const h = await harness([tool("orche_task", { role: "implement", request }), reply("Reviewed J1.")], [gated(entered, gate, report())], { mainCache: { keepalive: false } });
+    const run = h.session.prompt("go");
+    await entered.promise;
+    await stillAttached(h, []);
+    gate.resolve();
+    await run;
+    expect(toolResults(h, "orche_task")).toMatchObject([{ details: { job: "J1", attach: "ended" } }]);
+  });
+
+  it("wait:true blocks without a keepalive; a user steer still detaches as input, not as keepalive", async () => {
+    const entered = deferred(), gate = deferred();
+    const blocking = await harness([tool("orche_task", { role: "implement", request, wait: true }), reply("reviewed")], [gated(entered, gate, report())], { mainCache: { keepalive: 0.01 } });
+    const run = blocking.session.prompt("go");
+    await entered.promise;
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    expect(toolResults(blocking, "orche_task")).toHaveLength(0);
+    gate.resolve();
+    await run;
+    expect(textOf(toolResults(blocking, "orche_task")[0])).toContain("Done: greeting checked");
+    expect(toolResults(blocking, "orche_task")[0]).not.toMatchObject({ details: { attach: expect.anything() } });
+
+    const entered2 = deferred(), gate2 = deferred();
+    const h = await harness([tool("orche_task", { role: "implement", request }), tool("orche_task_attach", { job: "J1" }), reply("Reviewed J1.")], [gated(entered2, gate2, report())], { mainCache: { keepalive: 0.5 } });
+    const run2 = h.session.prompt("go");
+    await entered2.promise;
+    await vi.waitFor(() => attachedNow(h));
+    await h.session.prompt("what is 6*7?", { streamingBehavior: "steer" });
+    await vi.waitFor(() => expect(toolResults(h, "orche_task")).toHaveLength(1));
+    expect(toolResults(h, "orche_task")[0]).toMatchObject({ details: { attach: "detached", reason: "input" } });
+    await vi.waitFor(() => attachedNow(h));
+    gate2.resolve();
+    await run2;
+    expect(toolResults(h, "orche_task_attach")).toMatchObject([{ details: { attach: "ended" } }]);
+  });
+
+  it("cache_warming_decision: every Pi stop becomes warm only while a background job runs (attached or detached), unless warming is off; a blocking wait:true task is not one", async () => {
+    const decide = (h: Harness, action: "warm" | "stop") => h.session.extensionRunner.emitCacheWarmingDecision({ type: "cache_warming_decision", warmCost: 0, missCost: 0, continuationProbability: 1, action });
+    for (const warming of [true, false]) {
+      const entered = deferred(), gate = deferred();
+      const h = await harness([tool("orche_task", { role: "implement", request }), reply("J1 runs in the background."), reply("Noted the result.")], [gated(entered, gate, report())], { mainCache: { warming, keepalive: false } });
+      expect(await decide(h, "stop")).toBe("stop");
+      const run = h.session.prompt("go");
+      await entered.promise;
+      await vi.waitFor(() => attachedNow(h));
+      expect(await decide(h, "stop")).toBe(warming ? "warm" : "stop");
+      expect(await decide(h, "warm")).toBe("warm");
+      // Detached, the job is still active: still warmed.
+      await h.session.prompt("/orche detach");
+      expect(await decide(h, "stop")).toBe(warming ? "warm" : "stop");
+      await run;
+      gate.resolve();
+      await vi.waitFor(() => expect(h.session.getLastAssistantText()).toBe("Noted the result."), { timeout: 5000 });
+      expect(jobEntries(h).filter(entry => entry.event === "end")).toMatchObject([{ status: "done" }]);
+      expect(await decide(h, "stop")).toBe("stop");
+    }
+    // wait:true blocks main inside the call without a background job: Pi's decision stands.
+    const entered = deferred(), gate = deferred();
+    const blocking = await harness([tool("orche_task", { role: "implement", request, wait: true }), reply("reviewed")], [gated(entered, gate, report())], { mainCache: { keepalive: false } });
+    const run = blocking.session.prompt("go");
+    await entered.promise;
+    expect(await decide(blocking, "stop")).toBe("stop");
+    gate.resolve();
+    await run;
+    expect(jobEntries(blocking)).toEqual([]);
   });
 });

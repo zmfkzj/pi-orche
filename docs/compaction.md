@@ -23,6 +23,7 @@ every extension's `session_before_compact` / `session_compact` hooks). Source: `
 | `false` or `{ "enabled": false }` | off: Pi's own settings alone decide, exactly as before |
 | a number, e.g. `0.75` | on with that ratio (0.1 to 0.95) |
 | `{ "usageRatio", "midRun", "enabled" }` | `midRun: false` compacts only between runs (see below) |
+| `{ ..., "maxTokens": 300000 }` | also an absolute ceiling (30,000 to 10,000,000 tokens, unset by default): main compacts above the lower of the ratio's threshold and `maxTokens`, so a 1M window does not let main grow to hundreds of thousands of tokens that every prompt-cache miss re-writes ([main-cache.md](main-cache.md)) |
 
 - **Measure and capacity.** The usage is Pi's own estimate (`ctx.getContextUsage().tokens`, the estimator of Pi's threshold
   check) against `contextWindow` of the model Pi resolves for limits. Nothing is listed per model: a model registered today, a

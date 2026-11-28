@@ -451,6 +451,15 @@ describe("a background job's attached call", () => {
     expect(host.expand(true).drawPlain().join("\n")).toContain("Started job J1");
   });
 
+  it("a keepalive release is collapsed like any detach and names the keepalive", async () => {
+    const host = new Host(orcheTaskRenderers, { role: "implement", request: "Fix it" }).start();
+    await host.pass(65_000);
+    host.finish(textResult("Keepalive for J1 (worker W1 implement, running 1m 05s): … Call orche_task_attach {\"job\":\"J1\"} now, as your only action and without any text.", jobDetails({ attach: "detached", reason: "keepalive", detachedAt: T0 + 65_000 })));
+    const text = host.drawPlain().join(" ");
+    expect(text).toContain("detached by a keepalive (main re-attaches to refresh its prompt cache)");
+    expect(host.expand(true).drawPlain().join("\n")).toContain("Keepalive for J1");
+  });
+
   it("an orche_task_attach block names its job; refused and already-ended attaches say so", () => {
     const renderers = createOrcheRenderers("orche_task_attach");
     const pending = new Host(renderers, { job: "J1" }).start().finish(textResult("Not attached to J1 …", jobDetails({ attach: "pending", detachedAt: T0 })));

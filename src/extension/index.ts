@@ -10,6 +10,7 @@ import { DEFAULT_PROFILE, inheritsMain, inheritsMainThinking, isDelegatingMode, 
 import { delegationRules, guardBusyToolCall, guardToolCall, isMainMode, MainModeState, type MainModeLookup } from "./mode.js";
 import { contextWarning, DEFAULT_CONTEXT_WARNING, type ContextWarningSettings, type ContextWarningState } from "./context-warning.js";
 import { DEFAULT_MAIN_COMPACTION, MainCompaction, type MainCompactionSettings } from "./main-compaction.js";
+import { defaultMainCache, keepalivePlan, warmingOverride, type MainCacheSettings } from "./main-cache.js";
 import { CONFIG_FILE, DEFAULT_SINGLE, loadOrcheConfigFile } from "./config.js";
 import { DEFAULT_BASH_REVIEW, guardBashReview, registryAccess, type BashReviewSettings } from "./bash-review.js";
 import { orcheTaskParameters, WORKER_CAPABILITY_CHANNEL, WorkerPool, type GoneWorker, type WorkerCapabilityAnswer } from "./workers.js";
@@ -46,12 +47,12 @@ const ACTIVATE_BUILTINS = ["grep", "find", "ls"];
  * extension-only keys (`concurrentSessions`, `records`) that the plain route parser behind `discoverMainMode` (mode.ts) rejects as unknown, which
  * made a config with `records` look invalid at session start and drop its `mainMode`.
  */
-async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup & { contextWarning?: ContextWarningSettings; mainCompaction?: MainCompactionSettings; spawn?: boolean; advisor?: boolean; bashReview?: BashReviewSettings; warnings?: string[]; models?: ModelTiers; profiles?: Record<string, ModelProfile> }> {
+async function discoverConfiguredMainMode(options: { cwd: string; agentDir: string; projectTrusted: boolean }): Promise<MainModeLookup & { contextWarning?: ContextWarningSettings; mainCompaction?: MainCompactionSettings; mainCache?: MainCacheSettings; spawn?: boolean; advisor?: boolean; bashReview?: BashReviewSettings; warnings?: string[]; models?: ModelTiers; profiles?: Record<string, ModelProfile> }> {
   const candidates = [...(options.projectTrusted ? [join(options.cwd, ".pi", CONFIG_FILE)] : []), join(options.agentDir, CONFIG_FILE)];
   for (const path of candidates) {
     try { await access(path); } catch { continue; }
     try {
-      const { routes, contextWarning, mainCompaction, single, bashReview, warnings } = await loadOrcheConfigFile(path);
+      const { routes, contextWarning, mainCompaction, mainCache, single, bashReview, warnings } = await loadOrcheConfigFile(path);
       // The tiers with the top-level extendedContext filled in where a tier leaves it out, as routes resolve it (routing.ts);
       // not for `{ "model": "main" }`, which keeps main's own context window. The same for every profile's tiers.
       const filled = <T extends TierSettings | null | undefined>(route: T): T => {
@@ -61,7 +62,7 @@ async function discoverConfiguredMainMode(options: { cwd: string; agentDir: stri
       };
       const models = routes.models ? Object.fromEntries(Object.entries(routes.models).map(([tier, route]) => [tier, filled(route)])) as ModelTiers : undefined;
       const profiles = routes.profiles ? Object.assign(Object.create(null), Object.fromEntries(Object.entries(routes.profiles).map(([name, profile]) => [name, Object.fromEntries(Object.entries(profile).map(([key, value]) => [key, key === "routes" || key === "legacy" ? value : filled(value as TierSettings | null)]))]))) as Record<string, ModelProfile> : undefined;
-      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), ...(routes.legacyMainMode ? { legacyMode: routes.legacyMainMode } : {}), path, contextWarning, mainCompaction, spawn: single.spawn, advisor: single.advisor, bashReview, ...(warnings.length ? { warnings } : {}), ...(models ? { models } : {}), ...(profiles ? { profiles } : {}) };
+      return { ...(routes.mainMode ? { mode: routes.mainMode } : {}), ...(routes.legacyMainMode ? { legacyMode: routes.legacyMainMode } : {}), path, contextWarning, mainCompaction, mainCache, spawn: single.spawn, advisor: single.advisor, bashReview, ...(warnings.length ? { warnings } : {}), ...(models ? { models } : {}), ...(profiles ? { profiles } : {}) };
     } catch (error) {
       return { path, error: error instanceof Error ? error.message : String(error) };
     }
@@ -503,12 +504,37 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       if (pending && (queued.steer > 0 || queued.followUp === 0)) return true;
       return notesWaiting();
     };
-    /** The attach options of a tool call: its abort signal detaches, its block shows the job's progress. */
-    const attachOptions = (signal: AbortSignal | undefined, ctx: ExtensionContext, onUpdate: ((update: ReturnType<typeof jobUpdate>) => void) | undefined): AttachOptions => ({
-      ...(signal ? { signal } : {}),
-      pending: () => inputWaiting(ctx),
-      onUpdate: job => onUpdate?.(jobUpdate(job)),
-    });
+    /** `mainCache` of the config file read at session start (defaults without a valid file): main's prompt cache while a task runs (main-cache.ts). */
+    let mainCacheSettings: MainCacheSettings = defaultMainCache();
+    /** When main's latest turn (one model request and its tool calls) started: what a keepalive counts from, at or before Pi's own warming clock. */
+    let lastTurnStartAt = 0;
+    /** Whether an orche background job runs now (attached or detached; a blocking orche_task is not one). */
+    const jobRunning = () => !!jobs?.running;
+    /** When an attach made now should be released for main's cache (main-cache.ts `keepalivePlan`); undefined: never. */
+    const mainKeepalive = (ctx: ExtensionContext) => {
+      let warmingMode: string | undefined;
+      try { warmingMode = (pi.getSettings() as { cacheWarming?: string }).cacheWarming; } catch { warmingMode = undefined; }
+      let promptTokens = 0;
+      try { promptTokens = ctx.getContextUsage()?.tokens ?? 0; } catch { promptTokens = 0; }
+      let thinking: string | undefined;
+      try { thinking = pi.getThinkingLevel(); } catch { thinking = undefined; }
+      try {
+        return keepalivePlan({ model: ctx.model, settings: mainCacheSettings, warmingMode: warmingMode ?? "idle", thinking, promptTokens, jobRunning: true });
+      } catch { return undefined; }
+    };
+    /**
+     * The attach options of a tool call: its abort signal detaches, its block shows the job's progress, and (main-cache.ts) a
+     * keepalive releases it before main's prompt cache would expire, counted from the turn that made this call.
+     */
+    const attachOptions = (signal: AbortSignal | undefined, ctx: ExtensionContext, onUpdate: ((update: ReturnType<typeof jobUpdate>) => void) | undefined): AttachOptions => {
+      const plan = mainKeepalive(ctx);
+      return {
+        ...(signal ? { signal } : {}),
+        pending: () => inputWaiting(ctx),
+        onUpdate: job => onUpdate?.(jobUpdate(job)),
+        ...(plan ? { keepaliveAt: (lastTurnStartAt || Date.now()) + plan.delayMs } : {}),
+      };
+    };
     /**
      * Detach once the steer that just arrived is queued for main (or after the grace): see {@link INPUT_GRACE_MS}. Only this
      * attachment: a later attach (even to the same job) is not touched. While follow-ups are queued `ctx.hasPendingMessages()`
@@ -679,6 +705,8 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       warningSettings = found.contextWarning ?? { ...DEFAULT_CONTEXT_WARNING, thresholds: [...DEFAULT_CONTEXT_WARNING.thresholds] };
       warningState = { warnedLevel: 0 };
       mainCompactionSettings = found.mainCompaction ?? { ...DEFAULT_MAIN_COMPACTION };
+      mainCacheSettings = found.mainCache ?? defaultMainCache();
+      lastTurnStartAt = 0;
       spawn = found.spawn ?? DEFAULT_SINGLE.spawn;
       bashReview = found.bashReview ?? { ...DEFAULT_BASH_REVIEW };
       // Only a model or a thinking level of its own changes main's hand-off rule; `{ "model": "main" }` and `thinking: "main"` keep
@@ -741,6 +769,10 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
       // `strong` was merged into single: the config loader's warning (found.warnings) says so with the profile it maps to.
       if (found.legacyMode && found.legacyMode !== LEGACY_STRONG_MODE && !found.error) ctx.ui.notify(`orche: mainMode "${found.legacyMode}" in ${found.path} was removed (multi-agent orche_run delegation); using "single". Set mainMode to one of ${MAIN_MODES.join(", ")}.`, "warning");
     });
+    // Main's prompt cache while a task runs (main-cache.ts): the turn clock a keepalive counts from, and Pi's warming decisions while
+    // a background job runs (every `stop`, for a model without prices or a refresh below Pi's savings threshold, becomes `warm`).
+    pi.on("turn_start", () => { lastTurnStartAt = Date.now(); });
+    pi.on("cache_warming_decision", event => warmingOverride(event, jobRunning(), mainCacheSettings));
     // Every run main starts while idle (Pi 1.2.0+: user prompts and runs a triggerTurn message starts alike; older hosts: user
     // prompts only). Both kinds get the skill list and the delegation section of the mode in force, and the first takes the notice.
     pi.on("before_agent_start", event => {
@@ -1239,7 +1271,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
         "Pass `gui: true` (needs pi-gui) whenever the worker must see or operate a GUI: launch a desktop or Electron app, take screenshots as evidence, check a rendered UI or visual change, reproduce a bug by clicking, or use a rendered web page with tabs, forms or sign-in. The worker then gets its own private desktop that the user does not see, separate from yours and from other workers'. Leave it off for work on files, commands and public pages.",
         "Workers do not share your tools or their state: none of your browser_* session tools, tabs, profiles or logins reach them. With pi-browser installed every worker gets its own stateless browser_fetch for public web pages (the result says when it is unavailable, e.g. obscura not installed). A task that needs a rendered, interactive web page (tabs, clicks, forms, sign-in) needs `gui: true`: the worker browses in its private desktop with a fresh browser profile, not the user's. Every role can click and type on its own desktop: read-only roles (explore, answer, verify) stay read-only for the workspace, so an investigation that needs clicks stays answer + gui: true, and implement + gui: true is for work that changes files.",
         "With pi-session-bus installed every orche_task worker has its own session_list and session_send: it sends as your session, labelled with its worker id, answers peer notes routed to it itself, and reports what it sent. Ask it in the request to notify or ask another live Pi session when the task needs that; do not resend what its result says it already sent.",
-        "In interactive/RPC sessions orche_task stays attached to its job (J1, …) and returns the result like a blocking call. When it returns DETACHED (a steered user message or a peer-session message arrived), answer that input first; then, if the job is still running and nothing else is waiting for you, call orche_task_attach to wait for it again. Queued follow-up messages never detach and do not count as waiting: Pi delivers them after the result, when the turn has nothing else to do. Never wait with sleep, never poll orche_task_status (only when the user asks for progress or wants to cancel). Use orche_task_message to add instructions to the running worker.",
+        "In interactive/RPC sessions orche_task stays attached to its job (J1, …) and returns the result like a blocking call. When it returns KEEPALIVE (a scheduled release that only lets your next request refresh your prompt cache during a long task), call orche_task_attach for that job at once as your only action, without any text. When it returns DETACHED (a steered user message or a peer-session message arrived), answer that input first; then, if the job is still running and nothing else is waiting for you, call orche_task_attach to wait for it again. Queued follow-up messages never detach and do not count as waiting: Pi delivers them after the result, when the turn has nothing else to do. Never wait with sleep, never poll orche_task_status (only when the user asks for progress or wants to cancel). Use orche_task_message to add instructions to the running worker.",
         "While a background job runs, answer questions that need only reading yourself (read, grep, find, ls, ast_search; other tools are blocked until it ends) and never cancel, replace or re-delegate the running worker for a question. Delegate only what needs a worker: orche_task then asks the user to approve queueing it after the running job; only the user's answer in that dialog approves it.",
         "Every worker has a private scratch directory for temporary files. Pass `writeRoots` (implement/game-asset/video) only when the user explicitly asked to change a location outside the workspace, such as a sibling repository; it applies to that assignment only.",
         "An implement/answer orchestrator may run at most 2 fresh-verifier rounds; further rounds are refused and the result lists the remaining findings (data.unresolved, a `Verification cap:` line). Pass `verificationRounds` (up to 5) only when the user explicitly asked for more independent review rounds.",
@@ -1353,7 +1385,7 @@ export function createOrcheExtension(options: OrcheExtensionOptions = {}) {
     pi.registerTool({
       name: "orche_task_attach",
       label: "orche task attach",
-      description: "Attach to the running background orche_task job (the one named, else the running one) and wait for its result like a blocking orche_task: the call shows the worker's progress and returns the result when the job ends. A user message steered into the turn, a woken message from another Pi session (not one orche routed straight to the running worker), Esc or /orche detach DETACH it: it then returns at once, the worker keeps running, and the result arrives as one orche-task-result message unless you attach again. Call it after you answered the input that detached the job, when the job is still running and nothing else waits for you; it refuses while a steered message or a woken peer note is waiting; queued follow-up messages do not count (they wait for the result). Attaching never restarts or cancels the worker.",
+      description: "Attach to the running background orche_task job (the one named, else the running one) and wait for its result like a blocking orche_task: the call shows the worker's progress and returns the result when the job ends. A user message steered into the turn, a woken message from another Pi session (not one orche routed straight to the running worker), Esc or /orche detach DETACH it, and a scheduled keepalive releases it during a long task so that your next request refreshes your prompt cache (then attach again at once, as your only action, without text): it then returns at once, the worker keeps running, and the result arrives as one orche-task-result message unless you attach again. Call it after you answered the input that detached the job, when the job is still running and nothing else waits for you; it refuses while a steered message or a woken peer note is waiting; queued follow-up messages do not count (they wait for the result). Attaching never restarts or cancels the worker.",
       promptSnippet: "orche_task_attach: wait again for the running orche_task job (detaches on steered input, not on follow-ups)",
       parameters: Type.Object({
         job: Type.Optional(Type.String({ pattern: "^J[1-9][0-9]*$", description: "Job id from orche_task (J1, …); default: the running job." })),

@@ -97,8 +97,8 @@ export interface JobToolResult {
   isError?: boolean;
 }
 
-/** Why an attached call stopped waiting while its job keeps running. */
-export type DetachReason = "input" | "session-bus" | "abort" | "command" | "background" | "shutdown" | "replaced";
+/** Why an attached call stopped waiting while its job keeps running. `keepalive`: released on schedule so that main's next request refreshes its prompt cache (main-cache.ts). */
+export type DetachReason = "input" | "session-bus" | "abort" | "command" | "background" | "shutdown" | "replaced" | "keepalive";
 
 /** How an attach ended. */
 export type AttachOutcome =
@@ -120,6 +120,11 @@ export interface AttachOptions {
   pending?: () => boolean;
   /** Called on every progress/timing change of the attached job. */
   onUpdate?: (job: Job) => void;
+  /**
+   * When (epoch ms) to release this wait with reason `keepalive` if the job still runs (main-cache.ts `keepalivePlan`). Input
+   * waiting for main at that moment detaches as `input` instead. Each attach has its own: a re-attach starts a new one.
+   */
+  keepaliveAt?: number;
 }
 
 interface Waiter {
@@ -127,6 +132,7 @@ interface Waiter {
   options: AttachOptions;
   settle: (outcome: AttachOutcome) => void;
   promise: Promise<AttachOutcome>;
+  keepalive?: ReturnType<typeof setTimeout>;
 }
 
 export interface JobDeps {
@@ -293,13 +299,31 @@ export class TaskJobs {
     const onAbort = () => { if (this.waiter === waiter) this.detach("abort"); };
     const waiter: Waiter = {
       job, options, promise: outcome.promise,
-      settle: result => { options.signal?.removeEventListener("abort", onAbort); outcome.resolve(result); },
+      settle: result => {
+        if (waiter.keepalive) clearTimeout(waiter.keepalive);
+        waiter.keepalive = undefined;
+        options.signal?.removeEventListener("abort", onAbort);
+        outcome.resolve(result);
+      },
     };
     this.waiter = waiter;
     options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.keepaliveAt !== undefined) {
+      waiter.keepalive = setTimeout(() => this.keepalive(waiter), Math.max(0, options.keepaliveAt - Date.now()));
+      waiter.keepalive.unref?.();
+    }
     this.changed(job);
     if (options.signal?.aborted) onAbort();
     return waiter;
+  }
+
+  /** The keepalive time of `waiter` has come: release it if it is still the attachment and its job still runs (else nothing). */
+  private keepalive(waiter: Waiter): void {
+    waiter.keepalive = undefined;
+    if (this.waiter !== waiter || this.disposed || waiter.job.status !== "running" || waiter.job.settled || waiter.options.signal?.aborted) return;
+    let pending = false;
+    try { pending = waiter.options.pending?.() ?? false; } catch { pending = false; }
+    this.detach(pending ? "input" : "keepalive");
   }
 
   /**

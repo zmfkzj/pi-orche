@@ -40,8 +40,16 @@ export interface MainCompactionSettings {
   usageRatio: number;
   /** Also compact between the tool turns of a running response (interrupts and continues it). Default true. */
   midRun: boolean;
+  /**
+   * Optional absolute ceiling in tokens next to the ratio: main compacts above the LOWER of the two. Unset by default. With a
+   * large window (1M) a ratio alone lets main grow to hundreds of thousands of tokens, and every prompt-cache miss (a long
+   * orche_task wait outliving the cache) re-writes all of them; a ceiling bounds that cost whatever the model.
+   */
+  maxTokens?: number;
 }
 export const DEFAULT_MAIN_COMPACTION: Readonly<MainCompactionSettings> = { enabled: true, usageRatio: 0.8, midRun: true };
+/** Allowed `maxTokens` values (inclusive): below Pi's default `keepRecentTokens` (20000) plus a summary a ceiling would compact in a loop. */
+export const MAIN_MAX_TOKENS_RANGE = { min: 30_000, max: 10_000_000 } as const;
 /** Allowed `usageRatio` values (inclusive). */
 export const MAIN_USAGE_RATIO_RANGE = { min: 0.1, max: 0.95 } as const;
 /** `customType` of the hidden note that continues a response interrupted for compaction. */
@@ -51,7 +59,7 @@ export const PI_DEFAULT_RESERVE_TOKENS = 16384;
 
 /**
  * `mainCompaction` in orche.config.json: `false` (off), `true` (defaults), a ratio (`0.8`), or
- * `{ "enabled"?: boolean, "usageRatio"?: number, "midRun"?: boolean }`.
+ * `{ "enabled"?: boolean, "usageRatio"?: number, "midRun"?: boolean, "maxTokens"?: number }`.
  */
 export function parseMainCompactionConfig(value: unknown): MainCompactionSettings {
   const ratio = (raw: unknown, key: string): number => {
@@ -65,18 +73,23 @@ export function parseMainCompactionConfig(value: unknown): MainCompactionSetting
   if (typeof value === "number") return { ...DEFAULT_MAIN_COMPACTION, usageRatio: ratio(value, "mainCompaction") };
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("config.mainCompaction: expected false, true, a ratio or an object");
   const settings = value as Record<string, unknown>;
-  const unknown = Object.keys(settings).filter(key => key !== "enabled" && key !== "usageRatio" && key !== "midRun");
+  const unknown = Object.keys(settings).filter(key => key !== "enabled" && key !== "usageRatio" && key !== "midRun" && key !== "maxTokens");
   if (unknown.length) throw new Error(`config.mainCompaction: unknown field ${unknown.join(", ")}`);
   if (settings.enabled !== undefined && typeof settings.enabled !== "boolean") throw new Error("config.mainCompaction.enabled: expected boolean");
   if (settings.midRun !== undefined && typeof settings.midRun !== "boolean") throw new Error("config.mainCompaction.midRun: expected boolean");
+  const maxTokens = settings.maxTokens;
+  if (maxTokens !== undefined && (typeof maxTokens !== "number" || !Number.isSafeInteger(maxTokens) || maxTokens < MAIN_MAX_TOKENS_RANGE.min || maxTokens > MAIN_MAX_TOKENS_RANGE.max)) {
+    throw new Error(`config.mainCompaction.maxTokens: expected whole tokens from ${MAIN_MAX_TOKENS_RANGE.min} to ${MAIN_MAX_TOKENS_RANGE.max}`);
+  }
   return {
     enabled: (settings.enabled as boolean | undefined) ?? DEFAULT_MAIN_COMPACTION.enabled,
     usageRatio: settings.usageRatio === undefined ? DEFAULT_MAIN_COMPACTION.usageRatio : ratio(settings.usageRatio, "mainCompaction.usageRatio"),
     midRun: (settings.midRun as boolean | undefined) ?? DEFAULT_MAIN_COMPACTION.midRun,
+    ...(maxTokens !== undefined ? { maxTokens: maxTokens as number } : {}),
   };
 }
 
-/** Tokens main may hold: `floor(contextWindow * usageRatio)`; undefined without a usable window. Compaction needs MORE than this. */
+/** Tokens main may hold by the ratio: `floor(contextWindow * usageRatio)`; undefined without a usable window. Compaction needs MORE than this. */
 export function ratioThreshold(contextWindow: number | undefined, usageRatio: number): number | undefined {
   if (typeof contextWindow !== "number" || !Number.isFinite(contextWindow) || contextWindow <= 0) return undefined;
   return Math.floor(contextWindow * usageRatio);
@@ -91,6 +104,13 @@ export function piReserveTokens(settings: unknown, model: { provider: string; id
   const valid = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
   const override = model ? valid(compaction?.modelOverrides?.[`${model.provider}/${model.id}`]?.reserveTokens) : undefined;
   return override ?? valid(compaction?.reserveTokens) ?? PI_DEFAULT_RESERVE_TOKENS;
+}
+
+/** Tokens main may hold: the ratio's threshold, lowered to `maxTokens` when that is set and lower; undefined without a usable window. */
+export function mainThreshold(contextWindow: number | undefined, settings: Pick<MainCompactionSettings, "usageRatio" | "maxTokens">): number | undefined {
+  const byRatio = ratioThreshold(contextWindow, settings.usageRatio);
+  if (byRatio === undefined) return undefined;
+  return settings.maxTokens !== undefined ? Math.min(byRatio, settings.maxTokens) : byRatio;
 }
 
 export interface UsageLike { tokens: number | null; contextWindow: number }
@@ -112,7 +132,7 @@ export function checkMainCompaction(input: {
 }): MainCompactionCheck {
   if (!input.settings.enabled) return { compact: false, reason: "disabled" };
   if (!input.piEnabled) return { compact: false, reason: "pi_disabled" };
-  const threshold = ratioThreshold(input.usage?.contextWindow, input.settings.usageRatio);
+  const threshold = mainThreshold(input.usage?.contextWindow, input.settings);
   if (threshold === undefined || !input.usage) return { compact: false, reason: "no_window" };
   const tokens = input.usage.tokens;
   if (tokens === null || !Number.isFinite(tokens)) return { compact: false, reason: "no_usage" };
@@ -319,7 +339,7 @@ export class MainCompaction {
     try { usage = ctx.getContextUsage(); } catch { return; }
     if (!usage || usage.tokens === null) return;
     this.measure = false;
-    const threshold = ratioThreshold(usage.contextWindow, this.hooks.settings().usageRatio);
+    const threshold = mainThreshold(usage.contextWindow, this.hooks.settings());
     this.ineffective = threshold !== undefined && usage.tokens > threshold;
   }
 
@@ -330,9 +350,12 @@ export class MainCompaction {
     // Set before ctx.compact(): its abort runs Pi's handlers (agent_settled) before the compaction starts.
     this.attempt = attempt;
     if (resume) this.internalAbort = true;
-    const ratio = Math.round(this.hooks.settings().usageRatio * 100);
+    const settings = this.hooks.settings();
+    const ratio = Math.round(settings.usageRatio * 100);
+    const byCeiling = settings.maxTokens !== undefined && check.threshold === settings.maxTokens && settings.maxTokens < (ratioThreshold(check.contextWindow, settings.usageRatio) ?? Infinity);
+    const limit = byCeiling ? `mainCompaction maxTokens ${k(settings.maxTokens!)}` : `mainCompaction ${ratio}%`;
     try {
-      if (ctx.hasUI) ctx.ui.notify(`orche: main context is at ${Math.round(check.percent)}% of the window (${k(check.tokens)}/${k(check.contextWindow)} tokens), above mainCompaction ${ratio}%: compacting automatically.${resume ? " The running response stops here and continues after the summary." : ""}`, "info");
+      if (ctx.hasUI) ctx.ui.notify(`orche: main context is at ${Math.round(check.percent)}% of the window (${k(check.tokens)}/${k(check.contextWindow)} tokens), above ${limit}: compacting automatically.${resume ? " The running response stops here and continues after the summary." : ""}`, "info");
     } catch { /* the UI may be gone */ }
     // Called after Pi's compact() returned (its state is clear): release what was held, behind the continuation if any.
     const finish = (outcome: "done" | "failed") => {

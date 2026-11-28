@@ -391,7 +391,7 @@ function missingModelLine(name: string, details: unknown): string | undefined {
 // `followUp` only appears in sessions recorded before queued follow-ups stopped detaching; it stays readable there.
 const DETACH_LABEL: Record<string, string> = {
   input: "new user input", followUp: "a queued follow-up", "session-bus": "a message from another Pi session", abort: "Esc",
-  command: "/orche detach", background: "wait:false", shutdown: "session shutdown", replaced: "another attach",
+  command: "/orche detach", background: "wait:false", shutdown: "session shutdown", replaced: "another attach", keepalive: "a keepalive (main re-attaches to refresh its prompt cache)",
 };
 function detachedLines(details: Record<string, unknown>, theme: Theme, width: number, keys?: KeyText): string[] {
   const job = typeof details.job === "string" ? details.job : "the job";

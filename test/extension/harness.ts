@@ -67,6 +67,8 @@ export async function createHarness(options: {
   profiles?: Record<string, unknown>;
   /** `bashReview` in the user config (the Bash safety review; default: omitted, i.e. on with Jev, which the fake classifier answers). */
   bashReview?: Record<string, unknown>;
+  /** `mainCache` in the user config (main's prompt cache while a task runs: warming override, keepalive); omitted when unset. */
+  mainCache?: unknown;
   /** Extra providers registered in the main session's model runtime before the session starts (e.g. a `models.main` target). */
   providers?: { provider: Parameters<ModelRuntime["registerNativeProvider"]>[0] }[];
   /** `ctx.mode` the extension sees (default: the SDK default, i.e. not "tui"). */
@@ -100,7 +102,7 @@ export async function createHarness(options: {
   installFakeClassifier(orche.runtime, classifier);
   if (options.writeUserConfig !== false) {
     const records = options.records === true ? {} : options.records === undefined || options.records === false ? { enabled: false } : options.records;
-    await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: orche.route.model }, records, ...(options.taskContext ? { taskContext: options.taskContext } : {}), ...(options.single ? { single: options.single } : {}), ...(options.models ? { models: options.models } : {}), ...(options.profiles ? { profiles: options.profiles } : {}), ...(options.bashReview ? { bashReview: options.bashReview } : {}), ...(options.mainMode === "unset" ? {} : { mainMode: options.mainMode ?? "single" }) }));
+    await writeFile(join(agentDir, "orche.config.json"), JSON.stringify({ routes: {}, default: { model: orche.route.model }, records, ...(options.taskContext ? { taskContext: options.taskContext } : {}), ...(options.single ? { single: options.single } : {}), ...(options.models ? { models: options.models } : {}), ...(options.profiles ? { profiles: options.profiles } : {}), ...(options.bashReview ? { bashReview: options.bashReview } : {}), ...(options.mainCache !== undefined ? { mainCache: options.mainCache } : {}), ...(options.mainMode === "unset" ? {} : { mainMode: options.mainMode ?? "single" }) }));
   }
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, ...options.settings });
   const resourceLoader = new DefaultResourceLoader({

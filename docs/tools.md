@@ -78,7 +78,11 @@ an RPC `steer`; the call returns once Pi has queued it, `ctx.hasPendingMessages(
 `session-bus`, `abort`, `command`, `background`, `shutdown`; `followUp` only in sessions recorded before follow-ups stopped
 detaching) and what main should do: answer the input, then attach again when nothing else waits (not after `/orche detach` unless
 asked; after Esc only after answering the next message). A woken note counts as waiting until its `session-bus.message` reaches
-the context (`message_end`), at most 60 s, and is forgotten at `agent_end`.
+the context (`message_end`), at most 60 s, and is forgotten at `agent_end`. A **keepalive** (`mainCache.keepalive`,
+[main-cache.md](main-cache.md)) also releases an attached call when its time comes while the job still runs (`details.reason:
+"keepalive"`, not an error, a one-line `Keepalive for J1 (…): … Call orche_task_attach {"job":"J1"} now …` result): main re-attaches at
+once so that its next request refreshes its prompt cache. Each attach has its own timer, counted from the start of main's turn
+(`turn_start`); input waiting at that moment detaches as `input` instead; blocking calls never get one.
 
 **Follow-ups.** A follow-up (`input` with `streamingBehavior: "followUp"`: Alt+Enter, RPC `follow_up`, `sendUserMessage` with
 `deliverAs: "followUp"`) never detaches. It stays in Pi's follow-up queue, untouched (not consumed, re-sent or turned into a steer):

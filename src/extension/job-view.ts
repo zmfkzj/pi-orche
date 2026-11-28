@@ -72,7 +72,12 @@ const DETACH_TEXT: Record<DetachReason, (job: Job) => string> = {
   background: job => `it was started with wait:false. Keep talking with the user; call orche_task_attach {"job":"${job.id}"} when you have nothing else to do but wait for the result.`,
   shutdown: () => "the pi session is shutting down.",
   replaced: () => "another call attached to the job.",
+  keepalive: job => `keepalive. Call orche_task_attach {"job":"${job.id}"} now, as your only action and without any text.`,
 };
+
+/** The whole text of a keepalive release (main-cache.ts): short, so that the request it triggers adds little to main's context. */
+const keepaliveText = (job: Job, running: string) =>
+  `Keepalive for ${running}: this wait was released on schedule only so that your next request refreshes your prompt cache before it expires. Nothing arrived, nothing is wrong, and the worker keeps running. Call orche_task_attach {"job":"${job.id}"} now, as your only action and without any text.`;
 
 /** The result of an attached call (`orche_task` after its start, or `orche_task_attach`) from how its attach ended. */
 export function attachResult(outcome: AttachOutcome, tool: "orche_task" | "orche_task_attach"): JobToolResult {
@@ -90,6 +95,10 @@ export function attachResult(outcome: AttachOutcome, tool: "orche_task" | "orche
       return { content: withQueue, details: { ...result.details, job: job.id, attach: "ended" }, ...(result.isError ? { isError: true } : {}) };
     }
     case "detached":
+      if (outcome.reason === "keepalive") return {
+        content: [{ type: "text", text: keepaliveText(job, running) }],
+        details: { ...jobDetails(job), attach: "detached", reason: "keepalive", detachedAt: Date.now() },
+      };
       return {
         content: text([
           `${tool === "orche_task" ? `Started job ${job.id}: worker ${who(job)}${job.model ? ` (${job.model}${job.thinking ? ` · thinking ${job.thinking}` : ""})` : ""}. ` : ""}Detached from ${running}: ${DETACH_TEXT[outcome.reason](job)}`,
